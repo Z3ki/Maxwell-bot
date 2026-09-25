@@ -781,9 +781,6 @@ class RAGMemoryManager:
       - edit_long_term_memory(memory_id, content) -> bool
       - remove_long_term_memory(memory_id) -> bool
       - apply_ltm_batch(ops) -> dict
-      - get_server_prompt(server_id) -> str | None
-      - set_server_prompt(server_id, prompt) -> None
-      - clear_server_prompt(server_id) -> None
       - add_shared_context(entry) -> str
       - remove_shared_context(context_id) -> bool
       - update_shared_context(context_id, updates) -> bool
@@ -799,7 +796,6 @@ class RAGMemoryManager:
         self.data_dir = Path(data_dir)
         self.max_messages = min(max_messages, 10000)
         self.db_path = self.data_dir / "maxwell_rag.db"
-        self.prompts_file = self.data_dir / "prompts.json"
         self._db: sqlite3.Connection  # always set by _init_db() in __init__
         self._lock = asyncio.Lock()
         # One Ollama request at a time. Interactive queries take priority over
@@ -818,7 +814,6 @@ class RAGMemoryManager:
         self._embed_cache: dict[
             str, np.ndarray
         ] = {}  # in-process LRU; SQLite is durable
-        self._prompts: dict[str, str] = {}
         # Track background embed tasks so shutdown can await them (otherwise
         # in-flight embeds are silently dropped and rows stay embedding=NULL)
         # and so tests don't spam "coroutine ignored GeneratorExit".
@@ -1179,16 +1174,6 @@ class RAGMemoryManager:
         # racing). Removed in favor of pure-cosine retrieval with cache.
         # The pure-cosine path is fast enough (~5ms with cached embed)
         # and correct enough for the current corpus size.
-
-        # Migrate prompts
-        try:
-            if self.prompts_file.exists():
-                data = json.loads(self.prompts_file.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._prompts = {str(k): str(v) for k, v in data.items()}
-        except Exception as e:
-            logger.warning(f"Failed to load prompts: {e}")
-            self._prompts = {}
 
         # Migrate existing long_term_memory.txt if present
         self._migrate_ltm()
@@ -2625,27 +2610,6 @@ class RAGMemoryManager:
             "facts": int(facts["c"] if facts else 0),
             "facts_embedded": int(embedded["c"] if embedded else 0),
         }
-
-    # ─── server prompts (kept as JSON file) ───────────────────────
-
-    def get_server_prompt(self, server_id: str) -> str | None:
-        return self._prompts.get(str(server_id))
-
-    def set_server_prompt(self, server_id: str, prompt: str):
-        self._prompts[str(server_id)] = str(prompt)
-        self._save_prompts()
-
-    def clear_server_prompt(self, server_id: str):
-        self._prompts.pop(str(server_id), None)
-        self._save_prompts()
-
-    def _save_prompts(self):
-        try:
-            from utils import _atomic_json_write_sync
-
-            _atomic_json_write_sync(self.prompts_file, self._prompts)
-        except Exception as e:
-            logger.error(f"Failed to save prompts: {e}")
 
     # ─── shared context ───────────────────────────────────────────
 

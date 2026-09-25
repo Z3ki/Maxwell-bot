@@ -207,16 +207,6 @@ PLUGIN_SPECS: list[dict] = [
         ],
     },
     {
-        "id": "personality",
-        "name": "Personality and Server Prompts",
-        "description": "Owner-editable personality and per-server instructions.",
-        "permissions": ["config.modify"],
-        "tools": [
-            ("UpdateBasePersonalityTool", "update_base_personality", True, False, {"admin": True, "destructive": True}),
-            ("UpdateServerPromptTool", "update_server_prompt", True, False, {"admin": True, "destructive": True}),
-        ],
-    },
-    {
         "id": "chess",
         "name": "Chess",
         "description": "Play chess against Maxwell in a channel.",

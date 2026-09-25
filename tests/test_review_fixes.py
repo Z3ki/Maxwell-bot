@@ -22,9 +22,10 @@ def test_native_calls_from_string_does_not_consume_stash():
     assert consumed["n"] == 0
 
 
-def test_wait_and_personality_schemas_are_declared():
+def test_wait_schema_is_declared_and_prompt_edit_schema_is_retired():
     assert "seconds" in TOOL_PARAMETERS["wait"]["properties"]
-    assert "text" in TOOL_PARAMETERS["update_base_personality"]["properties"]
+    assert "update_base_personality" not in TOOL_PARAMETERS
+    assert "update_server_prompt" not in TOOL_PARAMETERS
     assert "files" in TOOL_PARAMETERS["shell"]["properties"]
     tools = build_openai_tools(
         {

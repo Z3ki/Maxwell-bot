@@ -830,7 +830,6 @@ DM_BLOCKED_TOOLS = (
         "list_members",
         "forward_message",
         "set_nickname",
-        "update_server_prompt",
         "create_thread",
         "thread_control",
         "join_vc",
@@ -4951,21 +4950,6 @@ def _imap_search_sync(
 
 
 # class EmailSearchTool(Tool):  — moved to a plugin
-
-
-# ---------------------------------------------------------------------------
-# Self-modification tools. These let Maxwell rewrite its own base
-# personality + per-server prompts at runtime. The runtime load is hot —
-# _load_control() reads mtime, so a write to bot_control.json is picked up
-# on the next prompt assembly without a restart. server prompts are read
-# on every prompt build, also hot.
-# ---------------------------------------------------------------------------
-
-
-# class UpdateBasePersonalityTool(Tool):  — moved to a plugin
-
-
-# class UpdateServerPromptTool(Tool):  — moved to a plugin
 
 
 # --------------------------------------------------------------------------- #

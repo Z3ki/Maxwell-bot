@@ -18,12 +18,6 @@ class MemoryService(Protocol):
     ) -> None:
         ...
 
-    def get_server_prompt(self, server_id: str) -> str | None:
-        ...
-
-    def set_server_prompt(self, server_id: str, prompt: str) -> None:
-        ...
-
     def plugin_namespace(self, plugin_id: str) -> str:
         """Return the storage namespace this plugin owns. Never delete on disable."""
         return f"plugin:{plugin_id}"

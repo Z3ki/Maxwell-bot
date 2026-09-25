@@ -32,7 +32,6 @@ _PERSONAL_SETTINGS = {
 _SERVER_SETTINGS = {
     "progress": ("Tool progress", "Show or hide progress messages while Maxwell works."),
     "ticket": ("Ticket greetings", "Enable or disable greetings in ticket channels."),
-    "personality": ("Server instructions", "Set instructions that apply to Maxwell in this server."),
 }
 _PERSONAL_VALUE_CHOICES = {
     "mode": [
@@ -170,8 +169,6 @@ _LEGACY_SLASH_COMMANDS = {
     "stop": ("stop", "Stop a running response in this channel.", True),
     "jobs": ("jobs", "List your current Maxwell jobs.", False),
     "job": ("job", "Inspect or cancel one of your jobs.", True),
-    "server-prompt": ("prompt", "View or set this server's Maxwell instructions.", True),
-    "clear-server-prompt": ("clearprompt", "Clear this server's Maxwell instructions.", False),
     "clear-memory": ("clearmem", "Clear this channel's stored conversation memory.", False),
     "downvote": ("downvote", "Mark a recent reply as unhelpful.", True),
     "negative-memory": ("neg", "Manage a negative memory record.", True),
@@ -462,7 +459,7 @@ class _ConfigPanel(discord.ui.View):
             choices = [("On", "on"), ("Off", "off")] if self.selected_key in {"progress", "ticket"} else None
         if choices:
             self.add_item(_ConfigValueSelect(self, choices))
-        if self.selected_key in {"language", "style", "personality"}:
+        if self.selected_key in {"language", "style"}:
             self.add_item(_ConfigEditButton(self))
         self.add_item(_ConfigResetButton(self))
 
@@ -481,9 +478,7 @@ class _ConfigPanel(discord.ui.View):
         if self.selected_key == "ticket":
             enabled = bool(getattr(self.bot, "_ticket_greeting_enabled", lambda _gid: False)(self.guild_id))
             return "On" if enabled else "Off"
-        memory = getattr(self.bot, "memory", None)
-        prompt = memory.get_server_prompt(self.guild_id) if memory is not None else ""
-        return str(prompt or "No custom instructions")
+        return "Unavailable"
 
     def render(self) -> str:
         if self.scope == "personal":
@@ -553,14 +548,6 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "personal" and key == "style":
             self.store.set_personality(self.user_id, value)
             return
-        if self.scope == "server" and key == "personality":
-            if not value or len(value) > 4000:
-                raise ValueError("Server instructions must contain 1–4000 characters.")
-            memory = getattr(self.bot, "memory", None)
-            if memory is None:
-                raise ValueError("Server instructions are unavailable right now.")
-            memory.set_server_prompt(self.guild_id, value)
-            return
         raise ValueError("That setting cannot be edited as text.")
 
     def edit_modal(self) -> _ConfigTextModal | None:
@@ -575,13 +562,6 @@ class _ConfigPanel(discord.ui.View):
             return _ConfigTextModal(
                 self, key="style", label="Reply style", current=current,
                 max_length=800, placeholder="For example: Keep replies brief and direct",
-            )
-        if self.scope == "server" and self.selected_key == "personality":
-            memory = getattr(self.bot, "memory", None)
-            current = str(memory.get_server_prompt(self.guild_id) or "") if memory is not None else ""
-            return _ConfigTextModal(
-                self, key="personality", label="Server instructions", current=current,
-                max_length=4000, placeholder="Instructions Maxwell should follow in this server",
             )
         return None
 
@@ -605,10 +585,6 @@ class _ConfigPanel(discord.ui.View):
             saver = getattr(self.bot, "_save_ticket_greeting_servers", None)
             if callable(saver):
                 saver()
-        elif self.selected_key == "personality":
-            memory = getattr(self.bot, "memory", None)
-            if memory is not None:
-                memory.clear_server_prompt(self.guild_id)
         self._build()
         await interaction.response.edit_message(content=self.render(), view=self)
 

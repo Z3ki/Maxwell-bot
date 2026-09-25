@@ -114,15 +114,6 @@ async def run_custom_tool_harness():
     res = await bot.tools["list_sites"].execute(fake_msg)
     print(f"[PASS] list_sites tool returned: {str(res)[:60]}...")
 
-    # 7. update_base_personality tool
-    old_p = bot._get_personality()
-    res = await bot.tools["update_base_personality"].execute(fake_msg, text="Stay sharp and helpful.")
-    print(f"[PASS] update_base_personality tool returned: {res}")
-    assert "updated" in str(res).lower()
-    # Restore personality
-    await bot.tools["update_base_personality"].execute(fake_msg, text=old_p)
-    print("[PASS] update_base_personality tool tested and restored")
-
     # 8. Live Model in Environment Test
     print("\n--- Testing Live Model in Environment with Tools ---")
     provider = bot.ai_provider

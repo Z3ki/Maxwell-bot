@@ -29,6 +29,14 @@ def test_command_suite_registers_purpose_commands_and_no_owner_command():
     assert any(option["name"] == "image" and option["type"] == 11 for option in image["options"])
 
 
+def test_prompt_edit_slash_commands_and_config_fields_are_removed():
+    definitions = command_suite.command_definitions()
+    names = {row["name"] for row in definitions}
+    assert "server-prompt" not in names
+    assert "clear-server-prompt" not in names
+    assert set(command_suite._SERVER_SETTINGS) == {"progress", "ticket"}
+
+
 def test_prefix_commands_are_retired_but_unknown_prefixed_text_is_not_a_command():
     bot = SimpleNamespace(command_prefix=",")
     retired = SimpleNamespace(content=",help")

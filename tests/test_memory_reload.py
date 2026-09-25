@@ -112,13 +112,14 @@ def test_channel_memory_clear(tmp_path):
     _run(run())
 
 
-def test_server_prompt(tmp_path):
+def test_legacy_server_prompts_are_ignored_and_immutable(tmp_path):
+    legacy_file = tmp_path / "prompts.json"
+    legacy_file.write_text('{"123": "legacy custom prompt"}', encoding="utf-8")
     mgr = RAGMemoryManager(str(tmp_path))
-    assert mgr.get_server_prompt("123") is None
-    mgr.set_server_prompt("123", "be casual")
-    assert mgr.get_server_prompt("123") == "be casual"
-    mgr.clear_server_prompt("123")
-    assert mgr.get_server_prompt("123") is None
+    assert not hasattr(mgr, "get_server_prompt")
+    assert not hasattr(mgr, "set_server_prompt")
+    assert not hasattr(mgr, "clear_server_prompt")
+    assert legacy_file.read_text(encoding="utf-8") == '{"123": "legacy custom prompt"}'
 
 
 def test_shared_context(tmp_path):

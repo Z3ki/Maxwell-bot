@@ -1,228 +1,108 @@
-"""Tests for UpdateBasePersonalityTool and UpdateServerPromptTool.
-
-These tools let Maxwell rewrite its own base personality paragraph and
-per-server prompts at runtime. Admin-only. Tests cover:
-
-- non-admin call: refused
-- valid text: writes to bot_control.json atomically
-- empty/too-short/too-long text: rejected with clear error
-- server prompt set + clear + DM target
-- the live config reflects the new text immediately
-
-Run: pytest tests/test_self_modify_tools.py -v
-"""
+"""Shared Maxwell prompts are immutable; personal style remains per-user."""
 
 import asyncio
-import json
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+import pytest
 
-import pytest  # noqa: E402
-
-from bot_tools import (  # noqa: E402
-    UpdateBasePersonalityTool,
-    UpdateServerPromptTool,
-)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+from api import api_server
+from api.state import _sanitize_control
+from control_defaults import DEFAULT_CONTROL
+from plugins.maxwell_extras.admin_commands import _set_control
+from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+from bot import MaxwellBot
+from maxwell_core.prompts.component import PromptComponent
+from maxwell_core.prompts.manager import PromptManager
+from tool_schemas import RESULT_TOOL_NAMES, TOOL_PARAMETERS
 
 
-@pytest.fixture
-def tmp_data_dir(tmp_path):
-    """Fresh data dir per test. Bot's persistence lives here."""
-    d = tmp_path / "data"
-    d.mkdir()
-    (d / "bot_control.json").write_text(json.dumps({
-        "base_personality": "original personality text",
-        "memory_history_messages": 30,
-    }))
-    return d
+def test_control_api_ignores_legacy_global_personality_values():
+    custom = "rewrite the shared bot prompt"
+    sanitized = _sanitize_control({"base_personality": custom})
+    assert sanitized["base_personality"] == DEFAULT_CONTROL["base_personality"]
 
 
-@pytest.fixture
-def bot(tmp_data_dir):
-    """Fake bot with admin gate, config, control, memory."""
-    bot = SimpleNamespace()
-    bot.config = SimpleNamespace(DATA_DIR=str(tmp_data_dir))
-    bot._control = {
-        "base_personality": "original personality text",
-        "memory_history_messages": 30,
-    }
-    bot._BIRTHDAY = datetime(2026, 5, 21, tzinfo=timezone.utc)
-
-    def _is_admin(uid):
-        return uid == 100
-    bot._is_admin = _is_admin
-
-    class FakeMemory:
-        def __init__(self):
-            self._prompts = {}
-        def get_server_prompt(self, sid):
-            return self._prompts.get(str(sid))
-        def set_server_prompt(self, sid, text):
-            self._prompts[str(sid)] = text
-        def clear_server_prompt(self, sid):
-            self._prompts.pop(str(sid), None)
-    bot.memory = FakeMemory()
-
-    return bot
+def test_loading_a_legacy_control_file_uses_the_locked_personality(tmp_path):
+    (tmp_path / "bot_control.json").write_text(
+        '{"base_personality": "rewrite the shared prompt"}', encoding="utf-8"
+    )
+    bot = SimpleNamespace(
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+        _control_mtime=-1,
+        _ai_concurrency=2,
+        _notify_ai_waiters=lambda: None,
+        _sync_audio_input_flags=lambda: None,
+        _conversation_watch_enabled=lambda: True,
+    )
+    MaxwellBot._load_control(bot, force=True)
+    assert bot._control["base_personality"] == DEFAULT_CONTROL["base_personality"]
 
 
-@pytest.fixture
-def admin_msg():
-    return SimpleNamespace(author=SimpleNamespace(id=100))
+def test_dashboard_has_no_prompt_edit_or_legacy_prompt_file_routes():
+    assert not hasattr(api_server, "prompt_save")
+    assert not hasattr(api_server, "prompt_delete")
+    request = SimpleNamespace(match_info={"file": "prompts.json"})
+    response = asyncio.run(api_server.data_file(request))
+    assert response.status == 403
 
 
-@pytest.fixture
-def non_admin_msg():
-    return SimpleNamespace(author=SimpleNamespace(id=999))
+def test_runtime_personality_ignores_legacy_control_overrides(monkeypatch):
+    monkeypatch.delenv("BOT_BIRTHDAY", raising=False)
+    bot = SimpleNamespace(_control={"base_personality": "rewrite the shared prompt"})
+    configured = MaxwellBot._get_personality(bot)
+    bot._control = {"base_personality": "another attempted override"}
+    assert MaxwellBot._get_personality(bot) == configured
+    assert "rewrite the shared prompt" not in configured
 
 
-# ---------------------------------------------------------------------------
-# UpdateBasePersonalityTool
-# ---------------------------------------------------------------------------
+def test_plugin_cannot_extend_the_shared_personality():
+    prompts = PromptManager()
+    prompts.register(
+        PromptComponent(
+            id="injected.global_style",
+            plugin="third_party",
+            text="rewrite the shared Maxwell persona",
+            position="style",
+            scope="discord",
+        )
+    )
+    bot = SimpleNamespace(
+        _control={"base_personality": "old override"},
+        prompts=prompts,
+        _identity={},
+    )
+    result = MaxwellBot._get_personality(bot)
+    assert "rewrite the shared Maxwell persona" not in result
+    assert "keep replies short, concise" in result.lower()
 
 
-def test_update_base_personality_refuses_non_admin(bot, non_admin_msg):
-    async def run():
-        tool = UpdateBasePersonalityTool(bot)
-        return await tool.execute(non_admin_msg, text="anything goes here really ok")
-    result = asyncio.run(run())
-    assert result.startswith("Error:")
-    assert "admin" in result.lower()
-    assert bot._control["base_personality"] == "original personality text"
+def test_turn_tool_catalog_hides_stale_prompt_edit_tools():
+    bot = SimpleNamespace(
+        tools={"update_base_personality", "update_server_prompt", "send_message"},
+        _control={},
+        plugin_manager=None,
+    )
+    names = MaxwellBot._turn_tool_names(bot, "discord")
+    assert "send_message" in names
+    assert "update_base_personality" not in names
+    assert "update_server_prompt" not in names
 
 
-def test_update_base_personality_requires_text(bot, admin_msg):
-    async def run():
-        tool = UpdateBasePersonalityTool(bot)
-        return await tool.execute(admin_msg, text="")
-    result = asyncio.run(run())
-    assert "required" in result.lower()
+def test_discord_maintenance_cannot_edit_the_shared_personality():
+    bot = SimpleNamespace(_control=dict(DEFAULT_CONTROL))
+    with pytest.raises(ValueError, match="shared Maxwell personality is locked"):
+        asyncio.run(_set_control(bot, "base_personality", "new global instructions"))
 
 
-def test_update_base_personality_rejects_too_long(bot, admin_msg):
-    async def run():
-        tool = UpdateBasePersonalityTool(bot)
-        return await tool.execute(admin_msg, text="x" * 5000)
-    result = asyncio.run(run())
-    assert "soft cap" in result.lower()
-    assert bot._control["base_personality"] == "original personality text"
+def test_prompt_edit_tools_are_not_in_the_model_catalog():
+    assert "update_base_personality" not in TOOL_PARAMETERS
+    assert "update_server_prompt" not in TOOL_PARAMETERS
+    assert "update_base_personality" not in RESULT_TOOL_NAMES
+    assert "update_server_prompt" not in RESULT_TOOL_NAMES
 
 
-def test_update_base_personality_rejects_too_short(bot, admin_msg):
-    async def run():
-        tool = UpdateBasePersonalityTool(bot)
-        return await tool.execute(admin_msg, text="too short")
-    result = asyncio.run(run())
-    assert "too short" in result.lower()
-
-
-def test_update_base_personality_writes_and_persists(bot, admin_msg, tmp_data_dir):
-    new_text = "A new personality: warm, terse, lowercase by default, never hedges."
-
-    async def run():
-        tool = UpdateBasePersonalityTool(bot)
-        return await tool.execute(admin_msg, text=new_text)
-    result = asyncio.run(run())
-
-    assert "updated" in result.lower()
-    assert f"{len(new_text)} chars" in result
-    assert bot._control["base_personality"] == new_text
-    persisted = json.loads((tmp_data_dir / "bot_control.json").read_text())
-    assert persisted["base_personality"] == new_text
-
-
-def test_update_base_personality_keeps_other_keys(bot, admin_msg, tmp_data_dir):
-    bot._control["memory_history_messages"] = 30
-    new_text = "Personality rewrite that should not touch memory_history_messages."
-
-    async def run():
-        tool = UpdateBasePersonalityTool(bot)
-        return await tool.execute(admin_msg, text=new_text)
-    asyncio.run(run())
-
-    persisted = json.loads((tmp_data_dir / "bot_control.json").read_text())
-    assert persisted["base_personality"] == new_text
-    assert persisted["memory_history_messages"] == 30
-
-
-# ---------------------------------------------------------------------------
-# UpdateServerPromptTool
-# ---------------------------------------------------------------------------
-
-
-def test_update_server_prompt_refuses_non_admin(bot, non_admin_msg):
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(non_admin_msg, server_id="12345", text="anything goes here ok")
-    result = asyncio.run(run())
-    assert result.startswith("Error:")
-    assert "admin" in result.lower()
-    assert bot.memory.get_server_prompt("12345") is None
-
-
-def test_update_server_prompt_requires_server_id(bot, admin_msg):
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(admin_msg, server_id="", text="hi")
-    result = asyncio.run(run())
-    assert "server_id" in result.lower()
-
-
-def test_update_server_prompt_writes_to_memory(bot, admin_msg):
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(admin_msg, server_id="12345", text="Be extra brief here.")
-    result = asyncio.run(run())
-    assert "updated" in result.lower()
-    assert bot.memory.get_server_prompt("12345") == "Be extra brief here."
-
-
-def test_update_server_prompt_clears_on_empty(bot, admin_msg):
-    bot.memory.set_server_prompt("12345", "existing text")
-
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(admin_msg, server_id="12345", text="")
-    result = asyncio.run(run())
-    assert "cleared" in result.lower()
-    assert bot.memory.get_server_prompt("12345") is None
-
-
-def test_update_server_prompt_clears_on_sentinel(bot, admin_msg):
-    bot.memory.set_server_prompt("12345", "existing text")
-
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(admin_msg, server_id="12345", text="__CLEAR__")
-    result = asyncio.run(run())
-    assert "cleared" in result.lower()
-    assert bot.memory.get_server_prompt("12345") is None
-
-
-def test_update_server_prompt_dm_target(bot, admin_msg):
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(admin_msg, server_id="DM", text="DM-only flavor")
-    result = asyncio.run(run())
-    assert "updated" in result.lower()
-    assert bot.memory.get_server_prompt("DM") == "DM-only flavor"
-
-
-def test_update_server_prompt_rejects_too_long(bot, admin_msg):
-    async def run():
-        tool = UpdateServerPromptTool(bot)
-        return await tool.execute(admin_msg, server_id="12345", text="x" * 5000)
-    result = asyncio.run(run())
-    assert "soft cap" in result.lower()
-    assert bot.memory.get_server_prompt("12345") is None
+def test_personality_preferences_are_isolated_by_discord_user_id(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    store.set_personality("100", "Keep replies concise.")
+    assert store.get("100")["personality"] == "Keep replies concise."
+    assert store.get("200")["personality"] == ""

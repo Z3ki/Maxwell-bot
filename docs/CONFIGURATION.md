@@ -3,7 +3,7 @@
 Maxwell has two configuration layers:
 
 1. `.env` for provider endpoints, credentials, identity, paths, feature availability, and startup behavior.
-2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the dashboard and owner-only controls.
+2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the dashboard and restricted maintenance controls. The shared Maxwell persona is locked in code.
 
 Keep `.env` and `data/` private.
 
@@ -71,7 +71,7 @@ Blank IDs do not grant implicit ownership.
 
 ## Discord slash commands
 
-`/config` opens a private, click-through menu for personal defaults. Choose a setting, select a saved value, or open a text form for language and style. In a server, the menu also shows tool-progress messages, ticket greetings, and custom server instructions to the server owner, a Manage Server administrator, or a configured Maxwell admin. Permission is checked again before a server setting changes. `/personality` remains available as a direct way to view or edit your personal reply-style preference.
+`/config` opens a private, click-through menu for personal defaults. Choose a setting, select a saved value, or open a text form for language and style. In a server, authorized managers also see tool-progress and ticket-greeting controls. Maxwell's shared prompt and server-level instructions cannot be edited through commands, plugins, the dashboard, or the control API. `/personality` stores a short reply-style preference under your Discord user ID; it does not change Maxwell for other users.
 
 Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` replace the former owner command and independently restrict every request to configured Maxwell developers. Sensitive control values remain redacted and cannot be edited through Discord.
 

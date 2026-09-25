@@ -410,6 +410,8 @@ async def _set_control(bot: Any, key: str, raw_value: Any) -> tuple[Any, Any]:
     key = str(key or "").strip()
     if key not in DEFAULT_CONTROL:
         raise ValueError("unknown control key")
+    if key == "base_personality":
+        raise ValueError("the shared Maxwell personality is locked")
     if _is_sensitive_key(key):
         raise ValueError("sensitive controls cannot be changed through Discord")
     value = _coerce_value(key, raw_value)

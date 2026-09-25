@@ -147,7 +147,6 @@ from api.config import (  # noqa: E402
     DISCORD_CLIENT_SECRET,
     MAX_AUTONOMY_GOALS,
     MAX_COMMANDS,
-    MAX_PROMPT_CHARS,
 )
 import site_backend  # noqa: E402
 import site_server  # noqa: E402
@@ -199,7 +198,6 @@ async def data_file(request):
     # memory now lives in the RAG SQLite DB, served via /api/rag/* endpoints.
     ALLOWED_FILES = {
         "sites.json",
-        "prompts.json",
         "blacklist.json",
         "auto_channels.json",
         "bot_control.json",
@@ -574,49 +572,6 @@ async def context_delete(request):
         return _json_response({"error": f"rag db: {e}"}, 500)
     if cur.rowcount == 0:
         return _json_response({"error": "not found"}, 404)
-    return _json_response({"ok": True})
-
-
-# ---------- Prompts ----------
-async def prompt_save(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_response({"error": "invalid json"}, 400)
-    if not isinstance(body, dict):
-        return _json_response({"error": "body must be an object"}, 400)
-    pid = _clean_id(body.get("id", ""))
-    text = str(body.get("text", "")).strip()[:MAX_PROMPT_CHARS]
-    if not pid:
-        return _json_response({"error": "no id"}, 400)
-    path = DATA_DIR / "prompts.json"
-    async with _file_lock:
-        try:
-            p = _load_for_write(path, dict, {})
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if not text:
-            p.pop(pid, None)
-        else:
-            p[pid] = text
-        await atomic_json_write(path, p)
-    return _json_response({"ok": True})
-
-
-async def prompt_delete(request):
-    pid = _clean_id(request.query.get("id", ""))
-    if not pid:
-        return _json_response({"error": "no id"}, 400)
-    path = DATA_DIR / "prompts.json"
-    async with _file_lock:
-        try:
-            p = _load_for_write(path, dict, {})
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if pid not in p:
-            return _json_response({"error": "not found"}, 404)
-        p.pop(pid, None)
-        await atomic_json_write(path, p)
     return _json_response({"ok": True})
 
 
@@ -2767,8 +2722,6 @@ app.router.add_get("/api/context", context_get)
 app.router.add_post("/api/context", context_post)
 app.router.add_put("/api/context", context_put)
 app.router.add_delete("/api/context", context_delete)
-app.router.add_post("/api/prompts", prompt_save)
-app.router.add_delete("/api/prompts", prompt_delete)
 app.router.add_post("/api/blacklist", blacklist_post)
 app.router.add_delete("/api/blacklist", blacklist_del)
 app.router.add_post("/api/auto_channels", auto_channel_post)

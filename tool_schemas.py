@@ -800,17 +800,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {"duration_minutes": _int("Sleep window in minutes (1-60, default 30)")},
     ),
     "clear_sleep": _obj({}),
-    "update_base_personality": _obj(
-        {"text": _str("New base personality (100-2000 chars)")},
-        ["text"],
-    ),
-    "update_server_prompt": _obj(
-        {
-            "text": _str("New per-server prompt"),
-            "server_id": _str("Optional guild id; defaults to the current server"),
-        },
-        ["text"],
-    ),
     # maxwell@z3ki.dev email — local MTA. Bot talks to local Postfix
     # (127.0.0.1:25, SMTP+STARTTLS+SASL) and local Dovecot (127.0.0.1:993,
     # IMAPS+SASL). No third-party relay. See bot_tools.py and
@@ -1000,8 +989,6 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         # the online/idle/dnd dot the user just set, and a follow-up turn
         # would race to undo it.
         "set_activity",
-        "update_base_personality",
-        "update_server_prompt",
         # more_tools hands the full catalog back and must get a turn to use it.
         "more_tools",
         # chess + usage return data the model needs a follow-up turn to react to.

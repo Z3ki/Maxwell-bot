@@ -89,8 +89,6 @@ from plugins.email.impl import EmailSendTool  # noqa: F401
 from plugins.email.impl import EmailReadInboxTool  # noqa: F401
 from plugins.email.impl import EmailGetMessageTool  # noqa: F401
 from plugins.email.impl import EmailSearchTool  # noqa: F401
-from plugins.personality.impl import UpdateBasePersonalityTool  # noqa: F401
-from plugins.personality.impl import UpdateServerPromptTool  # noqa: F401
 from plugins.chess.impl import ChessStartTool  # noqa: F401
 from plugins.chess.impl import ChessMoveTool  # noqa: F401
 from plugins.chess.impl import ChessStateTool  # noqa: F401

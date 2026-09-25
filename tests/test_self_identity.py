@@ -26,9 +26,6 @@ class FakeMemory:
     async def get_channel_memory(self, channel_id, *, requester=None):
         return list(self.messages)
 
-    def get_server_prompt(self, server_id):
-        return None
-
 
 def _bot(memory=None):
     bot = SimpleNamespace(
@@ -67,7 +64,6 @@ def _bot(memory=None):
     bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
     bot._get_personality = lambda: "test"
-    bot._jailbreak_enabled = lambda gid: False
     return bot
 
 

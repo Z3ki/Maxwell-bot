@@ -100,7 +100,7 @@ _HELP_TOPICS = {
         "Server settings",
         [
             "`/config` — open the settings menu. Server controls appear for the server owner, Manage Server administrators, or configured Maxwell admins.",
-            "`/server-prompt`, `/clear-server-prompt`, `/progress`, `/ticket-greetings`, and `/solo` — manage individual server settings.",
+            "`/progress`, `/ticket-greetings`, and `/solo` — manage individual server settings.",
             "`/autonomy` and `/plugins` — inspect or update server behavior and enabled features.",
         ],
     ),
@@ -153,7 +153,7 @@ def command_help_text(*, discovery: bool, topic: str | None = None) -> str:
             "**Start:** `/maxwell`, `/help`, `/usage`.",
             "**Personal:** `/config` opens a private settings menu; `/personality` edits your reply style.",
             "**AI and games:** `/image`, `/chess`, `/checkers`, `/memory`, `/reminder`, `/moderation`.",
-            "**Server:** `/config` also shows authorized server controls; `/progress`, `/ticket-greetings`, `/server-prompt`, `/solo`, `/autonomy`, `/plugins`.",
+            "**Server:** `/config` also shows authorized server controls; `/progress`, `/ticket-greetings`, `/solo`, `/autonomy`, `/plugins`.",
             "**Memory:** `/context`, `/clear-memory`, `/negative-memory`, `/summarize-memory`, `/downvote`.",
             "**Jobs and voice:** `/stop`, `/jobs`, `/job`, `/sleep`, `/wake`, `/voice`, `/rem`.",
             "**Restricted:** `/diagnostics`, `/maintenance`, `/debug`.",

@@ -22,9 +22,6 @@ class FakeMemory:
     async def get_channel_memory(self, channel_id, *, requester=None):
         return list(self.messages)
 
-    def get_server_prompt(self, server_id):
-        return None
-
 
 def _bot(memory):
     bot = SimpleNamespace(

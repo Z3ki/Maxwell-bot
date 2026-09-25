@@ -398,9 +398,7 @@ def _sanitize_control(control):
     out["vc_wake_words"] = [
         str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()
     ][:20]
-    out["base_personality"] = str(
-        out.get("base_personality", DEFAULT_CONTROL["base_personality"])
-    )[:12000]
+    out["base_personality"] = DEFAULT_CONTROL["base_personality"]
     for dead_key in DEAD_CONTROL_KEYS:
         out.pop(dead_key, None)
     return out

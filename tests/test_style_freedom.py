@@ -18,15 +18,15 @@ def test_append_style_freedom_adds_expected_language_once():
     assert append_style_freedom(out) == out
 
 
-def test_install_style_freedom_wraps_persisted_personality():
+def test_install_style_freedom_wraps_shared_personality():
     class Bot:
         def _get_personality(self):
-            return "persisted custom personality"
+            return "code-owned shared personality"
 
     bot = Bot()
     assert install_style_freedom(bot)
     first = bot._get_personality()
-    assert first.startswith("persisted custom personality")
+    assert first.startswith("code-owned shared personality")
     assert STYLE_FREEDOM_ADDENDUM in first
 
     # Re-installing (as can happen during plugin reloads) must not stack copies.

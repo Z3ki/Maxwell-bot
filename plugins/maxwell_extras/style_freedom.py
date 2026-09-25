@@ -1,10 +1,9 @@
 """Conversational style freedom for Maxwell's runtime persona.
 
-The dashboard persists ``base_personality`` in bot_control.json, so changing only
-DEFAULT_CONTROL would not update existing installations. This layer appends a
-small style addendum at the final ``_get_personality()`` boundary instead. That
-keeps normal chat, autonomy, and background agents consistent without rewriting
-an operator's saved personality text.
+The shared Maxwell personality is code-owned and loaded from DEFAULT_CONTROL.
+This layer appends a small code-defined style addendum at the final
+``_get_personality()`` boundary. Personal reply-style preferences are stored
+separately under each Discord user ID.
 """
 
 from __future__ import annotations

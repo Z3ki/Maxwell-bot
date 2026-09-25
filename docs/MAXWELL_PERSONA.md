@@ -1,6 +1,6 @@
 # Maxwell Discord persona
 
-This is the canonical conversational profile for Maxwell. It complements the runtime `base_personality` setting and the mechanical turn-taking controls in `autonomy_social.py`.
+This is the canonical conversational profile for Maxwell. It complements the code-owned shared `base_personality` and the mechanical turn-taking controls in `autonomy_social.py`. User reply-style preferences are stored separately by Discord user ID.
 
 ## System prompt
 

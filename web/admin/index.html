@@ -912,7 +912,6 @@
           norm: (d) => (Array.isArray(d) ? d : []),
         },
         { key: "sites", url: "/data/sites.json", norm: (d) => d || {} },
-        { key: "prompts", url: "/data/prompts.json", norm: (d) => d || {} },
         {
           key: "blacklist",
           url: "/data/blacklist.json",
@@ -1514,7 +1513,6 @@
             "background agents (REM, context cleanup, context watcher) and falls back " +
             "to autonomy first, then main.",
           fields: [
-            { k: "base_personality", t: "textarea" },
             { k: "autonomy_base_url", t: "text", placeholder: "blank = main provider" },
             { k: "autonomy_api_key", t: "secret", placeholder: "blank = main provider" },
             { k: "autonomy_model", t: "text", placeholder: "blank = main provider" },
@@ -2004,7 +2002,7 @@
       }
       function raw() {
         $("raw").innerHTML =
-          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>control</h3><pre>${esc(JSON.stringify(S.control, null, 2))}</pre></div><div class="card"><h3>memory stats</h3><pre>${esc(JSON.stringify(S.memoryStats, null, 2))}</pre></div><div class="card"><h3>memory entries</h3><pre>${esc(JSON.stringify(S.memoryEntries, null, 2))}</pre></div><div class="card"><h3>sites</h3><pre>${esc(JSON.stringify(S.sites, null, 2))}</pre></div><div class="card"><h3>prompts</h3><pre>${esc(JSON.stringify(S.prompts, null, 2))}</pre></div><div class="card"><h3>tools</h3><pre>${esc(JSON.stringify(S.tools, null, 2))}</pre></div><div class="card"><h3>llm traces</h3><pre>${esc(JSON.stringify(S.traces, null, 2))}</pre></div></div>`;
+          `<div class="grid two" style="margin-top:12px"><div class="card"><h3>control</h3><pre>${esc(JSON.stringify(S.control, null, 2))}</pre></div><div class="card"><h3>memory stats</h3><pre>${esc(JSON.stringify(S.memoryStats, null, 2))}</pre></div><div class="card"><h3>memory entries</h3><pre>${esc(JSON.stringify(S.memoryEntries, null, 2))}</pre></div><div class="card"><h3>sites</h3><pre>${esc(JSON.stringify(S.sites, null, 2))}</pre></div><div class="card"><h3>tools</h3><pre>${esc(JSON.stringify(S.tools, null, 2))}</pre></div><div class="card"><h3>llm traces</h3><pre>${esc(JSON.stringify(S.traces, null, 2))}</pre></div></div>`;
       }
       async function queue(type, body = {}) {
         await api("/api/commands", {

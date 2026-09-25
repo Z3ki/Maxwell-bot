@@ -34,9 +34,6 @@ class FakeMemory:
     async def get_channel_memory(self, channel_id, *, requester=None):
         return list(self.messages)
 
-    def get_server_prompt(self, server_id):
-        return None
-
 
 def _native_call(name, args, call_id="call_1"):
     """Build a raw OpenAI-style tool_call the native dispatcher expects."""

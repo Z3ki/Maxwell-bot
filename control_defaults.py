@@ -452,8 +452,6 @@ _FALLBACK_KNOWN_TOOLS = [
     "sleep",
     "clear_sleep",
     "wait",
-    "update_base_personality",
-    "update_server_prompt",
     "email_send",
     "email_read_inbox",
     "email_get_message",

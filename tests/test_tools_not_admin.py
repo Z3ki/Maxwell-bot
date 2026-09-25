@@ -11,8 +11,6 @@ from bot_tools import (
     LeaveServerTool,
     ListAdminServersTool,
     ListServersTool,
-    UpdateBasePersonalityTool,
-    UpdateServerPromptTool,
     CreateCategoryTool,
     CreateChannelTool,
     EditChannelTool,
@@ -26,8 +24,8 @@ from bot_tools import (
 
 def test_tool_protocol_keeps_creative_tools_open():
     assert (
-        "update_base_personality / update_server_prompt: admin-only"
-        not in TOOL_PROTOCOL
+        "update_base_personality" not in TOOL_PROTOCOL
+        and "update_server_prompt" not in TOOL_PROTOCOL
     )
     assert (
         "Sites, games, code, search, plugins and chat are open to everyone"
@@ -59,8 +57,6 @@ def test_tool_protocol_states_dm_and_cross_chat_restrictions():
 def test_tool_descriptions_do_not_say_admin_only():
     bot = SimpleNamespace()
     for cls in (
-        UpdateBasePersonalityTool,
-        UpdateServerPromptTool,
         ListServersTool,
         ListAdminServersTool,
         CreateInviteTool,
@@ -95,20 +91,6 @@ def test_leave_server_refuses_a_non_admin():
     assert result.startswith("Error:")
     assert "admin" in result.lower()
 
-
-def test_personality_tools_refuse_a_non_admin():
-    bot = SimpleNamespace(_is_admin=lambda _uid: False)
-    msg = SimpleNamespace(author=SimpleNamespace(id=999))
-    personality = asyncio.run(
-        UpdateBasePersonalityTool(bot).execute(msg, text="keep replies short and honest.")
-    )
-    prompt = asyncio.run(
-        UpdateServerPromptTool(bot).execute(msg, server_id="1", text="be chill")
-    )
-    assert personality.startswith("Error:")
-    assert prompt.startswith("Error:")
-    assert "admin" in personality.lower()
-    assert "admin" in prompt.lower()
 
 
 def test_list_servers_works_for_anyone():

@@ -23,10 +23,13 @@ poller. Its service could run container shell and Git operations and create
 background AI jobs. `plugin_workbench` was a model-callable tool that could
 propose and apply live plugin code. `shell`, `site_server`, and `manage_plugin`
 exposed privileged shell, Docker-backed code deployment, or global plugin
-administration. The personality plugin let an AI tool edit prompt state for
-arbitrary server IDs. These paths are incompatible with the requested public
-single-assistant boundary. Their source remains for review and historical data
-retention; the public runtime does not set them up or advertise them.
+administration. The former personality plugin let an AI tool edit prompt
+state for arbitrary server IDs. A 2026-09-25 follow-up removed that plugin,
+its command aliases,
+the dashboard prompt editor API, and server prompt accessors from the memory
+service. It pins the shared persona in the runtime and control sanitizers. The
+private `/personality` preference is stored by Discord user ID and only affects
+that user's requests.
 
 The slash `/plugins` command can still list and toggle already available
 plugins. Code install, removal, and reload now return a retired notice. This
