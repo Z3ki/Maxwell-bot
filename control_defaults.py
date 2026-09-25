@@ -27,6 +27,8 @@ def parse_bool(value, default: bool = False) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
+    # off / preview / launched. Discovery only; never enables billing or routing.
+    "premium_discovery_state": "off",
     "daily_user_token_limit_enabled": True,
     "daily_user_token_limit": 3_000_000,
     "log_messages": False,
