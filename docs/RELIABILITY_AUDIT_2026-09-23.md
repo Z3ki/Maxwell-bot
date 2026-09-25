@@ -98,10 +98,11 @@ were not changed through this repository checkout.
 
 ## Maxwell Plus, after reliability and security gates
 
-Customer-facing AI usage is messages, not tokens. The free allowance is 100
-messages per rolling five-hour window. Personal Plus is proposed at
-$2.99/month per user and would raise that individual allowance; the higher
-amount is not decided. Server Plus is proposed at $4.99/month per server and
+Customer-facing AI usage is measured in messages, not tokens. During Public
+Alpha, limits and reset windows may change; the usage command shows a
+percentage of the current allowance and its reset status. Exact Plus limits
+are undecided. Personal Plus is proposed at $2.99/month per user. Server Plus
+is proposed at $4.99/month per server and
 would use Discord's native Guild Subscription, remaining associated with the
 purchased server. It is not transferable. Its shared allowance and per-user
 fair-use cap are not decided. Do not build a subscription-transfer flow.
