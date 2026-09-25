@@ -30,3 +30,6 @@ jobs:
       - name: Benchmark scoped memory retrieval
         if: matrix.python-version == '3.12'
         run: python scripts/benchmark_memory_scaling.py --guilds 100 500 1000 --facts-per-guild 5 --iterations 10
+      - name: Benchmark bounded inbound admission
+        if: matrix.python-version == '3.12'
+        run: python scripts/benchmark_inbound_queue.py --servers 100 500 1000 --iterations 10 --max-outstanding 256

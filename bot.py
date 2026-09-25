@@ -2523,10 +2523,13 @@ class MaxwellBot(commands.Bot):
         # 15s acquire in on_message timed out constantly and the message was
         # thrown away.
         self._channel_locks = KeyedLocks(max_idle=256)
-        # One reply at a time per channel, and nothing is dropped waiting for
-        # its turn. See message_pipeline.ReplyQueue.
+        # One reply at a time per channel, with a process-wide bound.
+        # Addressed overflow is durably deferred by the inbound journal.
         self._reply_queue = ReplyQueue(
             max_directed=8,
+            max_outstanding=getattr(
+                self.config, "MAX_PENDING_REPLY_REQUESTS", 256
+            ),
             max_age=300.0,
             on_drop=self._on_reply_queue_drop,
         )
@@ -5685,6 +5688,12 @@ class MaxwellBot(commands.Bot):
         journal = getattr(self, "_request_journal", None)
         if journal is None:
             return
+        if self._reply_queue.full:
+            # Restart keyset paging when capacity returns so a long deferred
+            # prefix does not make older requests wait for a full sweep.
+            self._inbound_retry_before = None
+            self._inbound_retry_after = None
+            return
         delay = self._inbound_setting("inbound_retry_delay_seconds", 5, 1, 300)
         if getattr(self, "_inbound_retry_before", None) is None:
             self._inbound_retry_before = time.time()
@@ -5697,7 +5706,7 @@ class MaxwellBot(commands.Bot):
         boot = float(getattr(self, "_process_started_at", 0) or 0)
         handled = 0
         for row in rows:
-            if handled >= 20:
+            if handled >= 20 or self._reply_queue.full:
                 break
             mid, cid = row["message_id"], row["channel_id"]
             self._inbound_retry_after = (row["created_at"], mid)
@@ -6800,13 +6809,14 @@ class MaxwellBot(commands.Bot):
         started = time.monotonic()
         acquired = False
         try:
+            directed = self._directly_addressed(message)
             if journal is not None:
                 try:
                     journal.accept(
                         message_id,
                         channel_id,
                         getattr(getattr(message, "author", None), "id", ""),
-                        directed=self._directly_addressed(message),
+                        directed=directed,
                     )
                 except Exception:
                     self._freeze_failed_receipt(channel_id, message_id)
@@ -6815,6 +6825,20 @@ class MaxwellBot(commands.Bot):
                 if row and row["status"] in _REQUEST_TERMINAL:
                     return
                 if self._reply_queue.contains(channel_id, message_id):
+                    return
+                # Persist the receipt, then defer an addressed request before
+                # attachment parsing, memory writes, or prompt construction.
+                # The retry loop fetches the Discord message when capacity is
+                # available; no per-event wait task is left behind.
+                if directed and self._reply_queue.full:
+                    MaxwellBot._record_request_outcome(
+                        self, message, "deferred", "global_queue_capacity"
+                    )
+                    logger.info(
+                        "inbound mid=%s cid=%s stage=admission_deferred reason=global_capacity",
+                        message_id,
+                        channel_id,
+                    )
                     return
             elif not self._inbound_dedup.check_and_add(message_id):
                 return

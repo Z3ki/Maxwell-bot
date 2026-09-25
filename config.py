@@ -190,6 +190,10 @@ class Config:
     DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
     DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
     MAXWELL_DEV_MODE = _bool_env("MAXWELL_DEV_MODE", False)
+    # In-memory directed turn bound; overflow stays in the durable journal.
+    MAX_PENDING_REPLY_REQUESTS = _int_env(
+        "MAX_PENDING_REPLY_REQUESTS", 256, min_value=1, max_value=10000
+    )
     MAXWELL_DEV_GUILD_IDS: ClassVar[frozenset[str]] = frozenset(
         item.strip()
         for item in os.getenv("MAXWELL_DEV_GUILD_IDS", "").split(",")
