@@ -1017,3 +1017,46 @@ def test_retry_fetch_failure_preserves_newer_receipt_owner(tmp_path, change):
     expected = journal.get(message.id)
     asyncio.run(bot._pending_fetch_failed(original, message, TimeoutError()))
     assert journal.get(message.id) == expected
+
+
+def test_global_reply_capacity_defers_to_journal_and_retries(tmp_path):
+    bot = _bot(tmp_path, capacity=8)
+    bot._reply_queue.max_outstanding = 1
+    first = _message(bot, mid=101, cid=22)
+    second = _message(bot, mid=102, cid=23)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def answer(message, _content):
+        if message.id == first.id:
+            first_started.set()
+            await release_first.wait()
+        await bot._send_with_slowmode(message.channel, "answer", reply_to=message)
+
+    bot._handle_message = answer
+
+    async def run():
+        await bot.on_message(first)
+        await first_started.wait()
+        await bot.on_message(second)
+        deferred = bot._request_state(second)
+        assert deferred["status"] == "deferred"
+        assert deferred["reason"] == "global_queue_capacity"
+        assert bot._reply_queue.full
+        assert bot._reply_queue.stats()["outstanding"] == 1
+        assert not bot._reply_queue.contains(second.channel.id, second.id)
+        await bot._retry_pending_inbound()
+        assert second.channel.fetch_message.await_count == 0
+
+        release_first.set()
+        await _drain(bot)
+        assert bot._request_state(first)["status"] == "delivered"
+
+        # The normal journal recovery loop fetches the deferred Discord
+        # message once the process-wide in-memory slot is available.
+        await bot._retry_pending_inbound()
+        await _drain(bot)
+        assert bot._request_state(second)["status"] == "delivered"
+        assert [entry.content for entry in second.channel.sent] == ["answer"]
+
+    asyncio.run(run())

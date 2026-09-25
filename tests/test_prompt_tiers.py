@@ -22,7 +22,7 @@ class _Memory:
         self.ltm = list(ltm)
         self.profile_calls = []
 
-    async def get_channel_memory(self, channel_id):
+    async def get_channel_memory(self, channel_id, *, requester=None):
         return []
 
     def get_server_prompt(self, server_id):
@@ -31,7 +31,7 @@ class _Memory:
     def get_long_term_memory(self):
         return list(self.ltm)
 
-    async def get_user_profile(self, user_id, query="", top_k=8, budget=None):
+    async def get_user_profile(self, user_id, query="", top_k=8, budget=None, requester=None):
         self.profile_calls.append(
             {"user_id": user_id, "query": query, "top_k": top_k, "budget": budget}
         )
@@ -208,7 +208,7 @@ def test_nothing_known_renders_nothing():
 
 def test_a_memory_backend_without_the_tier_is_tolerated():
     class _Old:
-        async def get_channel_memory(self, channel_id):
+        async def get_channel_memory(self, channel_id, *, requester=None):
             return []
 
         def get_server_prompt(self, server_id):

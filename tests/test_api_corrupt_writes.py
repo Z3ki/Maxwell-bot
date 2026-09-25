@@ -1,6 +1,8 @@
 import asyncio
+import json
 
 import api.api_server as api
+from rag_memory import MemoryRequester, _memory_row_visible
 
 
 class FakeRequest:
@@ -58,3 +60,38 @@ def test_rem_enable_refuses_corrupt_rem_control(tmp_path, monkeypatch):
         assert (tmp_path / "rem_control.json").read_text(encoding="utf-8") == "{ broken"
 
     asyncio.run(run())
+
+
+def test_operator_memory_add_is_explicit_public_global_memory(monkeypatch):
+    captured = {}
+
+    class _Cur:
+        rowcount = 1
+
+    def record(sql, params=(), **kwargs):
+        captured["sql"] = sql
+        captured["params"] = params
+        return _Cur()
+
+    monkeypatch.setattr(api, "_rag_exec", record)
+
+    async def run():
+        response = await api.memory_add(FakeRequest({"content": "operator fact"}))
+        assert response.status == 200
+
+    asyncio.run(run())
+    sql = captured["sql"]
+    params = captured["params"]
+    assert "'global'" in sql
+    metadata = json.loads(params[3])
+    assert metadata["visibility"] == "public"
+    assert metadata["public_approved"] is True
+    assert metadata["source_kind"] == "operator_public"
+
+    requester = MemoryRequester(
+        user_id="u1", channel_id="c1", guild_id="g1",
+        is_dm=False, channel_is_public=True,
+    )
+    assert _memory_row_visible(
+        {"kind": "ltm", "scope": "global", "metadata": metadata}, requester
+    )

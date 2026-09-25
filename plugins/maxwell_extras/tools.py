@@ -31,6 +31,7 @@ import aiohttp
 import discord
 
 from tools import Tool
+from rag_memory import MemoryRequester
 
 logger = logging.getLogger(__name__)
 
@@ -476,10 +477,10 @@ class RecallCrossServerMemoryTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Explicitly search Maxwell's stored memory across servers/channels instead of "
-            "injecting extra cross-server history into every normal response. Non-admins can "
-            "only search their own authored history plus memory already visible to them. "
-            "Admins may request scope=global."
+            "Search memories explicitly instead of adding more history to every response. "
+            "The self scope uses only memories visible in this message's context. Maxwell "
+            "admins may request global scope, which searches only operator-approved public "
+            "facts and never exposes server conversations or private user memories."
         )
 
     def get_parameters(self) -> dict:
@@ -534,16 +535,23 @@ class RecallCrossServerMemoryTool(Tool):
             if requested_scope == "global":
                 rows = await memory.rag_search(
                     q,
-                    kinds=["message", "bot_output", "ltm", "shared", "entity"],
+                    kinds=["ltm", "shared_context"],
+                    requester=MemoryRequester.from_message(
+                        message, is_admin=is_admin
+                    ),
                     top_k=top_k,
                     min_similarity=0.20,
                     apply_recency=False,
+                    global_public_only=True,
                 )
             else:
                 rows = await memory.rag_search(
                     q,
                     kinds=["message"],
                     author_id=user_id,
+                    requester=MemoryRequester.from_message(
+                        message, is_admin=is_admin
+                    ),
                     top_k=top_k,
                     min_similarity=0.20,
                     apply_recency=False,
@@ -563,6 +571,9 @@ class RecallCrossServerMemoryTool(Tool):
                             query=q,
                             top_k=min(6, top_k),
                             budget=6000,
+                            requester=MemoryRequester.from_message(
+                                message, is_admin=is_admin
+                            ),
                         )
                     )
             shared_getter = getattr(memory, "get_relevant_shared_context", None)
@@ -572,6 +583,9 @@ class RecallCrossServerMemoryTool(Tool):
                 with contextlib.suppress(Exception):
                     extras.extend(
                         await shared_getter(
+                            requester=MemoryRequester.from_message(
+                                message, is_admin=is_admin
+                            ),
                             user_id=user_id,
                             guild_id=str(getattr(guild, "id", "") or ""),
                             channel_id=str(getattr(channel, "id", "") or ""),

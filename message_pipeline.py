@@ -128,10 +128,11 @@ class ReplyQueue:
     message is gone". The contract here is "your turn comes after the one in
     front of you", which is what a person in the room expects.
 
-    At most ``max_directed`` entries wait behind one running turn per channel.
-    Soft chatter is evicted first. If only directed entries remain, a NEW
-    directed request is returned as ``deferred`` for durable requeueing by the
-    caller; accepted directed requests never expire or lose their place.
+    The per-channel waiting queue is bounded by ``max_directed``. A separate
+    process-wide ``max_outstanding`` count covers queued and running turns.
+    Soft chatter is evicted first. Directed work that cannot be retained is
+    returned as ``deferred`` for durable requeueing; accepted directed requests
+    never expire or lose their place.
 
     Soft (non-directed) lines coalesce: at most one soft entry is pending per
     channel and a newer one replaces it, carrying the burst of lines it
@@ -142,11 +143,16 @@ class ReplyQueue:
         self,
         *,
         max_directed: int = 8,
+        max_outstanding: int = 256,
         max_age: float = 300.0,
         on_drop: Callable[[str, _Pending, str], None] | None = None,
     ) -> None:
         self.max_directed = max(1, int(max_directed))
+        self.max_outstanding = max(1, int(max_outstanding))
         self.max_age = max(10.0, float(max_age))
+        # Counts queued plus currently executing entries. Submission and
+        # completion update it synchronously on the event loop.
+        self._outstanding = 0
         self._channels: dict[str, _ChannelState] = {}
         self._on_drop = on_drop
         self._handler: Callable[[Any, str], Awaitable[Any]] | None = None
@@ -176,6 +182,16 @@ class ReplyQueue:
             for s in self._channels.values()
         )
 
+    @property
+    def outstanding(self) -> int:
+        """Queued and running entries currently retained by this process."""
+        return self._outstanding
+
+    @property
+    def full(self) -> bool:
+        """Whether another retained turn needs durable deferral."""
+        return self._outstanding >= self.max_outstanding
+
     def depth(self, channel_id: Any) -> int:
         state = self._channels.get(str(channel_id or ""))
         return len(state.queue) if state else 0
@@ -197,6 +213,8 @@ class ReplyQueue:
             "channels_tracked": len(self._channels),
             "running": len(running),
             "queued": sum(len(s.queue) for s in self._channels.values()),
+            "outstanding": self._outstanding,
+            "max_outstanding": self.max_outstanding,
             "deepest": max((len(s.queue) for s in self._channels.values()), default=0),
         }
 
@@ -220,7 +238,11 @@ class ReplyQueue:
         cid = str(channel_id or "")
         if not cid or self._handler is None or self._closing:
             return "dropped"
-        state = self._channels.setdefault(cid, _ChannelState())
+        # Do not retain empty channel states for submissions that are
+        # deferred by the process-wide limit.
+        state = self._channels.get(cid)
+        if state is None:
+            state = _ChannelState()
         now = time.monotonic()
         self._expire(cid, state, now)
 
@@ -268,7 +290,13 @@ class ReplyQueue:
             reason = "deferred" if entry.directed else "queue full"
             self._note_drop(cid, entry, reason)
             return "deferred" if entry.directed else "dropped"
+        if self._outstanding >= self.max_outstanding:
+            reason = "deferred" if entry.directed else "queue full"
+            self._note_drop(cid, entry, reason)
+            return "deferred" if entry.directed else "dropped"
         state.queue.append(entry)
+        self._outstanding += 1
+        self._channels[cid] = state
         started = state.running is None or state.running.done()
         if started and len(state.queue) == 1:
             outcome = "started"
@@ -282,6 +310,7 @@ class ReplyQueue:
         kept: list[_Pending] = []
         for entry in state.queue:
             if not entry.directed and now - entry.enqueued_at > self.max_age:
+                self._outstanding -= 1
                 self._note_drop(cid, entry, "stale")
                 continue
             kept.append(entry)
@@ -293,6 +322,7 @@ class ReplyQueue:
         for index, entry in enumerate(state.queue):
             if not entry.directed:
                 del state.queue[index]
+                self._outstanding -= 1
                 self._note_drop(cid, entry, "queue full")
                 return True
         return False
@@ -336,6 +366,10 @@ class ReplyQueue:
                 entry = state.queue.pop(0)
                 handler = self._handler
                 if handler is None:
+                    self._outstanding -= 1
+                    self._note_drop(
+                        cid, entry, "deferred" if entry.directed else "queue full"
+                    )
                     return
                 task = asyncio.ensure_future(handler(entry.message, entry.content))
                 state.running = task
@@ -367,6 +401,7 @@ class ReplyQueue:
                 finally:
                     state.running = None
                     state.running_entry = None
+                    self._outstanding -= 1
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -385,6 +420,7 @@ class ReplyQueue:
         if state is None:
             return False
         if clear_queue:
+            self._outstanding -= len(state.queue)
             for entry in state.queue:
                 self._note_drop(cid, entry, "channel cleared")
             state.queue.clear()
@@ -429,6 +465,7 @@ class ReplyQueue:
             if entry.directed:
                 kept.append(entry)
                 continue
+            self._outstanding -= 1
             self._note_drop(cid, entry, "interrupted")
             dropped += 1
         state.queue = kept
@@ -439,6 +476,7 @@ class ReplyQueue:
         self._closing = True
         tasks = set()
         for state in self._channels.values():
+            self._outstanding -= len(state.queue)
             state.queue.clear()
             for task in (state.running, state.pump):
                 if task is not None:
@@ -448,6 +486,7 @@ class ReplyQueue:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._channels.clear()
+        self._outstanding = 0
 
 
 class RequestJournal:

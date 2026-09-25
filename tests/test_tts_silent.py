@@ -31,7 +31,7 @@ class FakeMemory:
     async def add_to_channel_memory(self, channel_id, message):
         self.added.append((channel_id, message))
 
-    async def get_channel_memory(self, channel_id):
+    async def get_channel_memory(self, channel_id, *, requester=None):
         return list(self.messages)
 
     def get_server_prompt(self, server_id):
