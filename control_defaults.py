@@ -218,6 +218,9 @@ DEFAULT_CONTROL = {
     # {guild_id: [capability, ...]}; this is a per-server deny list. The
     # capability names are fixed in GUILD_CAPABILITIES below.
     "guild_disabled_capabilities": {},
+    # {guild_id: {plugin_id: bool}}; explicit per-server plugin tool/event
+    # overrides. Missing plugins inherit their global/per-user setting.
+    "guild_plugin_overrides": {},
     "disabled_commands": [],
     # {guild_id: channel_id}. When a server has an entry, Maxwell only speaks
     # in that one channel there — every other channel in that server is dead to

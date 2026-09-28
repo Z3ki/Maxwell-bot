@@ -487,9 +487,10 @@ class PluginManager:
         if not entries:
             return 0
         actor = self._event_actor_id(args)
+        guild_id = self._event_guild_id(args)
         filtered: list[tuple[str, Callable[..., Any]]] = []
         for plugin_name, callback in entries:
-            if not self.is_plugin_enabled_for_user(plugin_name, actor):
+            if not self.is_plugin_enabled_for_user(plugin_name, actor, guild_id):
                 continue
             filtered.append((plugin_name, callback))
         if not filtered:
@@ -543,6 +544,19 @@ class PluginManager:
                 uid = getattr(arg, "id", None)
                 if uid is not None:
                     return str(uid)
+        return None
+
+    @staticmethod
+    def _event_guild_id(args: tuple) -> str | None:
+        for arg in args:
+            guild = getattr(arg, "guild", None)
+            guild_id = getattr(guild, "id", None)
+            if guild_id is None:
+                guild_id = getattr(arg, "guild_id", None)
+            if guild_id is None and getattr(arg, "owner_id", None) is not None:
+                guild_id = getattr(arg, "id", None)
+            if guild_id is not None and str(guild_id).isdigit():
+                return str(guild_id)
         return None
 
     def start_jobs(self) -> int:
@@ -1029,16 +1043,29 @@ class PluginManager:
     # ------------------------------------------------------------------ #
 
     def is_plugin_enabled_for_user(
-        self, plugin_name: str, user_id: str | int | None
+        self,
+        plugin_name: str,
+        user_id: str | int | None,
+        guild_id: str | int | None = None,
     ) -> bool:
-        cfg = self.state["plugins"].get(plugin_name)
+        cfg = (self.state.get("plugins") or {}).get(plugin_name)
         if not isinstance(cfg, dict):
-            return False
+            cfg = {}
 
         uid = str(user_id) if user_id is not None else ""
         denied = set(self._user_ids(cfg.get("denied_users", [])))
         if uid and uid in denied:
             return False
+
+        gid = str(guild_id or "").strip()
+        control = getattr(self.bot, "_control", None) or {}
+        server_plugins = control.get("guild_plugin_overrides", {})
+        if gid and gid.isdigit() and isinstance(server_plugins, dict):
+            guild_overrides = server_plugins.get(gid)
+            if isinstance(guild_overrides, dict):
+                override = guild_overrides.get(plugin_name)
+                if type(override) is bool:
+                    return override
 
         if self._as_bool(cfg.get("enabled_globally"), False):
             return True
@@ -1050,16 +1077,24 @@ class PluginManager:
         return False
 
     def get_available_tools(
-        self, user_id: str | int | None = None, platform: str = "discord"
+        self,
+        user_id: str | int | None = None,
+        platform: str = "discord",
+        guild_id: str | int | None = None,
     ) -> Dict[str, Any]:
-        return self.get_available_tools_for_user(user_id=user_id, platform=platform)
+        return self.get_available_tools_for_user(
+            user_id=user_id, platform=platform, guild_id=guild_id
+        )
 
     def get_available_tools_for_user(
-        self, user_id: str | int | None, platform: str = "discord"
+        self,
+        user_id: str | int | None,
+        platform: str = "discord",
+        guild_id: str | int | None = None,
     ) -> Dict[str, Any]:
         tools = {}
         for plugin_name, data in self.loaded_plugins.items():
-            if self.is_plugin_enabled_for_user(plugin_name, user_id):
+            if self.is_plugin_enabled_for_user(plugin_name, user_id, guild_id):
                 for tname, tobj in data["tools"].items():
                     spec = self.tool_registry.get(tname)
                     if spec is not None and not spec.available_on(platform):

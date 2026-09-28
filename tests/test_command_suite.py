@@ -21,7 +21,7 @@ def test_prompt_edit_slash_commands_and_config_fields_are_removed():
     assert "server-prompt" not in names
     assert "clear-server-prompt" not in names
     assert set(command_suite._SERVER_SETTINGS) == {
-        "channels", "capabilities", "moderation", "progress", "ticket"
+        "channels", "plugins", "capabilities", "moderation", "progress", "ticket"
     }
     assert set(command_suite._OWNER_SETTINGS) == {
         "diagnostics", "tools_enabled", "autonomy_enabled",
@@ -96,7 +96,7 @@ def test_config_opens_a_private_settings_menu(tmp_path):
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, view=None, ephemeral=False):
+        async def send_message(self, text, *, view=None, ephemeral=False, **kwargs):
             responses.append((text, view, ephemeral))
 
     bot = SimpleNamespace(_user_preferences=store)
@@ -122,7 +122,7 @@ def test_config_value_menu_updates_a_personal_default(tmp_path):
     responses = []
 
     class ComponentResponse:
-        async def edit_message(self, content, *, view):
+        async def edit_message(self, content, *, view, **kwargs):
             responses.append((content, view))
 
     interaction.response = ComponentResponse()
@@ -171,7 +171,7 @@ def test_config_rechecks_server_permission_when_a_menu_is_used(tmp_path):
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, ephemeral=False):
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
             denied.append((text, ephemeral))
 
     permissions.manage_guild = False
@@ -184,6 +184,75 @@ def test_config_rechecks_server_permission_when_a_menu_is_used(tmp_path):
     )
     assert asyncio.run(panel.interaction_check(click)) is False
     assert panel.scope == "server"
+    assert denied and denied[0][1] is True
+
+
+def test_server_plugin_settings_are_scoped_and_require_manage_permission(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    manager = SimpleNamespace(
+        loaded_plugins={"web": {}, "shell": {}},
+        is_protected=lambda name: name == "core",
+        is_plugin_enabled_for_user=lambda name, _uid: name == "web",
+    )
+    owner = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=2, name="Test server"),
+        guild_id=10,
+        user=SimpleNamespace(id=2),
+        member=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_guild=False, administrator=False)
+        ),
+    )
+    bot = SimpleNamespace(
+        _user_preferences=store,
+        _control={},
+        plugin_manager=manager,
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+    )
+    panel = command_suite._ConfigPanel(bot, store, owner)
+    panel.scope = "server"
+    panel.selected_key = "plugins"
+    panel._build()
+    selector = next(
+        item for item in panel.children
+        if isinstance(item, command_suite._GuildPluginSelect)
+    )
+    assert {option.value for option in selector.options} == {"web", "shell"}
+    assert {option.value for option in selector.options if option.default} == {"web"}
+
+    edited = []
+
+    class Response:
+        async def edit_message(self, content, *, view, **kwargs):
+            edited.append(content)
+
+    selector._values = ["shell"]
+    click = SimpleNamespace(
+        guild=owner.guild,
+        guild_id=10,
+        user=owner.user,
+        member=owner.member,
+        response=Response(),
+    )
+    asyncio.run(selector.callback(click))
+    assert bot._control["guild_plugin_overrides"]["10"] == {
+        "shell": True,
+        "web": False,
+    }
+    assert edited and "shell" in edited[0]
+
+    # A menu is not reusable by someone else, even if they have server access.
+    denied = []
+
+    class DeniedResponse:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
+            denied.append((text, ephemeral))
+
+    click.user = SimpleNamespace(id=3)
+    click.response = DeniedResponse()
+    assert asyncio.run(panel.interaction_check(click)) is False
     assert denied and denied[0][1] is True
 
 
@@ -209,7 +278,7 @@ def test_config_does_not_open_server_settings_after_permission_is_revoked(tmp_pa
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, ephemeral=False):
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
             denied.append((text, ephemeral))
 
     permissions.manage_guild = False
@@ -275,7 +344,7 @@ def test_owner_global_toggle_is_fixed_and_persisted(tmp_path):
     results = []
 
     class Response:
-        async def edit_message(self, content, *, view):
+        async def edit_message(self, content, *, view, **kwargs):
             results.append(content)
 
     interaction.response = Response()
@@ -315,7 +384,7 @@ def test_cancel_only_cancels_requester_task_in_matching_context():
             def is_done(self):
                 return False
 
-            async def send_message(self, text, *, ephemeral=False):
+            async def send_message(self, text, *, ephemeral=False, **kwargs):
                 responses.append((text, ephemeral))
 
         bot = SimpleNamespace(

@@ -95,6 +95,30 @@ def test_user_self_enable_disable(temp_plugin_env):
     assert "test_tool" not in pm.get_available_tools(user_id="333")
 
 
+def test_server_plugin_override_controls_tools_and_preserves_user_denies(temp_plugin_env):
+    plugins_dir, data_dir = temp_plugin_env
+    bot = DummyBot()
+    bot._control = {
+        "guild_plugin_overrides": {
+            "10": {"test_plugin": True},
+            "20": {"test_plugin": False},
+        }
+    }
+    pm = PluginManager(
+        bot,
+        plugins_dir=str(plugins_dir),
+        state_file=str(data_dir / "plugins.json"),
+    )
+    pm.load_plugins()
+
+    assert "test_tool" in pm.get_available_tools(user_id="999", guild_id="10")
+    assert "test_tool" not in pm.get_available_tools(user_id="111", guild_id="20")
+    assert "test_tool" not in pm.get_available_tools(user_id="999", guild_id="30")
+
+    # Explicit per-user denial remains the strongest restriction.
+    assert "test_tool" not in pm.get_available_tools(user_id="222", guild_id="10")
+
+
 def test_reload_plugins_rebuilds_the_live_registry(temp_plugin_env):
     plugins_dir, data_dir = temp_plugin_env
     pm = PluginManager(

@@ -13,6 +13,8 @@ from user_install import (
     USER_INSTALL_MESSAGE_CAP,
     USER_INSTALL_MESSAGE_SUMMARIZE,
     UserInstallMessageAdapter,
+    UserInstallSession,
+    _ephemeral,
     build_user_install_turn,
     handle_user_install_interaction,
     is_user_install_command,
@@ -35,15 +37,17 @@ class FakeResponse:
         self.deferred = True
         self.deferred_ephemeral = ephemeral
 
-    async def send_message(self, content, ephemeral=False):
-        self.messages.append({"content": content, "ephemeral": ephemeral})
+    async def send_message(self, content, ephemeral=False, **kwargs):
+        self.messages.append({"content": content, "ephemeral": ephemeral, **kwargs})
 
 
 class FakeFollowup:
     def __init__(self):
         self.sent = []
+        self.payloads = []
 
     async def send(self, content=None, file=None, ephemeral=False, **kwargs):
+        self.payloads.append({"content": content, "file": file, "ephemeral": ephemeral, **kwargs})
         msg = SimpleNamespace(id=len(self.sent) + 1, content=content, file=file)
 
         async def edit(*, content=None, **_kwargs):
@@ -101,6 +105,26 @@ def test_parse_prompt_and_image():
     assert prompt == "look"
     assert atts[0].filename == "pic.png"
     assert atts[0].url.endswith("pic.png")
+
+
+def test_user_install_webhook_and_ephemeral_replies_disable_mentions():
+    async def run():
+        interaction = _interaction(prompt="@everyone <@123>")
+        session = UserInstallSession(interaction)
+        await session.send("@everyone <@123>")
+        mentions = interaction.followup.payloads[0]["allowed_mentions"]
+        assert mentions.everyone is False
+        assert mentions.users is False
+        assert mentions.roles is False
+        assert mentions.replied_user is False
+
+        await _ephemeral(interaction, "@everyone <@123>")
+        ephemeral_mentions = interaction.followup.payloads[1]["allowed_mentions"]
+        assert ephemeral_mentions.everyone is False
+        assert ephemeral_mentions.users is False
+        assert ephemeral_mentions.roles is False
+
+    asyncio.run(run())
 
 
 def test_is_user_install_command_filters_name():

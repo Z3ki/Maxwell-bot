@@ -10,6 +10,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import discord
+
 import user_install as ui
 
 MESSAGE_EXPLAIN = "Explain"
@@ -431,6 +433,7 @@ async def _modern_session_send(
         if key in kwargs and kwargs[key] is not None:
             payload[key] = kwargs[key]
 
+    payload["allowed_mentions"] = discord.AllowedMentions.none()
     if not payload:
         payload["content"] = "\u200b"
     payload["ephemeral"] = bool(getattr(self, "ephemeral", True))

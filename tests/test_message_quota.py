@@ -161,7 +161,7 @@ def test_help_interaction_uses_selected_topic():
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, ephemeral=False):
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
             sent.append((text, ephemeral))
 
     interaction = SimpleNamespace(
@@ -229,7 +229,7 @@ def test_live_turn_charges_one_message_not_followups(tmp_path):
 def test_premium_command_replies_in_place_and_does_not_dm():
     sent = []
 
-    async def send_message(text, ephemeral=False):
+    async def send_message(text, ephemeral=False, **kwargs):
         sent.append((text, ephemeral))
 
     interaction = SimpleNamespace(

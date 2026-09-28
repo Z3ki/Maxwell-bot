@@ -3945,6 +3945,12 @@ class MaxwellBot(commands.Bot):
 
         manager = getattr(self, "plugin_manager", None)
         plugin_entry = None
+        guild = getattr(message, "guild", None)
+        guild_id = str(
+            getattr(guild, "id", None)
+            or getattr(message, "guild_id", None)
+            or ""
+        )
         if manager is not None:
             plugin_entry = getattr(manager, "all_plugin_tools", {}).get(canonical)
             if plugin_entry:
@@ -3952,6 +3958,7 @@ class MaxwellBot(commands.Bot):
                     allowed = manager.get_available_tools(
                         user_id=user_id,
                         platform=MaxwellBot._message_tool_platform(self, message),
+                        guild_id=guild_id,
                     )
                 except Exception:
                     logger.exception("Tool availability check failed for %s", canonical)
@@ -3959,8 +3966,6 @@ class MaxwellBot(commands.Bot):
                 if canonical not in allowed:
                     return "refused: this tool is unavailable to this user"
 
-        guild = getattr(message, "guild", None)
-        guild_id = str(getattr(guild, "id", "") or "")
         capability = guild_capability_for_tool(
             canonical, plugin_owned=plugin_entry is not None
         )
@@ -15089,6 +15094,11 @@ class MaxwellBot(commands.Bot):
                     plugin_allowed = name in plugin_manager.get_available_tools(
                         user_id=author_id,
                         platform=self._message_tool_platform(message),
+                        guild_id=str(
+                            getattr(getattr(message, "guild", None), "id", None)
+                            or getattr(message, "guild_id", None)
+                            or ""
+                        ),
                     )
                 except Exception:
                     logger.exception("Failed to check access for plugin tool %s", name)
@@ -16030,18 +16040,24 @@ class MaxwellBot(commands.Bot):
         # per-user plugin tools that are not already present.
         plugin_manager = getattr(self, "plugin_manager", None)
         author_id = None
+        guild_id = ""
         if message is not None:
             author_id = getattr(getattr(message, "author", None), "id", None)
+            guild_id = str(
+                getattr(getattr(message, "guild", None), "id", None)
+                or getattr(message, "guild_id", None)
+                or ""
+            )
         if plugin_manager is not None:
             for pt_name in list(names):
                 owner = (plugin_manager.all_plugin_tools.get(pt_name) or (None, None))[0]
                 if owner and not plugin_manager.is_plugin_enabled_for_user(
-                    owner, author_id
+                    owner, author_id, guild_id
                 ):
                     names.discard(pt_name)
             try:
                 plugin_tools = plugin_manager.get_available_tools(
-                    user_id=author_id, platform=platform
+                    user_id=author_id, platform=platform, guild_id=guild_id
                 )
             except Exception:
                 logger.exception("Failed to load per-turn plugin tool names")
@@ -16129,6 +16145,11 @@ class MaxwellBot(commands.Bot):
         if manager is None:
             return tools
         author_id = getattr(getattr(message, "author", None), "id", None)
+        guild_id = str(
+            getattr(getattr(message, "guild", None), "id", None)
+            or getattr(message, "guild_id", None)
+            or ""
+        )
         try:
             # A plugin must never shadow a built-in tool. Dispatch gives the
             # built-in registry precedence, so the schema must describe that
@@ -16136,6 +16157,7 @@ class MaxwellBot(commands.Bot):
             for name, tool in manager.get_available_tools(
                 user_id=author_id,
                 platform=platform,
+                guild_id=guild_id,
             ).items():
                 tools.setdefault(name, tool)
         except Exception:

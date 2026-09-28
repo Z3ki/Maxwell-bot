@@ -78,3 +78,33 @@ def test_ctx_after_runs_one_shot_callback(tmp_path):
         assert seen == ["yes"]
 
     asyncio.run(run())
+
+
+def test_server_plugin_override_filters_guild_events(tmp_path):
+    bot, manager = _manager(tmp_path)
+    bot._control = {"guild_plugin_overrides": {"10": {"demo": False}}}
+    plugin_runtime.install_plugin_runtime_guards(bot)
+    manager.state["plugins"]["demo"] = {
+        "enabled_globally": True,
+        "allowed_users": [],
+        "denied_users": [],
+    }
+    seen = []
+
+    async def handler(message):
+        seen.append(message.guild.id)
+
+    manager._register_listener("demo", "on_message", handler)
+
+    async def run():
+        blocked = SimpleNamespace(
+            author=SimpleNamespace(id=1), guild=SimpleNamespace(id=10)
+        )
+        allowed = SimpleNamespace(
+            author=SimpleNamespace(id=1), guild=SimpleNamespace(id=20)
+        )
+        assert await manager.dispatch_event("on_message", blocked) == 0
+        assert await manager.dispatch_event("on_message", allowed) == 1
+
+    asyncio.run(run())
+    assert seen == [20]

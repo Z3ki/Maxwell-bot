@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import discord
+
 from utils import _coerce_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -677,6 +679,9 @@ class UserInstallSession:
         ):
             if key in kwargs and kwargs[key] is not None:
                 payload[key] = kwargs[key]
+        # Webhook follow-ups bypass the bot channel-send helper. Keep model,
+        # memory, and user-supplied text from pinging anyone by default.
+        payload["allowed_mentions"] = discord.AllowedMentions.none()
         payload["ephemeral"] = self.ephemeral
         if not payload:
             payload["content"] = "\u200b"
@@ -700,7 +705,10 @@ class UserInstallSession:
             edit = getattr(last, "edit", None)
             if callable(edit):
                 try:
-                    updated = await edit(content=merged)
+                    updated = await edit(
+                        content=merged,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                     self._last = updated or last
                     return self._last
                 except Exception:
@@ -802,12 +810,20 @@ async def _ephemeral(interaction: Any, text: str) -> None:
     if callable(is_done) and not is_done():
         send = getattr(response, "send_message", None)
         if callable(send):
-            await send(text, ephemeral=True)
+            await send(
+                text,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
     followup = getattr(interaction, "followup", None)
     send = getattr(followup, "send", None)
     if callable(send):
-        await send(text, ephemeral=True)
+        await send(
+            text,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:

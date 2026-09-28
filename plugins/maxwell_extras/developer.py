@@ -228,18 +228,32 @@ class _ProposalView(discord.ui.View):
     async def _apply(self, interaction: discord.Interaction) -> None:
         uid = getattr(getattr(interaction, "user", None), "id", None)
         if not _is_admin(self.tool.bot, uid):
-            await interaction.response.send_message("Admin approval required.", ephemeral=True)
+            await interaction.response.send_message(
+                "Admin approval required.", ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         result = await self.tool.apply(self.pid, str(uid or ""), via_button=True)
-        await interaction.response.edit_message(content=f"{getattr(interaction.message, 'content', '')}\n\n{result}", view=None)
+        await interaction.response.edit_message(
+            content=f"{getattr(interaction.message, 'content', '')}\n\n{result}",
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def _reject(self, interaction: discord.Interaction) -> None:
         uid = getattr(getattr(interaction, "user", None), "id", None)
         if not _is_admin(self.tool.bot, uid):
-            await interaction.response.send_message("Admin approval required.", ephemeral=True)
+            await interaction.response.send_message(
+                "Admin approval required.", ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         await self.tool.store.update(self.pid, status="rejected", decided_at=time.time(), decided_by=str(uid or ""))
-        await interaction.response.edit_message(content=f"{getattr(interaction.message, 'content', '')}\n\nProposal rejected.", view=None)
+        await interaction.response.edit_message(
+            content=f"{getattr(interaction.message, 'content', '')}\n\nProposal rejected.",
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class PluginWorkbenchTool(Tool):

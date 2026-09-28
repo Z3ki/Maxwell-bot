@@ -195,3 +195,6 @@ def test_modern_session_send_preserves_embed_view_and_multiple_files():
     assert payload["embed"] == "embed"
     assert payload["view"] == "view"
     assert payload["silent"] is True
+    assert payload["allowed_mentions"].everyone is False
+    assert payload["allowed_mentions"].users is False
+    assert payload["allowed_mentions"].roles is False
