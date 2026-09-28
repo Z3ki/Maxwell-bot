@@ -25,7 +25,7 @@ jobs:
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pip check
       - run: ruff check .
-      - run: bash -n install.sh setup.sh docker/entrypoint.sh
+      - run: bash -n install.sh setup.sh docker/entrypoint.sh scripts/setup_shell_egress_firewall.sh scripts/setup_shell_resource_pool.sh tests/integration/test_shell_sandbox.sh
       - run: python -m pytest
       - name: Benchmark scoped memory retrieval
         if: matrix.python-version == '3.12'

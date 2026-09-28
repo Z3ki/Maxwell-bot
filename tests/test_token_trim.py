@@ -81,13 +81,20 @@ def _msg(content, *, mentions=None, watch_followup=False, dm=False):
     author = SimpleNamespace(id=2)
     if not dm:
         perms = SimpleNamespace(administrator=True)
-        guild = SimpleNamespace(
-            id=1, me=SimpleNamespace(id=1, guild_permissions=perms, roles=[])
-        )
+        me = SimpleNamespace(id=1, guild_permissions=perms, roles=[])
         author = SimpleNamespace(id=2, guild_permissions=perms, roles=[])
+        guild = SimpleNamespace(id=1, me=me)
+        author.guild = guild
+        guild.get_member = lambda user_id: author if int(user_id) == 2 else None
+        msg_channel = SimpleNamespace(id=99, guild=guild)
+        msg_channel.permissions_for = lambda member: (
+            perms if getattr(member, "id", None) in {1, 2} else None
+        )
+    else:
+        msg_channel = SimpleNamespace(id=99, guild=None)
     msg = SimpleNamespace(
         content=content,
-        channel=SimpleNamespace(id=99, guild=guild),
+        channel=msg_channel,
         mentions=list(mentions or []),
         guild=guild,
         author=author,

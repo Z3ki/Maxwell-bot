@@ -42,12 +42,8 @@ HELP_COMMAND = {
             "choices": [
                 {"name": "Getting started", "value": "start"},
                 {"name": "Personal settings", "value": "personal"},
-                {"name": "AI and games", "value": "creative"},
                 {"name": "Server settings", "value": "server"},
-                {"name": "Memory", "value": "memory"},
-                {"name": "Jobs and voice", "value": "tools"},
-                {"name": "Moderation", "value": "moderation"},
-                {"name": "Developer tools", "value": "developer"},
+                {"name": "Application owner", "value": "owner"},
             ],
         },
     ],
@@ -76,6 +72,7 @@ _HELP_TOPICS = {
         "Getting started",
         [
             "`/maxwell prompt:<your question>` — ask Maxwell anything.",
+            "`/cancel` — stop your running request in this interaction context.",
             "`/help` — browse this list by topic.",
             "`/usage` — check your current message allowance.",
         ],
@@ -84,59 +81,23 @@ _HELP_TOPICS = {
         "Personal settings",
         [
             "`/config` — open the private settings menu for response mode, research, detail, context, language, and reply style.",
-            "`/personality` — view or edit your reply-style preference directly.",
-        ],
-    ),
-    "creative": (
-        "AI and games",
-        [
-            "`/image prompt:<request>` — create or edit an image; attach an image to use it as a reference.",
-            "`/chess prompt:<request>` and `/checkers prompt:<request>` — start or play a game.",
-            "`/reminder prompt:<request>` — create, inspect, or cancel a reminder.",
-            "`/memory prompt:<request>` — ask Maxwell to recall or manage scoped memory.",
+            "`/config` → Reply style — set or clear a personal writing preference.",
+            "`/config` → Default visibility — choose private or public replies; private is the default.",
+            "`/config` → Bring your own key — save, test, view status, or delete a supported provider key privately.",
         ],
     ),
     "server": (
         "Server settings",
         [
-            "`/config` — open the settings menu. Server controls appear for the server owner, Manage Server administrators, or configured Maxwell admins.",
-            "`/progress`, `/ticket-greetings`, and `/solo` — manage individual server settings.",
-            "`/autonomy` and `/plugins` — inspect or update server behavior and enabled features.",
+            "`/config` — open the settings menu. Server controls appear for the server owner or members with Manage Server.",
+            "Authorized managers can set the allowed channel, capability groups, moderation policy, progress messages, and ticket greetings.",
         ],
     ),
-    "memory": (
-        "Memory and feedback",
+    "owner": (
+        "Application owner settings",
         [
-            "`/memory` — ask Maxwell to recall, save, or manage scoped memory.",
-            "`/context` and `/clear-memory` — inspect or clear this channel's stored context.",
-            "`/negative-memory`, `/summarize-memory`, and `/downvote` — manage memory and give response feedback.",
-        ],
-    ),
-    "tools": (
-        "Jobs and voice",
-        [
-            "`/stop` — stop a running response.",
-            "`/jobs` and `/job` — list, inspect, or cancel your jobs.",
-            "`/sleep` and `/wake` — pause or resume Maxwell in a server.",
-            "`/voice` — control Maxwell's voice connection and speech.",
-            "`/rem` — inspect or run REM maintenance.",
-        ],
-    ),
-    "moderation": (
-        "Moderation and access",
-        [
-            "`/moderation prompt:<request>` — ask Maxwell to help with server moderation; Discord permissions still apply.",
-            "`/blacklist` and `/unblacklist` — manage blocked users.",
-            "`/admin` — manage configured Maxwell operators.",
-        ],
-    ),
-    "developer": (
-        "Developer tools",
-        [
-            "`/diagnostics` — view restricted runtime diagnostics.",
-            "`/maintenance` — run restricted maintenance actions.",
-            "`/debug` — view restricted runtime information.",
-            "These commands check the configured Maxwell developer IDs when run; visibility alone does not grant access.",
+            "Configured application owners can open the Application owner section of `/config` for redacted diagnostics, global tool/autonomy/quota switches, quota overrides, and trusted control reload.",
+            "Guild ownership and server administrator permissions do not grant access to application-owner settings.",
         ],
     ),
 }
@@ -151,12 +112,11 @@ def command_help_text(*, discovery: bool, topic: str | None = None) -> str:
         lines = [
             "**Maxwell commands**",
             "**Start:** `/maxwell`, `/help`, `/usage`.",
-            "**Personal:** `/config` opens a private settings menu; `/personality` edits your reply style.",
-            "**AI and games:** `/image`, `/chess`, `/checkers`, `/memory`, `/reminder`, `/moderation`.",
-            "**Server:** `/config` also shows authorized server controls; `/progress`, `/ticket-greetings`, `/solo`, `/autonomy`, `/plugins`.",
-            "**Memory:** `/context`, `/clear-memory`, `/negative-memory`, `/summarize-memory`, `/downvote`.",
-            "**Jobs and voice:** `/stop`, `/jobs`, `/job`, `/sleep`, `/wake`, `/voice`, `/rem`.",
-            "**Restricted:** `/diagnostics`, `/maintenance`, `/debug`.",
+            "**Personal:** `/config` opens private personal settings, including response preferences, style, visibility, and BYOK.",
+            "**Server:** `/config` exposes channel, capability, moderation, progress, and ticket settings to authorized server managers.",
+            "**Application owner:** `/config` exposes redacted diagnostics and fixed global controls only to configured application owners.",
+            "Use `/maxwell` for requests, tools, memory, creative work, reminders, jobs, and voice features.",
+            "Use `/cancel` to stop your active request in the current interaction context.",
             "Use `/help topic:<category>` to see one set of commands.",
         ]
     if discovery:

@@ -34,10 +34,13 @@ def test_modern_command_surface_has_modes_context_and_message_actions():
     assert ("Ask Maxwell", 2) in kinds
 
     slash = next(row for row in commands if row["name"] == "maxwell" and row["type"] == 1)
+    assert slash["integration_types"] == [0, 1]
+    assert slash["contexts"] == [0, 1, 2]
     options = {row["name"]: row for row in slash["options"]}
-    assert {"prompt", "mode", "web", "detail", "language", "context", "image", "file"} <= set(options)
+    assert {"prompt", "mode", "web", "detail", "language", "context", "visibility", "image", "file"} <= set(options)
     assert {c["value"] for c in options["mode"]["choices"]} >= {"research", "translate", "code"}
     assert {c["value"] for c in options["context"]["choices"]} == {0, 10, 25, 50}
+    assert {c["value"] for c in options["visibility"]["choices"]} == {"private", "public"}
 
 
 def test_slash_prompt_applies_research_web_detail_and_language():
@@ -100,7 +103,40 @@ def test_enhanced_slash_turn_keeps_core_attachments():
     assert turn["search_query"] == "debug it"
     assert turn["web"] == "auto"
     assert turn["mode"] == "code"
+    assert turn["visibility"] == "private"
     assert "mode=code" in turn["note"]
+
+
+def test_slash_visibility_override_is_validated():
+    interaction = _interaction(options=[
+        {"name": "prompt", "value": "hello"},
+        {"name": "visibility", "value": "public"},
+    ])
+    turn = mod._enhanced_build_turn(
+        interaction,
+        lambda _interaction: {"prompt": "hello", "attachments": [], "note": ""},
+    )
+    assert turn["visibility"] == "public"
+
+    interaction.data["options"][1]["value"] = "channel-is-secret"
+    turn = mod._enhanced_build_turn(
+        interaction,
+        lambda _interaction: {"prompt": "hello", "attachments": [], "note": ""},
+    )
+    assert turn["visibility"] == "private"
+
+
+def test_private_context_keys_separate_users_guilds_and_channels():
+    one = _interaction()
+    one.guild = SimpleNamespace(id=10)
+    other_channel = _interaction()
+    other_channel.guild = SimpleNamespace(id=10)
+    other_channel.channel_id = 56
+    other_channel.channel.id = 56
+    other_guild = _interaction()
+    other_guild.guild = SimpleNamespace(id=11)
+    assert mod.ui.private_channel_key(one) != mod.ui.private_channel_key(other_channel)
+    assert mod.ui.private_channel_key(one) != mod.ui.private_channel_key(other_guild)
 
 
 def test_fact_check_context_action_targets_selected_message(monkeypatch):

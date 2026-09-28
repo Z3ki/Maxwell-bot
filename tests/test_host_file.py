@@ -68,11 +68,32 @@ def test_host_inline_non_html_keeps_filename(tmp_path):
     assert (site_dir / "_files" / "notes" / "notes.txt").read_text() == "hello"
 
 
-def test_host_from_path(tmp_path):
+def test_host_refuses_host_file_paths(tmp_path):
     bot, site_dir, exports = _bot(tmp_path)
     src = exports / "clip.json"
     src.write_text('{"ok":true}', encoding="utf-8")
     out = run(HostFileTool(bot).execute(_msg(), path=str(src), name="clip"))
+    assert out.startswith("Error:")
+    assert "workspace" in out.lower()
+    assert not (site_dir / "_files" / "clip").exists()
+
+
+def test_host_from_request_workspace(tmp_path):
+    bot, site_dir, _exports = _bot(tmp_path)
+
+    class WorkspaceReader:
+        async def read_workspace_file(self, message, path, *, max_size):
+            assert message.author.id == 42
+            assert path == "/workspace/clip.json"
+            assert max_size > 0
+            return b'{"ok":true}', "clip.json", None
+
+    bot.tools["shell"] = WorkspaceReader()
+    out = run(
+        HostFileTool(bot).execute(
+            _msg(), path="/workspace/clip.json", name="clip"
+        )
+    )
     assert "Hosted file:" in out
     assert (site_dir / "_files" / "clip" / "clip.json").read_text() == '{"ok":true}'
 

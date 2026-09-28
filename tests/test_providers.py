@@ -126,7 +126,7 @@ class FakeSession:
         self.closed = False
         self.response = response or FakeResponse()
 
-    def post(self, url, json=None, timeout=None, headers=None):
+    def post(self, url, json=None, timeout=None, headers=None, **kwargs):
         self.urls.append(url)
         self.payloads.append(copy.deepcopy(json))
         return self.response
@@ -137,7 +137,7 @@ class FakeSequenceSession(FakeSession):
         super().__init__()
         self.responses = list(responses)
 
-    def post(self, url, json=None, timeout=None, headers=None):
+    def post(self, url, json=None, timeout=None, headers=None, **kwargs):
         self.urls.append(url)
         self.payloads.append(copy.deepcopy(json))
         return self.responses.pop(0)
@@ -1466,7 +1466,8 @@ def test_policy_block_fails_over_once_and_never_returns_the_notice():
             }
 
     class PolicyBlockSession(FakeSession):
-        def post(self, url, json=None, timeout=None, headers=None):
+        def post(self, url, json=None, timeout=None, headers=None, **kwargs):
+            assert kwargs.get("allow_redirects") is False
             calls.append(url)
             self.urls.append(url)
             self.payloads.append(copy.deepcopy(json))

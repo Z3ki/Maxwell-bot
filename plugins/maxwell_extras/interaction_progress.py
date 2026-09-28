@@ -264,8 +264,8 @@ def _patch_session() -> None:
     original_init = UserInstallSession.__init__
     next_send = {"fn": UserInstallSession._send_impl}
 
-    def session_init(self: Any, interaction: Any) -> None:
-        original_init(self, interaction)
+    def session_init(self: Any, interaction: Any, *args: Any, **kwargs: Any) -> None:
+        original_init(self, interaction, *args, **kwargs)
         state = _state_for_interaction(interaction)
         self._maxwell_progress_state = state
         if state is not None:

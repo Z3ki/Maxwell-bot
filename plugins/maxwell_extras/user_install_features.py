@@ -56,7 +56,8 @@ def set_user_preference_store(store: Any) -> None:
 def modern_user_install_commands() -> list[dict[str, Any]]:
     """Return the current USER_INSTALL command set."""
 
-    meta = {"integration_types": [1], "contexts": [0, 1, 2]}
+    # `/maxwell` works when installed to a server and when installed to a user.
+    meta = {"integration_types": [0, 1], "contexts": [0, 1, 2]}
     return [
         {
             "name": ui.USER_INSTALL_COMMAND_NAME,
@@ -105,6 +106,16 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
                     "type": 4,
                     "required": False,
                     "choices": _CONTEXT_CHOICES,
+                },
+                {
+                    "name": "visibility",
+                    "description": "Choose whether this reply is private or visible in the channel",
+                    "type": 3,
+                    "required": False,
+                    "choices": [
+                        {"name": "Private", "value": "private"},
+                        {"name": "Public", "value": "public"},
+                    ],
                 },
                 {
                     "name": "image",
@@ -300,13 +311,15 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
                 defaults = store.get(user_id).get("defaults") or {}
             except Exception:
                 defaults = {}
-            for key in ("mode", "web", "detail", "context", "language"):
+            for key in ("mode", "web", "detail", "context", "language", "visibility"):
                 if key not in opts and key in defaults:
                     opts[key] = defaults[key]
         raw_prompt = str(turn.get("prompt") or "")
         turn["search_query"] = raw_prompt
         turn["prompt"] = _slash_prompt(raw_prompt, opts)
         turn["history_limit"] = _context_limit(interaction)
+        visibility = str(opts.get("visibility") or "private").strip().lower()
+        turn["visibility"] = visibility if visibility in {"private", "public"} else "private"
         mode = str(opts.get("mode") or "ask")
         web = str(opts.get("web") or "auto")
         turn["mode"] = mode.strip().lower()
@@ -420,6 +433,7 @@ async def _modern_session_send(
 
     if not payload:
         payload["content"] = "\u200b"
+    payload["ephemeral"] = bool(getattr(self, "ephemeral", True))
     sent = await send(**payload)
     self._sent += 1
     self._last = sent

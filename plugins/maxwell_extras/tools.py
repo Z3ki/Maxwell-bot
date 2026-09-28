@@ -707,30 +707,18 @@ class InspectMediaUrlTool(Tool):
     async def _audio(self, url: str) -> str:
         try:
             from bot_tools import (
-                _get_shared_session,
+                _fetch_public_url,
                 _is_safe_url,
-                _read_response_limited,
             )
         except Exception as exc:
             return f"Error: media helpers unavailable: {exc}"
 
         if not _is_safe_url(url):
             return "Error: unsafe or unsupported URL."
-        session = await _get_shared_session()
-        timeout = aiohttp.ClientTimeout(total=20)
         try:
-            async with session.get(
-                url,
-                allow_redirects=True,
-                timeout=timeout,
-                headers={"User-Agent": "Maxwell-bot/1.0"},
-            ) as resp:
-                if resp.status < 200 or resp.status >= 300:
-                    return f"Error: audio fetch returned HTTP {resp.status}."
-                final_url = str(resp.url)
-                if not _is_safe_url(final_url):
-                    return "Error: redirect target is unsafe."
-                raw = await _read_response_limited(resp, 3_200_000)
+            _final_url, _content_type, raw = await _fetch_public_url(
+                url, max_bytes=3_200_000, timeout=20
+            )
         except Exception as exc:
             return f"Error fetching audio: {exc}"
 
@@ -774,6 +762,15 @@ class InspectMediaUrlTool(Tool):
         tool = (getattr(self.bot, "tools", None) or {}).get(tool_name)
         if tool is None:
             return f"Error: {tool_name} is not enabled."
+        authorize = getattr(self.bot, "_authorize_tool_execution", None)
+        if not callable(authorize):
+            return "refused: tool authorization is unavailable"
+        try:
+            denied = authorize(message, tool_name, tool, {"url": target})
+        except Exception:
+            return "refused: tool authorization could not be verified"
+        if denied:
+            return str(denied)
         try:
             return str(await tool.execute(message, url=target))
         except Exception as exc:

@@ -266,6 +266,10 @@ def test_exec_run_tool_react_uses_target_message_id(tmp_path):
         user=SimpleNamespace(id=42, display_name="Maxwell", name="Maxwell"),
         get_channel=lambda channel_id: channel if channel_id == 100 else None,
         fetch_channel=None,
+        # Autonomy now passes every tool call through the same execution
+        # authorizer used by interactive requests. This test exercises the
+        # successful execution path after that gate has approved the call.
+        _authorize_tool_execution=lambda message, name, tool, args: None,
     )
     engine = AutonomyEngine(bot)
     result = {"kind": "run_tool", "result": "success", "error": None}

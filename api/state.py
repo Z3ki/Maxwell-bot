@@ -43,12 +43,14 @@ try:
     from control_defaults import (  # noqa: E402
         DEAD_CONTROL_KEYS,
         DEFAULT_CONTROL,
+        GUILD_CAPABILITIES,
         KNOWN_TOOLS,
         parse_bool as _parse_bool,
     )
 except ImportError:
     DEAD_CONTROL_KEYS = set()
     DEFAULT_CONTROL = {}
+    GUILD_CAPABILITIES = {}
     KNOWN_TOOLS = set()
 
     def _parse_bool(value, default=False):
@@ -161,15 +163,33 @@ def _sanitize_control(control):
         elif isinstance(default, dict):
             # {guild_id: channel_id} maps (guild_solo_channel). Ids only, so a
             # hand-edited control.json cannot smuggle anything into the gate.
-            out[key] = (
-                {
-                    str(k).strip(): str(v).strip()
-                    for k, v in value.items()
-                    if str(k).strip().isdigit() and str(v).strip().isdigit()
-                }
-                if isinstance(value, dict)
-                else {}
-            )
+            if key == "guild_disabled_capabilities":
+                allowed = set(GUILD_CAPABILITIES)
+                out[key] = (
+                    {
+                        str(guild_id).strip(): sorted(
+                            {
+                                str(group).strip()
+                                for group in groups
+                                if str(group).strip() in allowed
+                            }
+                        )
+                        for guild_id, groups in value.items()
+                        if str(guild_id).strip().isdigit() and isinstance(groups, list)
+                    }
+                    if isinstance(value, dict)
+                    else {}
+                )
+            else:
+                out[key] = (
+                    {
+                        str(k).strip(): str(v).strip()
+                        for k, v in value.items()
+                        if str(k).strip().isdigit() and str(v).strip().isdigit()
+                    }
+                    if isinstance(value, dict)
+                    else {}
+                )
         elif isinstance(default, list):
             if isinstance(value, list):
                 items = [str(x).strip()[:64] for x in value if str(x).strip()]
