@@ -31,8 +31,9 @@ class FakeResponse:
     def is_done(self):
         return self.deferred or bool(self.messages)
 
-    async def defer(self):
+    async def defer(self, *, ephemeral=False):
         self.deferred = True
+        self.deferred_ephemeral = ephemeral
 
     async def send_message(self, content, ephemeral=False):
         self.messages.append({"content": content, "ephemeral": ephemeral})
@@ -271,9 +272,38 @@ def test_handle_spawns_for_non_admin():
     claimed = asyncio.run(handle_user_install_interaction(bot, interaction))
     assert claimed is True
     assert interaction.response.deferred is True
+    assert interaction.response.deferred_ephemeral is True
     assert spawned
     assert is_user_install_message(spawned[0])
     assert spawned[0].content == "ping me"
+    assert spawned[0].response_visibility == "private"
+    assert spawned[0].channel.id == "private:2:dm:555"
+    assert spawned[0].guild is None
+
+
+def test_public_visibility_is_set_before_defer_and_keeps_server_scope():
+    interaction = _interaction(user_id=2, prompt="ping me")
+    interaction.data["options"].append(
+        {"name": "visibility", "type": 3, "value": "public"}
+    )
+    spawned = []
+
+    async def on_message(message):
+        return None
+
+    def spawn(coro):
+        spawned.append(coro.cr_frame.f_locals["message"])
+        coro.close()
+
+    bot = SimpleNamespace(
+        _is_admin=lambda _uid: False,
+        _spawn_detached=spawn,
+        on_message=on_message,
+    )
+    assert asyncio.run(handle_user_install_interaction(bot, interaction)) is True
+    assert interaction.response.deferred_ephemeral is False
+    assert spawned[0].response_visibility == "public"
+    assert spawned[0].channel.id == 555
 
 
 def test_handle_defers_and_spawns_for_admin():

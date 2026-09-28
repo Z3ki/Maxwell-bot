@@ -31,12 +31,13 @@ from maxwell_core.tools.registry import ToolRegistry, set_global_registry
 
 logger = logging.getLogger("maxwell.plugins")
 
-# These bundled plugins expose detached AI workers, repository/host shell,
-# global plugin configuration, or edits to protected prompt state. Skip setup
+# These bundled plugins expose detached AI workers, repository access, global
+# plugin configuration, or edits to protected prompt state. Skip setup
 # entirely: some register periodic work even when plugins.json says disabled.
-# Keep their source and stored data for a reviewed migration.
+# The shell plugin is retained because its only execution backend now fails
+# closed unless gVisor and the host egress policy are available.
 _RETIRED_PUBLIC_RUNTIME_PLUGINS = frozenset({
-    "agent_life", "background_jobs", "github_projects", "shell",
+    "agent_life", "background_jobs", "github_projects",
     "plugin_admin", "personality",
 })
 

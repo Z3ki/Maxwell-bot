@@ -56,7 +56,7 @@ def test_search_messages_only_reads_this_channel():
                 msg = SimpleNamespace(
                     id=1,
                     content="hello cats",
-                    author=SimpleNamespace(display_name="Ada"),
+                    author=SimpleNamespace(id=7, display_name="Ada"),
                 )
                 yield msg
 
@@ -64,14 +64,80 @@ def test_search_messages_only_reads_this_channel():
 
     other = Hist()
     chan = Hist()
+    chan.id = 100
     chan.name = "general"
-    guild = SimpleNamespace(text_channels=[chan, other], me=SimpleNamespace())
-    other.permissions_for = lambda _me: SimpleNamespace(read_messages=True)
-    msg = SimpleNamespace(channel=chan, guild=guild)
+    guild = SimpleNamespace(id=10, text_channels=[chan, other], me=SimpleNamespace(id=999))
+    requester = SimpleNamespace(id=7, guild=guild, display_name="Ada")
+    guild.get_member = lambda uid: requester if int(uid) == 7 else None
+    chan.guild = guild
+    chan.permissions_for = lambda _member: SimpleNamespace(
+        view_channel=True, read_message_history=True
+    )
+    other.permissions_for = lambda _me: SimpleNamespace(read_message_history=True)
+    msg = SimpleNamespace(channel=chan, guild=guild, author=requester)
     out = asyncio.run(SearchMessagesTool(SimpleNamespace()).execute(msg, query="cats"))
     assert "hello cats" in out
     assert chan.calls == [20]
     assert other.calls == []
+    assert "message_id=1" in out
+    assert "author_id=7" in out
+    assert "channel_id=100" in out
+
+
+def test_message_lookup_by_id_and_reply_reference_is_current_channel_scoped():
+    guild = SimpleNamespace(id=10, me=SimpleNamespace(id=999))
+    requester = SimpleNamespace(id=7, guild=guild, display_name="Ada")
+    guild.get_member = lambda uid: requester if int(uid) == 7 else None
+
+    class Channel:
+        id = 100
+        name = "general"
+
+        def permissions_for(self, _member):
+            return SimpleNamespace(view_channel=True, read_message_history=True)
+
+        async def fetch_message(self, mid):
+            assert mid == 123
+            return SimpleNamespace(
+                id=123,
+                content="hello from target",
+                author=SimpleNamespace(id=8, display_name="Bea"),
+                created_at=SimpleNamespace(isoformat=lambda: "2026-09-28T00:00:00+00:00"),
+                reference=SimpleNamespace(message_id=122),
+                attachments=[],
+            )
+
+    channel = Channel()
+    channel.guild = guild
+    message = SimpleNamespace(
+        guild=guild,
+        channel=channel,
+        author=requester,
+        reference=SimpleNamespace(message_id=123),
+    )
+    tool = SearchMessagesTool(SimpleNamespace())
+
+    direct = asyncio.run(tool.execute(message, message_id="123"))
+    reply = asyncio.run(tool.execute(message))
+    assert "message_id=123" in direct
+    assert "author_id=8" in direct
+    assert "2026-09-28T00:00:00+00:00" in direct
+    assert "reply_to_message_id=122" in reply
+
+
+def test_message_link_rejects_cross_server_before_fetching_channel():
+    guild = SimpleNamespace(id=10)
+    message = SimpleNamespace(guild=guild, channel=SimpleNamespace(), author=SimpleNamespace(id=7))
+    bot = SimpleNamespace(
+        get_channel=lambda _cid: (_ for _ in ()).throw(AssertionError("must not fetch")),
+        fetch_channel=AsyncMock(side_effect=AssertionError("must not fetch")),
+    )
+    result = asyncio.run(
+        SearchMessagesTool(bot).execute(
+            message, message_link="https://discord.com/channels/11/20/30"
+        )
+    )
+    assert "limited to this server" in result
 
 
 def test_lookup_user_uses_cache_and_skips_profile():

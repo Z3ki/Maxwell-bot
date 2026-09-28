@@ -140,14 +140,17 @@ def test_help_and_usage_mention_premium_only_as_discovery():
 def test_help_browses_topics_and_returns_only_the_selected_section():
     topic_option = HELP_COMMAND["options"][0]
     assert topic_option["name"] == "topic"
-    assert {choice["value"] for choice in topic_option["choices"]} >= {
+    assert {choice["value"] for choice in topic_option["choices"]} == {
         "start",
         "personal",
         "server",
-        "memory",
+        "owner",
     }
     assert "/config" in command_help_text(discovery=False, topic="personal")
-    assert "/personality" in command_help_text(discovery=False, topic="personal")
+    assert "Bring your own key" in command_help_text(
+        discovery=False, topic="personal"
+    )
+    assert "/personality" not in command_help_text(discovery=False, topic="personal")
     assert "/image" not in command_help_text(discovery=False, topic="personal")
 
 
@@ -173,7 +176,8 @@ def test_help_interaction_uses_selected_topic():
     )
     assert sent and sent[0][1] is True
     assert "/config" in sent[0][0]
-    assert "/personality" in sent[0][0]
+    assert "Bring your own key" in sent[0][0]
+    assert "/personality" not in sent[0][0]
     assert "/image" not in sent[0][0]
 
 

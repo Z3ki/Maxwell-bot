@@ -16,6 +16,7 @@ _DEFAULTS: dict[str, Any] = {
     "detail": "balanced",
     "context": 25,
     "language": "",
+    "visibility": "private",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800

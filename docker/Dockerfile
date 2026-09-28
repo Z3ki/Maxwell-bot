@@ -2,10 +2,10 @@
 # Shell-tool sandbox (image name: maxwell-shell).
 # The bot itself is docker/maxwell.Dockerfile, started via docker-compose.yml.
 #
-# Isolated runs (the default) cap memory/CPU/pids and bind-mount only
-# shelldocker/. The process is root with full capabilities — isolation is
-# the mount and the network, not cap-drop. This image stays small and has
-# no sudo binary.
+# Public shell runs only under the configured gVisor (runsc) Docker runtime.
+# Root is available inside the guest with a small allow-list of guest
+# capabilities. The host applies no-new-privileges, resource limits, and
+# egress filtering. This image stays small and has no sudo binary.
 
 FROM debian:bookworm-slim
 
@@ -31,13 +31,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash -u 1000 maxwell \
-    && mkdir -p /home/maxwell \
-    && chown maxwell:maxwell /home/maxwell
+RUN mkdir -p /workspace
 
-WORKDIR /home/maxwell
-# Root with full capabilities inside the sandbox. Isolation is the bind
-# mount (shelldocker/ only unless MAXWELL_SHELL_FULL_HOST) and bridge net.
+WORKDIR /workspace
+# The uid is root in the isolated guest, without host capabilities.
 USER root
 
 CMD ["sleep", "infinity"]

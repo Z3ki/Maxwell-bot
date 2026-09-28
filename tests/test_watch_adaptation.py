@@ -52,6 +52,8 @@ def _bot(control=None, admins=()):
         "_conversation_watch_active",
         "_watch_debounce_seconds",
         "_should_extract_context",
+        "_normalize_context_entry",
+        "_extract_shared_context_fact",
         "_extract_threshold",
         "_note_extraction_ran",
         "_directly_addressed",
@@ -234,6 +236,28 @@ def test_extraction_can_be_switched_off_entirely():
         assert bot._should_extract_context(_msg("Ana owns the DNS for z3ki.dev")) is False
 
     asyncio.run(run())
+
+
+def test_private_user_install_turn_is_never_sent_to_context_memory():
+    bot = _bot(admins=(7,))
+    private = _msg("Ada owns the staging DNS for the private project domain")
+    private.response_visibility = "private"
+
+    assert bot._should_extract_context(private) is False
+    assert bot._normalize_context_entry(
+        private,
+        {
+            "should_store": True,
+            "importance": 10,
+            "scope": "global",
+            "visibility": "shared",
+            "summary": "Private project domain and staging DNS",
+        },
+    ) is None
+
+    # Defensive worker-side guard also stops a task scheduled before a policy
+    # change or invoked directly from sending the private text to a provider.
+    asyncio.run(bot._extract_shared_context_fact(private))
 
 
 def test_an_empty_message_with_no_media_is_skipped():

@@ -649,6 +649,21 @@ class RequestJournal:
             ).fetchone()
             return self._record(row) if row is not None else None
 
+    def find_response(self, response_id: Any) -> dict[str, Any] | None:
+        """Return the request owner for a tracked bot response ID, if unique."""
+        target = str(response_id or "").strip()
+        if not target:
+            return None
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM requests WHERE response_id = ? "
+                "ORDER BY updated_at DESC LIMIT 2",
+                (target,),
+            ).fetchall()
+            if len(rows) != 1:
+                return None
+            return self._record(rows[0])
+
     def _change(
         self,
         connection: sqlite3.Connection,

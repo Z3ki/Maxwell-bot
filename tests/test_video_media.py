@@ -34,7 +34,9 @@ def test_fetch_url_delegates_direct_video_without_decoding_it(monkeypatch):
     bot = SimpleNamespace(
         _control={"process_images": True, "process_audio": True},
         _download_embed_media=lambda *args, **kwargs: None,
+        _authorize_tool_execution=lambda *_a, **_k: None,
     )
+    bot.tools = {"see_video": SeeVideoTool(bot)}
     result = asyncio.run(
         FetchUrlTool(bot).execute(_message(), url="https://cdn.example/clip.mp4")
     )

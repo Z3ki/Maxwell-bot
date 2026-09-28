@@ -5,8 +5,18 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from tooling import helpers as _helpers
 from tools import Tool
+from plugins.shell.isolation import (
+    ShellTenant,
+    docker_run_args,
+    egress_policy_ready,
+    resource_pool_ready,
+    shell_tenant,
+    validate_runsc_runtime,
+)
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -16,36 +26,37 @@ for _name in dir(_helpers):
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
 
+
+def _bounded_env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        raw = int(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        raw = default
+    return max(low, min(raw, high))
+
+
 class ShellTool(Tool):
-    """Execute shell commands in the dedicated Docker sandbox."""
+    """Execute commands in a tenant-scoped gVisor sandbox."""
     tool_name = 'shell'
     returns_result = True
     ends_turn = False
-    requires_admin = True
+    # The sandbox is a tenant capability. Guild administrators gain no host or
+    # application-owner authority from using it.
+    requires_admin = False
 
 
     # Shell executes arbitrary code in a container. It's the most dangerous
     # tool we expose, so it gets the taint-check / user-confirmation gate.
     is_destructive = True
 
-    CONTAINER_NAME = "maxwell-shell"
     IMAGE_NAME = "maxwell-shell"
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
     # Bump when docker-run flags or recycle policy change so an old sandbox
     # is replaced instead of reused.
-    _SANDBOX_INIT = "4"
+    _SANDBOX_INIT = "6"
 
-    # Output / command-length caps. Read from env so the operator can tune
-    # without a code change. 0 = unlimited (use with care; see below).
-    # Defaults are generous: 100k chars of captured output covers any sane
-    # `cat /var/log/*` or `find` invocation, and 64k command length is enough
-    # for a multi-line ffmpeg pipeline. If you actually need more, raise
-    # MAXWELL_SHELL_MAX_OUTPUT / MAXWELL_SHELL_MAX_COMMAND_LENGTH in .env.
-    #
-    # Why not just remove the caps entirely? Because we still have to fit
-    # the response through Discord (2000 char chunks) AND through the LLM
-    # context window. A 50 MB stdout will OOM the model long before it
-    # OOMs us. 0/unlimited is fine if you've tuned your context budget.
+    # Limits are hard bounded. Operator configuration can lower these values,
+    # but cannot disable the cap.
     _MAX_OUTPUT_DEFAULT = 100_000
     _MAX_COMMAND_LENGTH_DEFAULT = 65_536
     # Channel post cap. Captured stdout can be 100k for the model, but posting
@@ -54,26 +65,35 @@ class ShellTool(Tool):
     _CHANNEL_MAX_CHARS_DEFAULT = 300
     _CHANNEL_MAX_CHUNKS = 1
 
-    # Hard ceiling on shell timeout. The actual timeout is read from env at
-    # call time so the operator can raise/lower it, but we never let it
-    # exceed this regardless of config. Why a cap? Because the tool runs
-    # arbitrary code, and a runaway `cat /dev/zero` or `apt install
-    # chromium` can pin a core forever. The cap is high (1 hour) but not
-    # gone. If you find yourself wanting to remove it, you probably want
-    # a different tool (a job queue, not a chatbot tool call).
-    _TIMEOUT_CEILING_SECONDS = 3600
+    # Operator configuration may lower this limit, but cannot remove it.
+    _TIMEOUT_CEILING_SECONDS = 900
 
-    # Idle recycle. A public bot sharing one sandbox otherwise accumulates
-    # packages, daemons, /tmp junk, and bind-mount files. Default 10 minutes
-    # unused → docker rm -f and wipe shelldocker/; next shell call starts clean.
-    # 0 disables (persistent container, homelab-only).
+    # Idle expiry destroys the tenant container and its transient workspace.
     _IDLE_SECONDS_DEFAULT = 600
-    _last_used_monotonic: float = 0.0
-    _idle_reaper_task: asyncio.Task | None = None
+    _MAX_CACHED_TENANTS = _bounded_env_int(
+        "MAXWELL_SHELL_MAX_CACHED_TENANTS", 4, 1, 4
+    )
+    _MAX_CACHED_PER_OWNER = _bounded_env_int(
+        "MAXWELL_SHELL_MAX_CACHED_PER_OWNER", 2, 1, 2
+    )
+    _last_used_by_tenant: ClassVar[dict[str, float]] = {}
+    _tenant_locks: ClassVar[dict[str, asyncio.Lock]] = {}
+    _user_slots: ClassVar[dict[str, asyncio.Semaphore]] = {}
+    _active_tenants: ClassVar[set[str]] = set()
+    _active_owners: ClassVar[set[str]] = set()
+    _prepared_tenants: ClassVar[set[str]] = set()
+    _tenants: ClassVar[dict[str, ShellTenant]] = {}
+    _idle_reaper_task: ClassVar[asyncio.Task | None] = None
+    _global_slots: ClassVar[asyncio.Semaphore] = asyncio.Semaphore(
+        _bounded_env_int("MAXWELL_SHELL_MAX_CONCURRENCY", 4, 1, 8)
+    )
+    _state_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    _recovery_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    _recovery_complete: ClassVar[bool] = False
 
     @classmethod
     def _max_output(cls) -> int:
-        """Captured stdout+stderr cap. 0 = unlimited."""
+        """Captured stdout+stderr cap, bounded at 1 MiB."""
         raw = os.environ.get("MAXWELL_SHELL_MAX_OUTPUT", "").strip()
         if not raw:
             return cls._MAX_OUTPUT_DEFAULT
@@ -81,11 +101,11 @@ class ShellTool(Tool):
             v = int(raw)
         except ValueError:
             return cls._MAX_OUTPUT_DEFAULT
-        return max(0, v)  # 0 means unlimited
+        return max(1, min(v, 1_000_000))
 
     @classmethod
     def _max_command_length(cls) -> int:
-        """Max chars in a single shell command. 0 = unlimited."""
+        """Max chars in a single shell command, bounded at 64 KiB."""
         raw = os.environ.get("MAXWELL_SHELL_MAX_COMMAND_LENGTH", "").strip()
         if not raw:
             return cls._MAX_COMMAND_LENGTH_DEFAULT
@@ -93,7 +113,7 @@ class ShellTool(Tool):
             v = int(raw)
         except ValueError:
             return cls._MAX_COMMAND_LENGTH_DEFAULT
-        return max(0, v)
+        return max(1, min(v, 65_536))
 
     @classmethod
     def _channel_max_chars(cls) -> int:
@@ -105,7 +125,7 @@ class ShellTool(Tool):
             v = int(raw)
         except ValueError:
             return cls._CHANNEL_MAX_CHARS_DEFAULT
-        return max(0, v)
+        return max(1, min(v, 1_900))
 
     @classmethod
     def _timeout_seconds(cls) -> int:
@@ -121,7 +141,7 @@ class ShellTool(Tool):
 
     @classmethod
     def _idle_seconds(cls) -> int:
-        """Seconds unused before the sandbox is destroyed. 0 = never."""
+        """Seconds unused before the tenant sandbox is destroyed."""
         raw = os.environ.get("MAXWELL_SHELL_IDLE_SECONDS", "").strip()
         if not raw:
             return cls._IDLE_SECONDS_DEFAULT
@@ -129,21 +149,12 @@ class ShellTool(Tool):
             v = int(raw)
         except ValueError:
             return cls._IDLE_SECONDS_DEFAULT
-        return max(0, min(v, cls._TIMEOUT_CEILING_SECONDS))
-
-    # Serialize container lifecycle + exec so parallel tool batches cannot
-    # race docker rm -f / recreate.
-    _lifecycle_lock = asyncio.Lock()
+        return max(60, min(v, cls._TIMEOUT_CEILING_SECONDS))
 
     @staticmethod
     def _full_host_access() -> bool:
-        """Opt-in host RCE mode. Default is isolated (no /host, no host net)."""
-        return os.environ.get("MAXWELL_SHELL_FULL_HOST", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        """Retained for compatibility; public full-host mode is removed."""
+        return False
 
     def get_description(self):
         # Surface live limits so the model doesn't have to guess. Pulled at
@@ -151,14 +162,14 @@ class ShellTool(Tool):
         max_out = self._max_output()
         max_cmd = self._max_command_length()
         to = self._timeout_seconds()
-        max_out_str = "unlimited" if max_out == 0 else f"{max_out:,} chars"
-        max_cmd_str = "unlimited" if max_cmd == 0 else f"{max_cmd:,} chars"
+        max_out_str = f"{max_out:,} chars"
+        max_cmd_str = f"{max_cmd:,} chars"
         chan = self._channel_max_chars()
         chan_str = "unlimited" if chan == 0 else f"{chan} chars"
         idle = self._idle_seconds()
         if idle:
             persist_note = (
-                f"Sandbox and /home/maxwell are wiped after {idle}s idle "
+                f"Sandbox and /workspace are wiped after {idle}s idle "
                 "and recreated on the next call."
             )
         else:
@@ -172,41 +183,50 @@ class ShellTool(Tool):
             "`cat << 'EOF' > path/file.py` then the body then a line containing "
             "only EOF. `cmd` is an alias for `command`. Do not prefix `$ ` or "
             "wrap the command in a markdown fence. Attach outputs with files= "
-            "(comma-separated paths under /home/maxwell)."
+            "(comma-separated paths under /workspace)."
         )
-        if self._full_host_access():
-            return (
-                "Run bash -lc in the maxwell-shell container as root (FULL ACCESS: "
-                "host net, /host, all capabilities). Params: command (required), "
-                "files (optional paths to attach). "
-                f"{how} {limits_note}"
-            )
         return (
-            "Run bash -lc as root with full capabilities in the maxwell-shell "
-            "sandbox (workdir /home/maxwell). Params: command (required), files "
-            "(optional paths under /home/maxwell to attach to the channel). "
-            f"{how} Max 10 MB per file. {limits_note}"
+            "Run bash -lc as root inside this user's gVisor sandbox (workdir "
+            "/workspace). Root is confined by runsc; it has no host capabilities "
+            "and receives only a small in-guest capability set. Params: command (required), files "
+            "(optional paths under /workspace to attach privately or publicly "
+            "according to this request's visibility). Max 10 MB per file. "
+            f"{how} {limits_note}"
         )
 
     @classmethod
     async def _run_docker(cls, *args: str, timeout: int = 30):
         return await _run_docker_cmd(*args, timeout=timeout)
 
-    def _should_recycle_running(self) -> bool:
-        """True when a running sandbox is too old or its idle age is unknown."""
-        idle = self._idle_seconds()
-        if idle <= 0:
-            return False
-        if type(self)._last_used_monotonic <= 0:
-            # Process just started (or the reaper already collected). Do not
-            # inherit leftover packages/daemons from a previous bot process.
-            return True
-        return (
-            time.monotonic() - type(self)._last_used_monotonic
-        ) >= idle
+    @classmethod
+    def _lock_for(cls, tenant: ShellTenant) -> asyncio.Lock:
+        lock = cls._tenant_locks.get(tenant.container_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._tenant_locks[tenant.container_name] = lock
+        return lock
 
     @classmethod
-    async def _wait_container_gone(cls) -> None:
+    def _user_slot(cls, tenant: ShellTenant) -> asyncio.Semaphore:
+        slot = cls._user_slots.get(tenant.owner_id)
+        if slot is None:
+            slot = asyncio.Semaphore(1)
+            cls._user_slots[tenant.owner_id] = slot
+        return slot
+
+    @classmethod
+    def _runtime(cls) -> str:
+        # Unsupported isolation is a hard error, never a Docker fallback.
+        return os.environ.get("MAXWELL_SHELL_RUNTIME", "runsc").strip()
+
+    @classmethod
+    def _network(cls) -> str:
+        return os.environ.get(
+            "MAXWELL_SHELL_NETWORK", "maxwell-shell-egress"
+        ).strip()
+
+    @classmethod
+    async def _wait_container_gone(cls, container_name: str) -> None:
         for _ in range(100):
             (_stdout, _stderr), inspect_code = await cls._run_docker(
                 "inspect",
@@ -214,7 +234,7 @@ class ShellTool(Tool):
                 "container",
                 "-f",
                 "{{.Id}}",
-                cls.CONTAINER_NAME,
+                container_name,
                 timeout=10,
             )
             if inspect_code != 0:
@@ -225,37 +245,10 @@ class ShellTool(Tool):
         )
 
     @classmethod
-    def _workspace_host_path(cls) -> str:
-        """Host path bind-mounted at /home/maxwell. Repo-root shelldocker/."""
-        return os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "shelldocker")
-        )
-
-    @classmethod
-    def _wipe_workspace(cls) -> None:
-        """Delete bind-mount contents. Keeps the directory itself."""
-        path = os.path.abspath(cls._workspace_host_path())
-        if os.path.basename(path) != "shelldocker":
-            logger.warning("refusing to wipe shell workspace at %s", path)
-            return
-        if not os.path.isdir(path):
-            os.makedirs(path, exist_ok=True)
-            return
-        for name in os.listdir(path):
-            child = os.path.join(path, name)
-            try:
-                if os.path.islink(child) or os.path.isfile(child):
-                    os.unlink(child)
-                elif os.path.isdir(child):
-                    shutil.rmtree(child, ignore_errors=True)
-            except Exception as exc:
-                logger.warning("shell workspace wipe failed for %s: %s", child, exc)
-
-    @classmethod
-    async def _destroy_container_unlocked(cls) -> None:
-        """docker rm -f the sandbox, then wipe /home/maxwell. Holds _lifecycle_lock."""
+    async def _destroy_container_unlocked(cls, tenant: ShellTenant) -> None:
+        """Destroy one tenant's sandbox; never target model supplied identifiers."""
         (_stdout, _stderr), rm_code = await cls._run_docker(
-            "rm", "-f", cls.CONTAINER_NAME, timeout=10
+            "rm", "-f", tenant.container_name, timeout=10
         )
         if rm_code != 0:
             (_stdout, _stderr), inspect_code = await cls._run_docker(
@@ -264,7 +257,7 @@ class ShellTool(Tool):
                 "container",
                 "-f",
                 "{{.Id}}",
-                cls.CONTAINER_NAME,
+                tenant.container_name,
                 timeout=10,
             )
             if inspect_code == 0:
@@ -272,17 +265,17 @@ class ShellTool(Tool):
                     "could not remove the existing sandbox container"
                 )
         else:
-            await cls._wait_container_gone()
-        cls._wipe_workspace()
+            await cls._wait_container_gone(tenant.container_name)
+        cls._active_tenants.discard(tenant.container_name)
+        cls._prepared_tenants.discard(tenant.container_name)
+        cls._tenants[tenant.container_name] = tenant
 
     @classmethod
-    def _mark_used(cls) -> None:
-        cls._last_used_monotonic = time.monotonic()
+    def _mark_used(cls, tenant: ShellTenant) -> None:
+        cls._last_used_by_tenant[tenant.container_name] = time.monotonic()
 
     @classmethod
     def _schedule_idle_reaper(cls) -> None:
-        if cls._idle_seconds() <= 0:
-            return
         task = cls._idle_reaper_task
         if task is not None and not task.done():
             return
@@ -297,25 +290,38 @@ class ShellTool(Tool):
         try:
             while True:
                 idle = cls._idle_seconds()
-                if idle <= 0 or cls._last_used_monotonic <= 0:
+                if idle <= 0 or not cls._last_used_by_tenant:
                     return
-                remaining = idle - (time.monotonic() - cls._last_used_monotonic)
+                now = time.monotonic()
+                remaining = min(
+                    idle - (now - stamp)
+                    for stamp in cls._last_used_by_tenant.values()
+                )
                 if remaining > 0:
                     await asyncio.sleep(min(remaining, 30.0))
                     continue
-                async with cls._lifecycle_lock:
-                    idle = cls._idle_seconds()
-                    if idle <= 0 or cls._last_used_monotonic <= 0:
-                        return
-                    if time.monotonic() - cls._last_used_monotonic < idle:
+                expired = [
+                    name for name, stamp in cls._last_used_by_tenant.items()
+                    if now - stamp >= idle and name not in cls._active_tenants
+                ]
+                for name in expired:
+                    tenant = cls._tenants.get(name)
+                    if tenant is None:
                         continue
-                    await cls._destroy_container_unlocked()
-                    cls._last_used_monotonic = 0.0
-                    logger.info(
-                        "idle-recycled %s after %ss unused",
-                        cls.CONTAINER_NAME,
-                        idle,
-                    )
+                    async with cls._lock_for(tenant):
+                        stamp = cls._last_used_by_tenant.get(name, 0.0)
+                        if time.monotonic() - stamp < idle:
+                            continue
+                        await cls._destroy_container_unlocked(tenant)
+                        cls._last_used_by_tenant.pop(name, None)
+                        cls._tenants.pop(name, None)
+                        if not any(
+                            known.owner_id == tenant.owner_id
+                            for known in cls._tenants.values()
+                        ) and tenant.owner_id not in cls._active_owners:
+                            cls._user_slots.pop(tenant.owner_id, None)
+                        logger.info("idle-recycled tenant shell %s", name)
+                if not cls._last_used_by_tenant:
                     return
         finally:
             if cls._idle_reaper_task is asyncio.current_task():
@@ -323,47 +329,158 @@ class ShellTool(Tool):
 
     @classmethod
     async def shutdown_sandbox(cls) -> None:
-        """Cancel the idle reaper and drop the sandbox (plugin teardown)."""
+        """Cancel active tenant containers during orderly service shutdown."""
         task = cls._idle_reaper_task
         cls._idle_reaper_task = None
         if task is not None and not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-        async with cls._lifecycle_lock:
-            with contextlib.suppress(Exception):
-                await cls._destroy_container_unlocked()
-            cls._last_used_monotonic = 0.0
+        for tenant in list(cls._tenants.values()):
+            async with cls._lock_for(tenant):
+                with contextlib.suppress(Exception):
+                    await cls._destroy_container_unlocked(tenant)
+        cls._active_tenants.clear()
+        cls._active_owners.clear()
+        cls._prepared_tenants.clear()
 
-    async def _ensure_container(self):
-        # Reuse a running container only while it is within the idle window
-        # and the access mode still matches. Stopped or stale sandboxes are
-        # destroyed, not restarted, so leftover packages/daemons die with them.
-        desired_mode = "full" if self._full_host_access() else "isolated"
+    async def _runtime_ready(self) -> None:
+        if self._runtime() != "runsc":
+            raise RuntimeError("shell disabled: required gVisor runtime 'runsc' is not configured")
+        if not egress_policy_ready():
+            raise RuntimeError(
+                "shell disabled: host egress firewall is not provisioned; see docs/SHELL_SANDBOX.md"
+            )
+        if not resource_pool_ready():
+            raise RuntimeError(
+                "shell disabled: host resource pool is not provisioned; see docs/SHELL_SANDBOX.md"
+            )
+        if self._network() != "maxwell-shell-egress":
+            raise RuntimeError("shell disabled: the filtered egress network is not configured")
+        try:
+            (stdout, stderr), code = await self._run_docker(
+                "info", "--format", "{{json .Runtimes}}", timeout=10
+            )
+        except (FileNotFoundError, asyncio.TimeoutError) as exc:
+            raise RuntimeError("shell disabled: Docker is unavailable") from exc
+        if code != 0:
+            raise RuntimeError("shell disabled: Docker could not report configured runtimes")
+        try:
+            runtimes = json.loads(stdout.decode("utf-8", errors="strict"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("shell disabled: Docker runtime configuration is unreadable") from exc
+        safe_runtime, runtime_reason = validate_runsc_runtime(runtimes)
+        if not safe_runtime:
+            detail = stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                "shell disabled: gVisor runsc configuration is not safe ("
+                + runtime_reason
+                + ")"
+                + (f" ({detail[:160]})" if detail else "")
+            )
+        (stdout, _stderr), code = await self._run_docker(
+            "info", "--format", "{{.LiveRestoreEnabled}}", timeout=10
+        )
+        if code != 0 or stdout.decode(errors="replace").strip() != "false":
+            raise RuntimeError(
+                "shell disabled: Docker live-restore must be disabled so a daemon restart stops shell guests"
+            )
+        (stdout, _stderr), code = await self._run_docker(
+            "info", "--format", "{{.CgroupDriver}}", timeout=10
+        )
+        if code != 0 or stdout.decode(errors="replace").strip() != "systemd":
+            raise RuntimeError(
+                "shell disabled: Docker must use systemd cgroups for the aggregate resource pool"
+            )
+        await self._recover_stale_sandboxes()
+
+    @classmethod
+    async def _recover_stale_sandboxes(cls) -> None:
+        """Remove labeled containers left by a Maxwell process restart.
+
+        The deployment runs one Maxwell controller. Sandboxes are intentionally
+        ephemeral across controller restarts so an orphaned process cannot
+        continue consuming resources or retain a prior process's state.
+        """
+        async with cls._recovery_lock:
+            if cls._recovery_complete:
+                return
+            (stdout, stderr), code = await cls._run_docker(
+                "ps", "-aq", "--filter", "label=maxwell.shell.managed=true",
+                timeout=15,
+            )
+            if code != 0:
+                detail = stderr.decode(errors="replace").strip()
+                raise RuntimeError(
+                    "shell disabled: could not recover prior sandboxes"
+                    + (f" ({detail[:120]})" if detail else "")
+                )
+            ids = [
+                value.strip()
+                for value in stdout.decode(errors="replace").splitlines()
+                if re.fullmatch(r"[a-f0-9]{12,64}", value.strip())
+            ]
+            for offset in range(0, len(ids), 64):
+                (_out, err), rm_code = await cls._run_docker(
+                    "rm", "-f", *ids[offset : offset + 64], timeout=30
+                )
+                if rm_code != 0:
+                    detail = err.decode(errors="replace").strip()
+                    raise RuntimeError(
+                        "shell disabled: could not clean prior sandboxes"
+                        + (f" ({detail[:120]})" if detail else "")
+                    )
+            cls._recovery_complete = True
+
+    async def _ensure_container(self, tenant: ShellTenant):
+        await self._runtime_ready()
+        async with self._state_lock:
+            if tenant.container_name not in self._tenants:
+                if len(self._tenants) >= self._MAX_CACHED_TENANTS:
+                    raise RuntimeError("sandbox capacity is temporarily full")
+                owner_count = sum(
+                    known.owner_id == tenant.owner_id
+                    for known in self._tenants.values()
+                )
+                if owner_count >= self._MAX_CACHED_PER_OWNER:
+                    raise RuntimeError(
+                        "this user's sandbox capacity is temporarily full"
+                    )
+                self._tenants[tenant.container_name] = tenant
+        try:
+            await self._ensure_container_impl(tenant)
+        except Exception:
+            if tenant.container_name not in self._prepared_tenants:
+                async with self._state_lock:
+                    self._tenants.pop(tenant.container_name, None)
+                    self._last_used_by_tenant.pop(tenant.container_name, None)
+            raise
+
+    async def _ensure_container_impl(self, tenant: ShellTenant):
         try:
             (stdout, _stderr), code = await self._run_docker(
                 "inspect",
                 "--type",
                 "container",
                 "-f",
-                '{{.State.Running}} {{index .Config.Labels "maxwell.shell.mode"}} '
-                '{{index .Config.Labels "maxwell.shell.init"}}',
-                self.CONTAINER_NAME,
+                '{{.State.Running}} {{index .HostConfig "Runtime"}} '
+                '{{index .Config.Labels "maxwell.shell.policy"}}',
+                tenant.container_name,
                 timeout=10,
             )
             if code == 0:
-                parts = stdout.decode(errors="replace").strip().split(None, 2)
+                parts = stdout.decode(errors="replace").strip().split(None, 3)
                 running = (parts[0] if parts else "").lower() == "true"
-                mode = parts[1] if len(parts) > 1 else ""
-                init = parts[2] if len(parts) > 2 else ""
+                runtime = parts[1] if len(parts) > 1 else ""
+                policy = parts[2] if len(parts) > 2 else ""
                 if (
                     running
-                    and mode == desired_mode
-                    and init == self._SANDBOX_INIT
-                    and not self._should_recycle_running()
+                    and runtime == "runsc"
+                    and policy == "v2"
+                    and tenant.container_name in self._prepared_tenants
                 ):
                     return
-                await self._destroy_container_unlocked()
+                await self._destroy_container_unlocked(tenant)
         except FileNotFoundError as exc:
             raise RuntimeError("docker is not installed or not on PATH") from exc
         except asyncio.TimeoutError as exc:
@@ -376,57 +493,22 @@ class ShellTool(Tool):
         except Exception as exc:
             raise RuntimeError(f"could not prepare sandbox image: {exc}") from exc
 
-        workspace = self._workspace_host_path()
-        os.makedirs(workspace, exist_ok=True)
-        shell_host = docker_bind_path(workspace)
-        run_args = self._sandbox_run_args(
-            full_host=self._full_host_access(), shell_host=shell_host
-        )
+        run_args = self._sandbox_run_args(tenant)
         (_stdout, stderr), run_code = await self._run_docker(*run_args, timeout=30)
         if run_code != 0:
             raise RuntimeError(
                 stderr.decode(errors="replace").strip() or "docker run failed"
             )
+        self._active_tenants.add(tenant.container_name)
+        self._prepared_tenants.add(tenant.container_name)
 
-    def _sandbox_run_args(self, *, full_host: bool, shell_host: str) -> list[str]:
-        """docker run argv for the persistent sandbox. Root, full capabilities."""
-        mode = "full" if full_host else "isolated"
-        run_args = [
-            "run",
-            "-d",
-            "--init",
-            "--name",
-            self.CONTAINER_NAME,
-            "--user",
-            "0",
-            "--label",
-            f"maxwell.shell.mode={mode}",
-            "--label",
-            f"maxwell.shell.init={self._SANDBOX_INIT}",
-            "--memory",
-            "4g",
-            "--memory-swap",
-            "4g",
-            "--cpus",
-            "2.0",
-            "--pids-limit",
-            "1024",
-            "--ulimit",
-            "nofile=1024:2048",
-            "--tmpfs",
-            "/tmp:rw,exec,nosuid,size=256m",
-            "-v",
-            f"{shell_host}:/home/maxwell:rw",
-        ]
-        if full_host:
-            # Explicit opt-in: host network + full host FS (documented RCE for admins).
-            run_args.extend(["--network", "host", "-v", "/:/host:rw"])
-        else:
-            # Isolated from the host FS/net, but root with every capability
-            # inside the sandbox so apt/chown/bind/raw-sockets just work.
-            run_args.extend(["--network", "bridge"])
-        run_args.append(self.IMAGE_NAME)
-        return run_args
+    def _sandbox_run_args(self, tenant: ShellTenant) -> list[str]:
+        return docker_run_args(
+            container_name=tenant.container_name,
+            image=self.IMAGE_NAME,
+            runtime=self._runtime(),
+            network=self._network(),
+        )
 
     @staticmethod
     def _command_arg(command: str | None = None, **kwargs) -> str | None:
@@ -471,13 +553,12 @@ class ShellTool(Tool):
         return raw
 
     def _validate_command(self, command: str) -> str | None:
-        """Return an error reason if the command looks dangerous, otherwise None."""
+        """Validate input size and heredoc shape before sandbox execution."""
         if not command:
             return "empty command"
-        # 0 = unlimited (operator opts in via MAXWELL_SHELL_MAX_COMMAND_LENGTH=0)
         max_len = self._max_command_length()
-        if max_len and len(command) > max_len:
-            return f"command too long (max {max_len} chars; set MAXWELL_SHELL_MAX_COMMAND_LENGTH=0 to disable)"
+        if len(command) > max_len:
+            return f"command too long (max {max_len} chars)"
         # Multi-line commands & heredocs are allowed.
         if "\n" in command:
             hint = _unterminated_heredoc_error(command)
@@ -486,86 +567,95 @@ class ShellTool(Tool):
         non_heredoc = _strip_heredoc_blocks(command)
         if any(ord(c) < 32 and c not in ("\t", "\n", "\r") for c in non_heredoc):
             return "control characters are not allowed in shell commands"
-        for pattern in _SHELL_BLOCKED_PATTERNS:
-            if re.search(pattern, command, re.IGNORECASE):
-                return "blocked dangerous shell pattern"
         return None
 
     _PROGRESS_TICK_SECONDS = 0.8
 
-    async def _run_shell_command(self, command: str, on_progress=None):
+    async def _run_shell_command(self, command: str, tenant: ShellTenant, on_progress=None):
+        # One user cannot consume the global pool by issuing commands against
+        # several guild/private scopes at once.
+        async with self._user_slot(tenant):
+            return await self._run_shell_command_inner(
+                command, tenant, on_progress=on_progress
+            )
+
+    async def _run_shell_command_inner(
+        self, command: str, tenant: ShellTenant, on_progress=None
+    ):
         sanitized = self._normalize_command(command)
         validation_error = self._validate_command(sanitized)
         if validation_error:
             raise RuntimeError(validation_error)
         if not sanitized:
             raise RuntimeError("empty command")
-        async with self._lifecycle_lock:
-            await self._ensure_container()
-            try:
-                exec_token = f"maxwell-exec-{uuid.uuid4().hex}"
-                pid_file = f"/tmp/{exec_token}.pid"
-                # Run the user's shell in its own session/process group and leave
-                # its leader PID in the container. Killing only the local
-                # `docker exec` client does not kill a child command; pipelines,
-                # background jobs, and `sleep` would otherwise survive every
-                # timeout and accumulate in the persistent sandbox.
-                inner = f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; {sanitized}"
-                wrapped = (
-                    f"echo $$ > {shlex.quote(pid_file)}; exec bash -lc {shlex.quote(inner)}"
-                )
-                proc = await asyncio.create_subprocess_exec(
-                    "docker",
-                    "exec",
-                    "--workdir",
-                    "/home/maxwell",
-                    "--user",
-                    "root",
-                    self.CONTAINER_NAME,
-                    "setsid",
-                    "--wait",
-                    "bash",
-                    "-lc",
-                    wrapped,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout_buf = bytearray()
-                stderr_buf = bytearray()
-                max_output = self._max_output()
-                captured = 0
-                output_truncated = False
-                started = time.monotonic()
-                last_tick = 0.0
+        async with self._global_slots:
+            async with self._lock_for(tenant):
+                await self._ensure_container(tenant)
+                self._active_tenants.add(tenant.container_name)
+                self._active_owners.add(tenant.owner_id)
+                try:
+                    exec_token = f"maxwell-exec-{uuid.uuid4().hex}"
+                    pid_file = f"/tmp/{exec_token}.pid"
+                    # Run the user's shell in its own session/process group and leave
+                    # its leader PID in the container. Killing only the local
+                    # `docker exec` client does not kill a child command; pipelines,
+                    # background jobs, and `sleep` would otherwise survive every
+                    # timeout and accumulate in the persistent sandbox.
+                    inner = f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; {sanitized}"
+                    wrapped = (
+                        f"echo $$ > {shlex.quote(pid_file)}; exec bash -lc {shlex.quote(inner)}"
+                    )
+                    proc = await asyncio.create_subprocess_exec(
+                        "docker",
+                        "exec",
+                        "--workdir",
+                        "/workspace",
+                        "--user",
+                        "root",
+                        tenant.container_name,
+                        "setsid",
+                        "--wait",
+                        "bash",
+                        "-lc",
+                        wrapped,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout_buf = bytearray()
+                    stderr_buf = bytearray()
+                    max_output = self._max_output()
+                    captured = 0
+                    output_truncated = False
+                    started = time.monotonic()
+                    last_tick = 0.0
 
-                async def _emit(force: bool = False) -> None:
-                    nonlocal last_tick
-                    if on_progress is None:
-                        return
-                    now = time.monotonic()
-                    if (
-                        not force
-                        and last_tick
-                        and now - last_tick < self._PROGRESS_TICK_SECONDS
-                    ):
-                        return
-                    last_tick = now
-                    with contextlib.suppress(Exception):
-                        await on_progress(
-                            bytes(stdout_buf),
-                            bytes(stderr_buf),
-                            now - started,
-                        )
+                    async def _emit(force: bool = False) -> None:
+                        nonlocal last_tick
+                        if on_progress is None:
+                            return
+                        now = time.monotonic()
+                        if (
+                            not force
+                            and last_tick
+                            and now - last_tick < self._PROGRESS_TICK_SECONDS
+                        ):
+                            return
+                        last_tick = now
+                        with contextlib.suppress(Exception):
+                            await on_progress(
+                                bytes(stdout_buf),
+                                bytes(stderr_buf),
+                                now - started,
+                            )
 
-                async def _pump(stream, buf: bytearray) -> None:
-                    if stream is None:
-                        return
-                    while True:
-                        chunk = await stream.read(4096)
-                        if not chunk:
-                            break
-                        nonlocal captured, output_truncated
-                        if max_output:
+                    async def _pump(stream, buf: bytearray) -> None:
+                        if stream is None:
+                            return
+                        while True:
+                            chunk = await stream.read(4096)
+                            if not chunk:
+                                break
+                            nonlocal captured, output_truncated
                             remaining = max_output - captured
                             if remaining > 0:
                                 kept = chunk[:remaining]
@@ -573,66 +663,81 @@ class ShellTool(Tool):
                                 captured += len(kept)
                             if len(kept if remaining > 0 else b"") < len(chunk):
                                 output_truncated = True
-                        else:
-                            buf.extend(chunk)
-                        await _emit()
-
-                async def _heartbeat() -> None:
-                    try:
-                        while True:
-                            await asyncio.sleep(self._PROGRESS_TICK_SECONDS)
-                            if proc.returncode is not None:
-                                return
                             await _emit()
-                    except asyncio.CancelledError:
-                        return
 
-                beat = asyncio.create_task(_heartbeat())
-                try:
-                    await _emit(force=True)
-                    await asyncio.wait_for(
-                        asyncio.gather(
-                            _pump(proc.stdout, stdout_buf),
-                            _pump(proc.stderr, stderr_buf),
-                            proc.wait(),
-                        ),
-                        timeout=self._timeout_seconds(),
-                    )
-                except asyncio.TimeoutError:
-                    await self._kill_container_exec(pid_file)
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
-                    await proc.wait()
-                    raise
-                except asyncio.CancelledError:
-                    # Outer autonomy wait_for or other cancel can hit here; always kill child.
-                    await self._kill_container_exec(pid_file)
-                    if proc.returncode is None:
+                    async def _heartbeat() -> None:
+                        try:
+                            while True:
+                                await asyncio.sleep(self._PROGRESS_TICK_SECONDS)
+                                if proc.returncode is not None:
+                                    return
+                                await _emit()
+                        except asyncio.CancelledError:
+                            return
+
+                    beat = asyncio.create_task(_heartbeat())
+                    try:
+                        await _emit(force=True)
+                        await asyncio.wait_for(
+                            asyncio.gather(
+                                _pump(proc.stdout, stdout_buf),
+                                _pump(proc.stderr, stderr_buf),
+                                proc.wait(),
+                            ),
+                            timeout=self._timeout_seconds(),
+                        )
+                    except asyncio.TimeoutError:
+                        await self._kill_container_exec(tenant, pid_file)
+                        cleanup = asyncio.create_task(
+                            self._destroy_container_unlocked(tenant)
+                        )
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await asyncio.shield(cleanup)
                         with contextlib.suppress(ProcessLookupError):
                             proc.kill()
                         await proc.wait()
-                    raise
-                finally:
-                    beat.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await beat
-                    # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
-                    if proc.returncode is None:
-                        try:
-                            await self._kill_container_exec(pid_file)
-                            proc.kill()
+                        raise
+                    except asyncio.CancelledError:
+                        # Destroying the whole tenant container guarantees that
+                        # disowned/session-escaped descendants cannot outlive cancel.
+                        cleanup = asyncio.create_task(
+                            self._destroy_container_unlocked(tenant)
+                        )
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await asyncio.shield(cleanup)
+                        if proc.returncode is None:
+                            with contextlib.suppress(ProcessLookupError):
+                                proc.kill()
                             await proc.wait()
-                        except Exception as e:
-                            # Usually means the process already exited.
-                            logger.debug("shell zombie cleanup: %s", e)
-                if output_truncated:
-                    stderr_buf.extend(b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]")
-                return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
-            finally:
-                type(self)._mark_used()
-                type(self)._schedule_idle_reaper()
+                        raise
+                    finally:
+                        beat.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await beat
+                        # Belt-and-suspenders: ensure no zombie if communicate didn't finish.
+                        if proc.returncode is None:
+                            try:
+                                await self._kill_container_exec(tenant, pid_file)
+                                proc.kill()
+                                await proc.wait()
+                            except Exception as e:
+                                # Usually means the process already exited.
+                                logger.debug("shell zombie cleanup: %s", e)
+                    if output_truncated:
+                        stderr_buf.extend(b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]")
+                    return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
+                finally:
+                    type(self)._active_tenants.discard(tenant.container_name)
+                    if not any(
+                        known.owner_id == tenant.owner_id
+                        and known.container_name in type(self)._active_tenants
+                        for known in type(self)._tenants.values()
+                    ):
+                        type(self)._active_owners.discard(tenant.owner_id)
+                    type(self)._mark_used(tenant)
+                    type(self)._schedule_idle_reaper()
 
-    async def _kill_container_exec(self, pid_file: str) -> None:
+    async def _kill_container_exec(self, tenant: ShellTenant, pid_file: str) -> None:
         """Terminate the timed-out command, not just its docker client."""
         quoted = shlex.quote(pid_file)
         cleanup = (
@@ -648,7 +753,7 @@ class ShellTool(Tool):
                 "exec",
                 "--user",
                 "root",
-                self.CONTAINER_NAME,
+                tenant.container_name,
                 "bash",
                 "-lc",
                 cleanup,
@@ -776,13 +881,15 @@ class ShellTool(Tool):
         # prompt-injection payloads), refuse. A fresh user message starts a
         # clean turn. There is no confirmation override.
         if _taint_gate_blocks(self, message, kwargs):
-            preview = normalized[:200] + ("..." if len(normalized) > 200 else "")
             return (
                 "Error: shell refused: this turn read content from a fetched "
                 "URL/web search that may carry prompt-injection payloads. "
-                "Send a new message without fetching that content to run shell.\n"
-                f"Command preview: {preview}"
+                "Send a new message without fetched content to run shell."
             )
+
+        tenant = shell_tenant(message)
+        if tenant is None:
+            return "Error: shell needs an authenticated Discord user and request scope"
 
         sess = None
         slot = None
@@ -824,7 +931,7 @@ class ShellTool(Tool):
 
         try:
             stdout, stderr, exit_code = await self._run_shell_command(
-                normalized, on_progress=_on_progress
+                normalized, tenant, on_progress=_on_progress
             )
         except asyncio.TimeoutError:
             if sess is not None and slot is not None:
@@ -837,12 +944,19 @@ class ShellTool(Tool):
                     )
             return f"Error: Command timed out after {self._timeout_seconds()}s"
         except Exception as e:
+            logger.warning("shell execution failed (%s)", type(e).__name__)
             if sess is not None and slot is not None:
                 with contextlib.suppress(Exception):
                     await self._finish_shell_progress(
-                        message, sess, slot, f"Error: {e}"
+                        message,
+                        sess,
+                        slot,
+                        "Shell isolation is unavailable; no host fallback was attempted.",
                     )
-            return f"Error executing command: {e}"
+            return (
+                "Error: isolated shell is unavailable. Check that Docker has "
+                "gVisor runsc, the filtered egress policy, and bounded storage configured."
+            )
 
         out = stdout.decode(errors="replace")
         err = stderr.decode(errors="replace")
@@ -891,78 +1005,116 @@ class ShellTool(Tool):
         # Fall back to comma-separated
         return [f.strip() for f in raw.split(",") if f.strip()]
 
-    async def _send_container_file(self, message: Message, rel_path: str) -> str | None:
-        """Copy a file out of the container, stage it in data/exports/, and
-        send it to Discord. Returns filename on success.
-
-        Staging into data/exports/ (which send_file already allowlists) means a
-        follow-up `send_file path=.../exports/<name>` can re-attach the same
-        artifact without another docker cp — the round-trip is one-shot.
-        """
-        # Sanitize — no path traversal escapes from /home/maxwell
-        clean = rel_path.strip().lstrip("/")
-        # The model usually passes a full container path like
-        # /home/maxwell/img/foo.png (the system prompt tells it to). lstrip
-        # only killed the leading slash, so strip the home/maxwell prefix
-        # too — otherwise we re-prepend it and docker cp looks for
-        # /home/maxwell/home/maxwell/img/foo.png (which is the bug we're fixing).
-        clean = re.sub(r"^home/maxwell/?", "", clean)
-        if ".." in clean:
-            logger.warning(f"Shell file send blocked — path traversal: {rel_path}")
+    @staticmethod
+    def _workspace_relative_path(path: str) -> str | None:
+        raw = str(path or "").strip()
+        if raw.startswith("/workspace/"):
+            raw = raw[len("/workspace/"):]
+        elif raw == "/workspace":
             return None
+        elif raw.startswith("workspace/"):
+            raw = raw[len("workspace/"):]
+        elif raw.startswith("/"):
+            return None
+        parts = raw.replace("\\", "/").split("/")
+        if not raw or any(part in {"", ".", ".."} for part in parts):
+            return None
+        return "/".join(parts)
 
-        container_path = f"/home/maxwell/{clean}"
-        tmp_dir = tempfile.mkdtemp(prefix="maxwell_shell_")
-        local_path = os.path.join(tmp_dir, os.path.basename(clean))
-
+    async def read_workspace_file(
+        self, message: Message, path: str, *, max_size: int = 25 * 1024 * 1024
+    ) -> tuple[bytes | None, str | None, str | None]:
+        """Read a bounded regular file without host-side symlink races."""
+        tenant = shell_tenant(message)
+        relative = self._workspace_relative_path(path)
+        if tenant is None or relative is None:
+            return None, None, "path must identify a file inside /workspace"
+        if tenant.container_name not in self._prepared_tenants:
+            return None, None, "this user's shell workspace is not active"
         try:
-            (_stdout, stderr), code = await self._run_docker(
-                "cp", f"{self.CONTAINER_NAME}:{container_path}", local_path, timeout=15
-            )
-            if code != 0:
-                logger.warning(
-                    f"docker cp failed for {container_path}: {stderr.decode(errors='replace')}"
+            limit = max(1, min(int(max_size), 25 * 1024 * 1024))
+        except (TypeError, ValueError):
+            limit = 25 * 1024 * 1024
+        safe_reader = r'''import os,stat,sys
+rel=sys.argv[1]
+limit=int(sys.argv[2])
+parts=rel.split("/")
+if not parts or any(p in ("", ".", "..") for p in parts):
+    sys.exit(2)
+root=os.open("/workspace", os.O_RDONLY|os.O_DIRECTORY)
+parent=root
+try:
+    for part in parts[:-1]:
+        child=os.open(part, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=parent)
+        if parent != root:
+            os.close(parent)
+        parent=child
+    target=os.open(parts[-1], os.O_RDONLY|os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        info=os.fstat(target)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            sys.exit(3)
+        data=bytearray()
+        while len(data) <= limit:
+            chunk=os.read(target, min(65536, limit+1-len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > limit:
+            sys.exit(3)
+        sys.stdout.buffer.write(data)
+    finally:
+        os.close(target)
+finally:
+    if parent != root:
+        os.close(parent)
+    os.close(root)
+'''
+        try:
+            async with self._lock_for(tenant):
+                if tenant.container_name not in self._prepared_tenants:
+                    return None, None, "this user's shell workspace is not active"
+                proc = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "exec",
+                    "--user",
+                    "root",
+                    tenant.container_name,
+                    "python3",
+                    "-c",
+                    safe_reader,
+                    relative,
+                    str(limit),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-                return None
+                try:
+                    blob, _stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=15
+                    )
+                except asyncio.TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    await proc.wait()
+                    return None, None, "workspace read timed out"
+                if proc.returncode != 0:
+                    if proc.returncode == 3:
+                        return None, None, f"file exceeds the {limit}-byte limit or is not a regular file"
+                    return None, None, "file not found or path contains a symlink"
+                if len(blob) > limit:
+                    return None, None, f"file exceeds the {limit}-byte limit"
+                return blob, os.path.basename(relative), None
+        except (OSError, asyncio.TimeoutError) as exc:
+            return None, None, type(exc).__name__
 
-            if not os.path.isfile(local_path):
-                logger.warning(f"File not found after docker cp: {local_path}")
-                return None
-
-            file_size = os.path.getsize(local_path)
-            if file_size > 10 * 1024 * 1024:
-                logger.warning(f"Shell file too large to send: {file_size} bytes")
-                return None
-
-            filename = os.path.basename(clean)
-            # Step aside for the live progress message before posting
-            # the file artifact.
-            self._signal_streaming(message)
-            await message.channel.send(file=File(local_path, filename=filename))
-            logger.info(f"Sent shell file: {filename} ({file_size} bytes)")
-
-            # Stage a copy into the canonical exports dir for later re-attach.
-            try:
-                exports_dir = _shell_exports_dir()
-                os.makedirs(exports_dir, exist_ok=True)
-                staged = os.path.join(exports_dir, filename)
-                # Avoid clobbering an existing export with the same name.
-                if os.path.exists(staged):
-                    base, ext = os.path.splitext(filename)
-                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-                    staged = os.path.join(exports_dir, f"{base}_{stamp}{ext}")
-                shutil.copy2(local_path, staged)
-                logger.info(f"Staged shell file to exports: {staged}")
-            except Exception as e:
-                logger.warning(f"Failed to stage shell file to exports: {e}")
-
-            return filename
-        except asyncio.TimeoutError:
-            logger.warning(f"docker cp timed out for {container_path}")
+    async def _send_container_file(self, message: Message, rel_path: str) -> str | None:
+        blob, basename, error = await self.read_workspace_file(
+            message, rel_path, max_size=10 * 1024 * 1024
+        )
+        if blob is None or basename is None:
+            logger.info("Shell file export rejected (%s)", error or "unknown")
             return None
-        except Exception as e:
-            logger.warning(f"Failed to send shell file {rel_path}: {e}")
-            return None
-        finally:
-            with contextlib.suppress(Exception):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+        filename = _safe_attachment_filename(basename, default="file")
+        self._signal_streaming(message)
+        await message.channel.send(file=File(BytesIO(blob), filename=filename))
+        return filename

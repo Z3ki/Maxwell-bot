@@ -858,11 +858,11 @@ def _perms_to_caps(perms) -> tuple[set[str], str]:
     return caps, ""
 
 
-def _admin_caps(guild, me=None) -> tuple[set[str], str]:
+def _admin_caps(guild, me=None, channel=None) -> tuple[set[str], str]:
     me = me or _guild_me(guild)
     if not me:
         return set(), "bot member is not cached"
-    return _perms_to_caps(getattr(me, "guild_permissions", None))
+    return _perms_to_caps(_member_channel_perms(me, channel))
 
 
 def _resolve_requester_member(guild, message):
@@ -883,7 +883,9 @@ def _resolve_requester_member(guild, message):
             member = getter(int(uid) if str(uid).isdigit() else uid)
             if member is not None:
                 return member
-    return author
+    # A User is not a guild Member. Reusing it here can apply permissions from
+    # the wrong guild or let a synthetic object supply forged permission bits.
+    return None
 
 
 def _member_channel_perms(member, channel=None):
@@ -892,10 +894,14 @@ def _member_channel_perms(member, channel=None):
     if channel is not None:
         permissions_for = getattr(channel, "permissions_for", None)
         if callable(permissions_for):
-            with contextlib.suppress(Exception):
+            try:
                 perms = permissions_for(member)
-                if perms is not None:
-                    return perms
+            except Exception:
+                return None
+            return perms
+        # A target channel is required for channel-level checks. Do not fall
+        # back to guild-wide permissions when its overwrites cannot be read.
+        return None
     return getattr(member, "guild_permissions", None)
 
 
@@ -933,8 +939,9 @@ def _mod_tools_allowed(guild, message) -> set[str]:
     """Mod tools both the bot and the person asking can actually use."""
     if guild is None:
         return set()
-    bot_caps, _ = _admin_caps(guild)
-    user_caps, _ = _member_caps(_resolve_requester_member(guild, message))
+    channel = getattr(message, "channel", None)
+    bot_caps, _ = _admin_caps(guild, channel=channel)
+    user_caps, _ = _member_caps(_resolve_requester_member(guild, message), channel)
     return set(_tools_for_caps(bot_caps)) & set(_tools_for_caps(user_caps))
 
 
@@ -955,7 +962,7 @@ def _missing_cap(
     needed = tuple(dict.fromkeys((cap,) + tuple(alt_caps)))
     shown = _needed_cap_label(cap, alt_caps)
     name = getattr(guild, "name", "this server")
-    bot_caps, _reason = _admin_caps(guild)
+    bot_caps, _reason = _admin_caps(guild, channel=channel)
     if not any(_has_cap(bot_caps, c) for c in needed):
         return (
             f"Error: I do not have {shown}/admin in {name}. "
@@ -1979,7 +1986,7 @@ def _guild_room_context(
     return text[: max_chars - 24].rstrip() + "\n… truncated; use list_* tools"
 
 
-async def _get_guild_channel(bot, channel_id):
+async def _get_guild_channel(bot, channel_id, *, expected_guild_id=None):
     cid = _parse_snowflake(channel_id)
     if cid is None:
         return None, f"Error: invalid channel_id: {channel_id}"
@@ -1991,6 +1998,10 @@ async def _get_guild_channel(bot, channel_id):
             return None, f"Error finding channel: {exc}"
     if not getattr(channel, "guild", None):
         return None, "Error: channel is not in a server"
+    if expected_guild_id is not None and str(
+        getattr(getattr(channel, "guild", None), "id", "") or ""
+    ) != str(expected_guild_id):
+        return None, "Error: channel is outside this server"
     return channel, ""
 
 
@@ -3955,46 +3966,6 @@ class ReasoningLogTool(Tool):
 
 
 # class HostFileTool(Tool):  — moved to a plugin
-
-
-# Patterns blocked in shell commands (defense-in-depth even in full-access mode).
-# These mainly prevent accidental or malicious attempts to run nested privileged containers,
-# mount host paths from inside commands, or access the Docker socket.
-# The sandbox process is root with full capabilities. Isolation is the bind
-# mount (only shelldocker/ unless MAXWELL_SHELL_FULL_HOST) plus taint tracking
-# and this blocklist — not dropped capabilities.
-def _shell_exports_dir() -> str:
-    """Canonical dir where shell-produced files are staged for re-attach.
-
-    Defaults to <repo>/data/exports, overridable via MAXWELL_SHELL_EXPORT_DIR.
-    send_file already allowlists data/exports, so staged files can be
-    re-attached with a plain `send_file path=.../exports/<name>` call.
-    """
-    override = os.environ.get("MAXWELL_SHELL_EXPORT_DIR", "").strip()
-    if override:
-        return os.path.abspath(override)
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "exports"))
-
-
-_SHELL_BLOCKED_PATTERNS = [
-    r"--privileged\b",
-    r"--pid=host\b",
-    r"--device\b",
-    r"--mount\b",
-    r"--volume\b",
-    r"\b-v\s+\S+:\S+",  # trying to do extra docker -v from inside command
-    r"/var/run/docker\.sock",
-    r"docker\.sock",
-    r"docker\s+(?:run|exec)\b",
-    # Common shell-redirect / pipe-to-interpreter chains that turn a benign
-    # `cat` or `echo` into remote code execution. The "downloaded and run
-    # immediately" pattern is a classic prompt-injection payload.
-    r"\bcurl\b[^|]*\|\s*(?:sh|bash|zsh|dash|ksh|fish|ash|python\d?|perl|ruby|node)\b",
-    r"\bwget\b[^|]*\|\s*(?:sh|bash|zsh|dash|ksh|fish|ash|python\d?|perl|ruby|node)\b",
-    r"\bcurl\b[^|]*-o\s*-?\s*\|",  # curl -o- | sh
-    r"\bbase64\s+(?:-d|--decode)\b[^|]*\|\s*(?:sh|bash|zsh|python\d?)\b",
-    r"\beval\s*\$\(.*(?:curl|wget)\b",  # eval $(curl ...)
-]
 
 
 async def _run_docker_cmd(

@@ -41,6 +41,8 @@ services:
     volumes:
       - .:/app
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Shell stays disabled on hosts without the Linux runsc firewall setup.
+      - /etc/maxwell-shell:/run/maxwell-shell-policy:ro
       # Same host path Caddy serves. See docker-compose.yml.
       - ${MAXWELL_SITE_DIR:-./public/bot}:${MAXWELL_SITE_DIR:-/app/public/bot}
     ports:

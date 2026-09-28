@@ -265,6 +265,7 @@ from context_budget import (  # noqa: E402
 from control_defaults import (  # noqa: E402
     DEAD_CONTROL_KEYS,
     DEFAULT_CONTROL,
+    guild_capability_for_tool,
     KNOWN_TOOLS,
     parse_bool,
 )
@@ -402,6 +403,12 @@ if _LOG_LEVEL <= logging.DEBUG:
 logger = logging.getLogger(__name__)
 
 _current_inbound: ContextVar[Any] = ContextVar("current_inbound", default=None)
+_current_request_provider: ContextVar[Any] = ContextVar(
+    "current_request_provider", default=None
+)
+_current_byok_tool_budget: ContextVar[Any] = ContextVar(
+    "current_byok_tool_budget", default=None
+)
 _current_inbound_effects: ContextVar[Any] = ContextVar(
     "current_inbound_effects", default=None
 )
@@ -1859,10 +1866,10 @@ def _is_text_attachment(
 # set the model was told about. Do not re-list them here.
 FOLLOWUP_TOOL_NAMES = RESULT_TOOL_NAMES
 
-# Deny historical coding and host-control tools at execution as well as
-# discovery. Old in-memory registries and model aliases must not revive them.
+# Deny retired host-control tools at execution as well as discovery. The shell
+# is public only through its mandatory tenant-scoped gVisor backend.
 PUBLIC_RUNTIME_BLOCKED_TOOLS = frozenset({
-    "agent_life", "user_sandbox", "spawn_background", "github_repo", "shell",
+    "agent_life", "user_sandbox", "spawn_background", "github_repo",
     "plugin_workbench", "manage_plugin", "update_base_personality",
     "update_server_prompt", "site_server",
 })
@@ -3023,10 +3030,17 @@ class MaxwellBot(commands.Bot):
 
     async def _generate_response(self, messages: list[dict], **kwargs):
         """Generate through the main provider, preferring fallback at night."""
+        provider = kwargs.pop("provider", None)
         quota_user_id = kwargs.pop("quota_user_id", None)
         charge_message = bool(kwargs.pop("charge_message", False))
-        for key, value in self._night_fallback_kwargs().items():
-            kwargs.setdefault(key, value)
+        selected_provider = provider or self.ai_provider
+        if provider is None:
+            for key, value in self._night_fallback_kwargs().items():
+                kwargs.setdefault(key, value)
+        else:
+            # User-supplied provider calls are isolated and never inherit
+            # Maxwell's fallback endpoints or routing preferences.
+            kwargs.pop("prefer_fallback", None)
         message = _current_inbound.get()
         if message is not None:
             kwargs.setdefault("request_id", str(getattr(message, "id", "") or ""))
@@ -3049,7 +3063,7 @@ class MaxwellBot(commands.Bot):
                 )
         started = time.monotonic()
         try:
-            return await self.ai_provider.generate_response(messages, **kwargs)
+            return await selected_provider.generate_response(messages, **kwargs)
         finally:
             if message is not None:
                 logger.info(
@@ -3057,7 +3071,7 @@ class MaxwellBot(commands.Bot):
                     getattr(message, "id", ""),
                     getattr(getattr(message, "channel", None), "id", ""),
                     (time.monotonic() - started) * 1000,
-                    kwargs.get("model") or getattr(self.ai_provider, "model", ""),
+                    kwargs.get("model") or getattr(selected_provider, "model", ""),
                 )
 
     async def _get_autonomy_provider(self):
@@ -3679,7 +3693,10 @@ class MaxwellBot(commands.Bot):
         enriched = dict(message_dict)
         enriched.update(self._mem_kwargs(message))
         await self.memory.add_to_channel_memory(channel_id, enriched)
-        await self._observe_message_author(message, enriched)
+        # Private /maxwell histories use a synthetic per-user channel key and
+        # must not update the shared cross-context entity directory.
+        if str(getattr(message, "response_visibility", "public") or "public") != "private":
+            await self._observe_message_author(message, enriched)
 
     async def _observe_message_author(self, message, enriched: dict) -> None:
         """Keep the global per-user entity row current.
@@ -3858,6 +3875,19 @@ class MaxwellBot(commands.Bot):
             # Model-supplied kwargs must never shadow the Discord message object.
             tool_args.pop("message", None)
             tool_args.pop("self", None)
+            denied = MaxwellBot._authorize_tool_execution(
+                self, inbound_message, tool_identifier, handler, tool_args
+            )
+            if denied:
+                raise PermissionError(denied)
+            if _current_request_provider.get() is not None:
+                budget = _current_byok_tool_budget.get()
+                # All parallel calls in a native tool batch share this mutable
+                # request budget. Increment synchronously before execute() so
+                # sibling tasks cannot race past the provider's eight-call cap.
+                if not isinstance(budget, dict) or budget.get("calls", 0) >= 8:
+                    raise PermissionError("refused: personal provider tool-call limit reached")
+                budget["calls"] += 1
             result = await handler.execute(inbound_message, **tool_args)
             if state is not None:
                 if str(result or "").lstrip().lower().startswith(
@@ -3874,6 +3904,137 @@ class MaxwellBot(commands.Bot):
         finally:
             if state is not None:
                 state["tools_running"] -= 1
+
+    def _authorize_tool_execution(
+        self, message, identifier: str, handler, arguments: dict | None = None
+    ) -> str | None:
+        """Independent authorization check immediately before tool execution.
+
+        Tool catalogs and hooks are presentation/extensibility layers. This
+        check runs for native, recovered-text, alias, and internal dispatches.
+        """
+        canonical = str(
+            getattr(handler, "tool_name", None)
+            or getattr(handler, "name", None)
+            or identifier
+        ).strip()
+        if not canonical:
+            return "refused: tool identity is missing"
+        control = getattr(self, "_control", None) or {}
+        if not control.get("tools_enabled", True):
+            return "refused: tools are disabled"
+        if _current_request_provider.get() is not None:
+            budget = _current_byok_tool_budget.get()
+            if not isinstance(budget, dict) or budget.get("calls", 0) >= 8:
+                return "refused: personal provider tool-call limit reached"
+        disabled = set(control.get("disabled_tools", []) or [])
+        if canonical in disabled or identifier in disabled:
+            return "refused: this tool is disabled"
+        if canonical in PUBLIC_RUNTIME_BLOCKED_TOOLS:
+            return "refused: this tool is retired from the public runtime"
+
+        author = getattr(message, "author", None)
+        user_id = str(getattr(author, "id", "") or "").strip()
+        needs_identity = bool(
+            getattr(handler, "requires_admin", False)
+            or getattr(handler, "required_discord_permissions", ())
+            or canonical == "shell"
+        )
+        if needs_identity and not user_id.isdigit():
+            return "refused: authenticated requester identity is unavailable"
+
+        manager = getattr(self, "plugin_manager", None)
+        plugin_entry = None
+        if manager is not None:
+            plugin_entry = getattr(manager, "all_plugin_tools", {}).get(canonical)
+            if plugin_entry:
+                try:
+                    allowed = manager.get_available_tools(
+                        user_id=user_id,
+                        platform=MaxwellBot._message_tool_platform(self, message),
+                    )
+                except Exception:
+                    logger.exception("Tool availability check failed for %s", canonical)
+                    return "refused: tool availability could not be verified"
+                if canonical not in allowed:
+                    return "refused: this tool is unavailable to this user"
+
+        guild = getattr(message, "guild", None)
+        guild_id = str(getattr(guild, "id", "") or "")
+        capability = guild_capability_for_tool(
+            canonical, plugin_owned=plugin_entry is not None
+        )
+        server_disabled = (
+            (getattr(self, "_control", None) or {}).get(
+                "guild_disabled_capabilities", {}
+            ) or {}
+        ).get(guild_id, [])
+        if guild_id and capability in server_disabled:
+            return f"refused: this server has disabled the {capability} capability"
+
+        if bool(getattr(handler, "requires_admin", False)):
+            checker = getattr(self, "_is_admin", None)
+            if not callable(checker) or not checker(user_id):
+                return "refused: this tool is restricted to Maxwell operators"
+
+        required_perms = tuple(
+            str(value).strip()
+            for value in (getattr(handler, "required_discord_permissions", ()) or ())
+            if str(value).strip()
+        )
+        if required_perms:
+            guild = getattr(message, "guild", None)
+            if guild is None:
+                return "refused: this tool requires a server permission context"
+            from tooling.helpers import _missing_cap
+
+            for permission in required_perms:
+                denial = _missing_cap(
+                    guild,
+                    permission,
+                    message,
+                    channel=getattr(message, "channel", None),
+                )
+                if denial:
+                    return denial
+
+        visibility = str(getattr(message, "response_visibility", "public") or "public")
+        private_side_effects = {
+            "send_message", "forward_message", "create_poll", "create_thread",
+            "react", "create_invite", "leave_server",
+            "thread_control", "delete_message", "edit_message", "purge_messages",
+            "pin_message", "kick_member", "ban_member", "unban_member",
+            "timeout_member", "softban_member", "voice_mod", "set_member_nickname",
+            "set_nickname", "create_channel", "edit_channel", "delete_channel",
+            "create_category", "edit_category", "delete_category", "set_channel_permissions",
+            "move_channel", "clone_channel", "sync_channel", "manage_role",
+            "manage_emoji", "manage_invites", "edit_server", "change_avatar",
+            "join_vc", "leave_vc", "send_media", "send_meme", "tts",
+            "create_site", "edit_site", "delete_site", "host_file", "site_server",
+            "reminder",
+        }
+        if visibility == "private" and canonical in private_side_effects:
+            return "refused: choose Public visibility before requesting a server-wide side effect"
+
+        args = arguments or {}
+        try:
+            encoded = json.dumps(args, ensure_ascii=False, default=str).encode("utf-8")
+        except Exception:
+            return "refused: tool arguments are not valid JSON data"
+        if len(encoded) > 256 * 1024 or len(args) > 128:
+            return "refused: tool arguments exceed the request size limit"
+        try:
+            import jsonschema
+
+            schema_getter = getattr(handler, "get_parameters", None)
+            schema = schema_getter() if callable(schema_getter) else None
+            if isinstance(schema, dict) and schema.get("type") == "object":
+                jsonschema.Draft202012Validator(schema).validate(args)
+        except ImportError:
+            return "refused: argument schema validation is unavailable"
+        except Exception as exc:
+            return f"refused: invalid arguments ({type(exc).__name__})"
+        return None
 
     async def _request_failure(
         self, message, reason: str, *, retryable=False, normal_completion=False
@@ -3939,6 +4100,8 @@ class MaxwellBot(commands.Bot):
         if journal is not None and row:
             journal.begin(row["message_id"])
         token = _current_inbound.set(message)
+        request_provider_token = _current_request_provider.set(None)
+        byok_budget_token = _current_byok_tool_budget.set({"calls": 0})
         effects_token = _current_inbound_effects.set({
             "message_id": str(getattr(message, "id", "") or ""),
             "tools_running": 0,
@@ -3955,8 +4118,36 @@ class MaxwellBot(commands.Bot):
             active_messages = self._active_request_messages = {}
         active_messages[cid] = message
         started = time.monotonic()
+        request_provider = None
         try:
             timeout = self._inbound_setting("live_turn_timeout_seconds", 180, 1, 7200)
+            if is_user_install_message(message):
+                vault = getattr(self, "_byok_vault", None)
+                author_id = str(getattr(getattr(message, "author", None), "id", "") or "")
+                if vault is not None and author_id.isdigit():
+                    try:
+                        has_credential = await asyncio.to_thread(
+                            vault.has_credential, author_id
+                        )
+                        if has_credential:
+                            credential = await asyncio.to_thread(vault.get, author_id)
+                            if not credential:
+                                raise RuntimeError("saved personal provider is unavailable")
+                            from plugins.maxwell_extras.byok import make_request_provider
+
+                            request_provider = make_request_provider(self, credential)
+                            _current_request_provider.set(request_provider)
+                    except Exception as exc:
+                        logger.warning(
+                            "Personal provider setup failed for requester %s (%s)",
+                            author_id,
+                            type(exc).__name__,
+                        )
+                        raise RuntimeError(
+                            "saved personal provider configuration is unavailable"
+                        ) from None
+            if request_provider is not None:
+                timeout = min(float(timeout), 300.0)
             async with asyncio.timeout(timeout):
                 if row:
                     reason = self._queued_request_policy_reason(message)
@@ -4016,6 +4207,11 @@ class MaxwellBot(commands.Bot):
             self._replying_channels.discard(cid)
             if active_messages.get(cid) is message:
                 active_messages.pop(cid, None)
+            if request_provider is not None:
+                with contextlib.suppress(Exception):
+                    await request_provider.close()
+            _current_request_provider.reset(request_provider_token)
+            _current_byok_tool_budget.reset(byok_budget_token)
             _current_inbound.reset(token)
             _current_inbound_effects.reset(effects_token)
             logger.info(
@@ -10099,6 +10295,8 @@ class MaxwellBot(commands.Bot):
         return " ".join(p for p in parts if p).strip()
 
     async def _record_rem_event(self, message, role: str, content: str | None = None):
+        if str(getattr(message, "response_visibility", "public") or "public") == "private":
+            return
         try:
             msg_id = getattr(message, "id", None)
             if msg_id and role == "user":
@@ -10393,6 +10591,11 @@ class MaxwellBot(commands.Bot):
         call and still answers should_store:false — this only decides whether
         asking it is worth the request.
         """
+        # Private user-install turns are kept in a tenant-specific conversation
+        # context. Never send their content to the shared context extractor,
+        # even as a user-scoped fact: later public turns could retrieve it.
+        if str(getattr(message, "response_visibility", "public") or "public") == "private":
+            return False
         if not self._control.get(
             "cross_context_enabled", True
         ) or not self._control.get("cross_context_extract_enabled", True):
@@ -10540,6 +10743,8 @@ class MaxwellBot(commands.Bot):
         return any(word in lowered for word in sensitive)
 
     def _normalize_context_entry(self, message, data: dict) -> dict | None:
+        if str(getattr(message, "response_visibility", "public") or "public") == "private":
+            return None
         if not isinstance(data, dict) or not data.get("should_store"):
             return None
         summary = " ".join(
@@ -10654,6 +10859,8 @@ class MaxwellBot(commands.Bot):
         }
 
     async def _extract_shared_context_fact(self, message):
+        if str(getattr(message, "response_visibility", "public") or "public") == "private":
+            return
         try:
             text = (message_combined_content(message) or "").strip()
             attachment_note = ""
@@ -11580,8 +11787,11 @@ class MaxwellBot(commands.Bot):
         title = (original_content or "").strip().splitlines()[0][
             :80
         ].strip() or "untitled site"
-        result = await tool.execute(
+        result = await MaxwellBot._invoke_request_tool(
+            self,
             message,
+            "create_site",
+            tool,
             name=slug,
             title=title,
             body=html,
@@ -13683,6 +13893,7 @@ class MaxwellBot(commands.Bot):
             author is not None
             and not getattr(author, "bot", False)
             and self._directly_addressed(message)
+            and str(getattr(message, "response_visibility", "public") or "public") != "private"
         ):
             self._arm_conversation_watch(channel_id)
         normal_reply_sent = False
@@ -14127,6 +14338,7 @@ class MaxwellBot(commands.Bot):
             try:
                 response = await self._generate_response(
                     messages,
+                    provider=_current_request_provider.get(),
                     media=active_media,
                     timeout=ai_timeout,
                     max_tokens=max_out_tokens,
@@ -14169,15 +14381,20 @@ class MaxwellBot(commands.Bot):
                         pass
                 return
             response = response or ""
+            byok_active = _current_request_provider.get() is not None
             max_iters = max(
                 0,
                 min(
-                    _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0), 100
+                    _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0),
+                    8 if byok_active else 100,
                 ),
             )
-            tool_deadline = time.monotonic() + float(
+            tool_timeout = float(
                 self._control.get("tool_iteration_timeout_seconds", 3600) or 3600
             )
+            if byok_active:
+                tool_timeout = min(tool_timeout, 300.0)
+            tool_deadline = time.monotonic() + max(1.0, tool_timeout)
             all_tool_results = []
             all_tool_images = []
             all_tool_media = []
@@ -14339,6 +14556,7 @@ class MaxwellBot(commands.Bot):
                     try:
                         followup = await self._generate_response(
                             result_messages,
+                            provider=_current_request_provider.get(),
                             images=followup_images,
                             media=all_tool_media,
                             timeout=ai_timeout,
@@ -15832,6 +16050,25 @@ class MaxwellBot(commands.Bot):
                 if pt_name not in disabled:
                     names.add(pt_name)
 
+        guild = getattr(message, "guild", None) if message is not None else None
+        guild_id = str(getattr(guild, "id", "") or "")
+        if guild_id:
+            server_disabled = (
+                (getattr(self, "_control", None) or {}).get(
+                    "guild_disabled_capabilities", {}
+                ) or {}
+            ).get(guild_id, [])
+            for tool_name in list(names):
+                plugin_owned = bool(
+                    plugin_manager is not None
+                    and tool_name in getattr(plugin_manager, "all_plugin_tools", {})
+                )
+                capability = guild_capability_for_tool(
+                    tool_name, plugin_owned=plugin_owned
+                )
+                if capability in server_disabled:
+                    names.discard(tool_name)
+
         # Never expose prompt-edit tools from stale persisted plugin manifests.
         names.difference_update({"update_base_personality", "update_server_prompt"})
         if "leave_server" in names:
@@ -15858,7 +16095,6 @@ class MaxwellBot(commands.Bot):
             names.discard("create_thread")
         if _is_private_chat(message):
             names.difference_update(DM_BLOCKED_TOOLS)
-        guild = getattr(message, "guild", None) if message is not None else None
         if guild is not None:
             allowed_mod = _mod_tools_allowed(guild, message)
             for tool in _ALL_MOD_TOOLS:
@@ -17032,6 +17268,8 @@ class MaxwellBot(commands.Bot):
             "LTM and cross-context facts are global."
         )
         watch_prompt = getattr(self, "_conversation_watch_prompt", None)
+        if str(getattr(message, "response_visibility", "public") or "public") == "private":
+            watch_prompt = None
         if callable(watch_prompt):
             dynamic_parts.extend(watch_prompt(message, channel_id))
         elif getattr(message, "_watch_followup", False):

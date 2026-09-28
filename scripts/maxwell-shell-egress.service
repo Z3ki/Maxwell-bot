@@ -1,0 +1,15 @@
+[Unit]
+Description=Maxwell shell sandbox egress firewall
+Requires=docker.service
+After=docker.service
+PartOf=docker.service
+BindsTo=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/maxwell-shell-egress
+ExecStop=/usr/bin/rm -f /etc/maxwell-shell/egress-ready
+
+[Install]
+WantedBy=multi-user.target

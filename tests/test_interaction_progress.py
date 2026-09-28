@@ -30,7 +30,7 @@ class _Response:
     def is_done(self):
         return self.deferred
 
-    async def defer(self):
+    async def defer(self, **_kwargs):
         self.deferred = True
 
 

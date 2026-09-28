@@ -215,6 +215,9 @@ DEFAULT_CONTROL = {
     "ignore_users": [],
     "allowed_channels": [],
     "blocked_channels": [],
+    # {guild_id: [capability, ...]}; this is a per-server deny list. The
+    # capability names are fixed in GUILD_CAPABILITIES below.
+    "guild_disabled_capabilities": {},
     "disabled_commands": [],
     # {guild_id: channel_id}. When a server has an entry, Maxwell only speaks
     # in that one channel there — every other channel in that server is dead to
@@ -491,3 +494,53 @@ def _known_tools() -> list[str]:
 # Dashboard disable-list and API sanitizer. Derived from plugin manifests
 # plus the fallback catalog so older installs keep every historical name.
 KNOWN_TOOLS = _known_tools()
+
+
+GUILD_CAPABILITIES = {
+    "shell": "Linux shell",
+    "web": "Web search and inspection",
+    "sites": "Website hosting and editing",
+    "creative": "Images and games",
+    "files": "File attachments",
+    "memory": "Memory tools",
+    "email": "Email tools",
+    "voice": "Voice tools",
+    "moderation": "Moderation and server management",
+    "plugins": "Optional plugins",
+}
+
+_GUILD_MODERATION_TOOLS = frozenset({
+    "edit_message", "delete_message", "create_poll", "create_invite",
+    "set_nickname", "create_category", "create_channel", "edit_category",
+    "edit_channel", "move_channel", "clone_channel", "sync_channel",
+    "delete_channel", "kick_member", "ban_member", "unban_member",
+    "softban_member", "list_bans", "timeout_member", "list_timeouts",
+    "manage_role", "purge_messages", "pin_message", "set_member_nickname",
+    "voice_mod", "lock_channel", "lockdown", "set_channel_permissions",
+    "list_permissions", "manage_invites", "edit_server", "audit_log",
+    "manage_emoji", "create_thread", "thread_control",
+})
+
+
+def guild_capability_for_tool(name: str, *, plugin_owned: bool = False) -> str | None:
+    """Map a tool to its coarse, server-configurable capability group."""
+    tool = str(name or "").strip()
+    if tool == "shell":
+        return "shell"
+    if tool in {"web_search", "fetch_url", "see_image", "see_video", "inspect_media_url"}:
+        return "web"
+    if tool in {"create_site", "edit_site", "delete_site", "list_sites", "host_file", "site_server"}:
+        return "sites"
+    if tool in {"image_generator", "hd_image", "send_meme", "chess_start", "chess_move", "chess_state", "chess_resign"} or tool.startswith("checkers_"):
+        return "creative"
+    if tool in {"send_file", "send_media"}:
+        return "files"
+    if tool in _GUILD_MODERATION_TOOLS:
+        return "moderation"
+    if tool.startswith(("ltm_", "memory_", "entity_", "knowledge_graph_")) or tool in {"recall_cross_server_memory", "search_messages", "context"}:
+        return "memory"
+    if tool.startswith("email_") or tool in {"inbox_list", "inbox_act"}:
+        return "email"
+    if tool.startswith("vc_") or tool in {"tts", "join_vc", "leave_vc"}:
+        return "voice"
+    return "plugins" if plugin_owned else None

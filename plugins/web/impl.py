@@ -19,6 +19,23 @@ del _name
 
 from plugins.media.impl import SeeImageTool, SeeVideoTool  # noqa: E402
 
+
+def _authorize_nested_media(bot: Any, message: Any, tool_name: str, url: str):
+    """Apply the normal dispatcher policy before an internal tool delegation."""
+    tool = (getattr(bot, "tools", None) or {}).get(tool_name)
+    if tool is None:
+        return None, f"Error: {tool_name} is not enabled."
+    authorize = getattr(bot, "_authorize_tool_execution", None)
+    if not callable(authorize):
+        return None, "refused: tool authorization is unavailable"
+    try:
+        denied = authorize(message, tool_name, tool, {"url": url})
+    except Exception:
+        return None, "refused: tool authorization could not be verified"
+    if denied:
+        return None, str(denied)
+    return tool, None
+
 class WebSearchTool(Tool):
     """Search the web using DuckDuckGo / ddgs metasearch."""
     tool_name = 'web_search'
@@ -186,7 +203,12 @@ class FetchUrlTool(Tool):
         # as text. fetch_url used to return mojibake and the model still
         # couldn't see the picture.
         if SeeImageTool.looks_visual(url) and self.bot is not None:
-            visual = await SeeImageTool(self.bot).execute(message, url=url)
+            media_tool, denied = _authorize_nested_media(
+                self.bot, message, "see_image", url
+            )
+            if denied:
+                return denied
+            visual = await media_tool.execute(message, url=url)
             if visual and not str(visual).startswith("Error"):
                 return visual
             # A visual URL must never fall through to the text decoder, even
@@ -200,7 +222,12 @@ class FetchUrlTool(Tool):
             and self.bot is not None
             and hasattr(self.bot, "_download_embed_media")
         ):
-            visual = await SeeVideoTool(self.bot).execute(message, url=url)
+            media_tool, denied = _authorize_nested_media(
+                self.bot, message, "see_video", url
+            )
+            if denied:
+                return denied
+            visual = await media_tool.execute(message, url=url)
             if visual and not str(visual).startswith("Error"):
                 return visual
             return visual or f"Error: could not load video from {url}"

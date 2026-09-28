@@ -14,7 +14,7 @@ def test_retired_plugins_never_initialize_even_when_persisted_enabled(tmp_path):
     plugins = tmp_path / "plugins"
     plugins.mkdir()
     retired = (
-        "agent_life", "background_jobs", "github_projects", "shell",
+        "agent_life", "background_jobs", "github_projects",
         "plugin_admin", "personality",
     )
     for name in retired:
@@ -66,8 +66,7 @@ def test_retired_tools_are_denied_at_dispatch_even_when_offered():
     for name in blocked:
         assert "retired from the public bot runtime" in asyncio.run(call(name))
         blocked[name].execute.assert_not_awaited()
-    assert "retired from the public bot runtime" in asyncio.run(call("bash"))
-    blocked["shell"].execute.assert_not_awaited()
+    assert "shell" not in PUBLIC_RUNTIME_BLOCKED_TOOLS
 
 
 def test_site_backend_tool_is_not_registered_but_static_site_tools_remain():

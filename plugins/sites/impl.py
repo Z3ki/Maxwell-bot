@@ -16,7 +16,10 @@ for _name in dir(_helpers):
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
 
-from plugins.discord_messages.impl import SendFileTool  # noqa: E402
+
+def _private_request(message: Any) -> bool:
+    return str(getattr(message, "response_visibility", "public") or "public") == "private"
+
 
 class CreateSiteTool(Tool):
     """Publish a website — one page or a whole directory, static or backed."""
@@ -152,6 +155,8 @@ class CreateSiteTool(Tool):
         url: str | None = None,
         **kwargs,
     ) -> str:
+        if _private_request(message):
+            return "Error: choose Public visibility before publishing a site."
         # Available to everyone (non-admins too). Quota + ownership checks apply.
         extra_files, files_err = _parse_site_files(files)
         if files_err:
@@ -266,19 +271,10 @@ class CreateSiteTool(Tool):
 
                 img_dir = os.path.join(site_dir, "images")
                 os.makedirs(img_dir, exist_ok=True)
-                # Reuse the same broad-but-safe allowlist as SendFileTool so
-                # images produced by image_generator (Discord CDN downloads)
-                # and the shell sandbox (shelldocker) can actually be
-                # embedded. The old check only allowed MAXWELL_SITE_DIR, which
-                # rejected virtually every real image source (the feature was
-                # silently non-functional).
-                send_tool = self.bot.tools.get("send_file") if self.bot else None
-                if send_tool is not None and hasattr(
-                    send_tool, "_allowed_send_file_bases"
-                ):
-                    allowed_bases = send_tool._allowed_send_file_bases()
-                else:
-                    allowed_bases = [self.base_dir]
+                shell_tool = (getattr(self.bot, "tools", None) or {}).get("shell")
+                workspace_reader = getattr(
+                    shell_tool, "read_workspace_file", None
+                )
                 for entry in image_list:
                     if isinstance(entry, str):
                         entry = {"path": entry}
@@ -301,13 +297,21 @@ class CreateSiteTool(Tool):
                                 f"Site image URL failed: {src_url} ({err or 'unknown'})"
                             )
                         continue
-                    if not src_path or not any(
-                        _is_path_allowed(src_path, b) for b in allowed_bases
-                    ):
+                    if not src_path or not callable(workspace_reader):
                         missing_images.append(src_path or "(empty path)")
                         logger.warning(f"Site image blocked or not found: {src_path}")
                         continue
-                    filename = entry.get("filename") or os.path.basename(src_path)
+                    image_blob, workspace_name, read_error = await workspace_reader(
+                        message, str(src_path), max_size=10 * 1024 * 1024
+                    )
+                    if image_blob is None or workspace_name is None:
+                        missing_images.append(str(src_path))
+                        logger.warning(
+                            "Site image workspace read failed (%s)",
+                            read_error or "unavailable",
+                        )
+                        continue
+                    filename = entry.get("filename") or workspace_name
                     # Sanitize filename: only safe chars, and strip path
                     # separators / leading dots so ".." can't write outside
                     # the images/ dir.
@@ -326,12 +330,12 @@ class CreateSiteTool(Tool):
                         )
                         continue
                     try:
-                        shutil.copy2(src_path, dest)
+                        await asyncio.to_thread(Path(dest).write_bytes, image_blob)
                         public_url = f"{self.base_url}/{slug}/images/{filename}"
                         image_urls.append(public_url)
-                        logger.info(f"Copied site image {src_path} -> {dest}")
+                        logger.info("Copied request workspace image to site: %s", filename)
                     except Exception as e:
-                        logger.warning(f"Failed to copy image {src_path}: {e}")
+                        logger.warning("Failed to copy workspace image: %s", type(e).__name__)
 
             # The page is served exactly as written. CSP belongs to the host
             # (see SITE_CSP_META) — turn `site_inject_csp` on only if yours
@@ -534,6 +538,11 @@ class EditSiteTool(_SiteOwnedTool):
         start_line: Any = None,
         **kwargs,
     ) -> str:
+        if (
+            _private_request(message)
+            and str(action or "list").strip().lower() in SITE_MUTATING_ACTIONS
+        ):
+            return "Error: choose Public visibility before changing a published site."
         slug, entry, site_dir, err = self._resolve(message, name)
         if err:
             return err
@@ -1162,19 +1171,12 @@ class HostFileTool(Tool):
         base = _public_files_target(self.bot)[1]
         return (
             f"Host a file at a permanent public URL under {base}/<name>/. "
-            "Pass url (curl a public file — Discord attachment, raw GitHub, "
-            "any http(s) link), or path (local/shell file), or filename+content. "
+            "Pass url (fetch a public file), path (a file in your active /workspace), "
+            "or filename+content. Publishing requires Public visibility. "
             "HTML is served as a page (index.html) so Discord can embed the link. "
             "Then send_message the URL without angle brackets. "
             "For a named site you will edit, create_site url= instead."
         )
-
-    def _send_file_helper(self) -> SendFileTool:
-        tools = getattr(self.bot, "tools", None) or {}
-        existing = tools.get("send_file") if isinstance(tools, dict) else None
-        if isinstance(existing, SendFileTool):
-            return existing
-        return SendFileTool(self.bot)
 
     async def execute(
         self,
@@ -1187,6 +1189,8 @@ class HostFileTool(Tool):
         encoding: str = "text",
         **kwargs,
     ) -> str:
+        if _private_request(message):
+            return "Error: choose Public visibility before hosting a public file."
         source_url = str(url or "").strip()
         source_path = str(path or "").strip()
         has_content = content is not None
@@ -1217,30 +1221,17 @@ class HostFileTool(Tool):
             if not hint_name:
                 hint_name = _filename_from_url(source_url, content_type)
         elif source_path:
-            helper = self._send_file_helper()
-            resolved = helper._resolve_send_file_path(source_path)
-            host_path, host_error = await helper._try_read_host_file(resolved)
-            tmp_to_clean = None
-            if host_path is None:
-                target, cp_error = await helper._docker_cp_from_shell(source_path)
-                if target is None:
-                    return (
-                        f"Error: could not read file at '{source_path}'. "
-                        f"Host: {host_error or 'not found'}. "
-                        f"Container: {cp_error or 'not found or not readable'}."
-                    )
-                tmp_to_clean = target
-                host_path = target
-            try:
-                blob = await asyncio.to_thread(host_path.read_bytes)
-            except Exception as e:
-                return f"Error reading file from disk: {e}"
-            finally:
-                if tmp_to_clean is not None:
-                    with contextlib.suppress(Exception):
-                        shutil.rmtree(tmp_to_clean.parent, ignore_errors=True)
+            shell_tool = (getattr(self.bot, "tools", None) or {}).get("shell")
+            reader = getattr(shell_tool, "read_workspace_file", None)
+            if not callable(reader):
+                return "Error: this request has no active private shell workspace"
+            blob, workspace_name, read_error = await reader(
+                message, source_path, max_size=self.MAX_SIZE
+            )
+            if blob is None or workspace_name is None:
+                return f"Error: cannot read a file from this request's workspace ({read_error or 'unavailable'})"
             if not hint_name:
-                hint_name = host_path.name
+                hint_name = workspace_name
         else:
             if not hint_name:
                 return "Error: filename is required when hosting inline content"

@@ -156,7 +156,7 @@ def test_shell_tool_runs_without_author_gate():
     message = FakeMessage()
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             assert len(message.channel.sent) == 1
             assert "working on it…" in message.channel.sent[0].content
             return b"hi", b"", 0
@@ -183,7 +183,7 @@ def test_shell_tool_truncates_captured_output_to_max_output(monkeypatch):
     blob = ("line of shell output\n" * 80).encode()
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             return blob, b"", 0
 
         tool._run_shell_command = fake_run_shell
@@ -211,7 +211,7 @@ def test_shell_progress_respects_shared_server_setting():
     message.guild = SimpleNamespace(id=99)
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             return b"quiet", b"", 0
 
         tool._run_shell_command = fake_run_shell
@@ -231,7 +231,7 @@ def test_same_turn_shell_calls_update_one_progress_message():
     message = FakeMessage()
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             return command.encode(), b"", 0
 
         tool._run_shell_command = fake_run_shell
@@ -257,7 +257,7 @@ def test_shell_progress_edits_while_command_runs():
     message = FakeMessage()
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             if on_progress is not None:
                 await on_progress(b"", b"", 0.0)
                 await on_progress(b"downloading 1/3\n", b"", 1.4)
@@ -285,7 +285,7 @@ def test_new_user_message_gets_a_fresh_shell_progress_message():
     second.channel = first.channel
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             return command.encode(), b"", 0
 
         tool._run_shell_command = fake_run_shell
@@ -319,7 +319,7 @@ def test_send_message_leaves_shell_progress():
     message = FakeMessage()
 
     async def run():
-        async def fake_run_shell(command, on_progress=None):
+        async def fake_run_shell(command, tenant, on_progress=None):
             return b"ok", b"", 0
 
         shell._run_shell_command = fake_run_shell

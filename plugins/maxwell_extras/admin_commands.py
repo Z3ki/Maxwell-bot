@@ -218,8 +218,8 @@ def _embed(bot: Any, section: str) -> discord.Embed:
     embed = discord.Embed(
         title="Maxwell Diagnostics",
         description=(
-            "Restricted Maxwell runtime diagnostics. Use `/maintenance` for "
-            "authorized operational changes."
+            "Restricted Maxwell runtime diagnostics. Fixed operational controls "
+            "are available in the protected Application owner section of `/config`."
         ),
         color=discord.Color.blurple(),
     )
@@ -365,7 +365,7 @@ def _embed(bot: Any, section: str) -> discord.Embed:
         return embed
 
     embed.set_footer(
-        text="Operational changes are available through `/maintenance`."
+        text="Operational changes are available through the protected `/config` owner section."
     )
     return embed
 
@@ -525,8 +525,8 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
             interaction,
             content=(
                 "Maintenance actions: set or toggle a control, reload `bot_control.json`, "
-                "inspect or update a user's message quota. "
-                "Use `/diagnostics` to view runtime and control details."
+                "inspect or update a user's message allowance. "
+                "Use the protected Application owner section of `/config` for diagnostics."
             ),
         )
         return True
@@ -610,15 +610,13 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
 
 
 def install_admin_commands(bot: Any) -> None:
-    """Register restricted /diagnostics and /maintenance commands."""
+    """Remove legacy owner commands; /config owns this protected surface now."""
     if getattr(bot, "_maxwell_admin_commands_installed", False):
         return
 
-    ui.register_command(DIAGNOSTICS_COMMAND)
-    ui.register_command(MAINTENANCE_COMMAND)
-    ui.register_interaction_handler(
-        handle_admin_interaction, priority=10, name="admin_commands"
-    )
+    ui.unregister_command(DIAGNOSTICS_COMMAND_NAME)
+    ui.unregister_command(MAINTENANCE_COMMAND_NAME)
+    ui.unregister_interaction_handler("admin_commands")
     bot._maxwell_admin_commands_installed = True
 
 
