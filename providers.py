@@ -3,19 +3,99 @@
 import asyncio
 import contextlib
 import copy
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 import random as _random
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+
+class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+    """Resolve only globally routable provider IPs and pin checked results."""
+
+    async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
+        try:
+            literal = ipaddress.ip_address(str(host).strip("[]"))
+        except ValueError:
+            literal = None
+        if literal is not None:
+            if not literal.is_global:
+                raise OSError("provider host resolved to a non-public address")
+            addresses = [(socket.AF_INET6 if literal.version == 6 else socket.AF_INET, str(literal))]
+        else:
+            loop = asyncio.get_running_loop()
+            infos = await loop.getaddrinfo(
+                host, port, family=family, type=socket.SOCK_STREAM
+            )
+            addresses = []
+            for af, _socktype, _proto, _canonname, sockaddr in infos:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if not ip.is_global:
+                    raise OSError("provider host resolved to a non-public address")
+                addresses.append((af, str(ip)))
+        if not addresses:
+            raise OSError("provider host did not resolve")
+        return [
+            {
+                "hostname": host,
+                "host": address,
+                "port": port,
+                "family": af,
+                "proto": socket.IPPROTO_TCP,
+                "flags": socket.AI_NUMERICHOST,
+            }
+            for af, address in addresses
+        ]
+
+    async def close(self):
+        return None
+
+
+async def _read_response_text_limited(resp, limit: int = 64 * 1024) -> str:
+    """Bound untrusted provider error bodies before decoding/logging."""
+    content = getattr(resp, "content", None)
+    if content is None or not hasattr(content, "iter_chunked"):
+        try:
+            return (await resp.text())[:limit]
+        except Exception:
+            return ""
+    body = bytearray()
+    async for chunk in content.iter_chunked(8192):
+        remaining = limit + 1 - len(body)
+        if remaining > 0:
+            body.extend(chunk[:remaining])
+        if len(body) > limit:
+            body = body[:limit]
+            break
+    return bytes(body).decode("utf-8", errors="replace")
+
+
+async def _read_json_response_limited(resp, limit: int) -> Any:
+    """Read and parse a bounded JSON response from an untrusted BYOK host."""
+    content = getattr(resp, "content", None)
+    if content is None or not hasattr(content, "read"):
+        # Small test doubles and compatible response adapters may only expose
+        # aiohttp's json() convenience method.
+        return await resp.json()
+    raw = await content.read(limit + 1)
+    if len(raw) > limit:
+        raise RuntimeError("Provider response exceeded the configured size limit")
+    charset = getattr(resp, "charset", None) or "utf-8"
+    try:
+        return json.loads(raw.decode(charset))
+    except (UnicodeError, LookupError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Provider returned invalid JSON") from exc
 
 # asyncio holds only a weak reference to a running task, so a bare
 # `create_task(...)` whose result nobody keeps can be garbage-collected
@@ -615,6 +695,7 @@ async def _read_sse_response(
     on_tool_call_name=None,
     on_token=None,
     custom_tool_calls: bool = False,
+    max_bytes: int | None = None,
 ) -> dict:
     """Read an OpenAI-style SSE chat-completions stream and reassemble it into
     the same dict shape a non-streamed `await resp.json()` would return.
@@ -728,9 +809,13 @@ async def _read_sse_response(
         custom_buffer._on_partial_name = _bridge
 
     buf = b""
+    received_bytes = 0
     async for raw_chunk in resp.content.iter_any():
         if done:
             break
+        received_bytes += len(raw_chunk)
+        if max_bytes is not None and received_bytes > max_bytes:
+            raise RuntimeError("Provider response exceeded the configured size limit")
         buf += raw_chunk
         while b"\n" in buf and not done:
             line, buf = buf.split(b"\n", 1)
@@ -1948,6 +2033,34 @@ class OllamaProvider:
         except (TypeError, ValueError):
             self._cooldown_seconds = DEFAULT_ENDPOINT_COOLDOWN_SECONDS
 
+    def _display_error(self, detail: Any) -> str:
+        """Never copy BYOK upstream bodies into logs or surfaced exceptions."""
+        if getattr(self, "_byok_sensitive", False):
+            return "provider rejected or could not complete the request"
+        return str(detail or "")
+
+    def _redact_provider_payload(self, value: Any) -> Any:
+        """Remove a BYOK credential if a malicious upstream echoes it back."""
+        if not getattr(self, "_byok_sensitive", False) or not self.api_key:
+            return value
+        if isinstance(value, str):
+            return value.replace(self.api_key, "[redacted]")
+        if isinstance(value, list):
+            return [self._redact_provider_payload(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                self._redact_provider_payload(key): self._redact_provider_payload(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _response_limit(self) -> int:
+        try:
+            configured = int(getattr(self, "_byok_response_limit", 10 * 1024 * 1024))
+        except (TypeError, ValueError):
+            configured = 10 * 1024 * 1024
+        return max(64 * 1024, min(configured, 10 * 1024 * 1024))
+
     def _headers(self, endpoint: ProviderEndpoint = None) -> dict[str, str]:
         api_key = self.api_key if endpoint is None else endpoint.api_key
         headers: dict[str, str] = {}
@@ -2200,6 +2313,11 @@ class OllamaProvider:
                     ttl_dns_cache=300,
                     enable_cleanup_closed=True,
                     keepalive_timeout=30,
+                    resolver=(
+                        _PublicOnlyResolver()
+                        if getattr(self, "_byok_public_only", False)
+                        else None
+                    ),
                 )
                 self._session = aiohttp.ClientSession(
                     connector=connector, timeout=aiohttp.ClientTimeout(total=None)
@@ -2219,6 +2337,7 @@ class OllamaProvider:
                     f"{endpoint.base_url}/models",
                     timeout=aiohttp.ClientTimeout(total=10),
                     headers=self._headers(endpoint),
+                    allow_redirects=False,
                 ) as resp:
                     if resp.status == 200:
                         initialized = True
@@ -2360,6 +2479,16 @@ class OllamaProvider:
         first time a tool_call delta with a function name arrives in the SSE
         stream. This lets callers update a live progress message mid-generation.
         """
+        byok_request = bool(getattr(self, "_byok_sensitive", False))
+        if byok_request:
+            try:
+                timeout = max(1, min(int(timeout), 300))
+            except (TypeError, ValueError):
+                timeout = 120
+            try:
+                max_tokens = max(1, min(int(max_tokens or self.max_tokens or 4096), 4096))
+            except (TypeError, ValueError):
+                max_tokens = 4096
         if not self.available:
             logger.warning("Provider marked unavailable; retrying initialization")
             await self.initialize()
@@ -2530,6 +2659,11 @@ class OllamaProvider:
                 temperature=temperature,
                 disable_reasoning=disable_reasoning,
             )
+            if byok_request:
+                # Avoid showing any response fragment in progress UI before
+                # the complete body has passed the credential scrubber.
+                data["stream"] = False
+                data.pop("stream_options", None)
             if empty_response_recoveries:
                 # A blank streamed 200 can be caused by a flaky SSE gateway
                 # even when the provider is healthy. Use a normal JSON response
@@ -2571,10 +2705,13 @@ class OllamaProvider:
                     json=data,
                     timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
                     headers=self._headers(endpoint),
+                    allow_redirects=False,
                 ) as resp:
                     headers_ms = (time.perf_counter() - request_start) * 1000
                     if resp.status == 503:
-                        error_text = await resp.text()
+                        error_text = self._display_error(
+                            await _read_response_text_limited(resp)
+                        )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
                             endpoint.name,
@@ -2596,7 +2733,9 @@ class OllamaProvider:
                             f"Provider overloaded after retries: {error_text[:200]}"
                         )
                     if resp.status == 429:
-                        error_text = await resp.text()
+                        error_text = self._display_error(
+                            await _read_response_text_limited(resp)
+                        )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
                             endpoint.name,
@@ -2636,7 +2775,9 @@ class OllamaProvider:
                             f"Provider rate limited after retries: {error_text[:200]}"
                         )
                     if resp.status != 200:
-                        error_text = await resp.text()
+                        error_text = self._display_error(
+                            await _read_response_text_limited(resp)
+                        )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s body=%s",
                             endpoint.name,
@@ -2929,6 +3070,7 @@ class OllamaProvider:
                             on_tool_call_name=on_tool_call_name,
                             on_token=on_token,
                             custom_tool_calls=custom_tool_calls,
+                            max_bytes=self._response_limit() if byok_request else None,
                         )
                         ended_at = time.perf_counter()
                         result = {
@@ -2942,12 +3084,22 @@ class OllamaProvider:
                         if first_token_s is not None:
                             json_ms = (first_token_s - request_start) * 1000
                     else:
-                        result = await resp.json()
+                        result = (
+                            await _read_json_response_limited(
+                                resp, self._response_limit()
+                            )
+                            if byok_request
+                            else await resp.json()
+                        )
                         ended_at = time.perf_counter()
                         json_ms = (ended_at - request_start) * 1000
+                    if byok_request:
+                        result = self._redact_provider_payload(result)
                     if not isinstance(result, dict):
                         result_preview = (
-                            str(result)[:600] if result is not None else "None"
+                            "[redacted]"
+                            if byok_request
+                            else (str(result)[:600] if result is not None else "None")
                         )
                         logger.warning(
                             "Provider %s returned 200 with non-dict JSON body (type=%s) preview=%s",
@@ -2977,7 +3129,11 @@ class OllamaProvider:
                             if isinstance(result, dict)
                             else type(result).__name__
                         )
-                        result_preview = str(result)[:600] if result else ""
+                        result_preview = (
+                            "[redacted]"
+                            if byok_request
+                            else (str(result)[:600] if result else "")
+                        )
                         logger.warning(
                             "Provider %s returned 200 with no choices. keys=%s preview=%s",
                             endpoint.name,
@@ -2989,7 +3145,9 @@ class OllamaProvider:
                             logger.warning(
                                 "Provider %s also included error in body: %s",
                                 endpoint.name,
-                                str(err_obj)[:300],
+                                "[redacted]"
+                                if byok_request
+                                else str(err_obj)[:300],
                             )
                             upstream_code = (
                                 err_obj.get("code", "")

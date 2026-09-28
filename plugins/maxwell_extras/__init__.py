@@ -21,6 +21,7 @@ def setup(bot, ctx):
         patch_image_generators,
     )
     from .user_preferences import UserPreferenceStore
+    from .byok import CredentialVault
 
     store = ReminderStore(ctx.store_path("reminders.json"))
 
@@ -33,6 +34,7 @@ def setup(bot, ctx):
     # Discord, and teach its webhook transport to preserve embeds/views/files.
     preferences = UserPreferenceStore(ctx.store_path("user_preferences.json"))
     bot._user_preferences = preferences
+    bot._byok_vault = CredentialVault(ctx.store_path("byok.sqlite3"))
     install_user_install_features(bot)
     install_command_suite(bot, preferences)
 
@@ -54,8 +56,8 @@ def setup(bot, ctx):
     # converting text to an embed first keeps those fast replies rich too.
     install_maxwell_embed_output(bot)
 
-    # Restricted diagnostics and maintenance are purpose-specific commands;
-    # each handler checks the configured Maxwell developer allowlist itself.
+    # Keep stale owner-only command registrations removed. Protected global
+    # controls and diagnostics are exposed through the owner scope of `/config`.
     install_admin_commands(bot)
 
     # Rich messages now support stateful callback buttons. The action registry

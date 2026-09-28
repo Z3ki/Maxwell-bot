@@ -4244,6 +4244,12 @@ class AutonomyEngine:
         if "target_message_id" in exec_kwargs and "message_id" not in exec_kwargs:
             exec_kwargs["message_id"] = exec_kwargs["target_message_id"]
         try:
+            authorize = getattr(self.bot, "_authorize_tool_execution", None)
+            if not callable(authorize):
+                raise PermissionError("refused: request authorization is unavailable")
+            denial = authorize(syn_msg, tool_name, tool, exec_kwargs)
+            if denial:
+                raise PermissionError(denial)
             tool_result = await tool.execute(syn_msg, **exec_kwargs)
             text = str(tool_result) if tool_result is not None else ""
             # Many tools (especially permission/admin guards) return "Error: ..." strings

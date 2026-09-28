@@ -1,0 +1,12 @@
+[Unit]
+Description=Aggregate resource limits for Maxwell's untrusted shell guests
+Before=slices.target
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=200%
+MemoryAccounting=yes
+MemoryMax=50%
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=1024

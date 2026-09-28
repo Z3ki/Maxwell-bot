@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import discord
+
 from utils import _coerce_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,25 @@ USER_INSTALL_NAMES = frozenset(
 # only user-installed (not also in that server).
 USER_INSTALL_MESSAGE_CAP = 6
 USER_INSTALL_HISTORY_LIMIT = 25
+
+
+def private_channel_key(interaction: Any) -> str:
+    """Return an internal history/lifecycle key scoped to one source context."""
+    user = getattr(interaction, "user", None)
+    uid = str(getattr(user, "id", "") or "0")
+    guild = getattr(interaction, "guild", None)
+    guild_id = str(
+        getattr(guild, "id", None)
+        or getattr(interaction, "guild_id", None)
+        or "dm"
+    )
+    channel = getattr(interaction, "channel", None)
+    channel_id = str(
+        getattr(interaction, "channel_id", None)
+        or getattr(channel, "id", None)
+        or "interaction"
+    )
+    return f"private:{uid}:{guild_id}:{channel_id}"[:180]
 
 # Official extension points. Plugins register here instead of replacing
 # UserInstallSession.send or patching bot.on_interaction globals.
@@ -525,6 +546,11 @@ def build_user_install_turn(interaction: Any) -> dict[str, Any] | None:
     prompt, attachments = parse_user_install_command(interaction)
     if not str(prompt).strip():
         return None
+    options = dict(_option_pairs(data.get("options")))
+    requested_visibility = str(options.get("visibility") or "private").strip().lower()
+    visibility = (
+        requested_visibility if requested_visibility in {"private", "public"} else "private"
+    )
     return {
         "prompt": str(prompt).strip(),
         "attachments": attachments,
@@ -532,6 +558,7 @@ def build_user_install_turn(interaction: Any) -> dict[str, Any] | None:
         "reference": None,
         "note": " ".join(note_bits),
         "command": name,
+        "visibility": visibility,
     }
 
 
@@ -543,12 +570,21 @@ class _NoopTyping:
         return False
 
 
+_UNSET = object()
+
+
 class UserInstallChannelAdapter:
-    def __init__(self, session: "UserInstallSession"):
+    def __init__(
+        self,
+        session: "UserInstallSession",
+        *,
+        channel_id: Any = None,
+        guild: Any = _UNSET,
+    ):
         self._session = session
-        self.id = session.channel_id
+        self.id = session.channel_id if channel_id is None else channel_id
         self.name = session.channel_name
-        self.guild = session.guild
+        self.guild = session.guild if guild is _UNSET else guild
         self._real = getattr(session.interaction, "channel", None)
 
     def typing(self):
@@ -576,12 +612,16 @@ class UserInstallChannelAdapter:
 class UserInstallSession:
     """Send via the interaction token: 1 original + 5 follow-ups, 15 minutes."""
 
-    def __init__(self, interaction: Any):
+    def __init__(self, interaction: Any, *, visibility: str = "private"):
         self.interaction = interaction
         self.channel_id = getattr(interaction, "channel_id", None) or 0
         channel = getattr(interaction, "channel", None)
         self.channel_name = str(getattr(channel, "name", "") or "") or "user-install"
         self.guild = getattr(interaction, "guild", None)
+        self.visibility = (
+            "public" if str(visibility or "private").strip().lower() == "public" else "private"
+        )
+        self.ephemeral = self.visibility == "private"
         self._sent = 0
         self._last = None
 
@@ -592,7 +632,7 @@ class UserInstallSession:
             return
         defer = getattr(response, "defer", None)
         if callable(defer):
-            await defer()
+            await defer(ephemeral=self.ephemeral)
 
     async def send(self, content: str | None = None, file=None, **kwargs):
         return await type(self)._send_impl(self, content, file, **kwargs)
@@ -639,6 +679,10 @@ class UserInstallSession:
         ):
             if key in kwargs and kwargs[key] is not None:
                 payload[key] = kwargs[key]
+        # Webhook follow-ups bypass the bot channel-send helper. Keep model,
+        # memory, and user-supplied text from pinging anyone by default.
+        payload["allowed_mentions"] = discord.AllowedMentions.none()
+        payload["ephemeral"] = self.ephemeral
         if not payload:
             payload["content"] = "\u200b"
         sent = await send(**payload)
@@ -661,7 +705,10 @@ class UserInstallSession:
             edit = getattr(last, "edit", None)
             if callable(edit):
                 try:
-                    updated = await edit(content=merged)
+                    updated = await edit(
+                        content=merged,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                     self._last = updated or last
                     return self._last
                 except Exception:
@@ -680,15 +727,41 @@ class UserInstallMessageAdapter:
         reference: Any | None = None,
         history: list[dict] | None = None,
         note: str = "",
+        search_query: str | None = None,
+        web_mode: str = "auto",
+        mode: str = "ask",
+        visibility: str = "private",
     ):
         self.user_install = True
         self.tool_platform = "user_install"
         self.suppress_typing = True
         self.interaction = interaction
-        self._session = UserInstallSession(interaction)
+        self.response_visibility = (
+            "public" if str(visibility or "private").strip().lower() == "public" else "private"
+        )
+        self._session = UserInstallSession(
+            interaction, visibility=self.response_visibility
+        )
         self.id = getattr(interaction, "id", 0)
-        self.channel = UserInstallChannelAdapter(self._session)
-        self.guild = self._session.guild
+        private_channel_id = private_channel_key(interaction)
+        self.channel = UserInstallChannelAdapter(
+            self._session,
+            channel_id=(
+                private_channel_id
+                if self.response_visibility == "private"
+                else self._session.channel_id
+            ),
+            guild=(
+                None
+                if self.response_visibility == "private"
+                else self._session.guild
+            ),
+        )
+        self.guild = (
+            None
+            if self.response_visibility == "private"
+            else self._session.guild
+        )
         self.author = getattr(interaction, "user", None) or SimpleNamespace(
             id=0, name="unknown", display_name="unknown", bot=False
         )
@@ -706,6 +779,9 @@ class UserInstallMessageAdapter:
         self.reference = reference
         self.user_install_history = list(history or [])
         self.user_install_note = note
+        self.user_install_search_query = str(search_query or "")
+        self.user_install_web_mode = str(web_mode or "auto").strip().lower()
+        self.user_install_mode = str(mode or "ask").strip().lower()
         self.poll = None
         self.activity = None
         self.call = None
@@ -734,12 +810,20 @@ async def _ephemeral(interaction: Any, text: str) -> None:
     if callable(is_done) and not is_done():
         send = getattr(response, "send_message", None)
         if callable(send):
-            await send(text, ephemeral=True)
+            await send(
+                text,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
     followup = getattr(interaction, "followup", None)
     send = getattr(followup, "send", None)
     if callable(send):
-        await send(text, ephemeral=True)
+        await send(
+            text,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
@@ -761,16 +845,25 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         await _ephemeral(interaction, "Maxwell could not read that command.")
         return True
     try:
+        visibility = (
+            "public"
+            if str(turn.get("visibility") or "private").strip().lower() == "public"
+            else "private"
+        )
         response = getattr(interaction, "response", None)
         is_done = getattr(response, "is_done", None)
         if not (callable(is_done) and is_done()):
             defer = getattr(response, "defer", None)
             if callable(defer):
-                await defer()
+                await defer(ephemeral=visibility == "private")
     except Exception:
         logger.exception("user-install defer failed")
         return True
-    history = await snapshot_channel_history(bot, interaction)
+    history = (
+        await snapshot_channel_history(bot, interaction)
+        if visibility == "public"
+        else []
+    )
     note = str(turn.get("note") or "")
     if history:
         note = (
@@ -784,7 +877,10 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         mentions=turn.get("mentions") or [],
         reference=turn.get("reference"),
         history=history,
-        note=note,
+        search_query=turn.get("search_query") or str(turn["prompt"]),
+        web_mode=turn.get("web") or "auto",
+        mode=turn.get("mode") or "ask",
+        visibility=visibility,
     )
     spawn = getattr(bot, "_spawn_detached", None)
     on_message = getattr(bot, "on_message", None)

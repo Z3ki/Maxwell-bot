@@ -101,6 +101,7 @@ def test_kick_member_blocks_equal_or_higher_role():
         owner_id=9,
         get_member=lambda uid: target if int(uid) == 99 else None,
     )
+    asker.guild = guild
     bot = SimpleNamespace(get_guild=lambda _gid: None)
     msg = SimpleNamespace(guild=guild, author=asker)
     result = asyncio.run(KickMemberTool(bot).execute(msg, user_id="99"))
@@ -114,6 +115,7 @@ def test_kick_member_refuses_when_asker_lacks_permission():
     guild = SimpleNamespace(
         id=10, name="Villa", me=me, owner_id=9, get_member=lambda _uid: None
     )
+    asker.guild = guild
     bot = SimpleNamespace(get_guild=lambda _gid: None)
     msg = SimpleNamespace(guild=guild, author=asker)
     result = asyncio.run(KickMemberTool(bot).execute(msg, user_id="99"))

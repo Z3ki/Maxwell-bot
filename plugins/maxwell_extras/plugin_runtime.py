@@ -166,10 +166,11 @@ def install_plugin_runtime_guards(bot: Any) -> None:
         if not entries:
             return 0
         actor = self._event_actor_id(args)
+        guild_id = self._event_guild_id(args)
         filtered = [
             (plugin, callback)
             for plugin, callback in entries
-            if self.is_plugin_enabled_for_user(plugin, actor)
+            if self.is_plugin_enabled_for_user(plugin, actor, guild_id)
         ]
         if not filtered:
             return 0

@@ -121,10 +121,12 @@ def test_fetch_url_defers_visual_links_to_see_image():
         _max_media_bytes=lambda: 1024 * 1024,
         _download_embed_media=_download,
         _cache_media_context=lambda *a, **k: None,
+        _authorize_tool_execution=lambda *_a, **_k: None,
         mark_message_tainted=lambda *_a, **_k: (_ for _ in ()).throw(
             AssertionError("visual fetch must not taint")
         ),
     )
+    bot.tools = {"see_image": SeeImageTool(bot)}
     tool = FetchUrlTool(bot)
     msg = SimpleNamespace(id=1, channel=SimpleNamespace(id=2))
     result = asyncio.run(

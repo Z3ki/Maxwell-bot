@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
-from types import SimpleNamespace
+import asyncio
+import json
 from typing import Any
 
 import discord
 
 import user_install as ui
+from control_defaults import GUILD_CAPABILITIES
+from .byok import PROVIDERS, VaultUnavailable, make_request_provider
 
 logger = logging.getLogger(__name__)
 _ACTIVE_STORE: Any = None
@@ -20,196 +22,64 @@ _PERSONAL_DEFAULT_VALUES = {
     "web": {"auto", "search", "off"},
     "detail": {"quick", "balanced", "deep"},
     "context": {"0", "10", "25", "50"},
+    "visibility": {"private", "public"},
 }
 _PERSONAL_SETTINGS = {
     "mode": ("Response mode", "Choose how Maxwell approaches your requests."),
     "web": ("Web research", "Choose when Maxwell searches the web."),
     "detail": ("Answer detail", "Choose how much detail Maxwell gives."),
     "context": ("Channel context", "Choose how many recent channel messages Maxwell may use."),
+    "visibility": ("Default visibility", "Choose whether /maxwell replies are private or visible in the channel."),
     "language": ("Response language", "Set a preferred language, such as English or Spanish."),
-    "style": ("Reply style", "Add a short preference for how Maxwell writes."),
+    "style": ("Reply style", "Set a personal style preference for Maxwell's replies."),
+    "byok": ("Bring your own key", "Select a provider/model, save an encrypted key, test it, or delete it."),
 }
 _SERVER_SETTINGS = {
+    "channels": ("Response channels", "Limit Maxwell to one channel in this server or allow all channels."),
+    "plugins": ("Plugin tools", "Choose which optional plugin tools are available in this server."),
+    "capabilities": ("Enabled capabilities", "Choose which tool groups are available in this server."),
+    "moderation": ("Moderation policy", "Enable or disable Maxwell's moderation tools in this server."),
     "progress": ("Tool progress", "Show or hide progress messages while Maxwell works."),
     "ticket": ("Ticket greetings", "Enable or disable greetings in ticket channels."),
 }
+_OWNER_SETTINGS = {
+    "diagnostics": ("Runtime diagnostics", "View redacted application diagnostics."),
+    "tools_enabled": ("Global tool access", "Enable or disable model tool execution globally."),
+    "autonomy_enabled": ("Autonomous activity", "Enable or disable autonomous activity globally."),
+    "message_quota_enabled": ("Message allowance", "Enable or disable the current message allowance policy."),
+    "user_quota": ("User message allowance", "Set or clear one user's quota override."),
+    "reload": ("Reload controls", "Reload the trusted bot_control.json file."),
+}
 _PERSONAL_VALUE_CHOICES = {
     "mode": [
-        ("Answer normally", "ask"),
-        ("Research", "research"),
-        ("Summarize", "summarize"),
-        ("Explain", "explain"),
-        ("Rewrite", "rewrite"),
-        ("Translate", "translate"),
-        ("Brainstorm", "brainstorm"),
-        ("Write code", "code"),
+        ("Answer normally", "ask"), ("Research", "research"),
+        ("Summarize", "summarize"), ("Explain", "explain"),
+        ("Rewrite", "rewrite"), ("Translate", "translate"),
+        ("Brainstorm", "brainstorm"), ("Write code", "code"),
     ],
     "web": [("Automatic", "auto"), ("Always search", "search"), ("Off", "off")],
     "detail": [("Quick", "quick"), ("Balanced", "balanced"), ("Deep", "deep")],
     "context": [
-        ("No recent context", "0"),
-        ("Last 10 messages", "10"),
-        ("Last 25 messages", "25"),
-        ("Last 50 messages", "50"),
+        ("No recent context", "0"), ("Last 10 messages", "10"),
+        ("Last 25 messages", "25"), ("Last 50 messages", "50"),
     ],
-}
-_PROMPT_INTENTS = {
-    "image": (
-        "Create an image for the user's request. Use the available image-generation tool "
-        "when appropriate, and tell the user plainly if image generation is unavailable."
-    ),
-    "chess": (
-        "Handle this as a chess request. Use the chess game tools for game state and moves; "
-        "do not claim a move or game succeeded unless the tool confirms it."
-    ),
-    "checkers": (
-        "Handle this as a checkers request. Use the checkers game tools for game state and moves; "
-        "do not claim a move or game succeeded unless the tool confirms it."
-    ),
-    "moderation": (
-        "Handle this as a Discord moderation request. Use only moderation tools the requester "
-        "is authorized to use in this server, and confirm the actual tool result."
-    ),
-    "memory": (
-        "Handle this as a memory request. Respect the current user's and server's memory scope; "
-        "do not claim that information was saved or deleted unless a tool confirms it."
-    ),
-    "reminder": (
-        "Handle this as a reminder request. Create, inspect, or cancel only the reminder the "
-        "user asks for, and confirm the tool result."
-    ),
+    "visibility": [("Private", "private"), ("Public", "public")],
 }
 
 CONFIG_COMMAND = {
     "name": "config",
-    "description": "Open a private menu for your settings and server controls.",
+    "description": "Open private personal, server, or application-owner settings.",
     **_APP_META,
 }
-
-PERSONALITY_COMMAND = {
-    "name": "personality",
-    "description": "Set a personal style preference for Maxwell's replies.",
+CANCEL_COMMAND = {
+    "name": "cancel",
+    "description": "Cancel your running Maxwell request in this channel.",
     **_APP_META,
-    "options": [
-        {
-            "name": "action",
-            "description": "View, set, or reset your personal style",
-            "type": 3,
-            "required": False,
-            "choices": [
-                {"name": "View", "value": "view"},
-                {"name": "Set", "value": "set"},
-                {"name": "Reset", "value": "reset"},
-            ],
-        },
-        {
-            "name": "text",
-            "description": "A short style preference (up to 800 characters)",
-            "type": 3,
-            "required": False,
-            "max_length": 800,
-        },
-    ],
 }
-
-
-def _prompt_command(
-    name: str,
-    description: str,
-    *,
-    guild_only: bool = False,
-    allow_image: bool = False,
-) -> dict[str, Any]:
-    meta = (
-        {"integration_types": [0], "contexts": [0]}
-        if guild_only
-        else {"integration_types": [0, 1], "contexts": [0, 1, 2]}
-    )
-    options = [
-        {
-            "name": "prompt",
-            "description": "What you want Maxwell to do",
-            "type": 3,
-            "required": True,
-            "max_length": 4000,
-        }
-    ]
-    if allow_image:
-        options.append(
-            {
-                "name": "image",
-                "description": "Optional image to edit or use as a reference",
-                "type": 11,
-                "required": False,
-            }
-        )
-    return {
-        "name": name,
-        "description": description,
-        "type": 1,
-        **meta,
-        "options": options,
-    }
-
-
-PROMPT_COMMANDS = [
-    _prompt_command(
-        "image", "Create or edit an image from your request.", allow_image=True
-    ),
-    _prompt_command("chess", "Start a chess game or make a chess move."),
-    _prompt_command("checkers", "Start a checkers game or make a move."),
-    _prompt_command("moderation", "Ask Maxwell to help with server moderation.", guild_only=True),
-    _prompt_command("memory", "Ask Maxwell to recall, save, or manage scoped memory."),
-    _prompt_command("reminder", "Create, inspect, or cancel one of your reminders."),
-]
-
-# Useful prefix-command behavior is exposed through discoverable slash commands.
-# Retired detached-agent, shell, and confirmation commands are intentionally absent.
-_LEGACY_SLASH_COMMANDS = {
-    "stop": ("stop", "Stop a running response in this channel.", True),
-    "jobs": ("jobs", "List your current Maxwell jobs.", False),
-    "job": ("job", "Inspect or cancel one of your jobs.", True),
-    "clear-memory": ("clearmem", "Clear this channel's stored conversation memory.", False),
-    "downvote": ("downvote", "Mark a recent reply as unhelpful.", True),
-    "negative-memory": ("neg", "Manage a negative memory record.", True),
-    "summarize-memory": ("summarize", "Summarize recent messages into long-term memory.", True),
-    "context": ("context", "Inspect or manage this channel's context.", True),
-    "rem": ("rem", "Inspect or run the REM maintenance process.", True),
-    "autonomy": ("autonomy", "View or update autonomous server behavior.", True),
-    "sleep": ("sleep", "Pause Maxwell's replies for a short period.", True),
-    "wake": ("wake", "End Maxwell's sleep window.", False),
-    "progress": ("progress", "Set this server's tool-progress message setting.", True),
-    "ticket-greetings": ("ticket", "Set ticket-channel greetings for this server.", True),
-    "admin": ("admin", "Manage Maxwell's configured operator list.", True),
-    "solo": ("solo", "Restrict Maxwell's responses to one server channel.", True),
-    "voice": ("vc", "Control Maxwell's voice connection and speech.", True),
-    "plugins": ("plugin", "List or enable and disable available plugins.", True),
-    "blacklist": ("blacklist", "Manage Maxwell's user blacklist.", True),
-    "unblacklist": ("unblacklist", "Remove a user from Maxwell's blacklist.", True),
-    "debug": ("debug", "View restricted runtime diagnostics.", False),
-}
-
-
-def _legacy_command_definitions() -> list[dict[str, Any]]:
-    rows = []
-    for name, (_target, description, has_argument) in _LEGACY_SLASH_COMMANDS.items():
-        row: dict[str, Any] = {"name": name, "description": description, **_APP_META}
-        if has_argument:
-            row["options"] = [
-                {
-                    "name": "arguments",
-                    "description": "Command arguments",
-                    "type": 3,
-                    "required": False,
-                    "max_length": 1000,
-                }
-            ]
-        rows.append(row)
-    return rows
 
 
 def command_definitions() -> list[dict[str, Any]]:
-    return [CONFIG_COMMAND, PERSONALITY_COMMAND, *PROMPT_COMMANDS, *_legacy_command_definitions()]
+    return [CONFIG_COMMAND, CANCEL_COMMAND]
 
 
 def _options(interaction: Any) -> dict[str, Any]:
@@ -246,8 +116,86 @@ def _can_manage_server(bot: Any, interaction: Any) -> bool:
         for key in ("administrator", "manage_guild")
     ):
         return True
-    checker = getattr(bot, "_is_admin", None)
-    return bool(callable(checker) and checker(getattr(user, "id", None)))
+    return False
+
+
+def _is_application_owner(bot: Any, interaction: Any) -> bool:
+    """Only configured application owners can open global controls."""
+    user_id = _user_id(interaction)
+    config = getattr(bot, "config", None)
+    owners = getattr(config, "MAXWELL_OWNER_IDS", ()) or ()
+    return bool(user_id and user_id in {str(value) for value in owners})
+
+
+def _guild_disabled(bot: Any, guild_id: str) -> set[str]:
+    from .admin_commands import _control
+
+    mapping = _control(bot).get("guild_disabled_capabilities", {})
+    values = mapping.get(str(guild_id), []) if isinstance(mapping, dict) else []
+    return {str(value) for value in values if str(value) in GUILD_CAPABILITIES}
+
+
+def _guild_plugin_names(bot: Any) -> list[str]:
+    manager = getattr(bot, "plugin_manager", None)
+    loaded = getattr(manager, "loaded_plugins", {}) or {}
+    names: list[str] = []
+    for name in loaded:
+        plugin_id = str(name or "").strip()
+        if not plugin_id.isidentifier():
+            continue
+        is_protected = getattr(manager, "is_protected", None)
+        if callable(is_protected) and is_protected(plugin_id):
+            continue
+        names.append(plugin_id)
+    return sorted(set(names))
+
+
+def _guild_plugin_overrides(bot: Any, guild_id: str) -> dict[str, bool]:
+    from .admin_commands import _control
+
+    mapping = _control(bot).get("guild_plugin_overrides", {})
+    values = mapping.get(str(guild_id), {}) if isinstance(mapping, dict) else {}
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(name): value
+        for name, value in values.items()
+        if str(name).isidentifier() and type(value) is bool
+    }
+
+
+async def _set_guild_plugin_selection(
+    bot: Any, guild_id: str, enabled: set[str]
+) -> None:
+    from .admin_commands import _control, _set_control
+
+    names = _guild_plugin_names(bot)
+    if len(names) > 25:
+        raise ValueError("Discord can display at most 25 plugin choices")
+    if not enabled <= set(names):
+        raise ValueError("a selected plugin is unavailable")
+    mapping = _control(bot).get("guild_plugin_overrides", {})
+    mapping = dict(mapping) if isinstance(mapping, dict) else {}
+    # Save a complete choice for the currently installed optional plugins.
+    # Uninstalled plugin IDs are discarded so stale `true` values cannot
+    # silently re-enable a plugin if it is installed again later.
+    if names:
+        mapping[str(guild_id)] = {name: name in enabled for name in names}
+    else:
+        mapping.pop(str(guild_id), None)
+    await _set_control(bot, "guild_plugin_overrides", json.dumps(mapping))
+
+
+async def _set_guild_disabled(bot: Any, guild_id: str, disabled: set[str]) -> None:
+    from .admin_commands import _control, _set_control
+
+    mapping = _control(bot).get("guild_disabled_capabilities", {})
+    mapping = dict(mapping) if isinstance(mapping, dict) else {}
+    if disabled:
+        mapping[str(guild_id)] = sorted(disabled)
+    else:
+        mapping.pop(str(guild_id), None)
+    await _set_control(bot, "guild_disabled_capabilities", json.dumps(mapping))
 
 
 async def _send(interaction: Any, text: str) -> None:
@@ -271,15 +219,18 @@ def _friendly_personal_value(key: str, value: Any) -> str:
         return text.capitalize()
     if key == "context":
         return "No recent messages" if text == "0" else f"Last {text} messages"
+    if key == "visibility":
+        return {"private": "Private (recommended default)", "public": "Public"}.get(text, "Private")
     return text
 
 
 class _ConfigScopeSelect(discord.ui.Select):
     def __init__(self, panel: "_ConfigPanel"):
-        options = [
-            discord.SelectOption(label="My personal settings", value="personal"),
-            discord.SelectOption(label="This server", value="server"),
-        ]
+        options = [discord.SelectOption(label="My personal settings", value="personal")]
+        if panel.can_manage_server:
+            options.append(discord.SelectOption(label="This server", value="server"))
+        if panel.is_owner:
+            options.append(discord.SelectOption(label="Application owner", value="owner"))
         super().__init__(
             placeholder="Choose a settings area",
             min_values=1,
@@ -291,19 +242,36 @@ class _ConfigScopeSelect(discord.ui.Select):
         self.panel = panel
 
     async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
         requested_scope = self.values[0]
         if requested_scope == "server" and not _can_manage_server(self.panel.bot, interaction):
             await _send(interaction, "You no longer have permission to manage this server's settings.")
             return
+        if requested_scope == "owner" and not _is_application_owner(self.panel.bot, interaction):
+            await _send(interaction, "Application-owner settings are restricted to the configured application owners.")
+            return
+        if requested_scope not in {"personal", "server", "owner"}:
+            await _send(interaction, "That settings area is unavailable.")
+            return
         self.panel.scope = requested_scope
-        self.panel.selected_key = "mode" if self.panel.scope == "personal" else "progress"
+        self.panel.selected_key = {
+            "personal": "mode", "server": "channels", "owner": "diagnostics"
+        }[self.panel.scope]
         self.panel._build()
-        await interaction.response.edit_message(content=self.panel.render(), view=self.panel)
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _ConfigSettingSelect(discord.ui.Select):
     def __init__(self, panel: "_ConfigPanel"):
-        settings = _PERSONAL_SETTINGS if panel.scope == "personal" else _SERVER_SETTINGS
+        settings = {
+            "personal": _PERSONAL_SETTINGS,
+            "server": _SERVER_SETTINGS,
+            "owner": _OWNER_SETTINGS,
+        }[panel.scope]
         options = [
             discord.SelectOption(label=label, value=key, description=description[:100])
             for key, (label, description) in settings.items()
@@ -319,9 +287,14 @@ class _ConfigSettingSelect(discord.ui.Select):
         self.panel = panel
 
     async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
         self.panel.selected_key = self.values[0]
         self.panel._build()
-        await interaction.response.edit_message(content=self.panel.render(), view=self.panel)
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _ConfigValueSelect(discord.ui.Select):
@@ -342,6 +315,282 @@ class _ConfigValueSelect(discord.ui.Select):
 
     async def callback(self, interaction: Any) -> None:
         await self.panel.set_choice(interaction, self.values[0])
+
+
+class _GuildCapabilitySelect(discord.ui.Select):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        disabled = _guild_disabled(panel.bot, panel.guild_id)
+        options = [
+            discord.SelectOption(
+                label=f"Disable {label}"[:100],
+                value=key,
+                default=key in disabled,
+                description=f"{label} tools {('disabled' if key in disabled else 'enabled')}"[:100],
+            )
+            for key, label in GUILD_CAPABILITIES.items()
+        ]
+        super().__init__(
+            placeholder="Select capability groups to disable",
+            min_values=0,
+            max_values=min(25, len(options)),
+            options=options,
+            custom_id="maxwell:config:capabilities",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        disabled = {str(value) for value in self.values}
+        if not disabled <= set(GUILD_CAPABILITIES):
+            await _send(interaction, "That capability group is not available.")
+            return
+        try:
+            await _set_guild_disabled(self.panel.bot, self.panel.guild_id, disabled)
+        except Exception as exc:
+            logger.warning("Could not update server capabilities (%s)", type(exc).__name__)
+            await _send(interaction, "Could not save the server capability settings.")
+            return
+        self.panel._build()
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class _GuildPluginSelect(discord.ui.Select):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        manager = getattr(panel.bot, "plugin_manager", None)
+        names = _guild_plugin_names(panel.bot)
+        overrides = _guild_plugin_overrides(panel.bot, panel.guild_id)
+        is_enabled = getattr(manager, "is_plugin_enabled_for_user", None)
+        options = []
+        for name in names:
+            if name in overrides:
+                enabled = overrides[name]
+            elif callable(is_enabled):
+                enabled = bool(is_enabled(name, None))
+            else:
+                enabled = False
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=name,
+                    default=enabled,
+                    description=("Enabled in this server" if enabled else "Disabled in this server"),
+                )
+            )
+        super().__init__(
+            placeholder="Select plugin tools enabled in this server",
+            min_values=0,
+            max_values=min(25, len(options)),
+            options=options,
+            custom_id="maxwell:config:plugins",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        try:
+            await _set_guild_plugin_selection(
+                self.panel.bot, self.panel.guild_id, {str(value) for value in self.values}
+            )
+        except Exception as exc:
+            logger.warning("Could not update server plugin settings (%s)", type(exc).__name__)
+            await _send(interaction, "Could not save the plugin settings.")
+            return
+        self.panel._build()
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class _GuildChannelSelect(discord.ui.Select):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        guild = getattr(panel.command_interaction, "guild", None)
+        channels = [
+            channel for channel in (getattr(guild, "text_channels", None) or [])
+            if getattr(channel, "id", None) is not None
+        ][:24]
+        options = [discord.SelectOption(label="All channels", value="all")]
+        options.extend(
+            discord.SelectOption(
+                label=("#" + str(getattr(channel, "name", "channel")))[:100],
+                value=str(channel.id),
+            )
+            for channel in channels
+        )
+        super().__init__(
+            placeholder="Choose where Maxwell may reply",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="maxwell:config:channels",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        value = str(self.values[0])
+        guild = getattr(interaction, "guild", None)
+        if str(getattr(guild, "id", "") or "") != self.panel.guild_id:
+            await _send(interaction, "This menu belongs to a different server.")
+            return
+        mapping = dict(getattr(self.panel.bot, "_control", {}).get("guild_solo_channel", {}) or {})
+        saver = getattr(self.panel.bot, "_save_solo", None)
+        if not callable(saver):
+            await _send(interaction, "Server channel settings are unavailable right now.")
+            return
+        if value == "all":
+            mapping.pop(self.panel.guild_id, None)
+            await saver(mapping, self.panel.guild_id, unblock_autonomy=True)
+        else:
+            allowed_ids = {
+                str(getattr(channel, "id", ""))
+                for channel in (getattr(guild, "text_channels", None) or [])
+            }
+            if value not in allowed_ids:
+                await _send(interaction, "Choose a text channel from this server.")
+                return
+            mapping[self.panel.guild_id] = value
+            await saver(mapping, self.panel.guild_id, unblock_autonomy=False)
+        self.panel._build()
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class _OwnerDiagnosticsSelect(discord.ui.Select):
+    _SECTIONS = ("overview", "runtime", "controls", "memory", "autonomy", "tools", "plugins", "data")
+
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        options = [
+            discord.SelectOption(label=section.replace("_", " ").title(), value=section)
+            for section in self._SECTIONS
+        ]
+        super().__init__(
+            placeholder="Choose a redacted diagnostics view",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="maxwell:config:diagnostics",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        section = str(self.values[0])
+        if section not in self._SECTIONS or not _is_application_owner(self.panel.bot, interaction):
+            await _send(interaction, "That diagnostics view is unavailable.")
+            return
+        from .admin_commands import _control, _embed, _json_file, _plugin_data, _redact, _runtime_data
+
+        if section == "controls":
+            await _send(interaction, embed=_embed(self.panel.bot, section), file=_json_file(_redact(_control(self.panel.bot)), "maxwell-controls.json"))
+        elif section == "data":
+            payload = {"runtime": _runtime_data(self.panel.bot), "controls": _redact(_control(self.panel.bot)), "plugins": _plugin_data(self.panel.bot)}
+            await _send(interaction, content="Redacted Maxwell diagnostics export.", file=_json_file(payload, "maxwell-diagnostics.json"))
+        else:
+            await _send(interaction, embed=_embed(self.panel.bot, section))
+
+
+class _OwnerQuotaModal(discord.ui.Modal):
+    def __init__(self, panel: "_ConfigPanel"):
+        super().__init__(title="Update a user's message allowance", timeout=180)
+        self.panel = panel
+        self.user_id_input = discord.ui.TextInput(label="Discord user ID", max_length=20, required=True)
+        self.action_input = discord.ui.TextInput(
+            label="Action: status, set, clear, reset, exempt, unexempt",
+            max_length=10, required=True, default="status",
+        )
+        self.amount_input = discord.ui.TextInput(label="Limit (for set only)", max_length=6, required=False)
+        self.add_item(self.user_id_input)
+        self.add_item(self.action_input)
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if not _is_application_owner(self.panel.bot, interaction):
+            await _send(interaction, "Only the configured application owner can update message allowances.")
+            return
+        target = str(self.user_id_input.value or "").strip()
+        action = str(self.action_input.value or "").strip().lower()
+        if not (target.isdecimal() and len(target) <= 20) or action not in {"status", "set", "clear", "reset", "exempt", "unexempt"}:
+            await _send(interaction, "Enter a valid Discord user ID and one of the listed actions.")
+            return
+        ledger = getattr(self.panel.bot, "_message_quota", None)
+        if ledger is None:
+            await _send(interaction, "Message allowance data is unavailable.")
+            return
+        if action == "set":
+            try:
+                amount = int(str(self.amount_input.value or ""))
+            except (TypeError, ValueError):
+                await _send(interaction, "For `set`, enter a whole-number limit from 1 to 100,000.")
+                return
+            if not 1 <= amount <= 100_000:
+                await _send(interaction, "The limit must be from 1 to 100,000.")
+                return
+            ledger.configure(target, limit=amount)
+        elif action == "clear":
+            ledger.configure(target, clear=True)
+        elif action == "reset":
+            ledger.configure(target, reset=True)
+        elif action == "exempt":
+            ledger.configure(target, exempt=True)
+        elif action == "unexempt":
+            ledger.configure(target, exempt=False)
+        from .admin_commands import _control
+
+        control = _control(self.panel.bot)
+        state = ledger.status(target, int(control.get("message_quota_limit") or 300), int(control.get("message_quota_window_seconds") or 18000))
+        await _send(interaction, f"User `{target}` · {state['used']}/{state['limit']} messages in the last {state['window_seconds']}s · exempt: {'yes' if state['exempt'] else 'no'}")
+
+
+class _OwnerQuotaButton(discord.ui.Button):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        super().__init__(label="Manage user allowance", style=discord.ButtonStyle.primary, custom_id="maxwell:config:user_quota", row=row)
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if not _is_application_owner(self.panel.bot, interaction):
+            await _send(interaction, "Only the configured application owner can manage message allowances.")
+            return
+        await interaction.response.send_modal(_OwnerQuotaModal(self.panel))
+
+
+class _OwnerReloadButton(discord.ui.Button):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        super().__init__(label="Reload controls", style=discord.ButtonStyle.secondary, custom_id="maxwell:config:reload", row=row)
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if not _is_application_owner(self.panel.bot, interaction):
+            await _send(interaction, "Only the configured application owner can reload global controls.")
+            return
+        from .admin_commands import _reload_control
+
+        try:
+            await _reload_control(self.panel.bot)
+        except Exception as exc:
+            logger.warning("Control reload failed (%s)", type(exc).__name__)
+            await _send(interaction, "Could not reload the operator control file.")
+        else:
+            await _send(interaction, "Reloaded the operator control file.")
 
 
 class _ConfigEditButton(discord.ui.Button):
@@ -404,14 +653,236 @@ class _ConfigTextModal(discord.ui.Modal):
         except ValueError as exc:
             await _send(interaction, str(exc))
             return
-        await interaction.response.send_message("Saved your setting.", ephemeral=True)
+        await interaction.response.send_message(
+            "Saved your setting.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self.panel._build()
         try:
             await self.panel.command_interaction.edit_original_response(
-                content=self.panel.render(), view=self.panel
+                content=self.panel.render(), view=self.panel,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             logger.debug("Could not refresh the original /config panel after a text edit", exc_info=True)
+
+
+class _ByokCredentialsModal(discord.ui.Modal):
+    def __init__(self, panel: "_ConfigPanel", provider: str):
+        label = PROVIDERS[provider]["label"]
+        super().__init__(title=f"Set {label} credentials", timeout=180)
+        self.panel = panel
+        self.provider = provider
+        self.model = discord.ui.TextInput(
+            label="Model ID",
+            default=PROVIDERS[provider]["suggested_model"],
+            max_length=120,
+            required=True,
+        )
+        self.api_key = discord.ui.TextInput(
+            label="API key (private form)",
+            placeholder="Paste the provider key here; it is encrypted before storage",
+            max_length=512,
+            required=True,
+        )
+        self.add_item(self.model)
+        self.add_item(self.api_key)
+
+    async def on_submit(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if self.panel.scope != "personal":
+            await _send(interaction, "BYOK credentials are personal settings only.")
+            return
+        vault = getattr(self.panel.bot, "_byok_vault", None)
+        if vault is None or not getattr(vault, "enabled", False):
+            await _send(
+                interaction,
+                "BYOK is unavailable until the operator configures MAXWELL_BYOK_ENCRYPTION_KEY.",
+            )
+            return
+        try:
+            await asyncio.to_thread(
+                vault.save,
+                self.panel.user_id,
+                self.provider,
+                str(self.model.value or ""),
+                str(self.api_key.value or ""),
+            )
+        except ValueError as exc:
+            await _send(interaction, str(exc))
+            return
+        except Exception as exc:
+            logger.warning("BYOK credential save failed (%s)", type(exc).__name__)
+            await _send(interaction, "Could not save that BYOK configuration.")
+            return
+        self.panel.selected_provider = self.provider
+        self.panel._build()
+        await interaction.response.send_message(
+            "Saved. This provider will receive the request context you send to Maxwell.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        try:
+            await self.panel.command_interaction.edit_original_response(
+                content=self.panel.render(), view=self.panel,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            logger.debug("Could not refresh /config after BYOK update", exc_info=True)
+
+
+class _ByokProviderSelect(discord.ui.Select):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        options = [
+            discord.SelectOption(
+                label=details["label"],
+                value=provider,
+                default=provider == panel.selected_provider,
+            )
+            for provider, details in PROVIDERS.items()
+        ]
+        super().__init__(
+            placeholder="Choose your provider",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="maxwell:config:byok_provider",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        self.panel.selected_provider = self.values[0]
+        self.panel._build()
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class _ByokKeyButton(discord.ui.Button):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        super().__init__(
+            label="Set or replace key",
+            style=discord.ButtonStyle.primary,
+            custom_id="maxwell:config:byok_key",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if self.panel.scope != "personal":
+            await _send(interaction, "BYOK controls are available only in personal settings.")
+            return
+        if self.panel.selected_provider not in PROVIDERS:
+            await _send(interaction, "Choose a supported provider first.")
+            return
+        await interaction.response.send_modal(
+            _ByokCredentialsModal(self.panel, self.panel.selected_provider)
+        )
+
+
+class _ByokTestButton(discord.ui.Button):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        super().__init__(
+            label="Test connection",
+            style=discord.ButtonStyle.secondary,
+            custom_id="maxwell:config:byok_test",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if self.panel.scope != "personal":
+            await _send(interaction, "BYOK controls are available only in personal settings.")
+            return
+        vault = getattr(self.panel.bot, "_byok_vault", None)
+        if vault is None:
+            await _send(interaction, "BYOK settings are unavailable right now.")
+            return
+        try:
+            credential = await asyncio.to_thread(vault.get, self.panel.user_id)
+        except Exception as exc:
+            logger.warning("BYOK credential read failed (%s)", type(exc).__name__)
+            await _send(interaction, "Could not read your BYOK configuration.")
+            return
+        if not credential or credential["provider"] != self.panel.selected_provider:
+            await _send(interaction, "Save a key for the selected provider first.")
+            return
+        response = getattr(interaction, "response", None)
+        defer = getattr(response, "defer", None)
+        is_done = getattr(response, "is_done", None)
+        if callable(defer) and not (callable(is_done) and is_done()):
+            await defer(ephemeral=True, thinking=True)
+        try:
+            provider = make_request_provider(self.panel.bot, credential)
+            await asyncio.wait_for(
+                provider.generate_response(
+                    [{"role": "user", "content": "Reply with OK."}],
+                    timeout=20,
+                    max_tokens=16,
+                    temperature=0,
+                    disable_reasoning=True,
+                ),
+                timeout=25,
+            )
+        except Exception as exc:
+            logger.info("BYOK connection test failed (%s)", type(exc).__name__)
+            await _send(interaction, "Test failed. Check the provider, model, and key.")
+        else:
+            await _send(interaction, "Provider connection succeeded.")
+        finally:
+            if "provider" in locals():
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    try:
+                        await close()
+                    except Exception:
+                        logger.debug("Could not close BYOK test client")
+
+
+class _ByokDeleteButton(discord.ui.Button):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        super().__init__(
+            label="Delete key",
+            style=discord.ButtonStyle.danger,
+            custom_id="maxwell:config:byok_delete",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        if self.panel.scope != "personal":
+            await _send(interaction, "BYOK controls are available only in personal settings.")
+            return
+        vault = getattr(self.panel.bot, "_byok_vault", None)
+        if vault is None:
+            await _send(interaction, "BYOK settings are unavailable right now.")
+            return
+        try:
+            removed = await asyncio.to_thread(vault.delete, self.panel.user_id)
+        except Exception as exc:
+            logger.warning("BYOK credential deletion failed (%s)", type(exc).__name__)
+            await _send(interaction, "Could not delete your BYOK key.")
+            return
+        await _send(interaction, "Deleted your BYOK key." if removed else "No BYOK key was saved.")
+        self.panel._build()
+        try:
+            await self.panel.command_interaction.edit_original_response(
+                content=self.panel.render(), view=self.panel,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            logger.debug("Could not refresh /config after BYOK deletion", exc_info=True)
 
 
 class _ConfigPanel(discord.ui.View):
@@ -424,26 +895,43 @@ class _ConfigPanel(discord.ui.View):
         self.guild_id = _guild_id(interaction)
         self.scope = "personal"
         self.selected_key = "mode"
-        self.can_choose_scope = bool(self.guild_id and _can_manage_server(bot, interaction))
+        self.selected_provider = "openai"
+        self.owner_quota_action = "status"
+        try:
+            status = self._byok_status()
+            if status:
+                self.selected_provider = status["provider"]
+        except Exception:
+            pass
+        self.can_manage_server = bool(self.guild_id and _can_manage_server(bot, interaction))
+        self.is_owner = _is_application_owner(bot, interaction)
+        self.can_choose_scope = self.can_manage_server or self.is_owner
         self._build()
 
-    async def interaction_check(self, interaction: Any) -> bool:
+    async def authorized(self, interaction: Any) -> bool:
         if _user_id(interaction) != self.user_id:
             await _send(interaction, "Only the person who opened `/config` can use this menu.")
             return False
+        if _guild_id(interaction) != self.guild_id:
+            await _send(interaction, "This `/config` menu belongs to a different interaction context.")
+            return False
         if self.scope == "server" and not _can_manage_server(self.bot, interaction):
-            self.scope = "personal"
-            self.selected_key = "mode"
-            self._build()
             await _send(interaction, "You no longer have permission to manage this server's settings.")
             return False
+        if self.scope == "owner" and not _is_application_owner(self.bot, interaction):
+            await _send(interaction, "Application-owner settings are restricted to the configured application owners.")
+            return False
         return True
+
+    async def interaction_check(self, interaction: Any) -> bool:
+        return await self.authorized(interaction)
 
     async def on_timeout(self) -> None:
         try:
             await self.command_interaction.edit_original_response(
                 content=self.render() + "\n\nThis menu expired. Run `/config` again.",
                 view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             logger.debug("Could not remove expired /config controls", exc_info=True)
@@ -453,18 +941,64 @@ class _ConfigPanel(discord.ui.View):
         if self.can_choose_scope:
             self.add_item(_ConfigScopeSelect(self))
         self.add_item(_ConfigSettingSelect(self))
+        base_row = 2 if self.can_choose_scope else 1
+        if self.scope == "personal" and self.selected_key == "byok":
+            self.add_item(_ByokProviderSelect(self, base_row))
+            self.add_item(_ByokKeyButton(self, base_row + 1))
+            last_row = base_row + 2
+            self.add_item(_ByokTestButton(self, last_row))
+            self.add_item(_ByokDeleteButton(self, last_row))
+            return
         if self.scope == "personal":
             choices = _PERSONAL_VALUE_CHOICES.get(self.selected_key)
-        else:
-            choices = [("On", "on"), ("Off", "off")] if self.selected_key in {"progress", "ticket"} else None
-        if choices:
-            self.add_item(_ConfigValueSelect(self, choices))
-        if self.selected_key in {"language", "style"}:
-            self.add_item(_ConfigEditButton(self))
-        self.add_item(_ConfigResetButton(self))
+            if choices:
+                self.add_item(_ConfigValueSelect(self, choices))
+            if self.selected_key in {"language", "style"}:
+                self.add_item(_ConfigEditButton(self))
+            self.add_item(_ConfigResetButton(self))
+            return
+        if self.scope == "server":
+            if self.selected_key == "channels":
+                self.add_item(_GuildChannelSelect(self, base_row))
+                return
+            if self.selected_key == "plugins":
+                names = _guild_plugin_names(self.bot)
+                if names and len(names) <= 25:
+                    self.add_item(_GuildPluginSelect(self, base_row))
+                self.add_item(_ConfigResetButton(self))
+                return
+            if self.selected_key == "capabilities":
+                self.add_item(_GuildCapabilitySelect(self, base_row))
+                return
+            choices = [("On", "on"), ("Off", "off")] if self.selected_key in {"moderation", "progress", "ticket"} else None
+            if choices:
+                self.add_item(_ConfigValueSelect(self, choices))
+            self.add_item(_ConfigResetButton(self))
+            return
+        if self.selected_key == "diagnostics":
+            self.add_item(_OwnerDiagnosticsSelect(self, base_row))
+        elif self.selected_key in {"tools_enabled", "autonomy_enabled", "message_quota_enabled"}:
+            self.add_item(_ConfigValueSelect(self, [("On", "on"), ("Off", "off")]))
+        elif self.selected_key == "user_quota":
+            self.add_item(_OwnerQuotaButton(self, base_row))
+        elif self.selected_key == "reload":
+            self.add_item(_OwnerReloadButton(self, base_row))
 
     def _current_value(self) -> str:
         if self.scope == "personal":
+            if self.selected_key == "byok":
+                try:
+                    status = self._byok_status()
+                except VaultUnavailable:
+                    return "Unavailable: operator encryption key is not configured or cannot decrypt stored credentials"
+                except Exception:
+                    return "Unavailable"
+                if not status:
+                    return "No key saved"
+                return (
+                    f"{status['provider_label']} / {status['model']} / "
+                    f"key {status['masked_key']}"
+                )
             row = self.store.get(self.user_id)
             if self.selected_key == "style":
                 return str(row.get("personality") or "not set")
@@ -472,28 +1006,87 @@ class _ConfigPanel(discord.ui.View):
             if self.selected_key == "language" and not value:
                 return "Use Maxwell's default language"
             return _friendly_personal_value(self.selected_key, value)
+        if self.selected_key == "channels":
+            from .admin_commands import _control
+
+            target = _control(self.bot).get("guild_solo_channel", {}).get(self.guild_id)
+            return f"Restricted to <#{target}>" if target else "All channels"
+        if self.selected_key == "plugins":
+            names = _guild_plugin_names(self.bot)
+            if len(names) > 25:
+                return "Unavailable: Discord's plugin selector limit was exceeded"
+            overrides = _guild_plugin_overrides(self.bot, self.guild_id)
+            if not overrides:
+                return "Inheriting global and personal plugin settings"
+            enabled = sorted(name for name, value in overrides.items() if value)
+            if not enabled:
+                return "No optional plugin tools enabled in this server"
+            shown = ", ".join(enabled[:8])
+            extra = len(enabled) - 8
+            return f"Enabled: {shown}" + (f", and {extra} more" if extra > 0 else "")
+        if self.selected_key == "capabilities":
+            disabled = _guild_disabled(self.bot, self.guild_id)
+            names = [GUILD_CAPABILITIES[key] for key in sorted(disabled)]
+            return "All groups enabled" if not names else "Disabled: " + ", ".join(names)
+        if self.selected_key == "moderation":
+            return "Off" if "moderation" in _guild_disabled(self.bot, self.guild_id) else "On"
         if self.selected_key == "progress":
             enabled = bool(getattr(self.bot, "_progress_enabled", lambda _gid: False)(self.guild_id))
             return "On" if enabled else "Off"
         if self.selected_key == "ticket":
             enabled = bool(getattr(self.bot, "_ticket_greeting_enabled", lambda _gid: False)(self.guild_id))
             return "On" if enabled else "Off"
+        if self.scope == "owner":
+            if self.selected_key == "diagnostics":
+                return "Redacted diagnostics and exports"
+            if self.selected_key in {"tools_enabled", "autonomy_enabled", "message_quota_enabled"}:
+                from .admin_commands import _control
+
+                return "On" if _control(self.bot).get(self.selected_key) else "Off"
+            if self.selected_key == "user_quota":
+                return "Manage a user's message allowance"
+            if self.selected_key == "reload":
+                return "Reload trusted bot_control.json"
         return "Unavailable"
+
+    def _byok_status(self) -> dict[str, str] | None:
+        vault = getattr(self.bot, "_byok_vault", None)
+        if vault is None or not getattr(vault, "enabled", False):
+            raise VaultUnavailable("BYOK encryption is unavailable")
+        return vault.status(self.user_id)
 
     def render(self) -> str:
         if self.scope == "personal":
             title = "Your personal settings"
             selected = _PERSONAL_SETTINGS.get(self.selected_key, ("Setting", ""))[0]
-            hint = "These defaults follow you when you use Maxwell. `/personality` is also available."
+            hint = (
+                "These defaults follow you when you use Maxwell. Private replies are "
+                "the fallback; public replies appear in the channel. BYOK providers "
+                "receive the authorized request context you send them."
+            )
             value = self._current_value()
+            if self.selected_key == "byok":
+                hint = (
+                    "Keys are encrypted at rest. Your selected provider receives the "
+                    "request context you send to Maxwell. Custom endpoints are disabled."
+                )
             if len(value) > 240:
                 value = value[:237] + "..."
-        else:
+        elif self.scope == "server":
             guild = getattr(self.command_interaction, "guild", None)
             guild_name = str(getattr(guild, "name", "this server") or "this server")[:80]
             title = f"Settings for {guild_name}"
             selected = _SERVER_SETTINGS.get(self.selected_key, ("Setting", ""))[0]
-            hint = "Only server managers can change these settings."
+            hint = "Only the server owner or a member with Manage Server can change these settings."
+            if self.selected_key == "plugins":
+                hint += " Plugin choices limit tool and guild-event access in this server; scheduled background jobs remain application-owner controlled."
+            value = self._current_value()
+            if len(value) > 240:
+                value = value[:237] + "..."
+        else:
+            title = "Application owner settings"
+            selected = _OWNER_SETTINGS.get(self.selected_key, ("Setting", ""))[0]
+            hint = "Global controls and diagnostics are limited to the configured application owner."
             value = self._current_value()
             if len(value) > 240:
                 value = value[:237] + "..."
@@ -504,8 +1097,7 @@ class _ConfigPanel(discord.ui.View):
         )[:1900]
 
     async def set_choice(self, interaction: Any, value: str) -> None:
-        if self.scope == "server" and not _can_manage_server(self.bot, interaction):
-            await _send(interaction, "You no longer have permission to manage this server's settings.")
+        if not await self.authorized(interaction):
             return
         if self.scope == "personal":
             if self.selected_key not in _PERSONAL_VALUE_CHOICES or value not in _PERSONAL_DEFAULT_VALUES.get(self.selected_key, set()):
@@ -513,7 +1105,37 @@ class _ConfigPanel(discord.ui.View):
                 return
             stored: Any = int(value) if self.selected_key == "context" else value
             self.store.set_default(self.user_id, self.selected_key, stored)
+        elif self.selected_key == "moderation":
+            if value not in {"on", "off"}:
+                await _send(interaction, "That setting value is unavailable.")
+                return
+            disabled = _guild_disabled(self.bot, self.guild_id)
+            if value == "off":
+                disabled.add("moderation")
+            else:
+                disabled.discard("moderation")
+            try:
+                await _set_guild_disabled(self.bot, self.guild_id, disabled)
+            except Exception as exc:
+                logger.warning("Could not update moderation policy (%s)", type(exc).__name__)
+                await _send(interaction, "Could not save the moderation policy.")
+                return
+        elif self.selected_key in {"tools_enabled", "autonomy_enabled", "message_quota_enabled"} and self.scope == "owner":
+            if not _is_application_owner(self.bot, interaction) or value not in {"on", "off"}:
+                await _send(interaction, "That global setting is unavailable.")
+                return
+            from .admin_commands import _set_control
+
+            try:
+                await _set_control(self.bot, self.selected_key, value == "on")
+            except Exception as exc:
+                logger.warning("Could not update global control %s (%s)", self.selected_key, type(exc).__name__)
+                await _send(interaction, "Could not save that global setting.")
+                return
         elif self.selected_key == "progress":
+            if value not in {"on", "off"}:
+                await _send(interaction, "That setting value is unavailable.")
+                return
             enabled = value == "on"
             enabled_set = getattr(self.bot, "_progress_servers", None)
             disabled_set = getattr(self.bot, "_progress_servers_off", None)
@@ -527,6 +1149,9 @@ class _ConfigPanel(discord.ui.View):
             if callable(saver):
                 saver()
         elif self.selected_key == "ticket":
+            if value not in {"on", "off"}:
+                await _send(interaction, "That setting value is unavailable.")
+                return
             enabled_set = getattr(self.bot, "_ticket_greeting_servers", None)
             if not isinstance(enabled_set, set):
                 enabled_set = self.bot._ticket_greeting_servers = set()
@@ -537,7 +1162,10 @@ class _ConfigPanel(discord.ui.View):
         else:
             await _send(interaction, "That setting cannot be changed with this menu.")
             return
-        await interaction.response.edit_message(content=self.render(), view=self)
+        await interaction.response.edit_message(
+            content=self.render(), view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     def set_text_value(self, key: str, value: str) -> None:
         if self.scope == "personal" and key == "language":
@@ -566,14 +1194,50 @@ class _ConfigPanel(discord.ui.View):
         return None
 
     async def reset(self, interaction: Any) -> None:
-        if self.scope == "server" and not _can_manage_server(self.bot, interaction):
-            await _send(interaction, "You no longer have permission to manage this server's settings.")
+        if not await self.authorized(interaction):
             return
         if self.scope == "personal":
             if self.selected_key == "style":
                 self.store.set_personality(self.user_id, "")
+            elif self.selected_key == "byok":
+                await _send(interaction, "Use **Delete key** to remove BYOK credentials.")
+                return
             else:
                 self.store.reset_default(self.user_id, self.selected_key)
+        elif self.selected_key in {"capabilities", "moderation"}:
+            disabled = _guild_disabled(self.bot, self.guild_id)
+            if self.selected_key == "capabilities":
+                disabled.clear()
+            else:
+                disabled.discard("moderation")
+            try:
+                await _set_guild_disabled(self.bot, self.guild_id, disabled)
+            except Exception as exc:
+                logger.warning("Could not reset server capabilities (%s)", type(exc).__name__)
+                await _send(interaction, "Could not reset that server setting.")
+                return
+        elif self.scope == "server" and self.selected_key == "plugins":
+            try:
+                from .admin_commands import _control, _set_control
+
+                mapping = _control(self.bot).get("guild_plugin_overrides", {})
+                mapping = dict(mapping) if isinstance(mapping, dict) else {}
+                mapping.pop(self.guild_id, None)
+                await _set_control(self.bot, "guild_plugin_overrides", json.dumps(mapping))
+            except Exception as exc:
+                logger.warning("Could not reset server plugin settings (%s)", type(exc).__name__)
+                await _send(interaction, "Could not reset the plugin settings.")
+                return
+        elif self.selected_key == "channels":
+            from .admin_commands import _control
+
+            mapping = dict(_control(self.bot).get("guild_solo_channel", {}) or {})
+            mapping.pop(self.guild_id, None)
+            saver = getattr(self.bot, "_save_solo", None)
+            if not callable(saver):
+                await _send(interaction, "Server channel settings are unavailable right now.")
+                return
+            await saver(mapping, self.guild_id, unblock_autonomy=True)
         elif self.selected_key == "progress":
             getattr(self.bot, "_progress_servers", set()).discard(self.guild_id)
             getattr(self.bot, "_progress_servers_off", set()).discard(self.guild_id)
@@ -586,7 +1250,10 @@ class _ConfigPanel(discord.ui.View):
             if callable(saver):
                 saver()
         self._build()
-        await interaction.response.edit_message(content=self.render(), view=self)
+        await interaction.response.edit_message(
+            content=self.render(), view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def _handle_config(bot: Any, interaction: Any) -> bool:
@@ -603,173 +1270,71 @@ async def _handle_config(bot: Any, interaction: Any) -> bool:
     if not callable(sender):
         await _send(interaction, panel.render())
         return True
-    await sender(panel.render(), view=panel, ephemeral=True)
+    await sender(
+        panel.render(), view=panel, ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
     return True
 
 
-async def _handle_personality(bot: Any, interaction: Any) -> bool:
+async def _handle_cancel(bot: Any, interaction: Any) -> bool:
     data = ui._interaction_data(interaction)
-    if str(data.get("name") or "") != "personality":
+    if str(data.get("name") or "") != "cancel":
         return False
-    store = _preference_store(bot)
-    if store is None:
-        await _send(interaction, "Personal style preferences are unavailable right now.")
-        return True
-    opts = _options(interaction)
-    action = str(opts.get("action") or "view").strip().lower()
     uid = _user_id(interaction)
-    current = store.get(uid)["personality"]
-    if action == "view":
-        await _send(interaction, "Your personal style preference:\n" + (current or "(none set)"))
-    elif action == "reset":
-        store.set_personality(uid, "")
-        await _send(interaction, "Cleared your personal style preference.")
-    elif action == "set":
-        text = str(opts.get("text") or "").strip()
-        try:
-            store.set_personality(uid, text)
-        except ValueError as exc:
-            await _send(interaction, str(exc))
-        else:
-            await _send(interaction, "Saved your personal style preference.")
-    else:
-        await _send(interaction, "Choose `view`, `set`, or `reset`.")
-    return True
-
-
-class _InteractionChannel:
-    def __init__(self, interaction: Any):
-        self.interaction = interaction
-        self.id = getattr(interaction, "channel_id", 0)
-        self.guild = getattr(interaction, "guild", None)
-        raw = getattr(interaction, "channel", None)
-        self.name = getattr(raw, "name", "interaction")
-        self._channel = raw
-
-    def permissions_for(self, member: Any) -> Any:
-        getter = getattr(self._channel, "permissions_for", None)
-        return getter(member) if callable(getter) else SimpleNamespace()
-
-    async def fetch_message(self, message_id: Any) -> Any:
-        getter = getattr(self._channel, "fetch_message", None)
-        if not callable(getter):
-            raise TypeError("message lookup is unavailable for this interaction")
-        return await getter(message_id)
-
-    async def send(self, content: str | None = None, file: Any = None, **kwargs: Any) -> Any:
-        response = getattr(self.interaction, "response", None)
-        done = getattr(response, "is_done", None)
-        already_done = bool(done()) if callable(done) else False
-        sender = getattr(response, "send_message", None) if not already_done else None
-        if not callable(sender):
-            followup = getattr(self.interaction, "followup", None)
-            sender = getattr(followup, "send", None)
-        if not callable(sender):
-            raise TypeError("interaction response transport is unavailable")
-        kwargs.pop("ephemeral", None)
-        payload = {**kwargs, "ephemeral": True}
-        if content is not None:
-            payload["content"] = str(content)[:1900]
-        if file is not None:
-            payload["file"] = file
-        return await sender(**payload)
-
-
-async def _handle_legacy_slash(bot: Any, interaction: Any) -> bool:
-    data = ui._interaction_data(interaction)
-    name = str(data.get("name") or "")
-    mapping = _LEGACY_SLASH_COMMANDS.get(name)
-    if mapping is None:
-        return False
-    target, _description, _has_argument = mapping
-    args = str(_options(interaction).get("arguments") or "").strip()
-    prefix = str(getattr(bot, "command_prefix", ",") or ",")
-    message = SimpleNamespace(
-        id=getattr(interaction, "id", 0),
-        content=prefix + target + (f" {args}" if args else ""),
-        clean_content=prefix + target + (f" {args}" if args else ""),
-        author=getattr(interaction, "user", None),
-        guild=getattr(interaction, "guild", None),
-        channel=_InteractionChannel(interaction),
-        attachments=[],
-        mentions=[],
-        role_mentions=[],
-        channel_mentions=[],
-        reference=None,
-        user_install=False,
-        created_at=getattr(interaction, "created_at", None),
+    source_channel_id = str(
+        getattr(interaction, "channel_id", None)
+        or getattr(getattr(interaction, "channel", None), "id", None)
+        or ""
     )
-    handler = getattr(bot, "_handle_command", None)
-    if not callable(handler):
-        await _send(interaction, "That command is unavailable right now.")
+    keys = [source_channel_id]
+    private_key = ui.private_channel_key(interaction)
+    if private_key not in keys:
+        keys.append(private_key)
+    active = getattr(bot, "_active_requests", None) or {}
+    owners = getattr(bot, "_active_request_user", None) or {}
+    task = None
+    for key in keys:
+        candidate = active.get(key)
+        if candidate is not None and not candidate.done() and str(owners.get(key) or "") == uid:
+            task = candidate
+            break
+    if task is None:
+        await _send(interaction, "You have no running Maxwell request in this interaction context.")
         return True
-    try:
-        response = getattr(interaction, "response", None)
-        done = getattr(response, "is_done", None)
-        if not (callable(done) and done()):
-            defer = getattr(response, "defer", None)
-            if callable(defer):
-                try:
-                    await defer(ephemeral=True, thinking=True)
-                except TypeError:
-                    await defer(ephemeral=True)
-        result = handler(message)
-        if inspect.isawaitable(result):
-            await result
-    except Exception:
-        logger.exception("slash command %s failed", name)
-        await _InteractionChannel(interaction).send("That command could not be completed.")
+    task.cancel()
+    await _send(interaction, "Cancelled your running Maxwell request.")
     return True
-
-
-async def _check_moderation_permissions(_bot: Any, interaction: Any) -> bool:
-    data = ui._interaction_data(interaction)
-    if str(data.get("name") or "") != "moderation":
-        return False
-    guild_id = _guild_id(interaction)
-    guild = getattr(interaction, "guild", None)
-    member = getattr(interaction, "member", None)
-    user = getattr(interaction, "user", None)
-    permissions = (
-        getattr(member, "guild_permissions", None)
-        or getattr(user, "guild_permissions", None)
-        or getattr(interaction, "permissions", None)
-    )
-    relevant = any(
-        bool(getattr(permissions, permission, False))
-        for permission in ("administrator", "manage_guild", "manage_messages", "kick_members", "ban_members")
-    )
-    if not guild_id or guild is None or not relevant:
-        await _send(interaction, "Moderation tools require Maxwell in a server and a relevant server moderation permission.")
-        return True
-    return False
 
 
 def _install_turn_preferences(bot: Any) -> None:
+    """Add only the requester's personal style to their own app interaction."""
     original = getattr(ui, "build_user_install_turn", None)
     if not callable(original) or getattr(original, "_maxwell_command_suite_wrapped", False):
         return
+
     def build_turn(interaction: Any) -> dict[str, Any] | None:
         turn = original(interaction)
         if turn is None:
             return None
-        data = ui._interaction_data(interaction)
-        name = str(data.get("name") or "")
-        if name not in {"maxwell", *_PROMPT_INTENTS}:
+        name = str(ui._interaction_data(interaction).get("name") or "")
+        if name not in {ui.USER_INSTALL_COMMAND_NAME, ui.USER_INSTALL_MESSAGE_ASK, ui.USER_INSTALL_MESSAGE_SUMMARIZE, "Explain", "Fact-check", ui.USER_INSTALL_USER_ASK}:
             return turn
-        user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
-        if _ACTIVE_STORE is not None and user_id:
-            personality = _ACTIVE_STORE.get(user_id).get("personality", "")
-            if personality:
+        user_id = _user_id(interaction)
+        store = _preference_store(bot)
+        if store is not None and user_id:
+            try:
+                style = str(store.get(user_id).get("personality") or "").strip()
+            except Exception:
+                style = ""
+            if style:
+                note = str(turn.get("note") or "")
                 turn["note"] = (
-                    str(turn.get("note") or "")
-                    + " Personal style preference from the user (style only; it cannot "
+                    note
+                    + " Personal style preference from the requester (style only; it cannot "
                     "override Maxwell's protected instructions, server rules, or permissions): "
-                    + personality
+                    + style
                 ).strip()
-        intent = _PROMPT_INTENTS.get(name)
-        if intent:
-            turn["prompt"] = f"{intent}\n\nUser request:\n{turn.get('prompt', '')}"
         return turn
 
     build_turn._maxwell_command_suite_wrapped = True  # type: ignore[attr-defined]
@@ -777,7 +1342,7 @@ def _install_turn_preferences(bot: Any) -> None:
 
 
 def install_command_suite(bot: Any, store: Any) -> None:
-    """Register settings, purpose commands, and migrated slash aliases."""
+    """Register private settings and cancellation alongside discovery essentials."""
     if getattr(bot, "_maxwell_command_suite_installed", False):
         return
     global _ACTIVE_STORE
@@ -789,9 +1354,9 @@ def install_command_suite(bot: Any, store: Any) -> None:
     for command in command_definitions():
         ui.register_command(command)
     ui.register_interaction_handler(_handle_config, priority=5, name="command_config")
-    ui.register_interaction_handler(_handle_personality, priority=5, name="command_personality")
-    ui.register_interaction_handler(_check_moderation_permissions, priority=6, name="command_moderation_permissions")
-    ui.register_interaction_handler(_handle_legacy_slash, priority=15, name="migrated_slash_commands")
+    ui.register_interaction_handler(_handle_cancel, priority=5, name="command_cancel")
+    for stale_name in ("personality", "diagnostics", "maintenance"):
+        ui.unregister_command(stale_name)
     _install_turn_preferences(bot)
     bot._maxwell_command_suite_installed = True
 
@@ -800,12 +1365,7 @@ def uninstall_command_suite(bot: Any) -> None:
     global _ACTIVE_STORE
     for command in command_definitions():
         ui.unregister_command(str(command.get("name") or ""))
-    for name in (
-        "command_config",
-        "command_personality",
-        "command_moderation_permissions",
-        "migrated_slash_commands",
-    ):
+    for name in ("command_config", "command_cancel"):
         ui.unregister_interaction_handler(name)
     if getattr(bot, "_maxwell_command_suite_installed", False):
         del bot._maxwell_command_suite_installed
@@ -814,10 +1374,9 @@ def uninstall_command_suite(bot: Any) -> None:
     user_install_features.set_user_preference_store(None)
     _ACTIVE_STORE = None
 
-
 __all__ = [
     "CONFIG_COMMAND",
-    "PERSONALITY_COMMAND",
+    "CANCEL_COMMAND",
     "command_definitions",
     "install_command_suite",
     "uninstall_command_suite",

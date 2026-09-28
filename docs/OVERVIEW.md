@@ -87,7 +87,9 @@ Maxwell supports the normal bot conversation path plus Discord app-command/user-
 - `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder` provide focused request paths.
 - Message/user context-menu actions are registered through the user-install layer.
 
-The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use clean branded embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request shows a temporary status with the tools Maxwell is using, removes it when complete, and sends the final answer as a follow-up.
+The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use clean branded embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request keeps its working status visible and replies to that message when channel replies are available; otherwise Maxwell edits the status when possible or sends an interaction follow-up.
+
+Current/latest factual questions in normal chat and `/maxwell` auto mode run `web_search` before generation when available. `/maxwell` also supports `web=search` to force lookup and `web=off` to disable web tools for that turn. Answers cite source URLs; search results are untrusted evidence.
 
 ## Operator controls
 

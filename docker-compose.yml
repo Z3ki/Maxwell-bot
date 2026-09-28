@@ -43,6 +43,9 @@ services:
       # :ro still allows the Docker API (unix sockets ignore the ro bit for
       # I/O) but blocks replacing the socket inode from inside the container.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Host-managed egress policy files, mounted read-only. If the readiness
+      # marker is absent, shell execution fails closed.
+      - /etc/maxwell-shell:/run/maxwell-shell-policy:ro
       # Caddy serves generated sites from MAXWELL_SITE_DIR on the *host*.
       # Without this mount, create_site writes into the container overlay and
       # the public URL 404s. Empty SITE_DIR falls back to public/bot under /app

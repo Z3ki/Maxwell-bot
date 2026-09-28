@@ -1,0 +1,15 @@
+[Unit]
+Description=Maxwell shell sandbox aggregate cgroup limits
+Requires=docker.service
+After=docker.service
+PartOf=docker.service
+BindsTo=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/maxwell-shell-resource-pool
+ExecStop=/usr/bin/rm -f /etc/maxwell-shell/resource-pool-ready
+
+[Install]
+WantedBy=multi-user.target

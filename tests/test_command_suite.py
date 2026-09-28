@@ -8,25 +8,11 @@ from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 from bot import MaxwellBot
 
 
-def test_command_suite_registers_purpose_commands_and_no_owner_command():
+def test_command_suite_keeps_only_config_and_cancellation_as_standalone_commands():
     definitions = command_suite.command_definitions()
     names = {row["name"] for row in definitions}
-    names.update({"diagnostics", "maintenance"})
-    assert {
-        "config",
-        "personality",
-        "image",
-        "chess",
-        "checkers",
-        "moderation",
-        "memory",
-        "reminder",
-        "diagnostics",
-        "maintenance",
-    } <= names
-    assert "owner" not in names
-    image = next(row for row in definitions if row["name"] == "image")
-    assert any(option["name"] == "image" and option["type"] == 11 for option in image["options"])
+    assert names == {"config", "cancel"}
+    assert not names.intersection({"personality", "image", "chess", "checkers", "moderation", "memory", "reminder", "diagnostics", "maintenance"})
 
 
 def test_prompt_edit_slash_commands_and_config_fields_are_removed():
@@ -34,7 +20,13 @@ def test_prompt_edit_slash_commands_and_config_fields_are_removed():
     names = {row["name"] for row in definitions}
     assert "server-prompt" not in names
     assert "clear-server-prompt" not in names
-    assert set(command_suite._SERVER_SETTINGS) == {"progress", "ticket"}
+    assert set(command_suite._SERVER_SETTINGS) == {
+        "channels", "plugins", "capabilities", "moderation", "progress", "ticket"
+    }
+    assert set(command_suite._OWNER_SETTINGS) == {
+        "diagnostics", "tools_enabled", "autonomy_enabled",
+        "message_quota_enabled", "user_quota", "reload",
+    }
 
 
 def test_prefix_commands_are_retired_but_unknown_prefixed_text_is_not_a_command():
@@ -56,8 +48,10 @@ def test_user_preferences_are_isolated_and_resettable(tmp_path):
     second = store.get("200")
     assert first["defaults"]["mode"] == "research"
     assert first["defaults"]["context"] == 10
+    assert first["defaults"]["visibility"] == "private"
     assert first["personality"] == "Keep replies concise."
     assert second["defaults"]["mode"] == "code"
+    assert second["defaults"]["visibility"] == "private"
     assert second["personality"] == ""
 
     store.reset_default("100", "mode")
@@ -78,7 +72,7 @@ def test_personality_has_a_bounded_size(tmp_path):
 
 
 def test_server_config_requires_server_privileges():
-    bot = SimpleNamespace(_is_admin=lambda _uid: False)
+    bot = SimpleNamespace(_is_admin=lambda _uid: True)
     interaction = SimpleNamespace(
         guild=SimpleNamespace(id=10, owner_id=1),
         guild_id=10,
@@ -88,6 +82,7 @@ def test_server_config_requires_server_privileges():
         ),
         permissions=SimpleNamespace(manage_guild=False, administrator=False),
     )
+    # A Maxwell operator role cannot substitute for current target-guild permissions.
     assert not command_suite._can_manage_server(bot, interaction)
     interaction.member.guild_permissions.manage_guild = True
     assert command_suite._can_manage_server(bot, interaction)
@@ -101,7 +96,7 @@ def test_config_opens_a_private_settings_menu(tmp_path):
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, view=None, ephemeral=False):
+        async def send_message(self, text, *, view=None, ephemeral=False, **kwargs):
             responses.append((text, view, ephemeral))
 
     bot = SimpleNamespace(_user_preferences=store)
@@ -127,7 +122,7 @@ def test_config_value_menu_updates_a_personal_default(tmp_path):
     responses = []
 
     class ComponentResponse:
-        async def edit_message(self, content, *, view):
+        async def edit_message(self, content, *, view, **kwargs):
             responses.append((content, view))
 
     interaction.response = ComponentResponse()
@@ -176,7 +171,7 @@ def test_config_rechecks_server_permission_when_a_menu_is_used(tmp_path):
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, ephemeral=False):
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
             denied.append((text, ephemeral))
 
     permissions.manage_guild = False
@@ -188,7 +183,76 @@ def test_config_rechecks_server_permission_when_a_menu_is_used(tmp_path):
         response=Response(),
     )
     assert asyncio.run(panel.interaction_check(click)) is False
-    assert panel.scope == "personal"
+    assert panel.scope == "server"
+    assert denied and denied[0][1] is True
+
+
+def test_server_plugin_settings_are_scoped_and_require_manage_permission(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    manager = SimpleNamespace(
+        loaded_plugins={"web": {}, "shell": {}},
+        is_protected=lambda name: name == "core",
+        is_plugin_enabled_for_user=lambda name, _uid: name == "web",
+    )
+    owner = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=2, name="Test server"),
+        guild_id=10,
+        user=SimpleNamespace(id=2),
+        member=SimpleNamespace(
+            guild_permissions=SimpleNamespace(manage_guild=False, administrator=False)
+        ),
+    )
+    bot = SimpleNamespace(
+        _user_preferences=store,
+        _control={},
+        plugin_manager=manager,
+        config=SimpleNamespace(DATA_DIR=str(tmp_path)),
+    )
+    panel = command_suite._ConfigPanel(bot, store, owner)
+    panel.scope = "server"
+    panel.selected_key = "plugins"
+    panel._build()
+    selector = next(
+        item for item in panel.children
+        if isinstance(item, command_suite._GuildPluginSelect)
+    )
+    assert {option.value for option in selector.options} == {"web", "shell"}
+    assert {option.value for option in selector.options if option.default} == {"web"}
+
+    edited = []
+
+    class Response:
+        async def edit_message(self, content, *, view, **kwargs):
+            edited.append(content)
+
+    selector._values = ["shell"]
+    click = SimpleNamespace(
+        guild=owner.guild,
+        guild_id=10,
+        user=owner.user,
+        member=owner.member,
+        response=Response(),
+    )
+    asyncio.run(selector.callback(click))
+    assert bot._control["guild_plugin_overrides"]["10"] == {
+        "shell": True,
+        "web": False,
+    }
+    assert edited and "shell" in edited[0]
+
+    # A menu is not reusable by someone else, even if they have server access.
+    denied = []
+
+    class DeniedResponse:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
+            denied.append((text, ephemeral))
+
+    click.user = SimpleNamespace(id=3)
+    click.response = DeniedResponse()
+    assert asyncio.run(panel.interaction_check(click)) is False
     assert denied and denied[0][1] is True
 
 
@@ -214,7 +278,7 @@ def test_config_does_not_open_server_settings_after_permission_is_revoked(tmp_pa
         def is_done(self):
             return False
 
-        async def send_message(self, text, *, ephemeral=False):
+        async def send_message(self, text, *, ephemeral=False, **kwargs):
             denied.append((text, ephemeral))
 
     permissions.manage_guild = False
@@ -228,6 +292,126 @@ def test_config_does_not_open_server_settings_after_permission_is_revoked(tmp_pa
     asyncio.run(scope_select.callback(click))
     assert panel.scope == "personal"
     assert denied and "permission" in denied[0][0].lower()
+
+
+def test_guild_owner_does_not_receive_application_owner_scope(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    bot = SimpleNamespace(
+        config=SimpleNamespace(MAXWELL_OWNER_IDS={"99"}),
+        _user_preferences=store,
+    )
+    interaction = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=1, name="Test server"),
+        guild_id=10,
+        user=SimpleNamespace(id=1),
+        member=SimpleNamespace(guild_permissions=SimpleNamespace(manage_guild=True)),
+    )
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    assert panel.can_manage_server
+    assert not panel.is_owner
+    assert "Application owner" not in {option.label for option in panel.children[0].options}
+
+
+def test_config_owner_scope_is_bound_to_configured_application_owner(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    bot = SimpleNamespace(
+        config=SimpleNamespace(MAXWELL_OWNER_IDS={"99"}),
+        _user_preferences=store,
+    )
+    owner = SimpleNamespace(
+        guild=None, guild_id=None, user=SimpleNamespace(id=99)
+    )
+    panel = command_suite._ConfigPanel(bot, store, owner)
+    assert panel.is_owner
+    assert isinstance(panel.children[0], command_suite._ConfigScopeSelect)
+    panel.scope = "owner"
+    panel.selected_key = "diagnostics"
+    assert "Application owner settings" in panel.render()
+
+
+def test_owner_global_toggle_is_fixed_and_persisted(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    bot = SimpleNamespace(
+        config=SimpleNamespace(MAXWELL_OWNER_IDS={"99"}, DATA_DIR=str(tmp_path)),
+        _control={},
+        _user_preferences=store,
+        _load_control=lambda force=False: None,
+    )
+    interaction = SimpleNamespace(user=SimpleNamespace(id=99))
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    panel.scope = "owner"
+    panel.selected_key = "tools_enabled"
+    results = []
+
+    class Response:
+        async def edit_message(self, content, *, view, **kwargs):
+            results.append(content)
+
+    interaction.response = Response()
+    asyncio.run(panel.set_choice(interaction, "off"))
+    assert bot._control["tools_enabled"] is False
+    assert "Off" in results[0]
+
+
+def test_owner_scope_denies_a_guild_admin_and_revoked_owner(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    config = SimpleNamespace(MAXWELL_OWNER_IDS={"99"})
+    bot = SimpleNamespace(config=config, _user_preferences=store)
+    guild_admin = SimpleNamespace(
+        guild=SimpleNamespace(id=10, owner_id=2), guild_id=10,
+        user=SimpleNamespace(id=2),
+        member=SimpleNamespace(guild_permissions=SimpleNamespace(manage_guild=True)),
+    )
+    panel = command_suite._ConfigPanel(bot, store, guild_admin)
+    assert not panel.is_owner
+    panel.scope = "owner"
+    assert asyncio.run(panel.authorized(guild_admin)) is False
+
+    owner = SimpleNamespace(user=SimpleNamespace(id=99), guild=None, guild_id=None)
+    owner_panel = command_suite._ConfigPanel(bot, store, owner)
+    owner_panel.scope = "owner"
+    config.MAXWELL_OWNER_IDS = set()
+    assert asyncio.run(owner_panel.authorized(owner)) is False
+
+
+def test_cancel_only_cancels_requester_task_in_matching_context():
+    async def scenario():
+        owner_task = asyncio.create_task(asyncio.sleep(60))
+        other_task = asyncio.create_task(asyncio.sleep(60))
+        responses = []
+
+        class Response:
+            def is_done(self):
+                return False
+
+            async def send_message(self, text, *, ephemeral=False, **kwargs):
+                responses.append((text, ephemeral))
+
+        bot = SimpleNamespace(
+            _active_requests={"55": other_task},
+            _active_request_user={"55": "2"},
+        )
+        interaction = SimpleNamespace(
+            data={"name": "cancel"},
+            user=SimpleNamespace(id=1),
+            channel_id=55,
+            channel=SimpleNamespace(id=55),
+            guild=None,
+            response=Response(),
+        )
+        assert await command_suite._handle_cancel(bot, interaction)
+        assert not other_task.cancelled()
+        assert "no running" in responses[0][0]
+
+        private_key = command_suite.ui.private_channel_key(interaction)
+        bot._active_requests[private_key] = owner_task
+        bot._active_request_user[private_key] = "1"
+        await command_suite._handle_cancel(bot, interaction)
+        assert owner_task.cancelling()
+        owner_task.cancel()
+        other_task.cancel()
+
+    asyncio.run(scenario())
 
 
 def test_config_text_settings_open_a_bounded_modal(tmp_path):

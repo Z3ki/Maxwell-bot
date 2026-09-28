@@ -102,7 +102,9 @@ def test_create_channel_rejects_unknown_kind():
         id=10, name="Villa", me=me, categories=[], create_text_channel=None
     )
     bot = SimpleNamespace(get_guild=lambda _gid: None)
-    msg = SimpleNamespace(guild=guild, author=_author())
+    asker = _author()
+    asker.guild = guild
+    msg = SimpleNamespace(guild=guild, author=asker)
     result = asyncio.run(
         CreateChannelTool(bot).execute(msg, name="general", kind="not-a-type")
     )
@@ -114,7 +116,9 @@ def test_edit_category_requires_a_field():
     cat = SimpleNamespace(id=20, name="chat")
     guild = SimpleNamespace(id=10, name="Villa", me=me, categories=[cat])
     bot = SimpleNamespace(get_guild=lambda _gid: None)
-    msg = SimpleNamespace(guild=guild, author=_author())
+    asker = _author()
+    asker.guild = guild
+    msg = SimpleNamespace(guild=guild, author=asker)
     result = asyncio.run(
         EditCategoryTool(bot).execute(msg, category_id="20")
     )
@@ -125,7 +129,9 @@ def test_lockdown_requires_target():
     me = _member()
     guild = SimpleNamespace(id=10, name="Villa", me=me, channels=[])
     bot = SimpleNamespace(get_guild=lambda _gid: None)
-    msg = SimpleNamespace(guild=guild, author=_author())
+    asker = _author()
+    asker.guild = guild
+    msg = SimpleNamespace(guild=guild, author=asker)
     result = asyncio.run(LockdownTool(bot).execute(msg))
     assert "target is required" in result
 

@@ -70,10 +70,41 @@ def test_site_runtime_stays_unprivileged():
 
 
 def test_runtime_flags_disable_swap():
-    tools = (ROOT / "plugins" / "shell" / "impl.py").read_text()
-    assert '"--memory-swap"' in tools
+    from plugins.shell.isolation import docker_run_args
+
+    args = docker_run_args(
+        container_name="mwsh-" + "a" * 24,
+        image="maxwell-shell",
+    )
+    assert args[args.index("--memory-swap") + 1] == "2g"
+    assert args[args.index("--cgroup-parent") + 1] == "maxwell-shell.slice"
     site = (ROOT / "site_server.py").read_text()
     assert '"--memory-swap", MEMORY' in site
+
+
+def test_shell_requires_explicit_gvisor_platform_and_isolated_network():
+    from plugins.shell.isolation import validate_runsc_runtime
+
+    safe, _reason = validate_runsc_runtime(
+        {
+            "runsc": {
+                "path": "/usr/local/bin/runsc",
+                "runtimeArgs": ["--platform=systrap", "--network=sandbox"],
+            }
+        }
+    )
+    assert safe
+
+    for args in (
+        ["--network=sandbox"],
+        ["--platform=systrap"],
+        ["--platform=systrap", "--network=host"],
+        ["--platform=kvm", "--network=sandbox"],
+    ):
+        safe, _reason = validate_runsc_runtime(
+            {"runsc": {"path": "/usr/local/bin/runsc", "runtimeArgs": args}}
+        )
+        assert not safe, args
 
 
 def test_site_backend_runs_as_root():

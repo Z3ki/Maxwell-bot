@@ -13,6 +13,8 @@ from user_install import (
     USER_INSTALL_MESSAGE_CAP,
     USER_INSTALL_MESSAGE_SUMMARIZE,
     UserInstallMessageAdapter,
+    UserInstallSession,
+    _ephemeral,
     build_user_install_turn,
     handle_user_install_interaction,
     is_user_install_command,
@@ -31,18 +33,21 @@ class FakeResponse:
     def is_done(self):
         return self.deferred or bool(self.messages)
 
-    async def defer(self):
+    async def defer(self, *, ephemeral=False):
         self.deferred = True
+        self.deferred_ephemeral = ephemeral
 
-    async def send_message(self, content, ephemeral=False):
-        self.messages.append({"content": content, "ephemeral": ephemeral})
+    async def send_message(self, content, ephemeral=False, **kwargs):
+        self.messages.append({"content": content, "ephemeral": ephemeral, **kwargs})
 
 
 class FakeFollowup:
     def __init__(self):
         self.sent = []
+        self.payloads = []
 
     async def send(self, content=None, file=None, ephemeral=False, **kwargs):
+        self.payloads.append({"content": content, "file": file, "ephemeral": ephemeral, **kwargs})
         msg = SimpleNamespace(id=len(self.sent) + 1, content=content, file=file)
 
         async def edit(*, content=None, **_kwargs):
@@ -100,6 +105,26 @@ def test_parse_prompt_and_image():
     assert prompt == "look"
     assert atts[0].filename == "pic.png"
     assert atts[0].url.endswith("pic.png")
+
+
+def test_user_install_webhook_and_ephemeral_replies_disable_mentions():
+    async def run():
+        interaction = _interaction(prompt="@everyone <@123>")
+        session = UserInstallSession(interaction)
+        await session.send("@everyone <@123>")
+        mentions = interaction.followup.payloads[0]["allowed_mentions"]
+        assert mentions.everyone is False
+        assert mentions.users is False
+        assert mentions.roles is False
+        assert mentions.replied_user is False
+
+        await _ephemeral(interaction, "@everyone <@123>")
+        ephemeral_mentions = interaction.followup.payloads[1]["allowed_mentions"]
+        assert ephemeral_mentions.everyone is False
+        assert ephemeral_mentions.users is False
+        assert ephemeral_mentions.roles is False
+
+    asyncio.run(run())
 
 
 def test_is_user_install_command_filters_name():
@@ -271,9 +296,38 @@ def test_handle_spawns_for_non_admin():
     claimed = asyncio.run(handle_user_install_interaction(bot, interaction))
     assert claimed is True
     assert interaction.response.deferred is True
+    assert interaction.response.deferred_ephemeral is True
     assert spawned
     assert is_user_install_message(spawned[0])
     assert spawned[0].content == "ping me"
+    assert spawned[0].response_visibility == "private"
+    assert spawned[0].channel.id == "private:2:dm:555"
+    assert spawned[0].guild is None
+
+
+def test_public_visibility_is_set_before_defer_and_keeps_server_scope():
+    interaction = _interaction(user_id=2, prompt="ping me")
+    interaction.data["options"].append(
+        {"name": "visibility", "type": 3, "value": "public"}
+    )
+    spawned = []
+
+    async def on_message(message):
+        return None
+
+    def spawn(coro):
+        spawned.append(coro.cr_frame.f_locals["message"])
+        coro.close()
+
+    bot = SimpleNamespace(
+        _is_admin=lambda _uid: False,
+        _spawn_detached=spawn,
+        on_message=on_message,
+    )
+    assert asyncio.run(handle_user_install_interaction(bot, interaction)) is True
+    assert interaction.response.deferred_ephemeral is False
+    assert spawned[0].response_visibility == "public"
+    assert spawned[0].channel.id == 555
 
 
 def test_handle_defers_and_spawns_for_admin():

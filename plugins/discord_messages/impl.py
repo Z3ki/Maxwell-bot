@@ -5,6 +5,8 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from tooling import helpers as _helpers
 from tools import Tool
 
@@ -132,7 +134,12 @@ class EditMessageTool(Tool):
 
 
     def get_description(self):
-        return "Edit your own message. Params: message_id (required), content (required, new text)."
+        return (
+            "Edit a Maxwell response attributable to this request, or a Maxwell "
+            "response a server moderator is authorized to manage. Legacy messages "
+            "with unknown ownership require manage_messages. Only the current "
+            "channel is available. Params: message_id (required), content (required)."
+        )
 
     async def execute(
         self,
@@ -141,13 +148,52 @@ class EditMessageTool(Tool):
         content: str | None = None,
         **kwargs,
     ) -> str:
-        if not message_id or not content:
+        if not message_id or content is None:
             return "Error: message_id and content are required"
+        if len(str(content)) > 2000:
+            return "Error: message content exceeds Discord's 2000-character limit"
+        requested_channel = kwargs.get("channel_id")
+        channel = getattr(message, "channel", None)
+        if requested_channel and str(requested_channel) != str(getattr(channel, "id", "")):
+            return "Error: edit_message is limited to the current channel"
         try:
-            msg = await message.channel.fetch_message(int(message_id))
+            msg = await channel.fetch_message(int(str(message_id).strip()))
             if msg.author.id != self.bot.user.id:
                 return "Error: I can only edit my own messages"
-            await msg.edit(content=content)
+            requester_id = str(getattr(getattr(message, "author", None), "id", "") or "")
+            current_channel_id = str(getattr(channel, "id", "") or "")
+            journal = getattr(self.bot, "_request_journal", None)
+            owner = journal.find_response(message_id) if journal is not None else None
+            attributable = bool(
+                owner
+                and str(owner.get("author_id") or "") == requester_id
+                and str(owner.get("channel_id") or "") == current_channel_id
+            )
+            guild = getattr(channel, "guild", None)
+            moderator = False
+            if guild is not None:
+                moderator = not bool(
+                    _missing_cap(
+                        guild,
+                        "manage_messages",
+                        message,
+                        channel=channel,
+                    )
+                )
+            if not attributable and not moderator:
+                return "Error: you may only edit your own tracked Maxwell response"
+            await msg.edit(
+                content=str(content),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            logger.info(
+                "moderation action=edit_message requester=%s guild=%s channel=%s target=%s ownership=%s",
+                requester_id,
+                getattr(guild, "id", ""),
+                current_channel_id,
+                str(message_id),
+                "request" if attributable else "moderator",
+            )
             return f"Message {message_id} edited successfully"
         except discord.NotFound:
             return f"Error: Message {message_id} not found"
@@ -165,9 +211,10 @@ class DeleteMessageTool(Tool):
 
     def get_description(self):
         return (
-            "Delete a message. Your own messages always. Someone else's needs "
-            "manage_messages. Params: message_id (required), channel_id (optional, "
-            "defaults to the current channel)."
+            "Delete a message. Maxwell responses require request ownership or "
+            "manage_messages. Another user's message requires manage_messages "
+            "for both you and Maxwell in the target channel. Targets must be in "
+            "this server. Params: message_id (required), channel_id (optional)."
         )
 
     async def execute(
@@ -181,24 +228,57 @@ class DeleteMessageTool(Tool):
             return "Error: message_id is required"
         channel = getattr(message, "channel", None)
         if channel_id:
-            channel, error = await _get_guild_channel(self.bot, channel_id)
+            channel, error = await _get_guild_channel(
+                self.bot,
+                channel_id,
+                expected_guild_id=getattr(getattr(message, "guild", None), "id", None),
+            )
             if error:
                 return error
+        request_guild = getattr(message, "guild", None)
+        target_guild = getattr(channel, "guild", None)
+        if request_guild is None or target_guild is None:
+            return "Error: deletion is limited to a server channel in this request's server"
+        if str(getattr(request_guild, "id", "")) != str(getattr(target_guild, "id", "")):
+            return "Error: target channel is outside this server"
         if channel is None or not hasattr(channel, "fetch_message"):
             return "Error: channel is unavailable"
         try:
             msg = await channel.fetch_message(int(str(message_id).strip()))
             mine = self.bot.user and msg.author.id == self.bot.user.id
-            guild = getattr(channel, "guild", None)
-            if not mine:
-                if guild is None:
-                    return "Error: I can only delete my own messages here"
+            if mine:
+                journal = getattr(self.bot, "_request_journal", None)
+                owner = journal.find_response(message_id) if journal is not None else None
+                requester_id = str(getattr(getattr(message, "author", None), "id", "") or "")
+                channel_matches = str(owner.get("channel_id") or "") == str(
+                    getattr(channel, "id", "") or ""
+                ) if owner else False
+                owns_response = bool(
+                    owner
+                    and channel_matches
+                    and str(owner.get("author_id") or "") == requester_id
+                )
+                if not owns_response:
+                    missing = _missing_cap(
+                        target_guild, "manage_messages", message, channel=channel
+                    )
+                    if missing:
+                        return "Error: response ownership is unknown; " + missing
+            else:
                 missing = _missing_cap(
-                    guild, "manage_messages", message, channel=channel
+                    target_guild, "manage_messages", message, channel=channel
                 )
                 if missing:
                     return missing
             await msg.delete()
+            logger.info(
+                "moderation action=delete_message requester=%s guild=%s channel=%s target=%s ownership=%s",
+                str(getattr(getattr(message, "author", None), "id", "") or ""),
+                getattr(target_guild, "id", ""),
+                getattr(channel, "id", ""),
+                str(message_id),
+                "request" if mine and owns_response else ("moderator" if mine else "authorized_other"),
+            )
             who = "my" if mine else "that"
             return f"Deleted {who} message {message_id}"
         except discord.NotFound:
@@ -292,12 +372,25 @@ class ForwardMessageTool(Tool):
                 return f"Error: Message {message_id} not found"
             src_guild = getattr(message.channel, "guild", None)
             dest_guild = getattr(dest, "guild", None)
-            if (
-                src_guild
-                and dest_guild
-                and getattr(src_guild, "id", None) != getattr(dest_guild, "id", None)
-            ):
+            if not src_guild or not dest_guild or str(
+                getattr(src_guild, "id", "")
+            ) != str(getattr(dest_guild, "id", "")):
                 return "Error: refusing to forward across servers"
+
+            member = _resolve_requester_member(dest_guild, message)
+            bot_member = _guild_me(dest_guild)
+            if member is None or bot_member is None:
+                return "Error: could not verify channel permissions"
+            user_perms = dest.permissions_for(member)
+            bot_perms = dest.permissions_for(bot_member)
+            if not getattr(user_perms, "view_channel", False) or not getattr(
+                user_perms, "send_messages", False
+            ):
+                return "Error: you cannot send messages in the destination channel"
+            if not getattr(bot_perms, "view_channel", False) or not getattr(
+                bot_perms, "send_messages", False
+            ):
+                return "Error: I cannot send messages in the destination channel"
 
             await orig.forward(dest)
             channel_name = getattr(dest, "name", channel_id)
@@ -573,51 +666,20 @@ class SendFileTool(Tool):
         path: str | None = None,
         **kwargs,
     ) -> str:
-        # Intentionally NOT admin-gated. send_file is an output channel —
-        # the model already has shell + every other tool to produce content,
-        # and gating the return path on `_is_admin` was just a barrier that
-        # blocked non-admin users from receiving files. The path-mode
-        # allowlist (_allowed_send_file_bases) is the real safety boundary.
-        # Path mode: send a file that already exists on disk (or in the shell
-        # container — we docker-cp it out as a fallback for container paths).
         if path:
-            # Normalize container paths (/home/maxwell/...) to the host bind
-            # mount so the allowlist and resolver see a real host path.
-            resolved_input = self._resolve_send_file_path(path)
-            # First, the fast path: a regular host file the model knows about.
-            host_path, host_error = await self._try_read_host_file(resolved_input)
-            if host_path is not None:
-                target = host_path
-                tmp_to_clean = None
-            else:
-                # Fallback: the model passed a container-only path (anything
-                # inside the maxwell-shell container). Try docker cp it out.
-                # Allowed for any path inside the container — the model
-                # already has shell access, and refusing "any file" creates
-                # an artificial one-step barrier that breaks the round-trip.
-                target, cp_error = await self._docker_cp_from_shell(path)
-                if target is None:
-                    return (
-                        f"Error: could not read file at '{path}'. "
-                        f"Host: {host_error or 'not found'}. "
-                        f"Container: {cp_error or 'not found or not readable'}."
-                    )
-                tmp_to_clean = target
-
-            try:
-                blob = await asyncio.to_thread(target.read_bytes)
-            except Exception as e:
-                return f"Error reading file from disk: {e}"
-            finally:
-                if tmp_to_clean is not None:
-                    with contextlib.suppress(Exception):
-                        shutil.rmtree(tmp_to_clean.parent, ignore_errors=True)
-            safe_name = _safe_attachment_filename(
-                filename or target.name, default="file"
+            shell_tool = (getattr(self.bot, "tools", None) or {}).get("shell")
+            reader = getattr(shell_tool, "read_workspace_file", None)
+            if not callable(reader):
+                return "Error: this request has no active private shell workspace"
+            blob, workspace_name, error = await reader(
+                message, path, max_size=self.MAX_SIZE
             )
+            if blob is None or workspace_name is None:
+                return f"Error: cannot read a file from this request's workspace ({error or 'unavailable'})"
+            safe_name = _safe_attachment_filename(filename or workspace_name, default="file")
             return await self._send_blob(message, blob, safe_name)
 
-        # Inline-content mode (original behavior).
+        # Inline files belong to this request and never touch a shared host path.
         if not filename or not str(filename).strip():
             return "Error: filename is required"
         if content is None:
@@ -630,163 +692,17 @@ class SendFileTool(Tool):
         mode = str(encoding or "text").strip().lower()
         try:
             if mode in {"base64", "b64"}:
+                if len(str(content)) > ((self.MAX_SIZE + 2) // 3) * 4:
+                    return "Error: file is too large"
                 blob = base64.b64decode(str(content), validate=True)
             elif mode in {"text", "utf8", "utf-8"}:
                 blob = str(content).encode("utf-8")
             else:
                 return "Error: encoding must be text or base64"
-        except Exception as e:
-            return f"Error: could not decode file content: {e}"
+        except Exception as exc:
+            return f"Error: could not decode file content ({type(exc).__name__})"
 
         return await self._send_blob(message, blob, safe_name)
-
-    def _allowed_send_file_bases(self) -> list[str]:
-        # Do NOT allow the full data/ tree (admins.json, cookies, traces, etc.).
-        # Only export-safe subtrees and workspace dirs the tools themselves create.
-        bases: list[str] = []
-        data_dir = os.path.abspath(
-            getattr(
-                getattr(getattr(self, "bot", None), "config", None), "DATA_DIR", "data"
-            )
-            or "data"
-        )
-        bases.extend(
-            os.path.join(data_dir, sub)
-            for sub in ("exports", "public_files", "attachments")
-        )
-        site_dir = getattr(getattr(self, "bot", None), "config", None)
-        if site_dir:
-            site_path = getattr(site_dir, "MAXWELL_SITE_DIR", "")
-            if site_path:
-                bases.append(os.path.abspath(site_path))
-        # Shell tool working dir (volume mounted into container as /home/maxwell).
-        shell_host = os.path.join(os.path.dirname(__file__), "shelldocker")
-        bases.append(os.path.abspath(shell_host))
-        return bases
-
-    def _resolve_send_file_path(self, raw_path: str) -> str:
-        """Map a path the model might pass to the actual host path.
-
-        Accepts both forms:
-          * host paths: /root/maxwell/shelldocker/foo.png (or any allowed base)
-          * container paths: /home/maxwell/foo.png  -> shelldocker/foo.png
-
-        Returns the resolved absolute host path, or the original input if no
-        remap is needed (let the existing _is_path_allowed check decide).
-        """
-        cleaned = str(raw_path or "").strip()
-        if not cleaned:
-            return cleaned
-        # Normalize container-side /home/maxwell/<x> to the host bind mount.
-        # Match /home/maxwell, /home/maxwell/, or just home/maxwell (defensive).
-        m = re.match(r"^/?home/maxwell/?(.*)$", cleaned)
-        if m:
-            shell_host = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "shelldocker")
-            )
-            rel = m.group(1).lstrip("/")
-            return os.path.join(shell_host, rel) if rel else shell_host
-        return cleaned
-
-    async def _try_read_host_file(
-        self, resolved_path: str
-    ) -> tuple[Path | None, str | None]:
-        """Read a file from the host if it exists in an allowed base.
-
-        Returns (Path, None) on success, (None, error_string) on miss.
-        """
-        allowed_bases = self._allowed_send_file_bases()
-        for base in allowed_bases:
-            if _is_path_allowed(resolved_path, base):
-                try:
-                    p = Path(resolved_path).resolve()
-                    if p.is_file():
-                        return p, None
-                except OSError:
-                    continue
-        return None, "not in an allowed host directory or not found"
-
-    async def _docker_cp_from_shell(
-        self, container_path: str
-    ) -> tuple[Path | None, str | None]:
-        """docker-cp a file out of the maxwell-shell container to a local temp
-        path, then return that local Path. Used as a fallback when the model
-        passes a path that only exists inside the container.
-
-        Path safety: we only allow reads from inside the running
-        maxwell-shell container. The container's root is bounded by the
-        sandbox flags (no host FS mount by default; even in MAXWELL_SHELL_FULL_HOST
-        mode, /host is a separate root).
-        """
-        if not container_path or not isinstance(container_path, str):
-            return None, "empty path"
-        clean = container_path.strip()
-        if not clean.startswith("/"):
-            clean = "/" + clean  # require absolute inside container
-        # No traversal escapes from the container root; this is read-only.
-        if ".." in clean.split("/"):
-            return None, "path traversal not allowed"
-
-        # Confirm the container is running.
-        try:
-            shell_tool = self.bot.tools.get("shell") if self.bot else None
-            container_name = (
-                getattr(shell_tool, "CONTAINER_NAME", "maxwell-shell")
-                if shell_tool
-                else "maxwell-shell"
-            )
-        except Exception:
-            container_name = "maxwell-shell"
-
-        tmp_dir = tempfile.mkdtemp(prefix="maxwell_sendfile_")
-        local_path = os.path.join(tmp_dir, os.path.basename(clean) or "file")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "docker",
-                "cp",
-                f"{container_name}:{clean}",
-                local_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _stdout, stderr = await communicate_process(proc, timeout=15)
-            except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
-                with contextlib.suppress(Exception):
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                return None, "docker cp timed out"
-            except asyncio.CancelledError:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
-                with contextlib.suppress(Exception):
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                raise
-            if proc.returncode != 0:
-                with contextlib.suppress(Exception):
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                return None, (
-                    stderr.decode(errors="replace").strip()
-                    or f"docker cp exit {proc.returncode}"
-                )
-            if not os.path.isfile(local_path):
-                with contextlib.suppress(Exception):
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                return None, "docker cp reported success but file is missing"
-            return Path(local_path), None
-        except FileNotFoundError:
-            with contextlib.suppress(Exception):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            return None, "docker is not installed or not on PATH"
-        except Exception as e:
-            with contextlib.suppress(Exception):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            return None, f"docker cp failed: {e}"
 
     async def _send_blob(self, message: Message, blob: bytes, safe_name: str) -> str:
         if len(blob) > self.MAX_SIZE:
@@ -851,12 +767,20 @@ class PinMessageTool(Tool):
             return "Error: message_id is required"
         channel = getattr(message, "channel", None)
         if channel_id:
-            channel, error = await _get_guild_channel(self.bot, channel_id)
+            channel, error = await _get_guild_channel(
+                self.bot,
+                channel_id,
+                expected_guild_id=getattr(getattr(message, "guild", None), "id", None),
+            )
             if error:
                 return error
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: pin only works in servers"
+        if str(getattr(guild, "id", "")) != str(
+            getattr(getattr(message, "guild", None), "id", "")
+        ):
+            return "Error: target channel is outside this server"
         missing = _missing_cap(
             guild,
             "pin_messages",
@@ -870,8 +794,22 @@ class PinMessageTool(Tool):
             msg = await channel.fetch_message(int(str(message_id).strip()))
             if parse_bool(unpin, False):
                 await msg.unpin(reason=_mod_reason(message))
+                logger.info(
+                    "moderation action=unpin_message requester=%s guild=%s channel=%s target=%s",
+                    str(getattr(getattr(message, "author", None), "id", "") or ""),
+                    getattr(guild, "id", ""),
+                    getattr(channel, "id", ""),
+                    str(message_id),
+                )
                 return f"Unpinned message {message_id}"
             await msg.pin(reason=_mod_reason(message))
+            logger.info(
+                "moderation action=pin_message requester=%s guild=%s channel=%s target=%s",
+                str(getattr(getattr(message, "author", None), "id", "") or ""),
+                getattr(guild, "id", ""),
+                getattr(channel, "id", ""),
+                str(message_id),
+            )
             return f"Pinned message {message_id}"
         except discord.NotFound:
             return f"Error: message {message_id} not found"
@@ -880,6 +818,169 @@ class PinMessageTool(Tool):
         except Exception as e:
             return f"Error pinning message: {e}"
 
+class _PurgeConfirmationView(discord.ui.View):
+    """Short-lived, opener-bound confirmation for one exact purge target set."""
+
+    def __init__(self, bot, requester_id: str, guild, channel, target_ids: list[str], user_id: int | None):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.requester_id = str(requester_id)
+        self.guild = guild
+        self.channel = channel
+        self.guild_id = str(getattr(guild, "id", ""))
+        self.channel_id = str(getattr(channel, "id", ""))
+        self.target_ids = tuple(str(item) for item in target_ids)
+        self.user_id = user_id
+        self.preview_message = None
+
+        confirm = discord.ui.Button(
+            label=f"Delete {len(self.target_ids)} messages",
+            style=discord.ButtonStyle.danger,
+        )
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        confirm.callback = self._confirm  # type: ignore[method-assign]
+        cancel.callback = self._cancel  # type: ignore[method-assign]
+        self.add_item(confirm)
+        self.add_item(cancel)
+
+    async def interaction_check(self, interaction) -> bool:
+        user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+        guild_id = str(getattr(interaction, "guild_id", "") or "")
+        channel_id = str(getattr(interaction, "channel_id", "") or "")
+        if (
+            user_id == self.requester_id
+            and guild_id == self.guild_id
+            and channel_id == self.channel_id
+        ):
+            return True
+        response = getattr(interaction, "response", None)
+        if response is not None and not response.is_done():
+            await response.send_message(
+                "Only the person who requested this purge can confirm or cancel it.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        return False
+
+    async def _cancel(self, interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if self.preview_message is not None:
+            with contextlib.suppress(Exception):
+                await self.preview_message.edit(
+                    content="Purge cancelled. No messages were deleted.", view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        await interaction.followup.send(
+            "Purge cancelled.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self.stop()
+
+    async def _confirm(self, interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        requester_id = self.requester_id
+        fetch_member = getattr(self.guild, "fetch_member", None)
+        if not callable(fetch_member):
+            result = "Purge refused: current server membership could not be verified."
+            await interaction.followup.send(
+                result, ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            member = await fetch_member(int(requester_id))
+        except Exception:
+            result = "Purge refused: you are no longer a member of this server."
+            await interaction.followup.send(
+                result, ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        # The interaction's embedded permission snapshot may predate a role
+        # revoke. Fetch the current member and check the actual target channel.
+        actor = SimpleNamespace(author=member, guild=self.guild, channel=self.channel)
+        deleted = 0
+        missing = 0
+        refused = 0
+        failures = 0
+        permission_revoked = False
+        for target_id in self.target_ids:
+            missing_cap = _missing_cap(
+                self.guild, "manage_messages", actor, channel=self.channel
+            )
+            if missing_cap:
+                permission_revoked = True
+                refused += len(self.target_ids) - deleted - missing - refused - failures
+                break
+            try:
+                target = await self.channel.fetch_message(int(target_id))
+            except discord.NotFound:
+                missing += 1
+                continue
+            except discord.Forbidden:
+                failures += 1
+                break
+            if self.user_id is not None and str(
+                getattr(getattr(target, "author", None), "id", "")
+            ) != str(self.user_id):
+                # The author is immutable in Discord. Treat any mismatch as a
+                # stale/corrupt target set and do not delete it.
+                refused += 1
+                continue
+            try:
+                await target.delete(reason=_mod_reason(actor))
+                deleted += 1
+            except discord.NotFound:
+                missing += 1
+            except discord.Forbidden:
+                failures += 1
+                break
+            except discord.HTTPException:
+                failures += 1
+                break
+
+        details = [f"deleted {deleted}"]
+        if missing:
+            details.append(f"already missing {missing}")
+        if refused:
+            details.append(f"not deleted {refused}")
+        if failures:
+            details.append(f"failed {failures}")
+        result = (
+            "Purge stopped because current channel permissions no longer allow it: "
+            if permission_revoked
+            else "Purge finished: "
+        ) + ", ".join(details) + "."
+        logger.info(
+            "moderation action=purge_confirmed requester=%s guild=%s channel=%s target_count=%s deleted=%s missing=%s refused=%s failures=%s",
+            requester_id,
+            self.guild_id,
+            self.channel_id,
+            len(self.target_ids),
+            deleted,
+            missing,
+            refused,
+            failures,
+        )
+        if self.preview_message is not None:
+            with contextlib.suppress(Exception):
+                await self.preview_message.edit(
+                    content=result, view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        await interaction.followup.send(
+            result, ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        if self.preview_message is not None:
+            with contextlib.suppress(Exception):
+                await self.preview_message.edit(view=None)
+
+
 class PurgeMessagesTool(Tool):
     tool_name = 'purge_messages'
     returns_result = True
@@ -887,8 +988,10 @@ class PurgeMessagesTool(Tool):
 
     def get_description(self):
         return (
-            "Bulk-delete recent messages in a channel. Requires manage_messages. "
-            "Params: limit (1-100, default 20), channel_id (optional), user_id (optional filter)."
+            "Preview up to 20 recent messages in this channel for bulk deletion. "
+            "Requires manage_messages; the person who requested it must confirm "
+            "with the button. Params: limit (1-20, default 20), channel_id "
+            "(optional current-server channel), user_id (optional author filter)."
         )
 
     async def execute(
@@ -901,42 +1004,89 @@ class PurgeMessagesTool(Tool):
     ) -> str:
         channel = getattr(message, "channel", None)
         if channel_id:
-            channel, error = await _get_guild_channel(self.bot, channel_id)
+            channel, error = await _get_guild_channel(
+                self.bot,
+                channel_id,
+                expected_guild_id=getattr(getattr(message, "guild", None), "id", None),
+            )
             if error:
                 return error
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: purge only works in servers"
+        if str(getattr(guild, "id", "")) != str(
+            getattr(getattr(message, "guild", None), "id", "")
+        ):
+            return "Error: target channel is outside this server"
         missing = _missing_cap(
             guild, "manage_messages", message, channel=channel
         )
         if missing:
             return missing
-        if not hasattr(channel, "purge"):
-            return "Error: this channel type cannot be purged"
         try:
-            cap = max(1, min(int(limit or 20), 100))
+            cap = max(1, min(int(limit or 20), 20))
         except (TypeError, ValueError):
             return "Error: limit must be a number"
         uid = _parse_snowflake(user_id)
-
-        def _check(msg):
-            if uid is None:
-                return True
-            return getattr(getattr(msg, "author", None), "id", None) == uid
+        if user_id and uid is None:
+            return "Error: user_id must be a valid Discord user ID"
+        if not hasattr(channel, "history"):
+            return "Error: this channel type cannot be previewed for purge"
 
         try:
-            deleted = await channel.purge(
-                limit=cap, check=_check, reason=_mod_reason(message)
+            candidates = []
+            async for target in channel.history(limit=cap):
+                author_id = str(getattr(getattr(target, "author", None), "id", "") or "")
+                # Never include the bot's confirmation/status posts in a later
+                # purge preview. The candidate set remains bounded and explicit.
+                if str(getattr(getattr(self.bot, "user", None), "id", "")) == author_id:
+                    continue
+                if uid is not None and author_id != str(uid):
+                    continue
+                candidates.append(target)
+            if not candidates:
+                return "No matching recent messages were found; nothing was deleted."
+
+            requester_id = str(getattr(getattr(message, "author", None), "id", "") or "")
+            target_ids = [str(target.id) for target in candidates]
+            lines = [
+                f"Purge preview for {_channel_label(channel)} — {len(candidates)} exact target(s).",
+                "Only the requester can confirm within 2 minutes. No message text is shown.",
+            ]
+            for target in candidates:
+                created_at = getattr(target, "created_at", None)
+                stamp = created_at.strftime("%Y-%m-%d %H:%M UTC") if created_at else "time unavailable"
+                author_id = getattr(getattr(target, "author", None), "id", "unknown")
+                lines.append(f"• message_id={target.id} author_id={author_id} at={stamp}")
+            preview = "\n".join(lines)
+            view = _PurgeConfirmationView(
+                self.bot, requester_id, guild, channel, target_ids, uid
             )
-            return f"Purged {len(deleted)} messages in {_channel_label(channel)}"
+            sent = await channel.send(
+                preview,
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            view.preview_message = sent
+            logger.info(
+                "moderation action=purge_preview requester=%s guild=%s channel=%s target_count=%s target_ids=%s",
+                requester_id,
+                getattr(guild, "id", ""),
+                getattr(channel, "id", ""),
+                len(target_ids),
+                ",".join(target_ids),
+            )
+            return (
+                f"Previewed {len(candidates)} exact message target(s) in "
+                f"{_channel_label(channel)}. The requester must use the confirmation button; nothing has been deleted yet."
+            )
         except discord.Forbidden:
-            return f"Error: Discord denied purging {_channel_label(channel)}"
+            return f"Error: Discord denied reading or posting a purge preview in {_channel_label(channel)}"
         except Exception as e:
-            return f"Error purging messages: {e}"
+            return f"Error creating purge preview: {e}"
 
 class SearchMessagesTool(Tool):
-    """Search for messages in the server"""
+    """Look up one message or search bounded history the requester can read."""
     tool_name = 'search_messages'
     returns_result = True
     ends_turn = False
@@ -944,58 +1094,180 @@ class SearchMessagesTool(Tool):
 
     def get_description(self):
         return (
-            "Search recent messages in this channel only. "
-            "Params: query (required), limit (optional, default 5, max 10)."
+            "Look up a message by ID in this channel, by a Discord message link "
+            "in this server, or by the current request's reply reference; otherwise "
+            "search/list bounded recent history in this channel. Only channels both "
+            "you and Maxwell can view and read are available. Results include the "
+            "real ID, author, channel, timestamp, and a short content preview. "
+            "Params: message_id, message_link, reply_reference, query, limit (1-10)."
         )
 
+    @staticmethod
+    def _message_link(value: str) -> tuple[str, str, str] | None:
+        try:
+            parsed = urlparse(str(value or "").strip().strip("<>"))
+            if parsed.scheme != "https" or (parsed.hostname or "").lower() not in {
+                "discord.com", "www.discord.com", "canary.discord.com",
+                "ptb.discord.com", "discordapp.com", "www.discordapp.com",
+            }:
+                return None
+            parts = [item for item in parsed.path.split("/") if item]
+            if len(parts) != 4 or parts[0] != "channels":
+                return None
+            if not all(item.isdigit() for item in parts[1:]):
+                return None
+            return parts[1], parts[2], parts[3]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_denial(message, channel) -> str | None:
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return None if channel is getattr(message, "channel", None) else (
+                "Error: direct-message lookup is limited to the current channel"
+            )
+        source_guild = getattr(message, "guild", None)
+        if source_guild is None or str(getattr(source_guild, "id", "")) != str(
+            getattr(guild, "id", "")
+        ):
+            return "Error: message lookup is limited to this server"
+        requester = _resolve_requester_member(guild, message)
+        bot_member = _guild_me(guild)
+        if requester is None or bot_member is None:
+            return "Error: current requester and bot membership must be verified"
+        permissions_for = getattr(channel, "permissions_for", None)
+        if not callable(permissions_for):
+            return "Error: channel read permissions could not be verified"
+        for member, label in ((requester, "you"), (bot_member, "Maxwell")):
+            try:
+                permissions = permissions_for(member)
+            except Exception:
+                permissions = None
+            if permissions is None or not getattr(permissions, "view_channel", False):
+                return f"Error: {label} cannot view that channel"
+            if not getattr(permissions, "read_message_history", False):
+                return f"Error: {label} cannot read that channel's history"
+        return None
+
+    @staticmethod
+    def _format_message(msg, channel) -> str:
+        content = str(getattr(msg, "content", "") or "")
+        snippet = content[:500] + ("…" if len(content) > 500 else "")
+        author = getattr(msg, "author", None)
+        author_name = getattr(author, "display_name", None) or getattr(author, "name", "unknown")
+        author_id = getattr(author, "id", "unknown")
+        created_at = getattr(msg, "created_at", None)
+        timestamp = created_at.isoformat() if created_at is not None else "unknown"
+        guild = getattr(channel, "guild", None)
+        reply_id = getattr(getattr(msg, "reference", None), "message_id", None)
+        attachments = [
+            str(getattr(item, "filename", "attachment"))[:100]
+            for item in list(getattr(msg, "attachments", None) or [])[:5]
+        ]
+        lines = [
+            f"message_id={msg.id} author={author_name} author_id={author_id} "
+            f"channel=#{getattr(channel, 'name', 'chat')} channel_id={getattr(channel, 'id', 'unknown')} "
+            f"guild_id={getattr(guild, 'id', 'DM')} timestamp={timestamp}",
+            f"content_preview={snippet or '[no text content]'}",
+        ]
+        if reply_id:
+            lines.append(f"reply_to_message_id={reply_id}")
+        if attachments:
+            lines.append("attachments=" + ", ".join(attachments))
+        return "\n".join(lines)
+
     async def execute(
-        self, message: Message, query: str | None = None, limit: str = "5", **kwargs
+        self,
+        message: Message,
+        query: str | None = None,
+        limit: str = "5",
+        message_id: str | None = None,
+        message_link: str | None = None,
+        reply_reference: str | None = None,
+        **kwargs,
     ) -> str:
         chan = getattr(message, "channel", None)
-        if not message.guild and not chan:
+        if not chan:
             return "Error: Channel context unavailable"
         try:
             search_limit = max(1, min(int(limit), 10))
-            results = []
             clean_query = str(query or "").strip().lower()
+            selectors = sum(bool(str(v or "").strip()) for v in (message_id, message_link, reply_reference))
+            if selectors > 1:
+                return "Error: use only one of message_id, message_link, or reply_reference"
+            target_channel = chan
+            target_id = None
+            if message_link:
+                parsed = self._message_link(message_link)
+                if parsed is None:
+                    return "Error: message_link must be a valid Discord message link"
+                guild_id, linked_channel, target_id = parsed
+                source_guild = getattr(message, "guild", None)
+                if source_guild is None or guild_id != str(getattr(source_guild, "id", "")):
+                    return "Error: message lookup is limited to this server"
+                target_channel, error = await _get_guild_channel(
+                    self.bot,
+                    linked_channel,
+                    expected_guild_id=guild_id,
+                )
+                if error:
+                    return error
+            elif message_id:
+                target_id = str(message_id).strip()
+                if not target_id.isdigit():
+                    return "Error: message_id must be numeric"
+            elif reply_reference:
+                target_id = str(reply_reference).strip()
+                if not target_id.isdigit():
+                    return "Error: reply_reference must be a message ID"
+            elif not clean_query:
+                ref = getattr(message, "reference", None)
+                target_id = str(getattr(ref, "message_id", "") or "") or None
 
-            if not chan or not hasattr(chan, "history"):
-                return "Error: Channel context unavailable"
+            denial = self._read_denial(message, target_channel)
+            if denial:
+                return denial
+            if target_id:
+                if not hasattr(target_channel, "fetch_message"):
+                    return "Error: message lookup is unavailable in this channel"
+                try:
+                    target = await target_channel.fetch_message(int(target_id))
+                except discord.NotFound:
+                    return f"Message {target_id} was not found in the authorized channel."
+                except discord.Forbidden:
+                    return "Error: Discord denied reading that message"
+                return "Message lookup:\n" + self._format_message(target, target_channel)
 
-            # This channel only. A guild-wide history walk (8 rooms × 50)
-            # is how selfbots get 429'd and flagged.
-            scan = (
-                search_limit
-                if not clean_query
-                else min(40, max(search_limit * 4, 15))
-            )
+            if not hasattr(target_channel, "history"):
+                return "Error: bounded channel history is unavailable"
+            # This channel only, with a hard maximum scan of 40 messages.
+            scan = search_limit if not clean_query else min(40, max(search_limit * 4, 15))
+            results = []
             try:
-                async for msg in chan.history(limit=scan):
+                async for msg in target_channel.history(limit=scan):
                     if clean_query and clean_query not in (msg.content or "").lower():
                         continue
-                    snippet = msg.content[:150] + (
-                        "..." if len(msg.content) > 150 else ""
-                    )
-                    label = getattr(chan, "name", "chat")
-                    results.append(
-                        f"[#{label} - {msg.id}] {msg.author.display_name}: {snippet}"
-                    )
+                    results.append(self._format_message(msg, target_channel))
                     if len(results) >= search_limit:
                         break
             except Exception as e:
                 logger.warning("search_messages: channel scan failed: %s", e)
-                return f"Error searching messages: {e}"
+                return "Error searching messages: Discord history lookup failed"
 
             if not results:
                 if not clean_query:
                     return "No recent messages found in this channel"
-                return f"No messages found matching '{query}' in this channel"
+                    return f"No messages found matching '{str(query or '')[:100]}' in this channel"
             heading = (
                 f"Recent messages ({len(results)}):\n"
                 if not clean_query
                 else "Search results:\n"
             )
-            return heading + "\n".join(results)
+            marker = getattr(self.bot, "mark_message_tainted", None)
+            if callable(marker):
+                marker(message)
+            return heading + "\n---\n".join(results)
         except Exception as e:
             return f"Error searching messages: {e}"
 

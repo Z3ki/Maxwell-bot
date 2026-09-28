@@ -152,10 +152,12 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "search_messages": _obj(
         {
-            "query": _str("Search query"),
+            "query": _str("Optional recent-history search text", maxLength=200),
             "limit": _int("Max results (default 5)"),
+            "message_id": _str("Look up a numeric message ID in the current channel", maxLength=22),
+            "message_link": _str("Look up a Discord message link in this server", maxLength=300),
+            "reply_reference": _str("Look up a reply target by numeric message ID", maxLength=22),
         },
-        ["query"],
     ),
     "set_nickname": _obj(
         {"nickname": _str("New nickname, or 'reset' to clear")},

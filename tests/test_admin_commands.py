@@ -12,6 +12,8 @@ from plugins.maxwell_extras.admin_commands import (
     _redact,
     _set_control,
 )
+from plugins.maxwell_extras.admin_commands import install_admin_commands
+import user_install as ui
 
 
 def test_admin_surface_splits_diagnostics_from_maintenance_and_removes_owner_command():
@@ -107,3 +109,17 @@ def test_sensitive_control_cannot_be_changed_through_discord(tmp_path):
 def test_old_owner_command_is_not_in_either_command_definition():
     assert DIAGNOSTICS_COMMAND["name"] != "owner"
     assert MAINTENANCE_COMMAND["name"] != "owner"
+
+
+def test_legacy_admin_commands_are_removed_from_sync_surface(monkeypatch):
+    monkeypatch.setattr(
+        ui,
+        "USER_INSTALL_COMMANDS",
+        [{"name": "diagnostics"}, {"name": "maintenance"}],
+    )
+    monkeypatch.setattr(ui, "USER_INSTALL_NAMES", frozenset({"diagnostics", "maintenance"}))
+    monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [])
+    bot = SimpleNamespace()
+    install_admin_commands(bot)
+    assert ui.USER_INSTALL_COMMANDS == []
+    assert not any(name == "admin_commands" for _priority, name, _fn in ui._INTERACTION_HANDLERS)
