@@ -13,6 +13,7 @@ import contextlib
 import time
 from typing import Any
 
+import discord
 from user_install import (
     USER_INSTALL_MESSAGE_CAP,
     UserInstallSession,
@@ -103,6 +104,7 @@ async def _edit_original(
 
     edit_payload = dict(payload)
     edit_payload["content"] = content
+    edit_payload["allowed_mentions"] = discord.AllowedMentions.none()
     edit = getattr(interaction, "edit_original_response", None)
     if callable(edit):
         return await edit(**edit_payload)
@@ -379,6 +381,7 @@ def _patch_session() -> None:
                 reply_kwargs = dict(kwargs)
                 for key in ("ephemeral", "reference", "mention_author", "stickers"):
                     reply_kwargs.pop(key, None)
+                reply_kwargs["allowed_mentions"] = discord.AllowedMentions.none()
                 extra_files = reply_kwargs.pop("files", None)
                 reply_file = file
                 if file is not None and extra_files:

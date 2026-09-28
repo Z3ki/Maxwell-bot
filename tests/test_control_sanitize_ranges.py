@@ -39,6 +39,19 @@ def test_removed_site_quota_setting_is_not_exposed_or_returned():
     assert "create_site_quota_per_user" not in out
 
 
+def test_guild_plugin_overrides_keep_only_numeric_guilds_and_boolean_plugin_values():
+    out = _sanitize_control(
+        {
+            "guild_plugin_overrides": {
+                "123": {"web": True, "shell": False, "bad-name": True, "other": "false"},
+                "not-a-guild": {"web": True},
+                "456": ["web"],
+            }
+        }
+    )
+    assert out["guild_plugin_overrides"] == {"123": {"web": True, "shell": False}}
+
+
 @pytest.mark.parametrize(
     "key",
     [

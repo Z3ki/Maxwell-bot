@@ -858,6 +858,7 @@ class _PurgeConfirmationView(discord.ui.View):
             await response.send_message(
                 "Only the person who requested this purge can confirm or cancel it.",
                 ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         return False
 
@@ -866,9 +867,13 @@ class _PurgeConfirmationView(discord.ui.View):
         if self.preview_message is not None:
             with contextlib.suppress(Exception):
                 await self.preview_message.edit(
-                    content="Purge cancelled. No messages were deleted.", view=None
+                    content="Purge cancelled. No messages were deleted.", view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
-        await interaction.followup.send("Purge cancelled.", ephemeral=True)
+        await interaction.followup.send(
+            "Purge cancelled.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self.stop()
 
     async def _confirm(self, interaction) -> None:
@@ -877,13 +882,19 @@ class _PurgeConfirmationView(discord.ui.View):
         fetch_member = getattr(self.guild, "fetch_member", None)
         if not callable(fetch_member):
             result = "Purge refused: current server membership could not be verified."
-            await interaction.followup.send(result, ephemeral=True)
+            await interaction.followup.send(
+                result, ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         try:
             member = await fetch_member(int(requester_id))
         except Exception:
             result = "Purge refused: you are no longer a member of this server."
-            await interaction.followup.send(result, ephemeral=True)
+            await interaction.followup.send(
+                result, ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
 
         # The interaction's embedded permission snapshot may predate a role
@@ -954,8 +965,14 @@ class _PurgeConfirmationView(discord.ui.View):
         )
         if self.preview_message is not None:
             with contextlib.suppress(Exception):
-                await self.preview_message.edit(content=result, view=None)
-        await interaction.followup.send(result, ephemeral=True)
+                await self.preview_message.edit(
+                    content=result, view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        await interaction.followup.send(
+            result, ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self.stop()
 
     async def on_timeout(self) -> None:

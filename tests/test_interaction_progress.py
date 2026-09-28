@@ -253,6 +253,10 @@ def test_ephemeral_answer_does_not_replace_public_working_status():
         assert interaction.original.content == mod._STATUS_TEXT
         assert interaction.channel.sent == []
         assert interaction.followup.sent[0][0]["ephemeral"] is True
+        mentions = interaction.followup.sent[0][0]["allowed_mentions"]
+        assert mentions.everyone is False
+        assert mentions.users is False
+        assert mentions.roles is False
         assert sent is interaction.followup.sent[0][1]
 
     asyncio.run(run())

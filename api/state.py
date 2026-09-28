@@ -180,6 +180,22 @@ def _sanitize_control(control):
                     if isinstance(value, dict)
                     else {}
                 )
+            elif key == "guild_plugin_overrides":
+                out[key] = (
+                    {
+                        str(guild_id).strip(): {
+                            str(plugin_id).strip(): enabled
+                            for plugin_id, enabled in plugins.items()
+                            if str(plugin_id).strip().isidentifier()
+                            and type(enabled) is bool
+                        }
+                        for guild_id, plugins in value.items()
+                        if str(guild_id).strip().isdigit()
+                        and isinstance(plugins, dict)
+                    }
+                    if isinstance(value, dict)
+                    else {}
+                )
             else:
                 out[key] = (
                     {

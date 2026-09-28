@@ -36,6 +36,7 @@ _PERSONAL_SETTINGS = {
 }
 _SERVER_SETTINGS = {
     "channels": ("Response channels", "Limit Maxwell to one channel in this server or allow all channels."),
+    "plugins": ("Plugin tools", "Choose which optional plugin tools are available in this server."),
     "capabilities": ("Enabled capabilities", "Choose which tool groups are available in this server."),
     "moderation": ("Moderation policy", "Enable or disable Maxwell's moderation tools in this server."),
     "progress": ("Tool progress", "Show or hide progress messages while Maxwell works."),
@@ -134,6 +135,56 @@ def _guild_disabled(bot: Any, guild_id: str) -> set[str]:
     return {str(value) for value in values if str(value) in GUILD_CAPABILITIES}
 
 
+def _guild_plugin_names(bot: Any) -> list[str]:
+    manager = getattr(bot, "plugin_manager", None)
+    loaded = getattr(manager, "loaded_plugins", {}) or {}
+    names: list[str] = []
+    for name in loaded:
+        plugin_id = str(name or "").strip()
+        if not plugin_id.isidentifier():
+            continue
+        is_protected = getattr(manager, "is_protected", None)
+        if callable(is_protected) and is_protected(plugin_id):
+            continue
+        names.append(plugin_id)
+    return sorted(set(names))
+
+
+def _guild_plugin_overrides(bot: Any, guild_id: str) -> dict[str, bool]:
+    from .admin_commands import _control
+
+    mapping = _control(bot).get("guild_plugin_overrides", {})
+    values = mapping.get(str(guild_id), {}) if isinstance(mapping, dict) else {}
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(name): value
+        for name, value in values.items()
+        if str(name).isidentifier() and type(value) is bool
+    }
+
+
+async def _set_guild_plugin_selection(
+    bot: Any, guild_id: str, enabled: set[str]
+) -> None:
+    from .admin_commands import _control, _set_control
+
+    names = _guild_plugin_names(bot)
+    if len(names) > 25:
+        raise ValueError("Discord can display at most 25 plugin choices")
+    if not enabled <= set(names):
+        raise ValueError("a selected plugin is unavailable")
+    mapping = _control(bot).get("guild_plugin_overrides", {})
+    mapping = dict(mapping) if isinstance(mapping, dict) else {}
+    # Save a complete choice for the currently installed optional plugins.
+    # Uninstalled plugin IDs are discarded so stale `true` values cannot
+    # silently re-enable a plugin if it is installed again later.
+    if names:
+        mapping[str(guild_id)] = {name: name in enabled for name in names}
+    else:
+        mapping.pop(str(guild_id), None)
+    await _set_control(bot, "guild_plugin_overrides", json.dumps(mapping))
+
 async def _set_guild_disabled(bot: Any, guild_id: str, disabled: set[str]) -> None:
     from .admin_commands import _control, _set_control
 
@@ -207,7 +258,10 @@ class _ConfigScopeSelect(discord.ui.Select):
             "personal": "mode", "server": "channels", "owner": "diagnostics"
         }[self.panel.scope]
         self.panel._build()
-        await interaction.response.edit_message(content=self.panel.render(), view=self.panel)
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _ConfigSettingSelect(discord.ui.Select):
@@ -236,7 +290,10 @@ class _ConfigSettingSelect(discord.ui.Select):
             return
         self.panel.selected_key = self.values[0]
         self.panel._build()
-        await interaction.response.edit_message(content=self.panel.render(), view=self.panel)
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _ConfigValueSelect(discord.ui.Select):
@@ -295,7 +352,60 @@ class _GuildCapabilitySelect(discord.ui.Select):
             await _send(interaction, "Could not save the server capability settings.")
             return
         self.panel._build()
-        await interaction.response.edit_message(content=self.panel.render(), view=self.panel)
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class _GuildPluginSelect(discord.ui.Select):
+    def __init__(self, panel: "_ConfigPanel", row: int):
+        manager = getattr(panel.bot, "plugin_manager", None)
+        names = _guild_plugin_names(panel.bot)
+        overrides = _guild_plugin_overrides(panel.bot, panel.guild_id)
+        is_enabled = getattr(manager, "is_plugin_enabled_for_user", None)
+        options = []
+        for name in names:
+            if name in overrides:
+                enabled = overrides[name]
+            elif callable(is_enabled):
+                enabled = bool(is_enabled(name, None))
+            else:
+                enabled = False
+            options.append(
+                discord.SelectOption(
+                    label=name[:100],
+                    value=name,
+                    default=enabled,
+                    description=("Enabled in this server" if enabled else "Disabled in this server"),
+                )
+            )
+        super().__init__(
+            placeholder="Select plugin tools enabled in this server",
+            min_values=0,
+            max_values=min(25, len(options)),
+            options=options,
+            custom_id="maxwell:config:plugins",
+            row=row,
+        )
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        try:
+            await _set_guild_plugin_selection(
+                self.panel.bot, self.panel.guild_id, {str(value) for value in self.values}
+            )
+        except Exception as exc:
+            logger.warning("Could not update server plugin settings (%s)", type(exc).__name__)
+            await _send(interaction, "Could not save the plugin settings.")
+            return
+        self.panel._build()
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _GuildChannelSelect(discord.ui.Select):
@@ -350,7 +460,10 @@ class _GuildChannelSelect(discord.ui.Select):
             mapping[self.panel.guild_id] = value
             await saver(mapping, self.panel.guild_id, unblock_autonomy=False)
         self.panel._build()
-        await interaction.response.edit_message(content=self.panel.render(), view=self.panel)
+        await interaction.response.edit_message(
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _OwnerDiagnosticsSelect(discord.ui.Select):
@@ -539,11 +652,15 @@ class _ConfigTextModal(discord.ui.Modal):
         except ValueError as exc:
             await _send(interaction, str(exc))
             return
-        await interaction.response.send_message("Saved your setting.", ephemeral=True)
+        await interaction.response.send_message(
+            "Saved your setting.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self.panel._build()
         try:
             await self.panel.command_interaction.edit_original_response(
-                content=self.panel.render(), view=self.panel
+                content=self.panel.render(), view=self.panel,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             logger.debug("Could not refresh the original /config panel after a text edit", exc_info=True)
@@ -603,10 +720,12 @@ class _ByokCredentialsModal(discord.ui.Modal):
         await interaction.response.send_message(
             "Saved. This provider will receive the request context you send to Maxwell.",
             ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         try:
             await self.panel.command_interaction.edit_original_response(
-                content=self.panel.render(), view=self.panel
+                content=self.panel.render(), view=self.panel,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             logger.debug("Could not refresh /config after BYOK update", exc_info=True)
@@ -638,7 +757,8 @@ class _ByokProviderSelect(discord.ui.Select):
         self.panel.selected_provider = self.values[0]
         self.panel._build()
         await interaction.response.edit_message(
-            content=self.panel.render(), view=self.panel
+            content=self.panel.render(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 
@@ -757,7 +877,8 @@ class _ByokDeleteButton(discord.ui.Button):
         self.panel._build()
         try:
             await self.panel.command_interaction.edit_original_response(
-                content=self.panel.render(), view=self.panel
+                content=self.panel.render(), view=self.panel,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             logger.debug("Could not refresh /config after BYOK deletion", exc_info=True)
@@ -809,6 +930,7 @@ class _ConfigPanel(discord.ui.View):
             await self.command_interaction.edit_original_response(
                 content=self.render() + "\n\nThis menu expired. Run `/config` again.",
                 view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
             logger.debug("Could not remove expired /config controls", exc_info=True)
@@ -837,6 +959,12 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "server":
             if self.selected_key == "channels":
                 self.add_item(_GuildChannelSelect(self, base_row))
+                return
+            if self.selected_key == "plugins":
+                names = _guild_plugin_names(self.bot)
+                if names and len(names) <= 25:
+                    self.add_item(_GuildPluginSelect(self, base_row))
+                self.add_item(_ConfigResetButton(self))
                 return
             if self.selected_key == "capabilities":
                 self.add_item(_GuildCapabilitySelect(self, base_row))
@@ -882,6 +1010,19 @@ class _ConfigPanel(discord.ui.View):
 
             target = _control(self.bot).get("guild_solo_channel", {}).get(self.guild_id)
             return f"Restricted to <#{target}>" if target else "All channels"
+        if self.selected_key == "plugins":
+            names = _guild_plugin_names(self.bot)
+            if len(names) > 25:
+                return "Unavailable: Discord's plugin selector limit was exceeded"
+            overrides = _guild_plugin_overrides(self.bot, self.guild_id)
+            if not overrides:
+                return "Inheriting global and personal plugin settings"
+            enabled = sorted(name for name, value in overrides.items() if value)
+            if not enabled:
+                return "No optional plugin tools enabled in this server"
+            shown = ", ".join(enabled[:8])
+            extra = len(enabled) - 8
+            return f"Enabled: {shown}" + (f", and {extra} more" if extra > 0 else "")
         if self.selected_key == "capabilities":
             disabled = _guild_disabled(self.bot, self.guild_id)
             names = [GUILD_CAPABILITIES[key] for key in sorted(disabled)]
@@ -936,6 +1077,8 @@ class _ConfigPanel(discord.ui.View):
             title = f"Settings for {guild_name}"
             selected = _SERVER_SETTINGS.get(self.selected_key, ("Setting", ""))[0]
             hint = "Only the server owner or a member with Manage Server can change these settings."
+            if self.selected_key == "plugins":
+                hint += " Plugin choices limit tool and guild-event access in this server; scheduled background jobs remain application-owner controlled."
             value = self._current_value()
             if len(value) > 240:
                 value = value[:237] + "..."
@@ -1018,7 +1161,10 @@ class _ConfigPanel(discord.ui.View):
         else:
             await _send(interaction, "That setting cannot be changed with this menu.")
             return
-        await interaction.response.edit_message(content=self.render(), view=self)
+        await interaction.response.edit_message(
+            content=self.render(), view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     def set_text_value(self, key: str, value: str) -> None:
         if self.scope == "personal" and key == "language":
@@ -1069,6 +1215,18 @@ class _ConfigPanel(discord.ui.View):
                 logger.warning("Could not reset server capabilities (%s)", type(exc).__name__)
                 await _send(interaction, "Could not reset that server setting.")
                 return
+        elif self.scope == "server" and self.selected_key == "plugins":
+            try:
+                from .admin_commands import _control, _set_control
+
+                mapping = _control(self.bot).get("guild_plugin_overrides", {})
+                mapping = dict(mapping) if isinstance(mapping, dict) else {}
+                mapping.pop(self.guild_id, None)
+                await _set_control(self.bot, "guild_plugin_overrides", json.dumps(mapping))
+            except Exception as exc:
+                logger.warning("Could not reset server plugin settings (%s)", type(exc).__name__)
+                await _send(interaction, "Could not reset the plugin settings.")
+                return
         elif self.selected_key == "channels":
             from .admin_commands import _control
 
@@ -1091,7 +1249,10 @@ class _ConfigPanel(discord.ui.View):
             if callable(saver):
                 saver()
         self._build()
-        await interaction.response.edit_message(content=self.render(), view=self)
+        await interaction.response.edit_message(
+            content=self.render(), view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def _handle_config(bot: Any, interaction: Any) -> bool:
@@ -1108,7 +1269,10 @@ async def _handle_config(bot: Any, interaction: Any) -> bool:
     if not callable(sender):
         await _send(interaction, panel.render())
         return True
-    await sender(panel.render(), view=panel, ephemeral=True)
+    await sender(
+        panel.render(), view=panel, ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
     return True
 
 
