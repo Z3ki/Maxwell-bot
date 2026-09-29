@@ -113,6 +113,11 @@ _DEFERRED_POST_WINDOW = 0.8
 
 # Placeholder string for "tool name announced but no reasoning yet".
 _GENERATING_PLACEHOLDER = "generating…"
+_HIDDEN_PROGRESS_TOOLS = frozenset({"send_message"})
+
+
+def _is_hidden_progress_tool(tool_name: str | None) -> bool:
+    return str(tool_name or "").strip().lower() in _HIDDEN_PROGRESS_TOOLS
 
 
 def _latest_complete_sentence(text: str) -> str:
