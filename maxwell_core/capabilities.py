@@ -26,7 +26,6 @@ PLUGINS_MANAGE = "plugins.manage"
 CONFIG_MODIFY = "config.modify"
 SECRETS_READ = "secrets.read"
 JOBS_RUN = "jobs.run"
-VOICE = "voice"
 
 ALL_CAPABILITIES: frozenset[str] = frozenset(
     {
@@ -44,7 +43,6 @@ ALL_CAPABILITIES: frozenset[str] = frozenset(
         CONFIG_MODIFY,
         SECRETS_READ,
         JOBS_RUN,
-        VOICE,
     }
 )
 
@@ -64,7 +62,6 @@ CAPABILITY_LABELS: dict[str, str] = {
     CONFIG_MODIFY: "Modify configuration",
     SECRETS_READ: "Access secrets",
     JOBS_RUN: "Run background jobs",
-    VOICE: "Voice / TTS",
 }
 
 # Privileged capabilities that the dashboard must warn about.

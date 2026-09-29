@@ -19,6 +19,7 @@
     "jobs.run"
   ],
   "prompt": {
+    "scope": "discord",
     "position": "tools",
     "priority": 80,
     "requires_tools": [

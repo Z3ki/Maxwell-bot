@@ -172,19 +172,6 @@ PLUGIN_SPECS: list[dict] = [
         ],
     },
     {
-        "id": "tts_voice",
-        "name": "Voice and TTS",
-        "description": "Text-to-speech and Discord voice-channel tools.",
-        "permissions": ["voice"],
-        "tools": [
-            ("TtsTool", "tts", False, False, {"enable": "ENABLE_TTS", "visible": True}),
-            ("JoinVcTool", "join_vc", True, False, {}),
-            ("VcStatusTool", "vc_status", True, False, {}),
-            ("VcWhereTool", "vc_where", True, False, {}),
-            ("LeaveVcTool", "leave_vc", True, False, {}),
-        ],
-    },
-    {
         "id": "inbox",
         "name": "Inbox",
         "description": "Owner inbox for inbound requests Maxwell cannot handle alone.",

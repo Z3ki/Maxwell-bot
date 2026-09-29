@@ -6,6 +6,7 @@ import copy
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -88,9 +89,14 @@ async def _read_json_response_limited(resp, limit: int) -> Any:
         # Small test doubles and compatible response adapters may only expose
         # aiohttp's json() convenience method.
         return await resp.json()
-    raw = await content.read(limit + 1)
-    if len(raw) > limit:
-        raise RuntimeError("Provider response exceeded the configured size limit")
+    raw = bytearray()
+    while True:
+        chunk = await content.read(min(64 * 1024, limit + 1 - len(raw)))
+        if not chunk:
+            break
+        raw.extend(chunk)
+        if len(raw) > limit:
+            raise RuntimeError("Provider response exceeded the configured size limit")
     charset = getattr(resp, "charset", None) or "utf-8"
     try:
         return json.loads(raw.decode(charset))
@@ -833,11 +839,23 @@ async def _read_sse_response(
                 continue
             try:
                 obj = json.loads(payload)
-            except ValueError:
-                # Malformed frame — skip rather than fail the whole stream.
-                # Providers occasionally send keepalives or partial frames.
-                continue
+            except ValueError as exc:
+                raise RuntimeError("Provider stream returned invalid JSON") from exc
+            if not isinstance(obj, dict):
+                raise TypeError("Provider stream returned an invalid frame")
+            if obj.get("error") is not None:
+                raise RuntimeError("Provider stream returned an upstream error")
             choices = obj.get("choices") or []
+            if not isinstance(choices, list) or any(
+                not isinstance(choice, dict)
+                or not isinstance(choice.get("delta") or {}, dict)
+                for choice in choices
+            ):
+                raise RuntimeError("Provider stream returned invalid choices")
+            # This request asks for one completion. Never merge an unsolicited
+            # second choice into its text or tool calls, or allocate by an
+            # untrusted choice index.
+            choices = [choice for choice in choices if choice.get("index", 0) == 0]
             # TTFT is time-to-first-generated-output, not time-to-first-SSE
             # frame. Role-only openers, empty deltas, finish_reason, and the
             # trailing usage chunk would otherwise make TTFT ~= TTFB and
@@ -851,10 +869,6 @@ async def _read_sse_response(
                     first_token_s = now
                 last_token_s = now
             for choice in choices:
-                idx = choice.get("index", 0)
-                # Ensure the choices slot for this index exists.
-                while len(merged["choices"]) <= idx:
-                    merged["choices"].append({})
                 delta = choice.get("delta") or {}
                 if delta.get("role"):
                     role = delta["role"]
@@ -1041,6 +1055,9 @@ async def _read_sse_response(
         # Inner break hit [DONE]; stop reading.
         break
 
+    if not done and finish_reason is None:
+        raise RuntimeError("Provider stream ended before completion")
+
     if (
         not tool_calls_by_index
         and not content_parts
@@ -1120,10 +1137,10 @@ def _coerce_token_count(value) -> int:
         return 0
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         try:
             return max(0, int(float(value)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
 
@@ -1137,16 +1154,21 @@ def _first_present_token_count(raw: dict, *keys: str) -> int:
 def _reported_cost_usd(raw) -> float:
     if not isinstance(raw, dict):
         return 0.0
-    for key in ("cost", "total_cost"):
-        value = raw.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return max(0.0, float(value))
     details = raw.get("cost_details")
+    candidates = [raw.get("cost"), raw.get("total_cost")]
     if isinstance(details, dict):
-        for key in ("upstream_inference_cost", "total"):
-            value = details.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return max(0.0, float(value))
+        candidates.extend(
+            (details.get("upstream_inference_cost"), details.get("total"))
+        )
+    for value in candidates:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        try:
+            cost = float(value)
+        except OverflowError:
+            continue
+        if math.isfinite(cost):
+            return max(0.0, cost)
     return 0.0
 
 
@@ -1997,16 +2019,12 @@ class OllamaProvider:
         self._last_assistant_message: dict | None = None
         self._last_timing: dict = {}
         self._timing_history: deque = deque(maxlen=TIMING_HISTORY_MAX)
-        # Per-endpoint learned max *output* token cap (name -> cap). Set when a
-        # 400 "maximum output tokens" is observed, and applied proactively on
-        # the next call to that endpoint so we don't waste a round-trip on the
-        # 400 again. Scoped per-endpoint (NOT on the shared instance) so one
-        # model's small output cap doesn't cripple other endpoints/concurrent
-        # requests that previously got mutated via self.max_tokens.
-        self._endpoint_output_caps: dict[str, int] = {}
+        # Learned model constraints are isolated by endpoint and actual model:
+        # a primary model override must not constrain normal or fallback calls.
+        self._endpoint_output_caps: dict[tuple[str, str], int] = {}
         # Same idea for models that accept exactly one temperature (Console Go
         # rejects anything but 0.6 with a 400). Learned once, applied up front.
-        self._endpoint_temperatures: dict[str, float] = {}
+        self._endpoint_temperatures: dict[tuple[str, str], float] = {}
         # Endpoints that 400 on stream_options.include_usage (older Ollama).
         # Learned once, then we stop sending it and fall back to estimating
         # completion tokens from the output text.
@@ -2232,16 +2250,18 @@ class OllamaProvider:
                 endpoint.name,
                 endpoint.model,
             )
+        effective_model = (
+            (model or endpoint.model) if endpoint.name == "primary" else endpoint.model
+        )
+        constraint_key = (endpoint.name, effective_model)
         effective_temperature = self.temperature if temperature is None else temperature
         # An endpoint that already rejected our temperature gets its demanded
         # value up front instead of another guaranteed 400.
-        forced_temperature = self._endpoint_temperatures.get(endpoint.name)
+        forced_temperature = self._endpoint_temperatures.get(constraint_key)
         if forced_temperature is not None:
             effective_temperature = forced_temperature
         data = {
-            "model": (model or endpoint.model)
-            if endpoint.name == "primary"
-            else endpoint.model,
+            "model": effective_model,
             "messages": chat_messages,
             "temperature": effective_temperature,
             "stream": True,
@@ -2251,7 +2271,7 @@ class OllamaProvider:
         # Proactively clamp to a previously-learned per-endpoint output cap so
         # we don't waste a round-trip re-hitting the same 400. Per-endpoint so a
         # small-cap model never lowers the cap for other endpoints.
-        learned_cap = self._endpoint_output_caps.get(endpoint.name)
+        learned_cap = self._endpoint_output_caps.get(constraint_key)
         if learned_cap and effective_max > learned_cap:
             effective_max = learned_cap
         data["max_tokens"] = effective_max
@@ -2967,36 +2987,24 @@ class OllamaProvider:
                             if out_match:
                                 out_cap = int(out_match.group(1))
                                 # Leave headroom under the hard cap.
-                                safe_output = max(1024, min(out_cap - 64, out_cap))
+                                safe_output = max(1, out_cap - 64)
                                 current = int(data.get("max_tokens", self.max_tokens))
-                                if safe_output < current:
+                                if out_cap > 0 and safe_output < current:
                                     logger.warning(
                                         "Clamping max_tokens from %s to %s (model max output %s)",
                                         current,
                                         safe_output,
                                         out_cap,
                                     )
-                                    max_tokens = safe_output
-                                    # Remember per-endpoint so future calls to
-                                    # this endpoint clamp proactively without a
-                                    # wasted 400 round-trip. Do NOT mutate the
-                                    # shared self.max_tokens: that permanently
-                                    # crippled every other endpoint/concurrent
-                                    # request after one small-cap model was hit.
-                                    self._endpoint_output_caps[endpoint.name] = (
-                                        safe_output
-                                    )
-                                    data["max_tokens"] = safe_output
-                                    if await self._retry_after_attempt(
-                                        attempt,
-                                        endpoint,
-                                        f"Output cap, clamped max_tokens to {safe_output}",
-                                        max_attempts=max_attempts,
-                                        fast_fallback=True,
-                                        has_media=has_media,
-                                        prefer_fallback=prefer_fallback,
-                                    ):
-                                        continue
+                                    self._endpoint_output_caps[
+                                        (endpoint.name, data["model"])
+                                    ] = safe_output
+                                    # Resend to the same model without mutating
+                                    # the caller's limit for a later fallback.
+                                    if attempt >= max_attempts:
+                                        max_attempts = attempt + 1
+                                    recovery_endpoint = endpoint
+                                    continue
                         # Some models accept exactly one temperature and 400 on
                         # anything else. Learn it and resend to the SAME endpoint
                         # rather than burning retries / falling back needlessly.
@@ -3016,7 +3024,9 @@ class OllamaProvider:
                         required_temp = _required_temperature(resp.status, error_text)
                         if (
                             required_temp is not None
-                            and self._endpoint_temperatures.get(endpoint.name)
+                            and self._endpoint_temperatures.get(
+                                (endpoint.name, data["model"])
+                            )
                             != required_temp
                         ):
                             logger.warning(
@@ -3028,7 +3038,9 @@ class OllamaProvider:
                             # `temperature` override instead would carry this
                             # endpoint's constraint onto every other endpoint
                             # this call later touches.
-                            self._endpoint_temperatures[endpoint.name] = required_temp
+                            self._endpoint_temperatures[
+                                (endpoint.name, data["model"])
+                            ] = required_temp
                             if attempt >= max_attempts:
                                 max_attempts = attempt + 1
                             recovery_endpoint = endpoint

@@ -471,19 +471,6 @@ def test_delivery_line_vague_final_falls_back_to_thread():
     assert "http" not in research
 
 
-def test_worker_prompt_matches_tools_to_the_goal():
-    from jobs import _worker_system_body
-
-    text = _worker_system_body("deadbeef", "summarize the latest SpaceX launch")
-    low = text.lower()
-    assert "pick tools that match the goal" in low
-    assert "do not force a website unless the goal is a site" in low
-    assert "web_search" in low
-    assert "never invent a url" in low
-    assert "last message must be `built <title>: <url>" not in low
-    site = _worker_system_body("cafe", "portfolio site with guestbook")
-    assert "create_site" in site
-    assert "Built <title>: <url>" in site
 
 
 def test_resolve_job_model_precedence(monkeypatch):

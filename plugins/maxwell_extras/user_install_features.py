@@ -425,7 +425,6 @@ async def _modern_session_send(
         "allowed_mentions",
         "suppress_embeds",
         "silent",
-        "tts",
         "poll",
         "ephemeral",
         "delete_after",

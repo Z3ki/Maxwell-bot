@@ -1524,31 +1524,6 @@
           ],
         },
         {
-          title: "Voice (VC)",
-          fields: [
-            {
-              k: "vc_tts_engine", t: "select",
-              options: ["fish", "local", "espeak", "espeak-ng"],
-            },
-            { k: "vc_tts_voice", t: "text", placeholder: "blank = default (e.g. tiktok, mommy)" },
-            { k: "vc_reply_mode", t: "select", options: ["voice", "text", "both"] },
-            { k: "vc_response_mode", t: "select", options: ["always", "addressed"] },
-            { k: "vc_wake_words", t: "csv", placeholder: "maxwell, hey max" },
-            { k: "vc_interrupt_enabled", t: "bool" },
-            { k: "vc_cross_context_enabled", t: "bool" },
-            { k: "vc_debug", t: "bool" },
-            { k: "vc_rms_threshold", t: "int", min: 100, max: 10000 },
-            { k: "vc_pause_seconds", t: "float", min: 0.1, max: 5, step: 0.05 },
-            { k: "vc_min_seconds", t: "float", min: 0.1, max: 10, step: 0.05 },
-            { k: "vc_max_seconds", t: "float", min: 1, max: 120, step: 0.5 },
-            { k: "vc_preroll_seconds", t: "float", min: 0, max: 3, step: 0.05 },
-            { k: "vc_ai_timeout_seconds", t: "int", min: 5, max: 180 },
-            { k: "vc_ai_max_tokens", t: "int", min: 16, max: 1000 },
-            { k: "vc_memory_history_messages", t: "int", min: 0, max: 20 },
-            { k: "vc_max_response_chars", t: "int", min: 40, max: 2000 },
-          ],
-        },
-        {
           title: "Generated Sites",
           fields: [
             { k: "site_ttl_hours", t: "int", min: 0, max: 8760, hint: "0 = never expire" },

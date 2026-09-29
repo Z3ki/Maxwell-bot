@@ -672,7 +672,6 @@ class UserInstallSession:
             "allowed_mentions",
             "suppress_embeds",
             "silent",
-            "tts",
             "poll",
             "ephemeral",
             "delete_after",

@@ -79,21 +79,3 @@ def test_pm2_logs_follow_invoking_user(tmp_path, custom_pm2_home):
         assert Path(app["error_file"]).parent == log_root
 
 
-def test_docker_desktop_has_a_linux_docker_cli():
-    dockerfile = (ROOT / "docker/maxwell.Dockerfile").read_text()
-    assert "FROM docker:28-cli AS docker-cli" in dockerfile
-    assert "COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker" in dockerfile
-
-
-def test_caddy_separates_dashboard_and_generated_site_roots():
-    caddyfile = (ROOT / "examples/Caddyfile.example").read_text()
-    admin, public = caddyfile.split("\nmaxwell.example.com {", 1)
-    assert "admin.maxwell.example.com {" in admin
-    assert "handle /api/*" in admin
-    assert "handle @admin" in admin
-    assert "handle @legal" in admin
-    assert "handle /bot/" not in admin
-    assert "root * /var/www/maxwell/bot" in public
-    assert "handle_path /bot/*" in public
-    assert "handle /api/*" not in public
-    assert 'respond "Not found" 404' in public

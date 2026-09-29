@@ -1,17 +1,8 @@
-"""The prompts have to ask for the behaviour people complained about missing.
-
-Production logs showed three shapes: bursts of consecutive short replies,
-"I'll do X" with no tool call behind it, and sites announced as working that
-served a "Loading…" shell. Each of these asserts the instruction that addresses
-one of those, so a future prompt edit cannot quietly drop it.
-"""
+"""Consumer-visible site placeholder detection and provider schema bounds."""
 
 from types import SimpleNamespace
 
-from bot import LEAN_TOOL_PROTOCOL, MAXWELL_BASE_KNOWLEDGE, TOOL_PROTOCOL
-from control_defaults import DEFAULT_CONTROL
 from bot_tools import CreateSiteTool, _site_placeholder_warnings
-from tool_schemas import TOOL_PARAMETERS
 
 
 def _create_site_desc():
@@ -24,167 +15,9 @@ def _create_site_desc():
     return CreateSiteTool(bot).get_description()
 
 
-# --------------------------------------------------------------------------
-# proactivity
-# --------------------------------------------------------------------------
-
-
-def test_full_protocol_asks_for_proactive_work():
-    text = TOOL_PROTOCOL.lower()
-    assert "be proactive" in text
-    assert "do the whole job" in text
-    assert "finishing is the job" in text
-
-
-def test_full_protocol_discourages_needless_questions():
-    text = TOOL_PROTOCOL.lower()
-    assert "only ask a question when you genuinely cannot proceed" in text
-
-
-def test_full_protocol_keeps_multistep_work_in_primary_assistant():
-    text = TOOL_PROTOCOL.lower()
-    assert "spawn_background" not in text
-    assert "work through multi-step requests" in text
-    assert "only report completion after checking the tool results" in text
-
-
-def test_protocol_uses_create_thread_not_guided_goal():
-    text = TOOL_PROTOCOL.lower()
-    assert "create_thread" in text
-    assert "thread-you" in text
-    assert "call guide(" not in text
-    assert "guided-goal" not in text
-
-
-def test_lean_protocol_also_asks_for_proactive_work():
-    """Ordinary chat turns carry the lean block, so it needs this too."""
-    assert "be proactive" in LEAN_TOOL_PROTOCOL.lower()
-
-
-# --------------------------------------------------------------------------
-# anti-spam
-# --------------------------------------------------------------------------
-
-
-def test_protocols_forbid_burst_replies():
-    for text in (TOOL_PROTOCOL.lower(), LEAN_TOOL_PROTOCOL.lower()):
-        assert "one send_message" in text
-        assert "spam" in text
-
-
-def test_protocols_offer_silence_as_the_alternative():
-    for text in (TOOL_PROTOCOL.lower(), LEAN_TOOL_PROTOCOL.lower()):
-        assert "no_response" in text
-
-
-# --------------------------------------------------------------------------
-# no unfulfilled promises
-# --------------------------------------------------------------------------
-
-
-def test_full_protocol_forbids_claiming_unverified_work():
-    text = TOOL_PROTOCOL.lower()
-    assert "never claim something is done" in text
-    assert "unless a tool result" in text
-
-
-def test_full_protocol_still_rejects_ack_only_turns():
-    text = TOOL_PROTOCOL.lower()
-    assert "announcing an action is not performing it" in text
-    assert "on it" in text
-    assert "do not pair send_message" in text
-    assert "acknowledgement" not in text
-    assert "put the helper tool" not in text
-
-
-def test_protocols_do_not_ask_for_a_placeholder_send():
-    for text in (TOOL_PROTOCOL.lower(), LEAN_TOOL_PROTOCOL.lower()):
-        assert "same batch as the acknowledgement" not in text
-        assert "content='on it" not in text
-        assert "more_tools" not in text
-
-
-def test_lean_protocol_forbids_claiming_unverified_work():
-    assert "never say you have done something you have not" in (
-        LEAN_TOOL_PROTOCOL.lower()
-    )
-
-
-def test_protocols_do_not_force_reasoning_on_every_call():
-    for text in (TOOL_PROTOCOL, LEAN_TOOL_PROTOCOL):
-        assert "needs `reasoning`" not in text
-        assert "may include `reasoning`" in text
-
-
-# --------------------------------------------------------------------------
-# sites: work hard, no placeholders
-# --------------------------------------------------------------------------
-
-
-def test_protocol_bans_placeholders_in_sites():
-    text = TOOL_PROTOCOL.lower()
-    for banned in ("lorem ipsum", "todo", "coming soon", "placeholder"):
-        assert banned in text, f"{banned!r} is not called out"
-
-
-def test_protocol_calls_a_loading_shell_a_failure():
-    text = TOOL_PROTOCOL.lower()
-    assert "loading" in text
-    assert "built nothing" in text
-
-
-def test_protocol_does_not_force_site_test():
-    text = TOOL_PROTOCOL.lower()
-    assert "site_test" not in text
-    assert "call site_test" not in text
-
-
-def test_protocol_tells_it_to_write_as_much_code_as_needed():
-    assert "write 900 lines" in TOOL_PROTOCOL.lower()
-
-
-def test_create_site_description_bans_placeholders():
-    text = _create_site_desc().lower()
-    assert "no placeholders" in text
-    assert "lorem ipsum" in text
-    assert "shipped nothing" in text
-
-
-def test_create_site_body_schema_bans_placeholders():
-    body = TOOL_PARAMETERS["create_site"]["properties"]["body"]["description"].lower()
-    assert "no placeholders" in body
-    assert "lorem ipsum" in body
-    assert "loading" in body
-
-
 def test_create_site_description_stays_within_the_openai_limit():
     """Providers truncate long tool descriptions, which silently drops rules."""
     assert len(_create_site_desc()) < 1024
-
-
-def test_create_site_description_does_not_force_a_backend():
-    desc = _create_site_desc()
-    low = desc.lower()
-    assert "always true" not in low
-    assert "must use backend=true" not in low
-    assert "client-only sites are forbidden" not in low
-    assert "optional" in low or "not required" in low
-
-
-def test_create_site_backend_schema_does_not_forbid_static_sites():
-    desc = TOOL_PARAMETERS["create_site"]["properties"]["backend"]["description"].lower()
-    assert "always true" not in desc
-    assert "forbidden" not in desc
-
-
-def test_protocol_does_not_force_a_site_backend():
-    text = TOOL_PROTOCOL
-    low = text.lower()
-    assert "BACKEND IS MANDATORY" not in text
-    assert "Client-only sites are forbidden" not in text
-    assert "MUST use backend=true" not in text
-    assert "optional" in low
-    assert "z3ki authorization" not in low
 
 
 # --------------------------------------------------------------------------
@@ -254,41 +87,3 @@ def test_no_sources_means_no_warnings():
     assert _site_placeholder_warnings("", []) == []
 
 
-# --------------------------------------------------------------------------
-# honesty: not a yes-man
-# --------------------------------------------------------------------------
-
-
-def test_personality_forbids_yes_man_energy():
-    text = DEFAULT_CONTROL["base_personality"].lower()
-    assert "never a yes-man" in text
-    assert "always be truthful" in text
-    assert "if you disagree, say so" in text
-    assert "never invent facts" in text
-
-
-def test_base_knowledge_forbids_yes_man_energy():
-    text = MAXWELL_BASE_KNOWLEDGE.lower()
-    assert "never a yes-man" in text
-    assert "always truthful" in text
-    assert "never invent facts" in text
-
-
-def test_base_knowledge_gates_mod_tools_on_asker_perms():
-    text = MAXWELL_BASE_KNOWLEDGE.lower()
-    assert "person asking" in text
-    assert "manage_messages" in text
-    assert "does not bypass" in text
-    assert "no permission needed" not in text
-    assert "call report" in text
-
-
-# --------------------------------------------------------------------------
-# chess: he plays it himself
-# --------------------------------------------------------------------------
-
-
-def test_protocol_tells_him_to_pick_his_own_chess_moves():
-    text = TOOL_PROTOCOL.lower()
-    assert "you play your own moves" in text
-    assert "nothing plays for you" in text

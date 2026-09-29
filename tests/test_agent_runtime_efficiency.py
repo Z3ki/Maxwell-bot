@@ -7,7 +7,6 @@ from jobs import (
     _call_signature,
     _compact_worker_messages,
     _message_chars,
-    _worker_system_body,
     resolve_job_context_chars,
 )
 
@@ -21,13 +20,6 @@ def test_spawn_background_requests_self_contained_brief():
     assert "essential facts" in text
 
 
-def test_worker_prompt_pushes_convergence_and_avoids_repeat_work():
-    text = _worker_system_body("abc123", "research the launch", "prefer primary sources").lower()
-    assert "smallest sufficient tool sequence" in text
-    assert "do not repeat a successful search" in text
-    assert "verify externally visible or destructive work once" in text
-    assert "fail concretely instead of looping" in text
-    assert "finishing is the job" in text
 
 
 def test_context_budget_clamps_control_values():

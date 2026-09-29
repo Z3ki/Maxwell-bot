@@ -132,156 +132,8 @@ def refresh_owner_ids() -> set[str]:
     return OWNER_IDS
 
 
-TTS_LANGUAGE_ALIASES = {
-    "en": "english",
-    "en-us": "english",
-    "english": "english",
-    "us": "english",
-    "es": "spanish",
-    "es-us": "spanish",
-    "es-es": "spanish",
-    "spanish": "spanish",
-    "espanol": "spanish",
-    "español": "spanish",
-    "spanish_jason_angry": "spanish",
-    "jason_es": "spanish",
-}
-TTS_RIVA_DEFAULTS = {
-    "english": ("Magpie-Multilingual.EN-US.Jason.Angry", "en-US"),
-    "spanish": ("Magpie-Multilingual.ES-US.Jason.Angry", "es-US"),
-}
-
 _SHARED_SESSION: aiohttp.ClientSession | None = None
 _SESSION_LOCK = asyncio.Lock()
-
-
-def _tts_language_key(
-    language: str | None = None, lang: str | None = None, **kwargs
-) -> str:
-    requested = (
-        str(
-            language
-            or lang
-            or kwargs.get("language")
-            or kwargs.get("lang")
-            or "english"
-        )
-        .strip()
-        .lower()
-    )
-    return TTS_LANGUAGE_ALIASES.get(requested, "english")
-
-
-def _tts_riva_voice_config(language_key: str) -> tuple[str, str]:
-    voice_env = "TTS_RIVA_VOICE_ES" if language_key == "spanish" else "TTS_RIVA_VOICE"
-    lang_env = (
-        "TTS_RIVA_LANGUAGE_ES" if language_key == "spanish" else "TTS_RIVA_LANGUAGE"
-    )
-    default_voice, default_code = TTS_RIVA_DEFAULTS.get(
-        language_key, TTS_RIVA_DEFAULTS["english"]
-    )
-    return os.environ.get(voice_env, default_voice), os.environ.get(
-        lang_env, default_code
-    )
-
-
-async def _synthesize_fish_tts(
-    text: str,
-    output_path: str,
-    *,
-    api_key: str,
-    model: str,
-    reference_id: str,
-    fmt: str = "mp3",
-) -> str | None:
-    """Call Fish Audio's TTS API. Returns output_path on success, None on
-    failure (caller falls through to next provider).
-
-    Fish is preferred over Riva when FISH_API_KEY is set: free tier, no gRPC
-    dependency, supports emotion tags like `[excited]`, `[laughing]` inline.
-
-    Docs: https://docs.fish.audio/api-reference/developer-apis/text-to-speech
-    """
-    if not api_key:
-        return None
-    url = "https://api.fish.audio/v1/tts"
-    payload = {
-        "text": text,
-        "format": fmt,
-    }
-    if reference_id:
-        payload["reference_id"] = reference_id
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "model": model,
-    }
-    try:
-        session = await _get_shared_session()
-        timeout = aiohttp.ClientTimeout(total=45)
-        async with session.post(
-            url, json=payload, headers=headers, timeout=timeout
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.warning("Fish TTS API returned %s: %s", resp.status, body[:200])
-                return None
-            data = await resp.read()
-        if not data or len(data) < 64:
-            logger.warning(
-                "Fish TTS returned empty/too-small payload (%d bytes)", len(data)
-            )
-            return None
-        # Fish returns MP3 bytes (or whatever fmt requested); write directly.
-        # The downstream `make_voice_ogg` re-encodes via ffmpeg so extension
-        # does not matter — ffmpeg sniffs the format.
-        # Written off-thread: this runs on the bot's event loop, and a blocking
-        # write of a few hundred KB stalls every other chat.
-        await asyncio.to_thread(Path(output_path).write_bytes, data)
-        logger.info(
-            "Fish TTS synthesized %d bytes (model=%s, ref=%s)",
-            len(data),
-            model,
-            bool(reference_id),
-        )
-        return output_path
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.warning("Fish TTS request failed: %s", e)
-        return None
-    except Exception as e:
-        logger.warning("Fish TTS unexpected error: %s", e)
-        return None
-
-
-# Named Fish reference voices. Each name maps to its own env var; the
-# legacy TTS_FISH_REFERENCE_ID stays the backward-compatible default so
-# existing installs keep their current voice unless they opt into a name.
-FISH_REFERENCE_ENV = {
-    "tiktok": "TTS_FISH_REFERENCE_ID_TIKTOK",
-    "mommy": "TTS_FISH_REFERENCE_ID_MOMMY",
-    "espanol": "TTS_FISH_REFERENCE_ID_ESPANOL",
-    "español": "TTS_FISH_REFERENCE_ID_ESPANOL",
-    "spanish": "TTS_FISH_REFERENCE_ID_ESPANOL",
-}
-
-# Hardcoded fallback when no TTS_FISH_REFERENCE_ID* env var is set at all.
-FISH_REFERENCE_DEFAULT = "8d21b053e2804e2a890e1cf62f267b6f"
-
-
-def _fish_reference_id(voice: str | None = None) -> str:
-    """Resolve a named Fish voice ("tiktok", "mommy", ...) to a reference id.
-
-    Unknown/empty names fall back to TTS_FISH_REFERENCE_ID (then the
-    hardcoded default), so callers that don't care about voices keep the
-    exact behaviour they had before named voices existed.
-    """
-    if voice:
-        env_key = FISH_REFERENCE_ENV.get(str(voice).strip().lower())
-        if env_key:
-            value = os.environ.get(env_key, "").strip()
-            if value:
-                return value
-    return os.environ.get("TTS_FISH_REFERENCE_ID", FISH_REFERENCE_DEFAULT).strip()
 
 
 def _is_safe_ip(value: str) -> bool:
@@ -832,8 +684,6 @@ DM_BLOCKED_TOOLS = (
         "set_nickname",
         "create_thread",
         "thread_control",
-        "join_vc",
-        "leave_vc",
     }
 ) - {"create_invite"}
 _SNOWFLAKE_RE = re.compile(r"(\d{15,22})")
@@ -4193,7 +4043,6 @@ async def _fetch_public_url(
 # the Docker sandbox. One prompt injection and the LLM owns your box.
 
 
-# class TtsTool(Tool):  — moved to a plugin
 
 
 def _is_voice_channel(ch) -> bool:
@@ -4237,58 +4086,10 @@ def _find_member_voice(bot, user_id: int, prefer_guild=None):
     return None, None
 
 
-def _resolve_voice_channel(
-    bot, message, channel_id=None, channel_name=None, user_id=None
-):
-    """Find a VoiceChannel from an id, name, or a user who is already in one."""
-    if user_id:
-        cleaned = re.sub(r"[^0-9]", "", str(user_id))
-        if cleaned:
-            _member, channel = _find_member_voice(
-                bot, int(cleaned), getattr(message, "guild", None)
-            )
-            if channel is not None:
-                return channel
-    cid = re.sub(r"[^0-9]", "", str(channel_id or ""))
-    if cid:
-        ch = bot.get_channel(int(cid))
-        if _is_voice_channel(ch):
-            return ch
-    name = str(channel_name or "").strip().lstrip("#").lower()
-    guild = getattr(message, "guild", None)
-    if name and guild is not None:
-        for ch in getattr(guild, "voice_channels", []) or []:
-            if str(getattr(ch, "name", "")).lower() == name:
-                return ch
-    return None
-
-
-def _vc_listen_text_channel(message, guild):
-    channel = getattr(message, "channel", None)
-    if channel is not None and hasattr(channel, "send"):
-        return channel
-    if guild is None:
-        return None
-    text_channels = list(getattr(guild, "text_channels", []) or [])
-    return text_channels[0] if text_channels else None
-
-
 # class InboxListTool(Tool):  — moved to a plugin
 
 
 # class InboxActTool(Tool):  — moved to a plugin
-
-
-# class JoinVcTool(Tool):  — moved to a plugin
-
-
-# class VcStatusTool(Tool):  — moved to a plugin
-
-
-# class VcWhereTool(Tool):  — moved to a plugin
-
-
-# class LeaveVcTool(Tool):  — moved to a plugin
 
 
 # =============================================================================

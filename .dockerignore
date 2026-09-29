@@ -21,6 +21,10 @@ build
 *.egg-info
 .env
 .env.*
+local.env
+secrets.*
+*.pem
+*.key
 !.env.example
 temp
 tmp
@@ -31,6 +35,9 @@ docs
 !README.md
 .pi-lens
 .pi-subagents
+.commandcode
+.claude
+.kilo
 progress.md
 CONTEXT_MEMORY_ANALYSIS.md
 RELIABILITY_RESEARCH.md

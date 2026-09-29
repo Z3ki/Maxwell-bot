@@ -1141,24 +1141,6 @@ def test_sse_ttft_counts_gemini_reasoning_details(monkeypatch):
     assert merged["choices"][0]["message"]["content"] == "ok"
 
 
-def test_payload_asks_for_streaming_usage():
-    provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
-    data = provider._request_payload(
-        provider._endpoints[0], [{"role": "user", "content": "hi"}]
-    )
-    assert data["stream"] is True
-    assert data["stream_options"] == {"include_usage": True}
-
-
-def test_payload_omits_stream_usage_after_reject():
-    provider = OllamaProvider("http://example.test", "base-model", 10, 0.5)
-    provider._endpoints_without_stream_usage.add("primary")
-    data = provider._request_payload(
-        provider._endpoints[0], [{"role": "user", "content": "hi"}]
-    )
-    assert "stream_options" not in data
-
-
 def test_stream_options_rejected_is_learned_and_resent():
     provider = OllamaProvider("http://primary.test/v1", "picky-model", 10, 0.5)
     provider.available = True
@@ -1182,7 +1164,6 @@ def test_stream_options_rejected_is_learned_and_resent():
     asyncio.run(run())
     assert session.payloads[0]["stream_options"] == {"include_usage": True}
     assert "stream_options" not in session.payloads[1]
-    assert "primary" in provider._endpoints_without_stream_usage
 
 
 def test_temperature_constraint_is_learned_and_resent():
@@ -1197,6 +1178,7 @@ def test_temperature_constraint_is_learned_and_resent():
                 'invalid temperature: only 0.6 is allowed for this model"}}',
             ),
             FakeResponse(),
+            FakeResponse(),
         ]
     )
     provider._session = session
@@ -1206,12 +1188,15 @@ def test_temperature_constraint_is_learned_and_resent():
             [{"role": "user", "content": "hi"}]
         )
         assert message["content"] == "ok"
+        again = await provider.generate_chat_completion(
+            [{"role": "user", "content": "hi again"}]
+        )
+        assert again["content"] == "ok"
 
     asyncio.run(run())
     assert session.payloads[0]["temperature"] == 0.9
     assert session.payloads[1]["temperature"] == 0.6
-    # Learned, so the next call starts at the accepted value.
-    assert provider._endpoint_temperatures["primary"] == 0.6
+    assert session.payloads[2]["temperature"] == 0.6
 
 
 def test_media_incapable_endpoint_is_remembered_across_calls():
@@ -1527,3 +1512,259 @@ def test_audio_is_not_attached_when_disabled():
     asyncio.run(run())
     content = session.payloads[0]["messages"][0]["content"]
     assert content == "listen to this"
+
+
+def test_fragmented_byok_json_preserves_usage_and_cost():
+    """HTTP chunks are not complete JSON documents."""
+    from aiohttp import web
+
+    async def run():
+        async def handler(request):
+            response = web.StreamResponse(
+                headers={"Content-Type": "application/json"}
+            )
+            await response.prepare(request)
+            await response.write(b'{"choices":')
+            await asyncio.sleep(0.01)
+            await response.write(
+                b'[{"message":{"content":"complete reply"}}],'
+                b'"usage":{"prompt_tokens":3,"completion_tokens":2,'
+                b'"total_tokens":5,"cost":0.002}}'
+            )
+            await response.write_eof()
+            return response
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        provider = OllamaProvider(
+            f"http://127.0.0.1:{port}/v1", "model", 10, 0.5,
+            retry_attempts=1, empty_response_retries=0,
+        )
+        provider.available = True
+        provider._byok_sensitive = True
+        try:
+            result = await provider.generate_response(
+                [{"role": "user", "content": "hello"}]
+            )
+            assert result == "complete reply"
+            assert result.usage == {
+                "prompt_tokens": 3, "completion_tokens": 2,
+                "total_tokens": 5, "cost_usd": 0.002,
+            }
+        finally:
+            await provider.close()
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_bounded_json_response_enforces_exact_byte_boundary(extra_bytes):
+    from types import SimpleNamespace
+    from providers import _read_json_response_limited
+
+    body = b'{"content":"complete"}'
+
+    async def run():
+        content = asyncio.StreamReader()
+        content.feed_data(body + b" " * extra_bytes)
+        content.feed_eof()
+        response = SimpleNamespace(content=content, charset="utf-8")
+        if extra_bytes:
+            with pytest.raises(RuntimeError, match="size limit"):
+                await _read_json_response_limited(response, len(body))
+        else:
+            assert await _read_json_response_limited(response, len(body)) == {
+                "content": "complete"
+            }
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "",
+        'data: {"error":{"message":"generation failed"}}\n\ndata: [DONE]\n\n',
+        "data: {bad json}\n\ndata: [DONE]\n\n",
+        "data: null\n\ndata: [DONE]\n\n",
+        'data: {"choices":[null]}\n\ndata: [DONE]\n\n',
+    ],
+)
+def test_sse_failed_stream_never_returns_partial_tool_calls(tail):
+    from types import SimpleNamespace
+    from providers import _read_sse_response
+
+    frame = {
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "content": "partial reply",
+                "tool_calls": [{
+                    "index": 0, "id": "call-1", "type": "function",
+                    "function": {"name": "send_message", "arguments": '{"text":'},
+                }],
+            },
+        }]
+    }
+    blob = f"data: {json.dumps(frame)}\n\n{tail}".encode()
+    response = SimpleNamespace(content=_FakeAsyncStream([blob]))
+
+    async def run():
+        with pytest.raises((RuntimeError, TypeError)):
+            await _read_sse_response(response)
+
+    asyncio.run(run())
+
+
+def test_sse_finished_response_can_end_without_done_sentinel():
+    from types import SimpleNamespace
+    from providers import _read_sse_response
+
+    frame = {
+        "choices": [{
+            "index": 0, "delta": {"content": "complete"}, "finish_reason": "stop",
+        }]
+    }
+    response = SimpleNamespace(
+        content=_FakeAsyncStream([f"data: {json.dumps(frame)}\n\n".encode()])
+    )
+    result = asyncio.run(_read_sse_response(response))
+    assert result["choices"][0]["message"]["content"] == "complete"
+
+
+@pytest.mark.parametrize("other_index", [1, 1_000_000])
+def test_sse_does_not_merge_unsolicited_choices(other_index):
+    from types import SimpleNamespace
+    from providers import _read_sse_response
+
+    frame = {
+        "choices": [
+            {"index": 0, "delta": {"content": "correct"}, "finish_reason": "stop"},
+            {
+                "index": other_index, "delta": {"content": "wrong answer"},
+                "finish_reason": "stop",
+            },
+        ]
+    }
+    response = SimpleNamespace(content=_FakeAsyncStream([
+        f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode()
+    ]))
+    result = asyncio.run(_read_sse_response(response))
+    assert result["choices"][0]["message"]["content"] == "correct"
+
+
+@pytest.mark.parametrize("output_cap", [1, 512, 2048])
+def test_learned_output_cap_isolates_override_and_resends_last_attempt(output_cap):
+    provider = OllamaProvider(
+        "http://primary.test/v1", "normal-model", 8192, 0.9,
+        retry_attempts=1,
+    )
+    provider.available = True
+    session = FakeSequenceSession([
+        FakeErrorResponse(400, f"maximum output tokens ({output_cap})"),
+        FakeResponse(), FakeResponse(), FakeResponse(),
+    ])
+    provider._session = session
+
+    async def run():
+        for model in ("small-model", None, "small-model"):
+            result = await provider.generate_response(
+                [{"role": "user", "content": "hello"}], model=model
+            )
+            assert result == "ok"
+
+    asyncio.run(run())
+    assert 1 <= session.payloads[1]["max_tokens"] <= output_cap
+    assert session.payloads[2]["model"] == "normal-model"
+    assert session.payloads[2]["max_tokens"] == 8192
+    assert session.payloads[3]["max_tokens"] == session.payloads[1]["max_tokens"]
+
+
+def test_output_cap_from_failed_primary_does_not_limit_fallback():
+    provider = OllamaProvider(
+        "http://primary.test/v1", "primary-model", 8192, 0.9,
+        fallback_base_url="http://fallback.test/v1",
+        fallback_model="fallback-model", retry_attempts=3,
+    )
+    provider.available = True
+    session = FakeSequenceSession([
+        FakeErrorResponse(400, "maximum output tokens (512)"),
+        FakeErrorResponse(503, "overloaded"), FakeResponse(),
+    ])
+    provider._session = session
+
+    async def run():
+        result = await provider.generate_response(
+            [{"role": "user", "content": "hello"}]
+        )
+        assert result == "ok"
+
+    asyncio.run(run())
+    assert session.payloads[1]["max_tokens"] <= 512
+    assert session.payloads[2]["model"] == "fallback-model"
+    assert session.payloads[2]["max_tokens"] == 8192
+
+
+def test_learned_temperature_does_not_poison_primary_model_override():
+    provider = OllamaProvider(
+        "http://primary.test/v1", "normal-model", 10, 0.9, retry_attempts=1,
+    )
+    provider.available = True
+    session = FakeSequenceSession([
+        FakeErrorResponse(400, "invalid temperature: only 0.6 is allowed"),
+        FakeResponse(), FakeResponse(), FakeResponse(),
+    ])
+    provider._session = session
+
+    async def run():
+        for model in ("picky-model", None, "picky-model"):
+            result = await provider.generate_response(
+                [{"role": "user", "content": "hello"}], model=model
+            )
+            assert result == "ok"
+
+    asyncio.run(run())
+    assert [payload["temperature"] for payload in session.payloads] == [
+        0.9, 0.6, 0.9, 0.6,
+    ]
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), "1e309"])
+def test_malformed_usage_does_not_discard_successful_generation(value):
+    class UsageResponse(FakeResponse):
+        def __init__(self):
+            frame = {
+                "choices": [{
+                    "index": 0, "delta": {"content": "complete"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": "3", "completion_tokens": value,
+                    "cost": value, "cost_details": {"total": 0.002},
+                },
+            }
+            self.content = _FakeAsyncStream([
+                f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode()
+            ])
+
+    provider = OllamaProvider(
+        "http://primary.test/v1", "model", 10, 0.5, retry_attempts=1,
+    )
+    provider.available = True
+    session = FakeSession(UsageResponse())
+    provider._session = session
+    result = asyncio.run(provider.generate_response(
+        [{"role": "user", "content": "hello"}]
+    ))
+    assert result == "complete"
+    assert result.usage == {
+        "prompt_tokens": 3, "completion_tokens": 0,
+        "total_tokens": 3, "cost_usd": 0.002,
+    }
+    assert len(session.payloads) == 1

@@ -39,6 +39,20 @@ def test_removed_site_quota_setting_is_not_exposed_or_returned():
     assert "create_site_quota_per_user" not in out
 
 
+def test_retired_voice_controls_cannot_be_reenabled_but_audio_input_survives():
+    obsolete = {
+        "vc_reply_mode": "both",
+        "vc_response_mode": "always",
+        "vc_tts_engine": "riva",
+        "vc_ai_timeout_seconds": 999,
+        "vc_interrupt_enabled": True,
+        "vc_debug": True,
+    }
+    out = _sanitize_control({**obsolete, "process_audio": True})
+    assert not obsolete.keys() & out.keys()
+    assert out["process_audio"] is True
+
+
 def test_guild_plugin_overrides_keep_only_numeric_guilds_and_boolean_plugin_values():
     out = _sanitize_control(
         {
@@ -73,10 +87,10 @@ def test_zero_is_honored_not_treated_as_unset(key):
 
 def test_zero_is_honored_for_float_keys():
     out = _sanitize_control(
-        {"cross_context_extract_threshold": 0, "vc_preroll_seconds": 0}
+        {"cross_context_extract_threshold": 0, "per_user_cooldown_seconds": 0}
     )
     assert out["cross_context_extract_threshold"] == 0.0
-    assert out["vc_preroll_seconds"] == 0.0
+    assert out["per_user_cooldown_seconds"] == 0.0
 
 
 def test_float_shaped_ints_are_accepted():
@@ -122,16 +136,3 @@ def test_inbound_reliability_limits(key, low, high):
 def test_inbound_policy_booleans(key):
     assert _sanitize_control({key: "false"})[key] is False
     assert _sanitize_control({key: "true"})[key] is True
-
-
-@pytest.mark.parametrize(
-    "key,good,bad,fallback",
-    [
-        ("vc_tts_engine", "espeak", "bogus", "fish"),
-        ("vc_reply_mode", "both", "telepathy", "voice"),
-        ("vc_response_mode", "addressed", "sometimes", "always"),
-    ],
-)
-def test_voice_enums_reject_unknown_values(key, good, bad, fallback):
-    assert _sanitize_control({key: good})[key] == good
-    assert _sanitize_control({key: bad})[key] == fallback

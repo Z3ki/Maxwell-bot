@@ -568,7 +568,6 @@ AUTONOMY_POST_TOOLS = frozenset(
         "send_file",
         "send_meme",
         "send_media",
-        "tts",
     }
 )
 
@@ -1019,7 +1018,7 @@ Read CONVERSATION FLOOR before deciding to post_channel or send_dm:
 Engage like a real friend in the server. If addressed, answer. If there's an interesting discussion in OPEN, chime in. Work towards your goals or create new ones when relevant. If nothing needs doing and you don't feel like chatting, do_nothing.
 Never claim someone's message was "cut off" or incomplete.
 
-INBOX (when present): inbox_list / inbox_act. Voice: join_vc / vc_where / vc_status / leave_vc.
+INBOX (when present): inbox_list / inbox_act.
 Skip repeating identical actions from YOUR RECENT ACTIONS.
 
 ## Target

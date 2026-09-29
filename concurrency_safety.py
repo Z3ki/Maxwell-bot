@@ -358,9 +358,6 @@ _TOOL_CLASS_HINTS: tuple[tuple[str, str], ...] = (
     ("video", "media"),
     ("avatar", "media"),
     ("see_", "media"),
-    ("tts", "tts"),
-    ("speak", "tts"),
-    ("voice", "tts"),
     ("shell", "shell"),
     ("terminal", "shell"),
     ("site", "site"),
@@ -401,7 +398,6 @@ class ToolConcurrency:
         defaults = {
             "provider": 8,
             "media": 3,
-            "tts": 2,
             "shell": 2,
             "site": 3,
             "web": 8,

@@ -77,7 +77,9 @@ def _run(code, env=None):
     child_env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("REM_", "ENABLE_", "OLLAMA_", "MAXWELL_", "DISCORD_"))
+        if not k.startswith(
+            ("AI_", "REM_", "ENABLE_", "OLLAMA_", "OPENAI_COMPAT_", "MAXWELL_", "DISCORD_")
+        )
     }
     child_env["MAXWELL_ENV_FILE"] = os.devnull
     child_env.update(env or {})
@@ -127,6 +129,35 @@ def test_minimum_install_only_needs_token_and_model():
         )
         == "valid"
     )
+
+
+def test_friendly_provider_config_works_without_legacy_aliases():
+    env = {
+        "DISCORD_BOT_TOKEN": "test-token",
+        "AI_API_URL": "http://127.0.0.1:9999/v1",
+        "AI_MODEL": "friendly-model",
+        "AI_API_KEY": "friendly-key",
+    }
+    assert _run(
+        "from config import Config; Config.validate(); "
+        "print(Config.OLLAMA_BASE_URL, Config.OLLAMA_MODEL, Config.OLLAMA_API_KEY)",
+        env,
+    ) == "http://127.0.0.1:9999/v1 friendly-model friendly-key"
+
+
+def test_friendly_provider_config_overrides_stale_legacy_settings():
+    env = {
+        **MINIMUM_ENV,
+        "OLLAMA_API_KEY": "stale-key",
+        "AI_API_URL": "http://127.0.0.1:9999/v1",
+        "AI_MODEL": "friendly-model",
+        "AI_API_KEY": "",
+    }
+    assert _run(
+        "from config import Config; print(repr(("
+        "Config.OLLAMA_BASE_URL, Config.OLLAMA_MODEL, Config.OLLAMA_API_KEY)))",
+        env,
+    ) == "('http://127.0.0.1:9999/v1', 'friendly-model', '')"
 
 
 def test_validate_accepts_legacy_discord_token_alias():

@@ -3,133 +3,641 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>maxwell</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<meta name="description" content="Maxwell is an official Discord bot for AI conversation, scoped memory, and tools. The hosted service is in public alpha while a premium release is in preparation.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#12100e">
+<title>Maxwell — Discord AI bot</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2312100e'/%3E%3Crect x='0' y='0' width='32' height='6' fill='%23ff8a3d'/%3E%3C/svg%3E">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{
-  --bg:#0a0a0c;--card:#0f0f12;--bdr:#1c1c22;--bdr2:#2a2a32;
-  --fg:#e4e4e8;--fg2:#8a8a96;--fg3:#4a4a56;--accent:#e4e4e8;
+:root {
+  --bg: #12100e;
+  --raise: #1c1814;
+  --code: #0e0c0a;
+  --line: #8a7562;
+  --cream: #f6f1e8;
+  --lede: #e6d9c8;
+  --muted: #d2c4b4;
+  --orange: #ff8a3d;
+  --orange-hover: #ff9d5c;
+  --orange-active: #f07828;
+  --ink: #1a1008;
+  --focus: #ffd7b8;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: dark;
 }
-html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--fg);font-family:Inter,system-ui,sans-serif;line-height:1.6;min-height:100vh;-webkit-font-smoothing:antialiased}
-::selection{background:var(--fg);color:var(--bg)}
-a{color:inherit;text-decoration:none}
-.page{max-width:680px;margin:0 auto;padding:140px 24px 80px}
-
-/* hero */
-.tag{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--fg3);letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px}
-h1{font-family:'JetBrains Mono',monospace;font-size:clamp(40px,9vw,64px);font-weight:700;letter-spacing:-.04em;line-height:1;margin-bottom:28px}
-.lead{font-size:17px;color:var(--fg2);max-width:540px;margin-bottom:36px}
-.lead em{color:var(--fg);font-style:normal;font-weight:500}
-.links{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:24px}
-.links a{display:inline-flex;align-items:center;gap:8px;padding:11px 22px;border:1px solid var(--bdr);border-radius:8px;font-size:13px;font-weight:500;color:var(--fg);transition:border-color .2s,background .2s}
-.links a:hover{border-color:var(--bdr2);background:var(--card)}
-.links a.accent{background:var(--fg);color:var(--bg);border-color:var(--fg)}
-.links a.accent:hover{background:#fff}
-
-/* sections */
-.sep{height:1px;background:var(--bdr);margin:72px 0}
-h2{font-family:'JetBrains Mono',monospace;font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--fg3);margin-bottom:24px;font-weight:600}
-
-/* features */
-ul{list-style:none}
-li{padding:18px 0;border-bottom:1px solid var(--bdr);display:grid;grid-template-columns:120px 1fr;gap:24px;align-items:baseline;font-size:14px}
-li:last-child{border-bottom:0}
-li strong{color:var(--fg);font-weight:600;font-family:'JetBrains Mono',monospace;font-size:13px}
-li span{color:var(--fg2)}
-
-/* commands */
-pre{background:var(--card);border:1px solid var(--bdr);border-radius:10px;padding:22px;overflow-x:auto;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.8;color:var(--fg2)}
-pre .cmd{color:var(--fg);font-weight:600}
-pre .cm{color:var(--fg3)}
-
-/* stack */
-.stack{font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.9;color:var(--fg2)}
-.stack .c{color:var(--fg3);display:block;margin-top:10px}
-.stack .c:first-child{margin-top:0}
-
-/* warning */
-.warn{border:1px solid var(--bdr);border-radius:10px;padding:16px 20px;font-size:13px;color:var(--fg2);line-height:1.6;margin-bottom:24px}
-.warn strong{color:var(--fg)}
-
-footer{margin-top:64px;padding-top:32px;border-top:1px solid var(--bdr);font-size:12px;color:var(--fg3);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-footer a{transition:color .2s}
-footer a:hover{color:var(--fg)}
-
-@media(max-width:600px){
-  .page{padding:96px 18px 48px}
-  li{grid-template-columns:1fr;gap:6px}
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-padding-top: 5.25rem; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--cream);
+  font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
-
+::selection { background: var(--orange); color: var(--ink); }
+img, svg, video { max-width: 100%; }
+a { color: var(--cream); }
+a:visited { color: var(--cream); }
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.skip:focus {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 30;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0.7rem 1rem;
+  clip-path: none;
+  overflow: visible;
+  background: var(--orange);
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+}
+.wrap {
+  width: 100%;
+  max-width: 72rem;
+  margin-inline: auto;
+  padding-inline: clamp(1.25rem, 4vw, 3.5rem);
+}
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  border-top: 4px solid var(--orange);
+  border-bottom: 1px solid var(--line);
+}
+.header-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 1.5rem;
+  min-height: 4.25rem;
+  padding-block: 0.25rem;
+}
+.wordmark {
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  letter-spacing: -0.03em;
+  text-decoration: none;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem 0.35rem;
+}
+.site-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.25rem 0.7rem;
+  text-decoration: none;
+  font-size: 0.98rem;
+}
+.label {
+  margin: 0 0 0.85rem;
+  color: var(--orange);
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+h1, h2, h3 {
+  font-family: var(--serif);
+  font-weight: 400;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  text-wrap: balance;
+}
+h1 {
+  margin: 0 0 1.25rem;
+  font-size: clamp(3rem, 7vw, 5.4rem);
+}
+h1 em {
+  font-style: italic;
+  color: var(--orange);
+}
+h2 {
+  margin: 0 0 1.5rem;
+  font-size: clamp(2.1rem, 4.4vw, 3.35rem);
+  max-width: 18ch;
+}
+h3 {
+  margin: 0 0 0.7rem;
+  font-size: clamp(1.55rem, 2.5vw, 2.05rem);
+  line-height: 1.15;
+}
+.prose h3 { margin-top: 2.25rem; }
+.lede, .feature p, .prose p, .reqs li, .status-note {
+  text-wrap: pretty;
+}
+.hero { padding-block: clamp(2.75rem, 7vw, 5.75rem) clamp(3rem, 7vw, 5.5rem); }
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(15rem, 0.72fr);
+  gap: clamp(2rem, 5vw, 4.5rem);
+  align-items: start;
+}
+.hero-copy, .hero-status, .feature-body { min-width: 0; }
+.lede {
+  margin: 0;
+  max-width: 38rem;
+  color: var(--lede);
+  font-size: clamp(1.125rem, 2vw, 1.3rem);
+  line-height: 1.55;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.85rem;
+}
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0.7rem 1.2rem;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font: inherit;
+  font-weight: 650;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+}
+.button-primary,
+.button-primary:visited {
+  background: var(--orange);
+  border-color: var(--orange);
+  color: var(--ink);
+}
+.button-secondary,
+.button-secondary:visited {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--cream);
+}
+.hero-status {
+  border-top: 2px solid var(--orange);
+  padding-top: 1.15rem;
+  max-width: 24rem;
+}
+.status-line {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: clamp(1.85rem, 3vw, 2.45rem);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+}
+.status-note {
+  margin: 1rem 0 0;
+  color: var(--muted);
+  max-width: 28rem;
+}
+.section { padding-block: clamp(3.25rem, 7vw, 5.75rem); }
+.band {
+  background: var(--raise);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.feature-list { margin-top: 0.5rem; }
+.feature {
+  display: grid;
+  grid-template-columns: 4.75rem minmax(0, 1fr);
+  column-gap: 1.25rem;
+  padding-block: 1.85rem;
+  border-top: 1px solid var(--line);
+}
+.feature:last-child { border-bottom: 1px solid var(--line); }
+.feature-index {
+  margin: 0.4rem 0 0;
+  font-family: var(--serif);
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--orange);
+}
+.feature p, .prose p {
+  margin: 0 0 0.9rem;
+  max-width: 42rem;
+}
+.feature p:last-child, .prose p:last-child { margin-bottom: 0; }
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+p code, li code { color: var(--cream); }
+.install-panel {
+  margin-top: 1.75rem;
+  background: var(--code);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+.install-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.7rem 0.8rem 0.7rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.install-toolbar .label { margin: 0; }
+#copy-install {
+  background: var(--orange);
+  border: 1px solid var(--orange);
+  color: var(--ink);
+  border-radius: 4px;
+  min-height: 44px;
+  padding: 0.55rem 0.95rem;
+  font-weight: 650;
+}
+pre.command {
+  display: block;
+  margin: 0;
+  padding: 1rem 1.1rem 1.15rem;
+  min-width: 0;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 0.98rem;
+  line-height: 1.55;
+  color: var(--cream);
+  background: transparent;
+}
+pre.command code {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  white-space: inherit;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.copy-status {
+  min-height: 1.5rem;
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+}
+.copy-status[data-state="success"],
+.copy-status[data-state="error"] { color: var(--cream); }
+.reqs {
+  list-style: none;
+  margin: 1.35rem 0 0;
+  padding: 0;
+  max-width: 42rem;
+}
+.reqs li {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  margin: 0.55rem 0;
+}
+.reqs li::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-top: 0.55rem;
+  background: var(--orange);
+}
+.link-row, .legal-links, .footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.35rem;
+  align-items: center;
+}
+.link-row { margin-top: 1.6rem; }
+.legal-links { margin-top: 1.25rem; }
+.link-row a, .legal-links a, .footer-nav a, .status-note a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  text-decoration: underline;
+  text-decoration-color: var(--orange);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+}
+.site-footer {
+  border-top: 1px solid var(--line);
+  padding-block: 1.5rem 2.5rem;
+}
+.footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem 1.5rem;
+}
+.footer-note {
+  margin: 0;
+  color: var(--muted);
+  max-width: 36rem;
+}
+@media (max-width: 860px) {
+  .hero-grid { grid-template-columns: minmax(0, 1fr); }
+  .hero-status { max-width: none; margin-top: 0.5rem; }
+}
+@media (max-width: 640px) {
+  .feature { grid-template-columns: minmax(0, 1fr); row-gap: 0.2rem; }
+  .feature-index { margin-top: 0; }
+  .actions { flex-direction: column; align-items: stretch; }
+  .install-toolbar { align-items: stretch; }
+  #copy-install { width: 100%; }
+  h2 { max-width: none; }
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .button, #copy-install, .site-nav a, .wordmark, .link-row a, .legal-links a, .footer-nav a, .status-note a {
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  }
+}
+@media (hover: hover) {
+  .button-primary:hover, #copy-install:hover {
+    background: var(--orange-hover);
+    border-color: var(--orange-hover);
+    color: var(--ink);
+  }
+  .button-secondary:hover { background: #2a231c; }
+  .site-nav a:hover, .wordmark:hover { text-decoration: underline; text-underline-offset: 0.22em; text-decoration-color: var(--orange); }
+}
+.button-primary:active, #copy-install:active {
+  background: var(--orange-active);
+  border-color: var(--orange-active);
+  color: var(--ink);
+}
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (forced-colors: active) {
+  :focus-visible { outline: 3px solid CanvasText; }
+  .button-primary, .button-primary:visited, .button-secondary, .button-secondary:visited, #copy-install {
+    background: ButtonFace;
+    color: ButtonText;
+    border: 1px solid ButtonText;
+    forced-color-adjust: none;
+  }
+  .label, h1 em, .feature-index, .status-line { color: CanvasText; }
+}
 </style>
 </head>
 <body>
-<div class="page">
+<a class="skip vh" href="#main">Skip to content</a>
+<header class="site-header" id="top">
+  <div class="wrap header-inner">
+    <a class="wordmark" href="#top">Maxwell</a>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="#hosted">Hosted alpha</a>
+      <a href="https://github.com/Z3ki/Maxwell-bot" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="label">Official Discord bot</p>
+        <h1 id="hero-title">Maxwell for <em>Discord</em>.</h1>
+        <p class="lede">An official bot for AI conversation, scoped memory, and the tools you enable. Install the open-source build on your own machine, or use the hosted bot on this site.</p>
+        <div class="actions">
+          <a class="button button-primary" href="#install">Get started</a>
+          <a class="button button-secondary" href="https://github.com/Z3ki/Maxwell-bot" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a>
+        </div>
+      </div>
+      <div class="hero-status">
+        <p class="label">Hosted service</p>
+        <p class="status-line">Public alpha.</p>
+        <p class="status-line">Premium release in preparation.</p>
+        <p class="status-note">Billing stays off. Limits can change. <a href="#hosted">About the hosted alpha</a></p>
+      </div>
+    </div>
+  </section>
 
-<div class="tag">Public Alpha</div>
-<h1>maxwell</h1>
-<p class="lead">An official Discord bot that talks, thinks, and remembers. <em>Open source. Hosted copy is Public Alpha.</em> Not an assistant — just someone in the chat who happens to have access to an LLM, a shell, and zero self-preservation instincts.</p>
-<div class="links">
-  <a class="accent" href="https://github.com/Z3ki/Maxwell-bot" target="_blank">source code</a>
-  <a href="/admin/">dashboard</a>
-</div>
+  <section class="section" id="features" aria-labelledby="features-title">
+    <div class="wrap">
+      <p class="label">Overview</p>
+      <h2 id="features-title">What Maxwell does</h2>
+      <div class="feature-list">
+        <article class="feature">
+          <p class="feature-index" aria-hidden="true">01</p>
+          <div class="feature-body">
+            <h3>Discord AI conversation</h3>
+            <p>Maxwell joins Discord with an official bot token. In a server or a direct message it can take a turn on text, and on images, audio, video, and files you attach. Replies come from the OpenAI-compatible model configured for that install: Ollama, LM Studio, OpenRouter, OpenAI, or another compatible endpoint.</p>
+            <p>Channel chat and the <code>/maxwell</code> command are both ways to talk to it.</p>
+          </div>
+        </article>
+        <article class="feature">
+          <p class="feature-index" aria-hidden="true">02</p>
+          <div class="feature-body">
+            <h3>Scoped memory</h3>
+            <p>Maxwell stores channel context and longer-term facts, including shared context with visibility controls. The <code>/memory</code> command manages that store.</p>
+            <p>On the hosted alpha, memory can be lost while the service changes. Keep secrets out of it.</p>
+          </div>
+        </article>
+        <article class="feature">
+          <p class="feature-index" aria-hidden="true">03</p>
+          <div class="feature-body">
+            <h3>Tools</h3>
+            <p>When a reply needs an action, enabled plugins can search the web, generate or edit an image, moderate a server, play chess or checkers, publish a generated site, or run a sandboxed shell. Web search depends on its optional packages and configuration.</p>
+            <p>Destructive tools fail closed after the turn has taken in untrusted fetched content. They stay closed until a new user message.</p>
+          </div>
+        </article>
+        <article class="feature">
+          <p class="feature-index" aria-hidden="true">04</p>
+          <div class="feature-body">
+            <h3>Media in, conversation out</h3>
+            <p>Bring images, audio, video, and files into the conversation when the configured model and host can read them. Audio attachments remain supported; Maxwell does not join voice channels, listen to calls, or speak aloud.</p>
+            <p>Replies stay in text or completed media artifacts. Model support and optional media-processing packages determine which attachments an install can understand.</p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
 
-<div class="sep"></div>
+  <section class="section band" id="install" aria-labelledby="install-title">
+    <div class="wrap prose">
+      <p class="label">Self-host</p>
+      <h2 id="install-title">Install it on your machine</h2>
+      <p>Use this when you want a Maxwell you run yourself. The easy installer clones the repository, asks for the minimum configuration, and hands off to Docker. It asks for an official Discord bot token, the model endpoint and an API key when the provider requires one, and optionally a Discord user ID for owner-only commands.</p>
+      <p>Linux is the primary target. On macOS and Windows, install Docker Desktop before you start. Create the bot in the Discord Developer Portal and enable the Message Content, Server Members, and Presence intents.</p>
+      <div class="install-panel">
+        <div class="install-toolbar">
+          <p class="label" id="install-label">Shell</p>
+          <button type="button" id="copy-install" aria-describedby="copy-status">Copy command</button>
+        </div>
+        <pre class="command"><code id="install-command">curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash</code></pre>
+      </div>
+      <p id="copy-status" class="copy-status" role="status" aria-live="polite" aria-atomic="true"></p>
+      <noscript><p>Copy is unavailable without JavaScript. Select the command above and copy it manually.</p></noscript>
+      <h3>Have this ready</h3>
+      <ul class="reqs">
+        <li>An official Discord bot token from the Developer Portal.</li>
+        <li>Privileged gateway intents: Message Content, Server Members, and Presence.</li>
+        <li>Git, curl, and Python 3 on the setup machine.</li>
+        <li>Docker Engine with Compose, or Docker Desktop.</li>
+        <li>An OpenAI-compatible model endpoint.</li>
+      </ul>
+      <p>The installation guide covers those intents, the full installer, and unattended setup. Read <code>easy-install.sh</code> before you pipe it to a shell.</p>
+      <div class="link-row">
+        <a href="https://github.com/Z3ki/Maxwell-bot/blob/main/docs/INSTALL.md" target="_blank" rel="noopener noreferrer">Installation guide<span class="vh"> (opens in a new tab)</span></a>
+        <a href="https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh" target="_blank" rel="noopener noreferrer">easy-install.sh<span class="vh"> (opens in a new tab)</span></a>
+        <a href="https://github.com/Z3ki/Maxwell-bot" target="_blank" rel="noopener noreferrer">Repository<span class="vh"> (opens in a new tab)</span></a>
+      </div>
+    </div>
+  </section>
 
-<h2>what it does</h2>
-<ul>
-  <li><strong>talks</strong><span>text, images, audio, video, files — responds like a person.</span></li>
-  <li><strong>remembers</strong><span>short and long-term memory (incl. fresh AI/tech news from feeds).</span></li>
-  <li><strong>tools</strong><span>image gen, web search, shell, sites, categories/channels, kick/ban/timeout, and more.</span></li>
-  <li><strong>voice</strong><span>joins calls, listens, replies with TTS.</span></li>
-</ul>
-
-<div class="sep"></div>
-
-<h2>commands</h2>
-<pre><span class="cmd">/help</span>          show available commands
-<span class="cmd">/maxwell</span>       ask Maxwell with tools and files
-<span class="cmd">/image</span>         create or edit an image
-<span class="cmd">/chess</span>         play chess
-<span class="cmd">/checkers</span>      play checkers
-<span class="cmd">/moderation</span>    request server moderation
-<span class="cmd">/memory</span>        manage scoped memory
-<span class="cmd">/config</span>        update personal or server settings
-<span class="cmd">/personality</span>   set your reply-style preference
-<span class="cmd">/usage</span>         your message allowance
-<span class="cmd">/diagnostics</span>   restricted runtime diagnostics
-<span class="cmd">/maintenance</span>   restricted operational controls</pre>
-
-<div class="sep"></div>
-
-<h2>stack</h2>
-<div class="stack">
-  <span class="c"># runtime</span>
-  python 3.12 &middot; discord.py &middot; aiohttp
-  <span class="c"># ai</span>
-  openai-compatible API &middot; openrouter &middot; riva TTS
-  <span class="c"># infra</span>
-  docker &middot; pm2 &middot; caddy &middot; ffmpeg
-</div>
-
-<div class="sep"></div>
-
-<div class="warn">
-  <strong>Public Alpha.</strong> Expect bugs, downtime, lost memory, and changing usage limits. The usage command shows a percentage of your current allowance and its reset status; alpha limits may change. The code is MIT. This hosted instance may later add a subscription; no paid plan is available yet. New Discord users receive the Terms and Privacy links by DM. Self-host: official Discord bot token, Message Content / Server Members / Presence intents, <em>DISCORD_BOT_TOKEN</em>.
-</div>
-
-<footer>
-  <a href="https://github.com/Z3ki/Maxwell-bot" target="_blank">github</a>
-  <span>&middot;</span>
-  <a href="/admin/">dashboard</a>
-  <span>&middot;</span>
-  <a href="/terms/">terms</a>
-  <span>&middot;</span>
-  <a href="/privacy/">privacy</a>
+  <section class="section" id="hosted" aria-labelledby="hosted-title">
+    <div class="wrap prose">
+      <p class="label">This website</p>
+      <h2 id="hosted-title">The hosted bot is a public alpha</h2>
+      <p>The bot on this website is the operator’s hosted instance. A bot you install with the command above is yours. The hosted service is in public alpha while a premium release is in preparation.</p>
+      <p>During alpha, expect bugs, downtime, and lost memory. Usage limits can change. The hosted alpha is free to use within those limits. Billing stays off while the premium release is in preparation.</p>
+      <p>The source is MIT licensed and free to self-host. If you already talk to the hosted bot, the terms and privacy policy apply to that instance.</p>
+      <div class="legal-links">
+        <a href="/terms/">Terms of Service</a>
+        <a href="/privacy/">Privacy Policy</a>
+      </div>
+    </div>
+  </section>
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <p class="footer-note">Maxwell. Hosted instance, public alpha. Premium release in preparation.</p>
+    <nav class="footer-nav" aria-label="Legal and source">
+      <a href="https://github.com/Z3ki/Maxwell-bot" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a>
+      <a href="/terms/">Terms</a>
+      <a href="/privacy/">Privacy</a>
+    </nav>
+  </div>
 </footer>
+<script>
+(function () {
+  var button = document.getElementById("copy-install");
+  var source = document.getElementById("install-command");
+  var status = document.getElementById("copy-status");
+  if (!button || !status) return;
 
-</div>
+  var announceTimer = 0;
+
+  function announce(state, message) {
+    window.clearTimeout(announceTimer);
+    status.dataset.state = state;
+    status.textContent = "";
+    announceTimer = window.setTimeout(function () {
+      status.textContent = message;
+    }, 50);
+  }
+
+  function commandText() {
+    if (!source) return "";
+    return (source.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function legacyCopy(text) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.setAttribute("aria-hidden", "true");
+    area.style.position = "fixed";
+    area.style.inset = "0 auto auto 0";
+    area.style.width = "1px";
+    area.style.height = "1px";
+    area.style.padding = "0";
+    area.style.border = "0";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    var ok = false;
+    try {
+      area.focus();
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+      ok = document.execCommand("copy");
+    } catch (err) {
+      ok = false;
+    } finally {
+      if (area.parentNode) area.parentNode.removeChild(area);
+    }
+    if (document.activeElement !== button) button.focus();
+    return ok;
+  }
+
+  button.addEventListener("click", function () {
+    var text = commandText();
+    var failMessage = "Could not copy the install command. Select the command and copy it manually.";
+    if (!text) {
+      announce("error", failMessage);
+      return;
+    }
+    function succeed() {
+      announce("success", "Install command copied.");
+    }
+    function fail() {
+      announce("error", failMessage);
+    }
+    try {
+      var clipboard = navigator.clipboard;
+      if (clipboard && typeof clipboard.writeText === "function") {
+        clipboard.writeText(text).then(succeed, function () {
+          try {
+            if (legacyCopy(text)) succeed();
+            else fail();
+          } catch (err) {
+            fail();
+          }
+        });
+        return;
+      }
+      if (legacyCopy(text)) succeed();
+      else fail();
+    } catch (err) {
+      try {
+        if (legacyCopy(text)) succeed();
+        else fail();
+      } catch (err2) {
+        fail();
+      }
+    }
+  });
+})();
+</script>
 </body>
 </html>

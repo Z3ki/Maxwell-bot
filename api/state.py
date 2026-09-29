@@ -32,7 +32,6 @@ from api.storage import (
     _rem_events_path,
     _rem_runs_path,
     _rem_state_path,
-    _safe_float,
     _safe_int,
     _safe_list,
     _safe_object,
@@ -387,56 +386,11 @@ def _sanitize_control(control):
             86400,
         ),
     )
-    out["vc_rms_threshold"] = max(
-        100, min(_safe_int(out.get("vc_rms_threshold"), 1200), 10000)
-    )
-    out["vc_pause_seconds"] = max(
-        0.1, min(_safe_float(out.get("vc_pause_seconds"), 0.8), 5.0)
-    )
-    out["vc_min_seconds"] = max(
-        0.1, min(_safe_float(out.get("vc_min_seconds"), 0.55), 10.0)
-    )
-    out["vc_max_seconds"] = max(
-        1.0, min(_safe_float(out.get("vc_max_seconds"), 18.0), 120.0)
-    )
-    out["vc_preroll_seconds"] = max(
-        0.0, min(_safe_float(out.get("vc_preroll_seconds"), 0.25), 3.0)
-    )
-    out["vc_ai_timeout_seconds"] = max(
-        5, min(_safe_int(out.get("vc_ai_timeout_seconds"), 45), 180)
-    )
-    out["vc_ai_max_tokens"] = max(
-        16, min(_safe_int(out.get("vc_ai_max_tokens"), 90), 1000)
-    )
-    out["vc_memory_history_messages"] = max(
-        0, min(_safe_int(out.get("vc_memory_history_messages"), 2), 20)
-    )
-    out["vc_max_response_chars"] = max(
-        40, min(_safe_int(out.get("vc_max_response_chars"), 2000), 2000)
-    )
-    # Free-text VC fields are enums in practice (bot.py switches on them);
-    # an unknown value would silently take the else branch forever.
-    _tts_engine = str(out.get("vc_tts_engine") or "fish").strip().lower()
-    out["vc_tts_engine"] = (
-        _tts_engine
-        if _tts_engine in {"fish", "local", "espeak", "espeak-ng"}
-        else "fish"
-    )
-    out["vc_tts_voice"] = str(out.get("vc_tts_voice") or "").strip()[:64]
-    _reply_mode = str(out.get("vc_reply_mode") or "voice").strip().lower()
-    out["vc_reply_mode"] = (
-        _reply_mode if _reply_mode in {"voice", "text", "both"} else "voice"
-    )
-    _response_mode = str(out.get("vc_response_mode") or "always").strip().lower()
-    out["vc_response_mode"] = (
-        _response_mode if _response_mode in {"always", "addressed"} else "always"
-    )
-    out["vc_wake_words"] = [
-        str(x).strip()[:32] for x in out.get("vc_wake_words", []) if str(x).strip()
-    ][:20]
     out["base_personality"] = DEFAULT_CONTROL["base_personality"]
     for dead_key in DEAD_CONTROL_KEYS:
         out.pop(dead_key, None)
+    for key in [name for name in out if str(name).startswith("vc_")]:
+        out.pop(key, None)
     return out
 
 

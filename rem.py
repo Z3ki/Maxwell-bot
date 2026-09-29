@@ -51,13 +51,10 @@ def rem_system_prompt(
 
 # The event ring holds up to DEFAULT_REM_EVENT_BUFFER_MAX (500) events of up
 # to 4000 chars each, so an un-budgeted slice can serialize to ~2M chars — well
-# past any model's context window, which fails the whole assimilation pass
-# instead of just losing detail. Shrink every event proportionally rather than
-# dropping the oldest ones: the watermark advances past this slice either way,
-# so a dropped event is never assimilated at all, while a shortened one still
-# contributes its decision/preference/task.
+# past any model's context window, which fails the whole assimilation pass.
+# Budget the serialized payload (including metadata and escaped content), not
+# just raw content. Keep every event: the watermark advances past this slice.
 REM_SLICE_MAX_CHARS = 120_000
-REM_SLICE_MIN_EVENT_CHARS = 300
 
 
 _REM_EVENT_FALSE_KEYS = frozenset({"auto_mode", "reply_to_self"})
@@ -95,26 +92,45 @@ def format_ltm_prompt(entries, limit: int = 200) -> str:
 
 
 def short_term_slice_prompt(events: list[dict]) -> str:
-    events = list(events or [])
-    if events:
-        per_event = max(REM_SLICE_MIN_EVENT_CHARS, REM_SLICE_MAX_CHARS // len(events))
-        budgeted = []
-        for event in events:
-            content = str(event.get("content") or "")
-            if len(content) <= per_event:
+    prefix = "STM slice (I/O only, reasoning excluded):\n"
+    compacted = [compact_rem_event(event) for event in events or []]
+
+    def render(content_limit: int | None = None) -> str:
+        budgeted = compacted
+        if content_limit is not None:
+            budgeted = []
+            for event in compacted:
+                content = str(event.get("content") or "")
+                if len(content) > content_limit:
+                    event = dict(event)
+                    event["content"] = (
+                        content[: max(0, content_limit - 1)] + "…"
+                        if content_limit
+                        else ""
+                    )
                 budgeted.append(event)
-                continue
-            trimmed = dict(event)
-            trimmed["content"] = (
-                content[:per_event] + f"… (+{len(content) - per_event} chars)"
-            )
-            budgeted.append(trimmed)
-        events = budgeted
-    compacted = [compact_rem_event(event) for event in events]
-    return (
-        "STM slice (I/O only, reasoning excluded):\n"
-        + json.dumps(compacted, ensure_ascii=False, sort_keys=True)
-    )
+        return prefix + json.dumps(
+            budgeted, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+
+    full = render()
+    if len(full) <= REM_SLICE_MAX_CHARS:
+        return full
+    # Metadata cannot be silently discarded: leave the slice unconsumed.
+    result = render(0)
+    if len(result) > REM_SLICE_MAX_CHARS:
+        raise ValueError("REM event metadata exceeds the short-term slice budget")
+    low = 0
+    high = max(len(str(event.get("content") or "")) for event in compacted)
+    while low < high:
+        limit = (low + high + 1) // 2
+        candidate = render(limit)
+        if len(candidate) <= REM_SLICE_MAX_CHARS:
+            low = limit
+            result = candidate
+        else:
+            high = limit - 1
+    return result
 
 
 def _load_json(path: Path, default, *, fail_closed: bool = False):

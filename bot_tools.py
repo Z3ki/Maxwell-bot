@@ -78,11 +78,6 @@ from plugins.media.impl import SeeVideoTool  # noqa: F401
 from plugins.media.impl import SendMemeTool  # noqa: F401
 from plugins.media.impl import SendMediaTool  # noqa: F401
 from plugins.shell.impl import ShellTool  # noqa: F401
-from plugins.tts_voice.impl import TtsTool  # noqa: F401
-from plugins.tts_voice.impl import JoinVcTool  # noqa: F401
-from plugins.tts_voice.impl import VcStatusTool  # noqa: F401
-from plugins.tts_voice.impl import VcWhereTool  # noqa: F401
-from plugins.tts_voice.impl import LeaveVcTool  # noqa: F401
 from plugins.inbox.impl import InboxListTool  # noqa: F401
 from plugins.inbox.impl import InboxActTool  # noqa: F401
 from plugins.email.impl import EmailSendTool  # noqa: F401

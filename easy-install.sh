@@ -15,8 +15,30 @@ fail() { printf '  ERROR: %s\n' "$*" >&2; exit 1; }
 INSTALL_DIR="${MAXWELL_INSTALL_DIR:-$HOME/maxwell}"
 REPO_URL="${MAXWELL_REPO_URL:-https://github.com/Z3ki/Maxwell-bot.git}"
 BRANCH="${MAXWELL_BRANCH:-main}"
+RELEASE_VERSION="${MAXWELL_VERSION:-}"
+RELEASE_REF="${MAXWELL_REF:-}"
+RESOLVED_COMMIT=""
+NONINTERACTIVE="${MAXWELL_NONINTERACTIVE:-0}"
+CONFIGURE_ONLY=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --help|-h)
+      printf '%s\n' "Usage: bash easy-install.sh [--version vX.Y.Z | --ref commit] [--dir path] [--non-interactive] [--configure-only]" \
+        "Without a version, main is an unreleased development snapshot."
+      exit 0 ;;
+    --version) shift; [ "$#" -gt 0 ] || fail "--version requires a release"; RELEASE_VERSION="$1" ;;
+    --ref) shift; [ "$#" -gt 0 ] || fail "--ref requires a commit"; RELEASE_REF="$1" ;;
+    --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
+    --non-interactive) NONINTERACTIVE=1 ;;
+    --configure-only) CONFIGURE_ONLY=1 ;;
+    *) fail "Unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
 TTY=""
-[ -r /dev/tty ] && [ -w /dev/tty ] && TTY=/dev/tty || true
+if [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ] && [ -w /dev/tty ] && ( : <> /dev/tty ) 2>/dev/null; then
+  TTY=/dev/tty
+fi
 
 prompt() {
   local label="$1" default="${2:-}" answer=""
@@ -62,18 +84,72 @@ require_host_tools() {
   command -v python3 >/dev/null 2>&1 || fail "Python 3 is required for setup. Maxwell itself runs in Docker."
 }
 
-get_repo() {
-  say "${BOLD}Getting Maxwell${RESET}"
-  if [ ! -e "$INSTALL_DIR" ]; then
-    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
-    ok "cloned to $INSTALL_DIR"
-  elif [ -d "$INSTALL_DIR/.git" ]; then
-    git -C "$INSTALL_DIR" pull --ff-only || warn "Could not fast-forward the existing checkout; keeping local files."
-    ok "using existing checkout at $INSTALL_DIR"
+resolve_release() {
+  local requested remote_refs sha ref peeled=""
+  [ -z "$RELEASE_VERSION" ] || [ -z "$RELEASE_REF" ] || fail "Choose --version or --ref, not both."
+  if [ -n "$RELEASE_REF" ]; then
+    [[ "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]] || fail "--ref must be a full lowercase 40-character commit."
+    RESOLVED_COMMIT="$RELEASE_REF"
+    return
+  fi
+  if [ -n "$RELEASE_VERSION" ]; then
+    RELEASE_VERSION="v${RELEASE_VERSION#v}"
+    [[ "$RELEASE_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail "Invalid release version: $RELEASE_VERSION"
+    requested="refs/tags/$RELEASE_VERSION"
   else
-    fail "$INSTALL_DIR exists but is not a Git checkout. Move it or set MAXWELL_INSTALL_DIR."
+    git check-ref-format "refs/heads/$BRANCH" >/dev/null || fail "Invalid development branch: $BRANCH"
+    requested="refs/heads/$BRANCH"
+  fi
+  remote_refs="$(git ls-remote -- "$REPO_URL" "$requested" "$requested^{}")" || fail "Could not resolve $requested from $REPO_URL."
+  while read -r sha ref; do
+    case "$ref" in
+      "$requested") RESOLVED_COMMIT="$sha" ;;
+      "$requested^{}") peeled="$sha" ;;
+    esac
+  done <<< "$remote_refs"
+  RESOLVED_COMMIT="${peeled:-$RESOLVED_COMMIT}"
+  [[ "$RESOLVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "Ref $requested does not exist; installation was not changed."
+}
+
+get_repo() {
+  local stage
+  say "${BOLD}Getting Maxwell${RESET}"
+  if [ -n "${MAXWELL_INSTALL_COMMIT:-}" ]; then
+    [ "$(git -C "$INSTALL_DIR" rev-parse HEAD)" = "$MAXWELL_INSTALL_COMMIT" ] || fail "Checkout changed during installer handoff."
+    cd "$INSTALL_DIR"
+    INSTALL_DIR="$(pwd -P)"
+    return
+  fi
+  resolve_release
+  if [ -e "$INSTALL_DIR" ]; then
+    [ -d "$INSTALL_DIR/.git" ] || fail "$INSTALL_DIR exists but is not a Git checkout."
+    [ -z "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=no)" ] || fail "Tracked files have local changes; commit or save them before updating."
+    git -C "$INSTALL_DIR" fetch --depth 1 --no-tags -- "$REPO_URL" "$RESOLVED_COMMIT" || fail "Could not fetch the selected commit; existing checkout was kept."
+    git -C "$INSTALL_DIR" cat-file -e "$RESOLVED_COMMIT^{commit}" || fail "Selected ref is not a commit."
+    for file in install.sh easy-install.sh bot.py .env.example .env.simple.example scripts/set_env.py scripts/env_defaults.py scripts/migrate_ai_env.py docker/maxwell.Dockerfile docker/entrypoint.sh docker/supervisor.py docker-compose.yml docker-compose.bridge.yml; do
+      git -C "$INSTALL_DIR" cat-file -e "$RESOLVED_COMMIT:$file" || fail "Selected commit is missing $file; existing checkout was kept."
+    done
+    git -C "$INSTALL_DIR" checkout --detach "$RESOLVED_COMMIT" || fail "Could not switch releases; existing local files were kept."
+  else
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    stage="$(mktemp -d "${INSTALL_DIR}.install.XXXXXX")"
+    if ! (
+      trap 'rm -rf -- "$stage"' EXIT
+      git init --quiet "$stage" &&
+      git -C "$stage" remote add origin "$REPO_URL" &&
+      git -C "$stage" fetch --depth 1 --no-tags origin "$RESOLVED_COMMIT" &&
+      git -C "$stage" checkout --quiet --detach "$RESOLVED_COMMIT" &&
+      for file in install.sh easy-install.sh bot.py .env.example .env.simple.example scripts/set_env.py scripts/env_defaults.py scripts/migrate_ai_env.py docker/maxwell.Dockerfile docker/entrypoint.sh docker/supervisor.py docker-compose.yml docker-compose.bridge.yml; do
+        [ -f "$stage/$file" ] || exit 1
+      done &&
+      [ ! -e "$INSTALL_DIR" ] && mv -- "$stage" "$INSTALL_DIR"
+    ); then
+      fail "Could not prepare the selected release; no installation was replaced."
+    fi
   fi
   cd "$INSTALL_DIR"
+  INSTALL_DIR="$(pwd -P)"
+  ok "using ${RELEASE_VERSION:-development $BRANCH} at $RESOLVED_COMMIT"
 }
 
 set_value() {
@@ -196,6 +272,7 @@ write_fresh_env() {
 configure() {
   say ""
   if [ -f .env ]; then
+    chmod 600 .env
     say "${BOLD}Existing config found${RESET}"
     python3 scripts/migrate_ai_env.py .env
     ok "kept your settings and migrated the primary provider names to AI_*"
@@ -235,8 +312,21 @@ main() {
   say "Three short steps, then the normal Docker installer takes over."
   require_host_tools
   get_repo
+  if [ -z "${MAXWELL_INSTALL_COMMIT:-}" ]; then
+    handoff=()
+    [ "$CONFIGURE_ONLY" = "1" ] && handoff+=(--configure-only)
+    exec env MAXWELL_INSTALL_COMMIT="$RESOLVED_COMMIT" \
+      MAXWELL_INSTALL_DIR="$INSTALL_DIR" MAXWELL_REPO_URL="$REPO_URL" \
+      MAXWELL_VERSION="$RELEASE_VERSION" MAXWELL_REF="$RELEASE_REF" \
+      MAXWELL_NONINTERACTIVE="$NONINTERACTIVE" \
+      bash "$INSTALL_DIR/easy-install.sh" "${handoff[@]}"
+  fi
   configure
-  MAXWELL_INSTALL_DIR="$INSTALL_DIR" bash install.sh
+  handoff=(--local)
+  [ "$CONFIGURE_ONLY" = "1" ] && handoff+=(--configure-only)
+  MAXWELL_INSTALL_DIR="$INSTALL_DIR" MAXWELL_NONINTERACTIVE="$NONINTERACTIVE" \
+    MAXWELL_SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-0}" \
+    bash "$INSTALL_DIR/install.sh" "${handoff[@]}"
   say ""
   ok "Maxwell setup finished"
   say "  Config: $INSTALL_DIR/.env"

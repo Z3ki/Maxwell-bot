@@ -1,18 +1,10 @@
-"""Inbox notice handling and VC presence tools."""
+"""Inbox notice handling."""
 
 import asyncio
 from types import SimpleNamespace
 
 from bot import _tool_results_need_followup
-from bot_tools import (
-    InboxActTool,
-    InboxListTool,
-    JoinVcTool,
-    VcStatusTool,
-    VcWhereTool,
-    _find_member_voice,
-    _is_voice_channel,
-)
+from bot_tools import InboxActTool, InboxListTool
 from inbox import InboxStore, apply_inbox_action, needs_decision
 from tool_schemas import TOOL_PARAMETERS
 
@@ -131,102 +123,6 @@ def test_inbox_tools_list_and_read(tmp_path):
     asyncio.run(run())
 
 
-class VoiceChannel:
-    def __init__(self):
-        self.id = 77
-        self.name = "General"
-        self.bitrate = 64000
-        self.members = []
-        self.guild = SimpleNamespace(name="Gild", text_channels=[])
-
-
-def test_is_voice_channel_accepts_duck_type():
-    assert _is_voice_channel(VoiceChannel()) is True
-    assert _is_voice_channel(SimpleNamespace(name="text")) is False
-
-
-def test_join_vc_and_where_and_status():
-    voice = VoiceChannel()
-    member = SimpleNamespace(
-        id=55,
-        display_name="Eli",
-        voice=SimpleNamespace(channel=voice),
-    )
-    voice.members = [member]
-    guild = SimpleNamespace(
-        id=9,
-        name="Gild",
-        get_member=lambda uid: member if int(uid) == 55 else None,
-        voice_channels=[voice],
-        text_channels=[SimpleNamespace(send=True)],
-    )
-    voice.guild = guild
-
-    class Bot:
-        def __init__(self):
-            self.config = SimpleNamespace(ENABLE_VC=True)
-            self.guilds = [guild]
-            self.voice_clients = []
-            self.joined = None
-            self.listened = False
-
-        def get_channel(self, cid):
-            return voice if int(cid) == 77 else None
-
-        def _vc_get_client(self, _guild, _target):
-            return None
-
-        async def _vc_connect_channel(self, target):
-            self.joined = target
-            return SimpleNamespace(is_connected=lambda: True, channel=target)
-
-        async def _vc_start_listening(self, _guild, _text, _target):
-            self.listened = True
-            return True
-
-        def _vc_is_listening(self, _vc):
-            return True
-
-    bot = Bot()
-    message = SimpleNamespace(guild=guild, channel=SimpleNamespace(send=True))
-
-    async def run():
-        joined = await JoinVcTool(bot).execute(message, voice_channel_id="77")
-        assert "Joined" in joined
-        assert bot.joined is voice
-        assert bot.listened is True
-
-        followed = await JoinVcTool(bot).execute(message, user_id="55")
-        assert "Joined" in followed
-
-        where = await VcWhereTool(bot).execute(message, user_id="<@55>")
-        assert "General" in where
-        assert "Eli" in where
-
-        missing = await VcWhereTool(bot).execute(message, user_id="99")
-        assert "not in a voice channel" in missing
-
-        idle = await VcStatusTool(bot).execute(message)
-        assert "Not connected" in idle
-
-        bot.voice_clients = [
-            SimpleNamespace(
-                guild=guild,
-                channel=voice,
-                is_connected=lambda: True,
-            )
-        ]
-        live = await VcStatusTool(bot).execute(message)
-        assert "Connected" in live
-        assert "Eli" in live
-
-        found, ch = _find_member_voice(bot, 55, guild)
-        assert found is member
-        assert ch is voice
-
-    asyncio.run(run())
-
-
 def test_commands_post_accepts_legacy_inbox_act_queue(tmp_path, monkeypatch):
     """Old dashboard actions may still be queued, but execution fails safely."""
     import json
@@ -270,14 +166,10 @@ def test_new_tools_are_followup_and_have_schemas():
     for name in (
         "inbox_list",
         "inbox_act",
-        "join_vc",
-        "vc_status",
-        "vc_where",
     ):
         assert name in TOOL_PARAMETERS
         assert _tool_results_need_followup([f"Tool {name}: ok"])
     assert "action" in TOOL_PARAMETERS["inbox_act"]["properties"]
-    assert "user_id" in TOOL_PARAMETERS["vc_where"]["properties"]
 
 
 def test_mail_burst_is_capped():

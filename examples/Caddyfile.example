@@ -32,6 +32,14 @@ maxwell.example.com {
 	header X-Content-Type-Options "nosniff"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
+	# Copy web/ contents into /var/www/maxwell. Expose only the landing and
+	# policy pages here; operator controls stay on the separate admin origin.
+	@public_pages path / /index.html /terms /terms/* /privacy /privacy/*
+	handle @public_pages {
+		root * /var/www/maxwell
+		file_server
+	}
+
 	# Site backends are public and must precede the static file handler.
 	handle /bot/*/api/* {
 		reverse_proxy 127.0.0.1:8765

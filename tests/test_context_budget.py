@@ -123,3 +123,22 @@ def test_minimums_are_honored_when_affordable():
     # ltm's 1% of 20k is 200, under its 400 floor, so it is paid the floor.
     assert plan.budget_for("ltm") == DEFAULT_MINIMUMS["ltm"]
     assert _total(plan) <= 20_000
+
+
+def test_explicit_zero_cap_disables_tier_without_wasting_other_shares():
+    plan = allocate(100_000, caps={"recent": 0})
+    assert plan.budget_for("recent") == 0
+    assert _total(plan) == 100_000
+    assert plan.budget_for("ltm") > DEFAULT_WEIGHTS["ltm"] * 1000
+
+
+def test_all_zero_caps_leave_no_memory_allocation():
+    plan = allocate(100_000, caps=dict.fromkeys(TIER_ORDER, 0))
+    assert all(tier.budget == 0 for tier in plan.tiers.values())
+
+
+def test_cap_below_floor_is_honored_without_overallocating():
+    plan = allocate(100_000, caps={"recent": 1, "ltm": 0})
+    assert plan.budget_for("recent") == 1
+    assert plan.budget_for("ltm") == 0
+    assert _total(plan) == 100_000

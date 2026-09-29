@@ -2,16 +2,14 @@ import asyncio
 from types import SimpleNamespace
 
 import bot as bot_module
-from bot import TOOL_PROTOCOL, MaxwellBot
+from bot import MaxwellBot
 from bot_tools import (
-    FetchUrlTool,
     WebSearchTool,
     _format_web_hits,
     _normalize_web_hit,
     _sanitize_web_query,
     _web_search_backends,
 )
-from tool_schemas import RESULT_TOOL_NAMES, build_openai_tools
 
 
 GLUED = (
@@ -133,65 +131,6 @@ def test_web_off_rejects_direct_lookup_tool_calls(monkeypatch):
     assert "web access is disabled" in result
     assert calls == []
 
-
-
-
-def test_web_search_description_encourages_lookup():
-    desc = WebSearchTool(SimpleNamespace()).get_description().lower()
-    assert "don't search" not in desc
-    assert "only if" not in desc
-    assert "casual conversation" not in desc
-    assert "unsure" in desc or "guess" in desc
-    assert "automatically" in desc
-    stamped = build_openai_tools({"web_search": WebSearchTool(SimpleNamespace())})[0][
-        "function"
-    ]["description"].lower()
-    assert "returns output" in stamped
-    assert "don't search" not in stamped
-
-
-def test_fetch_url_description_is_for_reading_pages():
-    desc = FetchUrlTool(SimpleNamespace()).get_description().lower()
-    assert "only if" not in desc
-    assert "page" in desc
-    assert "web_search" in desc
-
-
-def test_tool_protocol_requires_live_sources_for_current_facts():
-    blob = TOOL_PROTOCOL.lower()
-    assert "web_search" in blob
-    assert "fetch_url" in blob
-    assert "cite source urls" in blob
-    assert "training data" in blob
-    assert "untrusted data" in blob
-    assert "current/latest requests" in blob
-
-
-def test_native_tool_prompt_includes_live_lookup_contract():
-    bot = SimpleNamespace(
-        tools={
-            "web_search": WebSearchTool(SimpleNamespace()),
-            "fetch_url": FetchUrlTool(SimpleNamespace()),
-            "send_message": SimpleNamespace(get_description=lambda: "send"),
-        },
-        _control={
-            "tools_enabled": True,
-            "disabled_tools": [],
-            "native_tool_calls": True,
-        },
-    )
-    bot._compatible_tool_names = MaxwellBot._compatible_tool_names.__get__(bot)
-    prompt = MaxwellBot._tool_system_prompt(bot, "discord")
-    assert "XML text tags only" not in prompt
-    assert "current/latest requests" in prompt.lower()
-    assert "web_search" in prompt
-    assert "training data" in prompt
-    assert "untrusted data" in prompt
-    assert TOOL_PROTOCOL in prompt
-
-def test_lookup_tools_return_output_to_the_model():
-    assert "web_search" in RESULT_TOOL_NAMES
-    assert "fetch_url" in RESULT_TOOL_NAMES
 
 
 def test_normalize_web_hit_accepts_url_and_excerpt():

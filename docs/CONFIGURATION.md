@@ -17,15 +17,9 @@ The easy installer and `.env.simple.example` use provider-neutral names:
 | `AI_MODEL` | Primary chat model |
 | `AI_API_KEY` | Primary API key; blank is normal for local endpoints that do not require one |
 
-The simple template maps them to compatibility aliases:
+The runtime reads these names directly; legacy `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY` remain supported for existing installations. Non-empty `AI_API_URL` and `AI_MODEL` take precedence over legacy settings. An explicitly set `AI_API_KEY`, including a blank value for a local endpoint, takes precedence over a legacy key.
 
-```ini
-OLLAMA_BASE_URL=${AI_API_URL}
-OLLAMA_MODEL=${AI_MODEL}
-OLLAMA_API_KEY=${AI_API_KEY}
-```
-
-The full `.env.example` and full installer still use the historical `OLLAMA_*` namespace for the primary provider and its advanced settings. Those names are compatibility names; Maxwell is not Ollama-only.
+The simple template also includes interpolation aliases for older tooling. They are not required by the runtime. Advanced provider controls retain the historical `OLLAMA_*` namespace; Maxwell is not Ollama-only.
 
 For an older install:
 
@@ -77,7 +71,7 @@ Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`
 
 The former comma-prefix commands are no longer accepted. `/help` lets you browse available slash commands by topic.
 
-Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn, voice utterance, or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` shows that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
+Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` shows that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
 
 ## Runtime controls
 
@@ -113,6 +107,17 @@ Frequently used controls include:
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
 The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the dashboard or `/maintenance` to editing `bot_control.json` while Maxwell is running.
+
+## Prompt size and provider caching
+
+`prompt_context_budget` and `memory_context_budget` are character budgets, not exact model-token counts. The final prompt limit is soft: complete historical transcript blocks may be removed, but authorization/system instructions, live input, and native tool-call/result records are preserved rather than clipped mid-rule.
+
+Tool guidance is conditional on enabled plugins, available tools, and request scope. A background job on Discord does not inherit Discord-only delivery instructions. Component `token_budget` values are advisory; they never truncate an instruction.
+
+Reusable instructions and authorized history precede volatile requester/time/retrieval context. This permits prefix-cache reuse when the provider supports it and the prefix remains byte-identical; changing model, tool access, or configuration can invalidate that prefix. Maxwell does not promise a cache hit or a provider-specific token saving.
+
+Background workers put job IDs, goals, and context in user input after stable instructions. REM caps the entire serialized short-term slice at 120,000 characters, including JSON escapes and metadata; metadata-only overflow fails without consuming the slice. Explicit zero context-tier ceilings allocate nothing to that tier.
+
 
 ## Message reliability
 

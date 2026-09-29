@@ -204,7 +204,9 @@ def allocate(
         return plan
 
     ceilings = {
-        name: max(0, _coerce_int((caps or {}).get(name), 0)) for name in TIER_ORDER
+        name: max(0, _coerce_int(value, 0))
+        for name, value in (caps or {}).items()
+        if name in TIER_ORDER
     }
     shares: dict[str, int] = dict.fromkeys(TIER_ORDER, 0)
     unsettled = [name for name in TIER_ORDER if w.get(name, 0) > 0]
@@ -225,8 +227,8 @@ def allocate(
         # Caps first: a tier that cannot use its share must hand it back
         # before anyone measures themselves against a floor.
         for name in unsettled:
-            cap = ceilings[name]
-            if cap and provisional[name] > cap:
+            cap = ceilings.get(name)
+            if cap is not None and provisional[name] > cap:
                 settled = (name, cap)
                 break
         if settled is None:
@@ -237,7 +239,8 @@ def allocate(
                 # Pay the floor if the pool can afford it, otherwise drop the
                 # tier: a fragment below the floor reads to the model as the
                 # whole truth, which is worse than an absent section.
-                pay = min(floor, ceilings[name]) if ceilings[name] else floor
+                cap = ceilings.get(name)
+                pay = min(floor, cap) if cap is not None else floor
                 settled = (name, pay if pay <= pool else 0)
                 break
         if settled is None:
@@ -248,7 +251,8 @@ def allocate(
                 shares[name] = provisional[name]
             remainder = max(0, pool - sum(provisional.values()))
             for name in unsettled:
-                room = max(0, ceilings[name] - shares[name]) if ceilings[name] else remainder
+                cap = ceilings.get(name)
+                room = max(0, cap - shares[name]) if cap is not None else remainder
                 extra = min(remainder, room)
                 shares[name] += extra
                 remainder -= extra

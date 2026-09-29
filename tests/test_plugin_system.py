@@ -53,7 +53,7 @@ def test_plugin_loading_and_scoping(temp_plugin_env):
     bot = DummyBot()
     state_file = data_dir / "plugins.json"
 
-    pm = PluginManager(bot, plugins_dir=str(plugins_dir), state_file=str(state_file))
+    pm = PluginManager(bot, plugins_dir=str(plugins_dir), data_dir=str(data_dir), state_file=str(state_file))
     loaded = pm.load_plugins()
 
     assert "test_plugin" in loaded
@@ -83,7 +83,7 @@ def test_user_self_enable_disable(temp_plugin_env):
     bot = DummyBot()
     state_file = data_dir / "plugins.json"
 
-    pm = PluginManager(bot, plugins_dir=str(plugins_dir), state_file=str(state_file))
+    pm = PluginManager(bot, plugins_dir=str(plugins_dir), data_dir=str(data_dir), state_file=str(state_file))
     pm.load_plugins()
 
     # User 333 enables for self
@@ -107,6 +107,7 @@ def test_server_plugin_override_controls_tools_and_preserves_user_denies(temp_pl
     pm = PluginManager(
         bot,
         plugins_dir=str(plugins_dir),
+        data_dir=str(data_dir),
         state_file=str(data_dir / "plugins.json"),
     )
     pm.load_plugins()
@@ -122,7 +123,8 @@ def test_server_plugin_override_controls_tools_and_preserves_user_denies(temp_pl
 def test_reload_plugins_rebuilds_the_live_registry(temp_plugin_env):
     plugins_dir, data_dir = temp_plugin_env
     pm = PluginManager(
-        DummyBot(), plugins_dir=str(plugins_dir), state_file=str(data_dir / "plugins.json")
+        DummyBot(), plugins_dir=str(plugins_dir), data_dir=str(data_dir),
+        state_file=str(data_dir / "plugins.json")
     )
     assert "test_tool" in pm.load_plugins()["test_plugin"]["tools"]
     assert pm.reload_plugins() == "Reloaded 1 plugin(s) with 1 tool(s)."

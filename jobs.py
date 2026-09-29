@@ -709,14 +709,12 @@ _VAGUE_FINAL_RE = re.compile(
 )
 
 
-def _worker_system_body(job_id: str, goal: str, context: str = "") -> str:
-    """Instructions for a detached worker, optimized for convergence."""
-    extra = f"Context: {context}\n" if str(context or "").strip() else ""
+def _worker_system_body() -> str:
+    """Reusable detached-worker instructions; the brief belongs in user input."""
     return (
-        f"BACKGROUND job `{job_id}`. Channel already acked — don't narrate. "
-        "No channel posts (no send_message). Only your FINAL line is delivered.\n"
-        f"Goal: {goal}\n"
-        f"{extra}"
+        "BACKGROUND worker. The channel already acknowledged this job; don't narrate. "
+        "This delivery contract overrides chat instructions: no channel posts and no "
+        "send_message. Return final text directly; the host delivers it.\n"
         "Execution rules:\n"
         "1. Treat the goal + concise context as the complete brief. Plan silently, then use "
         "the smallest sufficient tool sequence. Do not ask the user to repeat information.\n"
@@ -984,13 +982,17 @@ async def run_background_job(bot: Any, job_id: str) -> None:
             "role": "system",
             "content": (
                 f"{base_personality}\n\n"
-                f"{_worker_system_body(job.id, job.goal, job.context)}\n\n"
-                f"{tool_prompt}"
+                f"{tool_prompt}\n\n"
+                f"{_worker_system_body()}"
             ).strip(),
         },
         {
             "role": "user",
-            "content": f"<@{job.user_id}>: {job.goal}\nDo it now.",
+            "content": (
+                f"Job `{job.id}` for <@{job.user_id}>.\nGoal: {job.goal}\n"
+                + (f"Context: {job.context}\n" if job.context.strip() else "")
+                + "Do it now."
+            ),
         },
     ]
 

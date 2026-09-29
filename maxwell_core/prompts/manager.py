@@ -8,12 +8,14 @@ instructions are included only when that tool is actually offered.
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 from typing import Iterable
 
 from .component import POSITIONS, PromptComponent, PromptRequest
 
-# Rough chars-per-token for budget clipping. Conservative on purpose.
 _CHARS_PER_TOKEN = 4
+_POSITION_ORDER = {position: index for index, position in enumerate(POSITIONS)}
+logger = logging.getLogger(__name__)
 
 
 class PromptManager:
@@ -66,16 +68,23 @@ class PromptManager:
         request: PromptRequest,
         *,
         enabled_plugins: Iterable[str] | None = None,
+        exclude_ids: Iterable[str] = (),
+        rendered: bool | None = None,
     ) -> list[str]:
         allowed = None if enabled_plugins is None else set(enabled_plugins)
+        excluded = set(exclude_ids)
         selected: list[PromptComponent] = []
         for component in self._components.values():
+            if component.id in excluded:
+                continue
+            if rendered is not None and (component.render is not None) != rendered:
+                continue
             if allowed is not None and component.plugin not in allowed and component.plugin != "core":
                 continue
             if not component.applies(request):
                 continue
             selected.append(component)
-        selected.sort(key=lambda c: (POSITIONS.index(c.position), c.priority, c.id))
+        selected.sort(key=lambda c: (_POSITION_ORDER[c.position], c.priority, c.id))
         out: list[str] = []
         for component in selected:
             body = component.body(request)
@@ -85,7 +94,10 @@ class PromptManager:
             if budget is not None and budget > 0:
                 max_chars = int(budget) * _CHARS_PER_TOKEN
                 if len(body) > max_chars:
-                    body = body[: max_chars - 1].rstrip() + "…"
+                    logger.warning(
+                        "Prompt component %s exceeds advisory budget (%s/%s chars); preserving instructions",
+                        component.id, len(body), max_chars,
+                    )
             out.append(body)
         return out
 

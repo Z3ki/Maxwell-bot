@@ -2,14 +2,21 @@
 set -euo pipefail
 cd /app
 
-# Production always runs main. The Dev container sets MAXWELL_DEV_MODE and
-# is allowed to run the dev checkout.
-if [ "${MAXWELL_DEV_MODE:-}" != "true" ] && [ "${MAXWELL_DEV_MODE:-}" != "1" ]; then
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  if [ "$branch" != "main" ]; then
-    echo "Refusing to start: production Maxwell must run branch main (checked out: ${branch:-unknown})" >&2
-    exit 1
-  fi
+# Production accepts main, a pinned detached checkout, or the source bundled
+# into a release image (which has no .git). Named development branches remain
+# opt-in so a bind-mounted dev checkout cannot silently become production.
+if [ -e .git ] && [ "${MAXWELL_DEV_MODE:-}" != "true" ] && [ "${MAXWELL_DEV_MODE:-}" != "1" ]; then
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  case "$branch" in
+    main|HEAD) ;;
+    *) echo "Refusing production startup from development branch: $branch" >&2; exit 1 ;;
+  esac
+fi
+
+# Explicit commands support diagnostics and release-image smoke checks without
+# accidentally starting a second bot or forwarding commands as bot arguments.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
 fi
 
 mkdir -p data public/bot shelldocker logs data/exports data/site_servers

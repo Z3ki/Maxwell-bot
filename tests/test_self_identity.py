@@ -39,8 +39,6 @@ def _bot(memory=None):
             "memory_history_messages": 20,
             "music_context_enabled": False,
             "tools_enabled": False,
-            "vc_response_mode": "always",
-            "vc_wake_words": ["maxwell"],
         },
         _drugged_until={},
         _guild_emojis={},
@@ -247,47 +245,3 @@ def test_different_guilds_get_different_names():
     assert "Sparky" in a and "Cool Guild" in a
     assert "Sparky" not in b
     assert "Other Guild" in b
-
-
-def test_vc_prompt_includes_guild_nick():
-    bot = _bot()
-    guild = _guild(nick="Sparky", display_name="Sparky")
-    user = SimpleNamespace(display_name="alice")
-    prompt = MaxwellBot._vc_build_system_prompt(bot, user, guild, [])
-    assert "Your name here: Sparky" in prompt
-    assert "server nickname" in prompt
-
-
-def test_vc_shared_facts_do_not_imply_owner_or_persona():
-    bot = _bot()
-    guild = _guild(nick="Sparky", display_name="Sparky")
-    user = SimpleNamespace(display_name="alice")
-    prompt = MaxwellBot._vc_build_system_prompt(
-        bot,
-        user,
-        guild,
-        [
-            {
-                "content": "Persona configured as Dame Curie",
-                "scope": "channel:123",
-                "importance": 7,
-                "source_user_id": "source-owner-42",
-            }
-        ],
-    )
-    assert "Dame Curie" in prompt
-    assert "historical reference" in prompt
-    assert "never infer who created or owns them" in prompt
-    assert "source-owner-42" not in prompt
-
-
-def test_vc_addressed_mode_wakes_on_server_nick():
-    bot = _bot()
-    bot._control["vc_response_mode"] = "addressed"
-    guild = _guild(nick="Sparky", display_name="Sparky")
-    user = SimpleNamespace(display_name="alice")
-    prompt = MaxwellBot._vc_build_system_prompt(bot, user, guild, [])
-    assert "talking to you (Sparky)" in prompt
-    assert "Sparky" in prompt
-    # Stored wake-word list is not mutated.
-    assert bot._control["vc_wake_words"] == ["maxwell"]

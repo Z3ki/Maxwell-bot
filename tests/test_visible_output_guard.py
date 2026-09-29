@@ -46,7 +46,7 @@ def test_visible_output_detection_covers_delivery_tools():
     assert not tool_result_is_visible("Tool send_file: Error - upload failed")
     assert not tool_result_is_visible("Tool web_search: 3 results")
     assert tool_batch_has_visible_output(
-        ["Tool web_search: 3 results", "Tool tts: __TTS_SENT__"]
+        ["Tool web_search: 3 results", "Tool send_meme: __MEME_SENT__"]
     )
 
 

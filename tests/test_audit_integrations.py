@@ -2,10 +2,7 @@
 
 import asyncio
 import importlib
-import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -105,71 +102,6 @@ def test_dns_spf_update_preserves_unrelated_txt_records(monkeypatch):
         spf_writes[0][1]["content"]
         == "v=spf1 include:mailgun.org include:_spf.example.test ~all"
     )
-
-
-@pytest.fixture
-def voice_module(monkeypatch):
-    import discord_vc_compat
-
-    monkeypatch.setattr(discord_vc_compat, "ensure_voice_recv_compat", lambda: None)
-    monkeypatch.setitem(
-        sys.modules, "discord.ext.voice_recv", SimpleNamespace(AudioSink=object)
-    )
-    spec = importlib.util.spec_from_file_location(
-        "_audit_voice_live", Path(__file__).resolve().parents[1] / "voice_live.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_voice_first_frame_is_not_duplicated(voice_module):
-    LiveSpeechSink = voice_module.LiveSpeechSink
-
-    async def run():
-        sink = LiveSpeechSink(
-            loop=asyncio.get_running_loop(),
-            on_utterance=AsyncMock(),
-            guild_id=1,
-            control={},
-            self_user_id=2,
-        )
-        try:
-            frame = b"\xe8\x03" * 1920
-            sink.write(SimpleNamespace(id=3), SimpleNamespace(pcm=frame))
-            assert bytes(sink._states[3].active) == frame
-        finally:
-            sink.cleanup()
-
-    asyncio.run(run())
-
-
-def test_voice_safe_int_accepts_nonfinite_controls(voice_module):
-    _safe_int = voice_module._safe_int
-    assert _safe_int(float("inf"), 500) == 500
-    assert _safe_int("-inf", 500) == 500
-
-
-def test_voice_playback_tail_can_shorten_ignore_window(voice_module, monkeypatch):
-    monkeypatch.setattr(voice_module.time, "monotonic", lambda: 100.0)
-
-    async def run():
-        sink = voice_module.LiveSpeechSink(
-            loop=asyncio.get_running_loop(),
-            on_utterance=AsyncMock(),
-            guild_id=1,
-            control={},
-            self_user_id=2,
-        )
-        try:
-            sink.set_ignore_until(190.0)
-            sink.set_ignore_until(100.5)
-            assert sink._ignore_until == 100.5
-        finally:
-            sink.cleanup()
-
-    asyncio.run(run())
 
 
 class _Stream:

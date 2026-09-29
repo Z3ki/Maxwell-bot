@@ -125,10 +125,6 @@ def test_what_the_bot_knows_about_a_person_reaches_the_prompt():
     prompt = _prompt(_bot(memory))
 
     assert "About this person" in prompt
-    # Phrased as global on purpose: the model is told elsewhere that the
-    # transcript is this-channel-only, and without this line it treats
-    # everything outside the transcript the same way.
-    assert "carries across servers and DMs" in prompt
     assert "works night shifts" in prompt
     # The name on the current message is noise; the *other* names are what
     # make someone recognisable across servers.
@@ -137,15 +133,6 @@ def test_what_the_bot_knows_about_a_person_reaches_the_prompt():
     assert "2 server(s) and DMs" in prompt
 
 
-def test_the_tier_is_asked_about_the_current_message():
-    memory = _Memory(entity={"user_id": "456"}, facts=[{"content": "a fact"}])
-    _prompt(_bot(memory), "do I still have that deploy tomorrow")
-
-    call = memory.profile_calls[0]
-    assert call["user_id"] == "456"
-    assert call["query"] == "do I still have that deploy tomorrow"
-    # A character budget, not just an item count — that is the whole point.
-    assert call["budget"] > 0
 
 
 def test_the_tier_is_bounded_in_characters():

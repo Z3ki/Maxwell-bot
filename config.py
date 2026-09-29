@@ -3,9 +3,8 @@
 Design note — optional features
 -------------------------------
 Maxwell only *requires* two things: a Discord token and an OpenAI-compatible
-model endpoint. Everything else (voice, YouTube, web search, TTS, email,
-video frames, RAG embeddings) is optional and gated behind an ``ENABLE_*``
-switch.
+model endpoint. Everything else (YouTube, web search, email, video frames,
+RAG embeddings) is optional and gated behind an ``ENABLE_*`` switch.
 
 Those switches are tri-state:
 
@@ -201,12 +200,17 @@ class Config:
     )
 
 
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
+    OLLAMA_BASE_URL = _first_env(
+        "AI_API_URL", "OLLAMA_BASE_URL", default="http://localhost:11434"
+    )
+    # An explicitly blank friendly key clears a stale legacy credential.
+    OLLAMA_API_KEY = os.getenv(
+        "AI_API_KEY", os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
+    ).strip()
     # No default model on purpose: a hardcoded one that your endpoint does
     # not serve fails later, as an opaque 404 from the provider. Empty fails
     # at startup with a sentence that says what to do.
-    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "").strip()
+    OLLAMA_MODEL = _first_env("AI_MODEL", "OLLAMA_MODEL")
     OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
@@ -282,30 +286,6 @@ class Config:
     ENABLE_WEB_SEARCH = _feature_env(
         "ENABLE_WEB_SEARCH", lambda: _has_module("ddgs"), needs="the ddgs package"
     )
-    ENABLE_VC = _feature_env(
-        "ENABLE_VC",
-        lambda: _has_module("discord.ext.voice_recv") and _has_module("nacl"),
-        needs="discord-ext-voice-recv + PyNaCl",
-    )
-    # TTS works through any one of: Fish (key), NVIDIA Riva (key), gTTS
-    # (package), espeak (binary). Off only when none of them exist.
-    ENABLE_TTS = _feature_env(
-        "ENABLE_TTS",
-        lambda: bool(
-            os.getenv("FISH_API_KEY", "").strip()
-            or os.getenv("NVIDIA_API_KEY", "").strip()
-            or _has_module("gtts")
-            or _has_binary("espeak-ng")
-            or _has_binary("espeak")
-        ),
-        needs="a TTS engine (espeak-ng, gTTS, or a Fish/NVIDIA key)",
-    )
-    # Playing TTS into a voice channel additionally needs ffmpeg.
-    ENABLE_TTS_VC = _feature_env(
-        "ENABLE_TTS_VC",
-        lambda _tts=ENABLE_TTS: _tts and _has_binary("ffmpeg"),
-        needs="ffmpeg + a TTS engine",
-    )
     # Optional Discord ID of this bot's user account. Empty on a fresh clone
     # so no one else's snowflake is inherited.
     MAXWELL_USER_ID = os.getenv("MAXWELL_USER_ID", "").strip()
@@ -364,10 +344,6 @@ class Config:
     # you trust the model fully (single-user homelab install).
     DISABLE_TAINT_GATE = _bool_env("DISABLE_TAINT_GATE", False)
 
-    # TTS engine selection. local / riva / gtts / auto. Undocumented before
-    # 2026-07-21 — used to fall through a chain in bot._synthesize_tts_wav.
-    TTS_ENGINE = os.getenv("TTS_ENGINE", "auto").strip().lower()
-
     # Optional secondary auth fallback for the primary LLM endpoint.
     OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
 
@@ -418,12 +394,6 @@ class Config:
         "NVIDIA_IMAGE_URL",
         "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev",
     )
-    # NVIDIA Riva ASR (Parakeet) for live VC transcription. Whisper is too
-    # slow for this path; VC utterances go through Riva then the text model.
-    ASR_RIVA_FUNCTION_ID = os.getenv(
-        "ASR_RIVA_FUNCTION_ID", "1598d209-5e27-4d3c-8079-4751568b1081"
-    ).strip()
-    ASR_RIVA_LANGUAGE = os.getenv("ASR_RIVA_LANGUAGE", "en-US").strip() or "en-US"
 
     # Legacy ChatGPT2API image endpoint. Kept only so an existing .env does
     # not error on load — hd_image no longer uses it (that host dropped every
@@ -538,9 +508,6 @@ class Config:
         ("ENABLE_VIDEO_INPUT", "video input (frame extraction)"),
         ("ENABLE_AUDIO_INPUT", "audio input (omni models)"),
         ("ENABLE_IMAGE_GEN", "image generation"),
-        ("ENABLE_TTS", "text-to-speech"),
-        ("ENABLE_TTS_VC", "TTS playback in voice channels"),
-        ("ENABLE_VC", "voice channels (live listening)"),
         ("ENABLE_WEB_SEARCH", "web search"),
         ("ENABLE_FETCH_URL", "fetch_url"),
         ("ENABLE_CREATE_SITE", "site generation"),
@@ -625,13 +592,6 @@ class Config:
                 "ENABLE_SHELL is on — the model can run commands on this host "
                 "as the bot user. Set ENABLE_SHELL=false in .env if you did "
                 "not mean to grant that."
-            )
-        # TTS engine sanity check
-        if cls.TTS_ENGINE not in {"auto", "local", "riva", "gtts", "fish"}:
-            _log.warning(
-                "TTS_ENGINE=%r is not one of auto/local/riva/gtts/fish — falling "
-                "back to 'auto' behaviour.",
-                cls.TTS_ENGINE,
             )
 
         # One line per optional feature, so "why isn't X working" is answered

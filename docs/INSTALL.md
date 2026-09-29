@@ -16,9 +16,27 @@ It asks for:
 2. The AI provider/model and API key if the provider needs one.
 3. An optional Discord owner user ID for restricted `/diagnostics` and `/maintenance` commands.
 
-The easy config uses `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`. `.env.simple.example` maps those values to historical `OLLAMA_*` compatibility names used by advanced code/configuration.
+The easy config uses `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`, read directly by the runtime. `.env.simple.example` also supplies historical `OLLAMA_*` aliases for older tooling. An explicitly blank friendly key clears a legacy credential.
 
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
+
+## Versioned installation and releases
+
+The default command installs an unreleased `main` development snapshot. Both installers resolve the selected branch/tag once and use that immutable commit for the app, setup scripts, and configuration handoff. The checkout is detached; do not use `git pull` to update it.
+
+After a release is published, install its exact tag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/vX.Y.Z/easy-install.sh -o /tmp/maxwell-install.sh
+bash /tmp/maxwell-install.sh --version vX.Y.Z
+```
+
+Replace `vX.Y.Z` with a published tag from [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). The initial version in `VERSION` is `0.1.0`; no release tag is published by merely changing that file. Exact full commit IDs are also supported with `--ref <40-character-sha>`. `--version` and `--ref` are mutually exclusive. Use `--dir <path>` to select the installation directory.
+
+For a fork, set `MAXWELL_REPO_URL`; `MAXWELL_VERSION` / `MAXWELL_REF` are the environment equivalents. `MAXWELL_BRANCH` selects development snapshots only. A missing/invalid revision or incomplete checkout fails before replacing an existing installation. Tracked local changes must be committed or saved first; `.env`, memory, generated sites, and other persistent untracked runtime files are retained.
+
+Maintainers: update `VERSION` and `CHANGELOG.md`, verify the checkout, then push a matching semantic tag (`vMAJOR.MINOR.PATCH`). The release workflow rejects tag/version mismatches, runs checks, builds and smokes the real Docker entrypoint, publishes source/installers with checksums, and pushes a matching GHCR image. `CONTAINER_IMAGE` records the image digest. No moving `latest` tag is published. This repository runs from a checkout; it does not publish a Python wheel.
+
 
 ## Full installer
 
@@ -239,6 +257,8 @@ Rebuild/start:
 
 Use [`examples/Caddyfile.example`](../examples/Caddyfile.example) as the reference for a split-origin deployment.
 
+The public root is a static product landing page, not an operator dashboard. Copy the contents of `web/` into `/var/www/maxwell` when using the example: it serves only `/`, `/index.html`, `/terms/`, and `/privacy/` there. Generated sites stay under `/var/www/maxwell/bot`; the admin dashboard is served only on the separate admin hostname. The landing page has no dashboard controls or links. Updating static files does not require restarting the bot.
+
 Keep generated HTML/JavaScript on a different origin from the admin dashboard. Set:
 
 - `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin.
@@ -251,11 +271,12 @@ Do not serve arbitrary generated pages from the dashboard origin. Generated Java
 
 ```bash
 cd ~/maxwell
-git pull --ff-only
-./install.sh --local
+bash install.sh --dir "$PWD"
 ```
 
 The installer keeps `.env`, `data/`, and generated-site state.
+
+To update to a published release, add `--version vX.Y.Z`. The installer resolves and validates the revision before checkout. Back up `.env`, `data/`, and generated sites before an operational update; the installer preserves those files but a backup is still required for recovery.
 
 Reconfigure advanced settings:
 
@@ -270,8 +291,7 @@ Do not run the old host process and Docker Maxwell at the same time with the sam
 From the checkout:
 
 ```bash
-git pull --ff-only
-./install.sh --local
+bash install.sh --dir "$PWD"
 ```
 
 The supported runtime is Docker. Historical PM2/host files may remain in the repository for compatibility/migration, but they are not the recommended production path.

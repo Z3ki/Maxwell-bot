@@ -15,6 +15,19 @@ Since the original audit snapshot, Maxwell has continued to change. Current `mai
 
 The current implementation and tests are authoritative for those features.
 
+## Release-preparation fixes (2026-09-29)
+
+- Primary `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY` settings are read directly at startup. Friendly endpoint/model settings take precedence over legacy names; a blank friendly key clears a stale legacy credential.
+- Detached workers keep job IDs, goals, and context in user input, after a reusable system prefix. Their final-text delivery contract overrides chat-only `send_message` instructions.
+- REM budgets the complete serialized short-term slice, including metadata and JSON escapes, within 120,000 characters. Content is shortened without dropping events; metadata-only overflow fails without consuming the slice.
+- Provider reads preserve fragmented JSON and reject malformed/error/incomplete streams instead of accepting partial tool calls. Learned output and temperature constraints are isolated by endpoint/model; nonfinite usage fields do not corrupt accounting.
+- Versioned installers resolve tags/commits immutably and preserve persistent files. A local Git-remote smoke exercised both installers through annotated-tag installation and lightweight-tag upgrade. Missing/invalid/dirty/incomplete release boundaries are covered by installer regressions.
+- The public site now presents a product landing rather than a dashboard. The example Caddy configuration was exercised as a real local server: public landing/policies/sites available, public admin/API/data paths denied, operator dashboard available only on its separate origin. The existing hosted Caddy routing is not migrated by this example change; split the live admin/generated-page origins before treating that deployment as isolated.
+- Removed live voice transport and speech-output tools/configuration. Audio attachments still enter the configured model as input; moderation of other members remains available.
+- Explicit zero memory-tier caps no longer act as unlimited ceilings; varied allocation smoke cases preserve caps and the total budget.
+
+These are implementation changes, not a blanket premium-readiness certification. Release verification must still cover the configured provider, installation, and live container health.
+
 ## September 2026 audit scope
 
 The audit covered the core bot and tool dispatcher; provider integrations; memory/RAG, autonomy and jobs; Discord accounts/threads/plugins; dashboard/API; generated-site runtime; configuration; installation; and deployment boundaries.

@@ -28,7 +28,7 @@ class _FakeTool:
         return "fake tool"
 
 
-TOOLS = {"send_file", "react", "send_message", "no_response", "create_site", "tts"}
+TOOLS = {"send_file", "react", "send_message", "no_response", "create_site"}
 
 
 # ---- strip_tool_payload_leaks (defensive sanitizer, still used) ----
@@ -71,11 +71,11 @@ def test_strip_tool_payload_leaks_removes_unclosed_tool_and_environment_details(
 
 def test_strip_tool_payload_leaks_removes_reasoning_json_and_system_reminder():
     text = '''{
-  "thoughts": "User asked for TTS.",
-  "intent": "tts",
-  "decision": "Call tts"
+  "thoughts": "User asked for a file.",
+  "intent": "send_file",
+  "decision": "Call send_file"
 }
-<tool:tts text="Hey there!" language="english" />
+<tool:send_file filename="note.txt" />
 <system-reminder>secret context</system-reminder>'''
     assert strip_tool_payload_leaks(text) == ""
 

@@ -20,8 +20,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        libsodium-dev
+        build-essential
 
 WORKDIR /app
 COPY requirements.txt requirements-optional.txt requirements-dev.txt ./
@@ -46,9 +45,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         curl \
         git \
         ffmpeg \
-        libopus0 \
-        libsodium23 \
-        espeak-ng \
         nodejs \
         chromium \
         fonts-liberation \

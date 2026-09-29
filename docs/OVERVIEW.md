@@ -4,6 +4,8 @@ Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It 
 
 Maxwell expects an official bot token from the Discord Developer Portal. Enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**.
 
+Maxwell does not join voice channels, listen to calls, or generate speech. Audio attachments are model input; voice-state lookup and moderation of other members are separate server-management features.
+
 ## High-level flow
 
 ```text
@@ -51,7 +53,7 @@ Discord bot / app commands
 | `discord_threads.py` | Discord thread create/control tools and the brief injected into thread turns. |
 | `doctor.py` | Installation/configuration report; `--probe` calls the configured endpoints. |
 | `requirements.txt` | Core Python packages required to start Maxwell. |
-| `requirements-optional.txt` | Optional packages for web search, voice, and TTS features. |
+| `requirements-optional.txt` | Optional packages for web search. |
 
 Historical host/PM2 files may remain for compatibility/migration, but Docker is the supported deployment model.
 

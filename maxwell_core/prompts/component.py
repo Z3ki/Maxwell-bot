@@ -23,8 +23,6 @@ POSITIONS = (
 SCOPES = (
     "always",
     "discord",
-
-    "voice",
     "autonomy",
     "jobs",
     "memory",
@@ -60,6 +58,7 @@ class PromptComponent:
     scope: str = "always"
     position: str = "plugin"
     priority: int = 100
+    # Advisory estimate only: instructions must never be truncated mid-rule.
     token_budget: int | None = None
     when: Predicate | None = None
     # If set, only include this component when these tools are on the turn.
@@ -68,7 +67,7 @@ class PromptComponent:
     requires_plugins: tuple[str, ...] = ()
 
     def applies(self, request: PromptRequest) -> bool:
-        if self.scope not in {"always", request.scope, request.platform}:
+        if self.scope not in {"always", request.scope}:
             return False
         if self.requires_plugins:
             have = set(request.plugin_ids)

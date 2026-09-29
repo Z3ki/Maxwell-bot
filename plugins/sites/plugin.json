@@ -65,6 +65,6 @@
       "list_sites",
       "host_file"
     ],
-    "text": "create_site publishes static HTML/CSS/JS. The optional backend=true flag enables only the simple KV API. Do not claim a custom backend server is available. Never paste site source into chat or claim an unfinished page works."
+    "text": "create_site: full HTML document in `body`, or url= of an existing HTML file to fetch and host. Never paste the page into chat. Real line breaks or <br> in visible HTML; never literal \\n text. Full visual freedom — invent a new look each time; no house style unless the user asked. Build the real thing on first pass with complete content. NO placeholders — no 'lorem ipsum', no 'TODO', no 'coming soon', no '[insert here]', no empty href='#' nav, no commented-out 'implement later', no fake returns. If you ship a shell that says 'Loading…' and the app never mounts, you have built nothing. If the page needs 900 lines to actually work, write 900 lines. Do not ping-pong action=read on large files. Do not recreate the site to change a line. create_site publishes static HTML/CSS/JS. The optional backend=true flag enables only the simple KV API; do not claim a custom backend server is available. Never claim an unfinished page works."
   }
 }

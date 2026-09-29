@@ -13,7 +13,7 @@ from discord_account import (
     bot_oauth_install_urls,
     configured_bot_token,
 )
-from bot import LEAN_TOOL_PROTOCOL, MaxwellBot, TOOL_PROTOCOL
+from bot import MaxwellBot
 
 
 def test_clear_application_commands_puts_empty_list(monkeypatch):
@@ -269,11 +269,6 @@ def test_author_is_self_uses_bot_id():
     assert not bot._author_is_self(SimpleNamespace(author=SimpleNamespace(id=333)))
 
 
-def test_protocol_does_not_offer_selfbot_join():
-    text = TOOL_PROTOCOL.lower()
-    assert "join_server" not in text
-    assert "bot_invite_url" in text
-    assert "bot_invite_url" in LEAN_TOOL_PROTOCOL.lower()
 
 
 def test_bot_oauth_install_urls_app_and_server():

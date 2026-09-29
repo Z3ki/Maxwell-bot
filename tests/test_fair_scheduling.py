@@ -168,7 +168,6 @@ def test_the_same_room_gets_the_same_lock():
 
 def test_heavy_tools_draw_on_separate_budgets():
     assert classify_tool("image_generator") == "media"
-    assert classify_tool("tts") == "tts"
     assert classify_tool("shell") == "shell"
     assert classify_tool("create_site") == "site"
     assert classify_tool("fetch_url") == "web"

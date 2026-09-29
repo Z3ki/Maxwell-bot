@@ -143,8 +143,7 @@ def check_system_tools() -> None:
 
     head("Optional system tools")
     tools = [
-        ("ffmpeg", "video frames, TTS playback, audio conversion"),
-        ("espeak-ng", "offline TTS voice"),
+        ("ffmpeg", "video frames and audio conversion"),
     ]
     for binary, purpose in tools:
         # Stay usable even when config cannot import a missing core package.

@@ -1,84 +1,10 @@
-"""create_site must not herd Maxwell into a repeated house look.
-
-The tool writes whatever HTML/CSS/JS it is given, byte for byte — no house
-skin, and no injected meta tags unless an operator turns `site_inject_csp` on
-(a CSP belongs to the host, and injecting one can only subtract from what the
-page was written to do). Prompt/schema text must tell the model it has visual
-freedom and must not require a palette, font, layout, or theme.
-"""
+"""Generated sites preserve supplied HTML and enforce only configured CSP."""
 
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-from bot import TOOL_PROTOCOL
 from bot_tools import CreateSiteTool
-from tool_schemas import TOOL_PARAMETERS, build_openai_tools
-
-_BANNED_AESTHETIC = (
-    "cyberpunk",
-    "glassmorphism",
-    "dark theme",
-    "dark-mode",
-    "always use a dark",
-    "always include a hero",
-    "gradient hero",
-    "inter font",
-    "font-family: inter",
-    "required palette",
-    "house palette",
-    "always use a",
-)
-
-
-def _prompt_surfaces():
-    bot = SimpleNamespace(
-        config=SimpleNamespace(
-            MAXWELL_SITE_DIR="public/bot",
-            MAXWELL_PUBLIC_BASE_URL="https://maxwell.example.com",
-        )
-    )
-    desc = CreateSiteTool(bot).get_description()
-    body_desc = TOOL_PARAMETERS["create_site"]["properties"]["body"]["description"]
-    title_desc = TOOL_PARAMETERS["create_site"]["properties"]["title"]["description"]
-    return desc, body_desc, title_desc, TOOL_PROTOCOL
-
-
-def test_create_site_description_grants_visual_freedom():
-    desc, body_desc, title_desc, protocol = _prompt_surfaces()
-    blob = f"{desc}\n{body_desc}\n{title_desc}\n{protocol}".lower()
-    assert "visual freedom" in desc.lower()
-    assert "house style" in desc.lower()
-    assert "invent a new" in desc.lower()
-    assert "visual freedom" in protocol.lower()
-    assert "house style" in protocol.lower()
-    assert "invent a new" in blob
-    for phrase in _BANNED_AESTHETIC:
-        assert phrase not in blob, f"prompt still mandates {phrase!r}"
-    assert "headline" not in title_desc.lower()
-    assert "inline css/js" not in desc.lower()
-    assert "always true" not in desc.lower()
-    assert "must use backend=true" not in desc.lower()
-    assert "client-only sites are forbidden" not in desc.lower()
-
-
-def test_create_site_openai_description_keeps_freedom_under_limit():
-    bot = SimpleNamespace(
-        config=SimpleNamespace(
-            MAXWELL_SITE_DIR="public/bot",
-            MAXWELL_PUBLIC_BASE_URL="https://maxwell.example.com",
-        )
-    )
-    tool = CreateSiteTool(bot)
-    raw = tool.get_description()
-    assert len(raw) < 1024
-    payload = build_openai_tools({"create_site": tool})
-    stamped = payload[0]["function"]["description"].lower()
-    assert "visual freedom" in stamped
-    assert "house style" in stamped
-    body = TOOL_PARAMETERS["create_site"]["properties"]["body"]["description"].lower()
-    assert "served as-is" in body
-    assert "no restyle" in body
 
 
 def _make_tool(tmp_path: Path) -> CreateSiteTool:

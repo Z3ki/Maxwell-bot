@@ -5,7 +5,7 @@ That text is usually pre-action chatter ("here's...", "done", etc.), not a secon
 answer. Keep it in model history, but do not surface it after the tool executes.
 
 Maxwell also already had a short-followup guard for send_message. Extend its
-"already sent" signal to file/media/TTS/poll/rich-message delivery so a tool can
+"already sent" signal to file/media/poll/rich-message delivery so a tool can
 finish the turn cleanly while still allowing substantial follow-up text.
 """
 
@@ -19,7 +19,6 @@ _VISIBLE_MARKERS = (
     "__FILE_SENT__",
     "__MEDIA_SENT__",
     "__MEME_SENT__",
-    "__TTS_SENT__",
     "__POLL_SENT__",
 )
 _VISIBLE_TOOLS = frozenset(
@@ -28,7 +27,6 @@ _VISIBLE_TOOLS = frozenset(
         "send_file",
         "send_media",
         "send_meme",
-        "tts",
         "create_poll",
         "send_rich_message",
     }

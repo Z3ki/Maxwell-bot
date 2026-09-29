@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import bot as bot_module
 import sys
 
 
@@ -88,8 +87,8 @@ class _RunningProcess:
         return self.returncode
 
 
-@pytest.mark.parametrize("kind", ["gif", "video", "frames", "local_tts"])
-def test_media_subprocess_is_reaped_on_cancellation(monkeypatch, tmp_path, kind):
+@pytest.mark.parametrize("kind", ["gif", "video", "frames"])
+def test_media_subprocess_is_reaped_on_cancellation(monkeypatch, kind):
     async def run():
         proc = _RunningProcess()
         monkeypatch.setattr(
@@ -102,14 +101,9 @@ def test_media_subprocess_is_reaped_on_cancellation(monkeypatch, tmp_path, kind)
             operation = MaxwellBot._normalize_gif(owner, b"gif", "test.gif", 1024)
         elif kind == "video":
             operation = MaxwellBot._normalize_video(owner, b"video", "test.mp4", 1024)
-        elif kind == "frames":
+        else:
             operation = MaxwellBot._extract_video_derivatives(
                 owner, b"video", "test.mp4", 1, 1024, include_frames=True
-            )
-        else:
-            monkeypatch.setattr(bot_module.shutil, "which", lambda _: "espeak")
-            operation = bot_module._synthesize_local_tts_wav(
-                "hello", str(tmp_path / "out.wav")
             )
         task = asyncio.create_task(operation)
         await asyncio.wait_for(proc.started.wait(), timeout=2)

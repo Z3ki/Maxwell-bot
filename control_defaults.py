@@ -4,11 +4,6 @@ Single source of truth for DEFAULT_CONTROL, KNOWN_TOOLS, and parse_bool.
 Both bot.py and api_server.py import from here so config ranges never drift.
 """
 
-import os
-
-from identity import default_wake_words
-
-
 def parse_bool(value, default: bool = False) -> bool:
     """Parse persisted/env booleans. bool("false") is True because Python is an asshole."""
     if isinstance(value, bool):
@@ -242,25 +237,6 @@ DEFAULT_CONTROL = {
         "Don't spam set_activity; only update status when asked or after a real state change. "
         "DO NOT REPEAT STUFF: never reuse your own phrasing, a joke, a catchphrase, or the same idea you already voiced this conversation."
     ),
-    "vc_rms_threshold": 1200,
-    "vc_pause_seconds": 0.8,
-    "vc_min_seconds": 0.55,
-    "vc_max_seconds": 18,
-    "vc_preroll_seconds": 0.25,
-    "vc_ai_timeout_seconds": 45,
-    "vc_ai_max_tokens": 1000,
-    "vc_memory_history_messages": 2,
-    "vc_cross_context_enabled": False,
-    "vc_max_response_chars": 2000,
-    "vc_tts_engine": "fish",
-    # Named Fish voice for VC replies ("tiktok", "mommy", or "" = default).
-    # Maxwell can override per-reply with a leading [voice=NAME] tag.
-    "vc_tts_voice": "",
-    "vc_reply_mode": "voice",
-    "vc_response_mode": "always",
-    "vc_wake_words": default_wake_words(os.getenv("BOT_NAME") or "Maxwell"),
-    "vc_interrupt_enabled": True,
-    "vc_debug": True,
     "autonomy_enabled": False,
     "autonomy_interval_seconds": 300,
     "autonomy_base_url": "",  # "" = use main provider's base_url
@@ -372,6 +348,30 @@ DEAD_CONTROL_KEYS = frozenset(
         # Retired token spend caps; message/request quotas are the usage measure.
         "daily_user_token_limit_enabled",
         "daily_user_token_limit",
+        # Voice-channel listening and speech output were removed. These keys
+        # can linger in bot_control.json; strip them so they are not editable
+        # and cannot turn the removed path back on.
+        "vc_rms_threshold",
+        "vc_pause_seconds",
+        "vc_min_seconds",
+        "vc_max_seconds",
+        "vc_preroll_seconds",
+        "vc_ai_timeout_seconds",
+        "vc_ai_max_tokens",
+        "vc_memory_history_messages",
+        "vc_cross_context_enabled",
+        "vc_max_response_chars",
+        "vc_tts_engine",
+        "vc_tts_voice",
+        "vc_reply_mode",
+        "vc_response_mode",
+        "vc_wake_words",
+        "vc_interrupt_enabled",
+        "vc_interrupt_grace_seconds",
+        "vc_debug",
+        "vc_min_voiced_seconds",
+        "vc_min_voiced_frames",
+        "vc_max_decode_drops",
     }
 )
 
@@ -394,7 +394,6 @@ _FALLBACK_KNOWN_TOOLS = [
     "set_nickname",
     "forward_message",
     "typing",
-    "tts",
     "list_servers",
     "list_admin_servers",
     "list_channels",
@@ -451,10 +450,6 @@ _FALLBACK_KNOWN_TOOLS = [
     "send_media",
     "inbox_list",
     "inbox_act",
-    "join_vc",
-    "vc_status",
-    "vc_where",
-    "leave_vc",
     "sleep",
     "clear_sleep",
     "wait",
@@ -507,7 +502,6 @@ GUILD_CAPABILITIES = {
     "files": "File attachments",
     "memory": "Memory tools",
     "email": "Email tools",
-    "voice": "Voice tools",
     "moderation": "Moderation and server management",
     "plugins": "Optional plugins",
 }
@@ -544,6 +538,4 @@ def guild_capability_for_tool(name: str, *, plugin_owned: bool = False) -> str |
         return "memory"
     if tool.startswith("email_") or tool in {"inbox_list", "inbox_act"}:
         return "email"
-    if tool.startswith("vc_") or tool in {"tts", "join_vc", "leave_vc"}:
-        return "voice"
     return "plugins" if plugin_owned else None

@@ -41,10 +41,8 @@ def _live_bot(extra_tools=None):
             "send_meme",
             "search_messages",
             "lookup_user",
-            "tts",
             "image_generator",
             "hd_image",
-            "join_vc",
             "more_tools",
         )
     }
@@ -118,7 +116,7 @@ def test_every_turn_offers_every_registered_tool():
         "wyd",
         "Can you run a debugger on YOUR machine?",
         "look",
-        "can you tts that",
+        "can you check that",
         "whatts up",
         "so anyway " * 40,
     ):

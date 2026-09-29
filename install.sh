@@ -27,6 +27,9 @@ esac
 INSTALL_DIR="${MAXWELL_INSTALL_DIR:-$HOME/maxwell}"
 REPO_URL="${MAXWELL_REPO_URL:-https://github.com/Z3ki/Maxwell-bot.git}"
 BRANCH="${MAXWELL_BRANCH:-main}"
+RELEASE_VERSION="${MAXWELL_VERSION:-}"
+RELEASE_REF="${MAXWELL_REF:-}"
+RESOLVED_COMMIT=""
 RECONFIGURE=0
 LOCAL_MODE=0
 CONFIGURE_ONLY=0
@@ -52,10 +55,14 @@ Options:
   --non-interactive   Read all answers from environment variables.
   --dir <path>        Install/update Maxwell in this directory.
   --local             Configure the current checkout instead of cloning.
+  --version <vX.Y.Z>   Install an exact published release (also accepts X.Y.Z).
+  --ref <commit>      Install an exact 40-character Git commit.
+                      Without either option, main is a development snapshot.
   --configure-only    Prepare .env and run.sh without installing or starting Docker.
 
 Useful environment variables:
-  MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_BRANCH,
+  MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_VERSION, MAXWELL_REF,
+  MAXWELL_BRANCH (development snapshots only),
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
   DISCORD_BOT_TOKEN, AI_API_URL, AI_MODEL, AI_API_KEY,
   OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
@@ -72,6 +79,8 @@ while [ "$#" -gt 0 ]; do
     --no-extras) warn "--no-extras is ignored; extras ship in the Docker image." ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
+    --version) shift; [ "$#" -gt 0 ] || fail "--version requires a release"; RELEASE_VERSION="$1" ;;
+    --ref) shift; [ "$#" -gt 0 ] || fail "--ref requires a commit"; RELEASE_REF="$1" ;;
     --local) LOCAL_MODE=1; INSTALL_DIR="$SCRIPT_DIR"; SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-1}" ;;
     *) fail "unknown option: $1 (try --help)" ;;
   esac
@@ -237,31 +246,84 @@ install_docker() {
   fail "Docker is required. Install Docker Engine + Compose and re-run."
 }
 
+resolve_release() {
+  local requested remote_refs sha ref peeled=""
+  [ -z "$RELEASE_VERSION" ] || [ -z "$RELEASE_REF" ] || fail "Choose --version or --ref, not both."
+  if [ -n "$RELEASE_REF" ]; then
+    [[ "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]] || fail "--ref must be a full lowercase 40-character commit."
+    RESOLVED_COMMIT="$RELEASE_REF"
+    return
+  fi
+  if [ -n "$RELEASE_VERSION" ]; then
+    RELEASE_VERSION="v${RELEASE_VERSION#v}"
+    [[ "$RELEASE_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail "Invalid release version: $RELEASE_VERSION"
+    requested="refs/tags/$RELEASE_VERSION"
+  else
+    git check-ref-format "refs/heads/$BRANCH" >/dev/null || fail "Invalid development branch: $BRANCH"
+    requested="refs/heads/$BRANCH"
+  fi
+  remote_refs="$(git ls-remote -- "$REPO_URL" "$requested" "$requested^{}")" || fail "Could not resolve $requested from $REPO_URL."
+  while read -r sha ref; do
+    case "$ref" in
+      "$requested") RESOLVED_COMMIT="$sha" ;;
+      "$requested^{}") peeled="$sha" ;;
+    esac
+  done <<< "$remote_refs"
+  RESOLVED_COMMIT="${peeled:-$RESOLVED_COMMIT}"
+  [[ "$RESOLVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "Ref $requested does not exist; installation was not changed."
+}
+
+checkout_release() {
+  local stage
+  if [ -e "$INSTALL_DIR" ]; then
+    [ -d "$INSTALL_DIR/.git" ] || fail "$INSTALL_DIR exists but is not a Git checkout."
+    [ -z "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=no)" ] || fail "Tracked files have local changes; commit or save them before updating."
+    git -C "$INSTALL_DIR" fetch --depth 1 --no-tags -- "$REPO_URL" "$RESOLVED_COMMIT" || fail "Could not fetch the selected commit; existing checkout was kept."
+    git -C "$INSTALL_DIR" cat-file -e "$RESOLVED_COMMIT^{commit}" || fail "Selected ref is not a commit."
+    for file in install.sh easy-install.sh bot.py .env.example .env.simple.example scripts/set_env.py scripts/env_defaults.py scripts/migrate_ai_env.py docker/maxwell.Dockerfile docker/entrypoint.sh docker/supervisor.py docker-compose.yml docker-compose.bridge.yml; do
+      git -C "$INSTALL_DIR" cat-file -e "$RESOLVED_COMMIT:$file" || fail "Selected commit is missing $file; existing checkout was kept."
+    done
+    git -C "$INSTALL_DIR" checkout --detach "$RESOLVED_COMMIT" || fail "Could not switch releases; existing local files were kept."
+  else
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    stage="$(mktemp -d "${INSTALL_DIR}.install.XXXXXX")"
+    if ! (
+      trap 'rm -rf -- "$stage"' EXIT
+      git init --quiet "$stage" &&
+      git -C "$stage" remote add origin "$REPO_URL" &&
+      git -C "$stage" fetch --depth 1 --no-tags origin "$RESOLVED_COMMIT" &&
+      git -C "$stage" checkout --quiet --detach "$RESOLVED_COMMIT" &&
+      for file in install.sh easy-install.sh bot.py .env.example .env.simple.example scripts/set_env.py scripts/env_defaults.py scripts/migrate_ai_env.py docker/maxwell.Dockerfile docker/entrypoint.sh docker/supervisor.py docker-compose.yml docker-compose.bridge.yml; do
+        [ -f "$stage/$file" ] || exit 1
+      done &&
+      [ ! -e "$INSTALL_DIR" ] && mv -- "$stage" "$INSTALL_DIR"
+    ); then
+      fail "Could not prepare the selected release; no installation was replaced."
+    fi
+  fi
+  cd "$INSTALL_DIR"
+  INSTALL_DIR="$(pwd -P)"
+  ok "using ${RELEASE_VERSION:-development $BRANCH} at $RESOLVED_COMMIT"
+}
+
 clone_or_update() {
   step "Getting Maxwell"
-  if [ "$LOCAL_MODE" != "1" ]; then
-    command -v git >/dev/null 2>&1 || fail "git is required to fetch Maxwell."
-  fi
   if [ "$LOCAL_MODE" = "1" ]; then
     [ -f "$INSTALL_DIR/bot.py" ] || fail "--local must be run from a Maxwell checkout."
+    if [ -n "${MAXWELL_INSTALL_COMMIT:-}" ]; then
+      [ "$(git -C "$INSTALL_DIR" rev-parse HEAD)" = "$MAXWELL_INSTALL_COMMIT" ] || fail "Checkout changed during installer handoff."
+    elif [ -n "$RELEASE_VERSION$RELEASE_REF" ]; then
+      resolve_release
+      [ "$(git -C "$INSTALL_DIR" rev-parse HEAD)" = "$RESOLVED_COMMIT" ] || fail "--local does not switch releases. Omit --local to install the selected version."
+    fi
     cd "$INSTALL_DIR"
+    INSTALL_DIR="$(pwd -P)"
     ok "using local checkout at $INSTALL_DIR"
     return
   fi
-  if [ ! -e "$INSTALL_DIR" ]; then
-    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
-    ok "cloned $REPO_URL ($BRANCH) to $INSTALL_DIR"
-  elif [ -d "$INSTALL_DIR/.git" ]; then
-    cd "$INSTALL_DIR"
-    if git pull --ff-only; then
-      ok "updated existing checkout"
-    else
-      warn "git pull --ff-only failed; continuing without overwriting local changes."
-    fi
-  else
-    fail "$INSTALL_DIR exists but is not a git repository. Move it aside or choose --dir <path>."
-  fi
-  cd "$INSTALL_DIR"
+  command -v git >/dev/null 2>&1 || fail "git is required to fetch Maxwell."
+  resolve_release
+  checkout_release
 }
 
 set_env_value() {
@@ -279,6 +341,7 @@ copy_env_if_needed() {
 
 configure_env() {
   step "Configuring Maxwell"
+  [ ! -f .env ] || chmod 600 .env
   if [ -f .env ] && [ "$RECONFIGURE" != "1" ]; then
     ok ".env already exists — leaving values unchanged (use --reconfigure to edit it)"
     python3 scripts/migrate_ai_env.py .env >/dev/null || warn "Could not add AI_* provider aliases; run: python3 scripts/migrate_ai_env.py .env"
@@ -566,7 +629,8 @@ final_summary() {
              /moderation, /memory, /reminder, /diagnostics, /maintenance
   Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d
   Reconfigure: ./install.sh --local --reconfigure
-  Update:      git pull --ff-only && ./install.sh --local
+  Update:      bash install.sh --dir "$(pwd -P)" --version vX.Y.Z
+               (choose a published release; omit --version for development main)
   Old venv/PM2 install: that same update command stops host Maxwell and starts Docker.
 EOF
 }
@@ -575,6 +639,17 @@ main() {
   banner_and_confirm
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to prepare .env. Install Python 3, then re-run."
   clone_or_update
+  if [ "$LOCAL_MODE" != "1" ]; then
+    # Execute configuration/build code from the same immutable commit as the app.
+    handoff=(--local)
+    [ "$RECONFIGURE" = "1" ] && handoff+=(--reconfigure)
+    [ "$CONFIGURE_ONLY" = "1" ] && handoff+=(--configure-only)
+    exec env MAXWELL_INSTALL_COMMIT="$RESOLVED_COMMIT" \
+      MAXWELL_INSTALL_DIR="$INSTALL_DIR" MAXWELL_REPO_URL="$REPO_URL" \
+      MAXWELL_VERSION="$RELEASE_VERSION" MAXWELL_REF="$RELEASE_REF" \
+      MAXWELL_NONINTERACTIVE="$NONINTERACTIVE" MAXWELL_SKIP_SYSTEM_DEPS="$SKIP_SYSTEM_DEPS" \
+      bash "$INSTALL_DIR/install.sh" "${handoff[@]}"
+  fi
   configure_env
   write_host_bind
   write_run_script

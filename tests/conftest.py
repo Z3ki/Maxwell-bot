@@ -12,7 +12,6 @@ _MIRROR_MODULES = (
     "plugins.media.impl",
     "plugins.images.impl",
     "plugins.sites.impl",
-    "plugins.tts_voice.impl",
     "plugins.shell.impl",
     "plugins.discord_messages.impl",
     "plugins.discord_guild.impl",

@@ -5,7 +5,7 @@ from bot import MaxwellBot
 
 
 def _bot(**cfg):
-    base = {"ENABLE_IMAGE_INPUT": True, "ENABLE_TTS_VC": True, "ENABLE_AUTONOMY": True}
+    base = {"ENABLE_IMAGE_INPUT": True, "ENABLE_AUTONOMY": True}
     base.update(cfg)
     return SimpleNamespace(config=SimpleNamespace(**base), _control={})
 

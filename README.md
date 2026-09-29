@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.
 
 The easy installer keeps the first setup small. It asks for your Discord bot token, the AI provider/model, and optionally your Discord user ID for owner controls. It generates a dashboard password, writes a compact `.env`, and then hands off to the Docker installer.
 
-> **good luck installing this shit!**
+The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For production, select a published release; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases). The initial `0.1.0` release is prepared but not published yet.
 
 Before running it, create a bot in the Discord Developer Portal and enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**. The setup machine needs Git, curl, and Python 3. Maxwell itself runs in Docker. On supported Linux systems the installer can install Docker; on macOS/Windows use Docker Desktop.
 
@@ -40,7 +40,7 @@ MAXWELL_ADMIN_USER=admin
 MAXWELL_ADMIN_PASSWORD=change-me
 ```
 
-`.env.simple.example` maps those values to the older `OLLAMA_*` names used by some advanced configuration paths, so existing installs and internal compatibility code keep working. Do not maintain two different values for the same provider setting.
+The runtime reads `AI_*` directly. `.env.simple.example` also supplies `OLLAMA_*` interpolation aliases for older tooling. Friendly endpoint/model settings take precedence; an explicitly blank `AI_API_KEY` clears a legacy credential. Avoid conflicting settings.
 
 For an older `.env`, run:
 
@@ -122,11 +122,12 @@ To update:
 
 ```bash
 cd ~/maxwell
-git pull --ff-only
-bash install.sh --local
+bash install.sh --dir "$PWD"
 ```
 
 The installer preserves `.env`, `data/`, and generated-site files.
+
+For a published release, use `bash install.sh --dir "$PWD" --version vX.Y.Z` instead. Updates use a detached immutable checkout, so `git pull` is not the update mechanism. The installer refuses tracked local changes rather than overwriting them.
 
 ## Discord app commands
 
@@ -209,6 +210,7 @@ docs/PLUGINS.md         Plugin development API
 - [Security](SECURITY.md)
 - [Discord persona](docs/MAXWELL_PERSONA.md)
 - [Audit snapshot](docs/AUDIT.md)
+- [Changelog and release status](CHANGELOG.md)
 - [GitHub projects](docs/GITHUB_PROJECTS.md)
 - [Agent life](docs/LIVING_AGENT.md)
 - [Email integration](email_integration/README.md)

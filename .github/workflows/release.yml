@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release version
+        shell: bash
+        run: |
+          version="$(cat VERSION)"
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pip check
+      - run: ruff check .
+      - run: bash -n easy-install.sh install.sh setup.sh docker/entrypoint.sh
+      - run: python -m pytest
+      - name: Build runtime image
+        run: docker build -f docker/maxwell.Dockerfile -t "$IMAGE" .
+      - name: Exercise release image entrypoint
+        run: |
+          docker run --rm --network none "$IMAGE" python3 -c 'from config import Config; from docker.supervisor import supervise; from providers import OllamaProvider; print("Release image imports and entrypoint OK")'
+          docker run --rm --network none "$IMAGE" python3 -m pip check
+      - name: Prepare downloadable source and installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="maxwell-$GITHUB_REF_NAME/" -o "dist/maxwell-$GITHUB_REF_NAME.tar.gz" HEAD
+          cp easy-install.sh install.sh VERSION dist/
+          (cd dist && sha256sum *.sh VERSION *.tar.gz > SHA256SUMS)
+      - name: Publish versioned container image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE"
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" > dist/CONTAINER_IMAGE
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Maxwell $GITHUB_REF_NAME" --notes-file CHANGELOG.md
