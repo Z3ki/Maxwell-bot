@@ -103,7 +103,7 @@ def test_enhanced_slash_turn_keeps_core_attachments():
     assert turn["search_query"] == "debug it"
     assert turn["web"] == "auto"
     assert turn["mode"] == "code"
-    assert turn["visibility"] == "private"
+    assert turn["visibility"] == "public"
     assert "mode=code" in turn["note"]
 
 

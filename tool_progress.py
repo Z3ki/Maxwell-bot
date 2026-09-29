@@ -113,6 +113,11 @@ _DEFERRED_POST_WINDOW = 0.8
 
 # Placeholder string for "tool name announced but no reasoning yet".
 _GENERATING_PLACEHOLDER = "generating…"
+_HIDDEN_PROGRESS_TOOLS = frozenset({"send_message"})
+
+
+def _is_hidden_progress_tool(tool_name: str | None) -> bool:
+    return str(tool_name or "").strip().lower() in _HIDDEN_PROGRESS_TOOLS
 
 
 def _latest_complete_sentence(text: str) -> str:
@@ -340,7 +345,11 @@ class ToolProgress:
         can watch the model generate the artifact in real time.
         Pass ``""`` to clear it; omit to leave the current value.
         """
-        if self._stopped or self._tool_streaming:
+        if (
+            self._stopped
+            or self._tool_streaming
+            or _is_hidden_progress_tool(tool_name)
+        ):
             return
         if self._platform != "discord":
             return
@@ -389,7 +398,7 @@ class ToolProgress:
         user data, so they are never copied into a channel progress message.
         """
         name = str(tool_name or "").strip()
-        if not name or self._stopped:
+        if not name or self._stopped or _is_hidden_progress_tool(name):
             return
         async with self._tools_lock:
             if self._stopped:
@@ -430,6 +439,8 @@ class ToolProgress:
         if self._platform != "discord":
             return
 
+        if _is_hidden_progress_tool(tool_name):
+            tool_name = None
         if tool_name:
             self._current_tool = tool_name
         tool_name_switch = bool(tool_name and not self._last_tool_name_announced)
