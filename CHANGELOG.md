@@ -18,6 +18,7 @@ Not published yet. A release is published only by pushing a matching `v0.1.0` ta
 - Fragmented provider JSON is accumulated within its size limit. Invalid/error/truncated SSE responses are not accepted as completed answers.
 - Learned output limits and required temperatures are isolated by endpoint and effective model; small output caps can be repaired without limiting fallback models.
 - Nonfinite usage and cost fields do not corrupt accounting.
+- The authenticated status API recognizes live bot children of its Docker supervisor instead of incorrectly reporting Docker deployments offline.
 - Prompt budgeting preserves system instructions, live input, and native tool-call records. Complete historical transcript blocks are the expendable tier.
 - Conditional tool guidance replaces duplicated always-on instructions, follows the requesting user/server's plugin access, and places reusable instructions before volatile requester context.
 - Background-worker briefs follow stable instructions and use a distinct final-text delivery contract.

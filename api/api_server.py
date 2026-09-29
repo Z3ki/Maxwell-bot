@@ -2028,6 +2028,35 @@ async def chat_history(request):
     return _json_response(msgs)
 
 
+def _supervised_bot_is_running() -> bool:
+    """Recognize only a live bot child of this API's Docker supervisor."""
+    parent_pid = os.getppid()
+    parent_proc = Path("/proc") / str(parent_pid)
+    try:
+        parent_args = (parent_proc / "cmdline").read_bytes().split(b"\0")
+        parent_cwd = (parent_proc / "cwd").resolve(strict=True)
+        supervisor_script = APP_ROOT / "docker" / "supervisor.py"
+        if not any(
+            (parent_cwd / os.fsdecode(arg)).resolve() == supervisor_script
+            for arg in parent_args[1:] if arg and not arg.startswith(b"-")
+        ):
+            return False
+        children = (parent_proc / "task" / str(parent_pid) / "children").read_text().split()
+    except OSError:
+        return False
+    bot_script = str(APP_ROOT / "bot.py").encode()
+    for child_pid in children:
+        child_proc = Path("/proc") / child_pid
+        try:
+            args = (child_proc / "cmdline").read_bytes().split(b"\0")
+            state = (child_proc / "stat").read_text().rsplit(")", 1)[1].split()[0]
+            if len(args) > 1 and args[1] == bot_script and state not in {"Z", "X"}:
+                return True
+        except (OSError, IndexError):
+            continue
+    return False
+
+
 async def bot_status(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
@@ -2078,7 +2107,7 @@ async def bot_status(request):
         {
             "online": bool(
                 bot_proc and bot_proc.get("pm2_env", {}).get("status") == "online"
-            ),
+            ) or _supervised_bot_is_running(),
             "control": {
                 k: control.get(k)
                 for k in [

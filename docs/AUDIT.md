@@ -25,6 +25,7 @@ The current implementation and tests are authoritative for those features.
 - The public site now presents a product landing rather than a dashboard. The example Caddy configuration was exercised as a real local server: public landing/policies/sites available, public admin/API/data paths denied, operator dashboard available only on its separate origin. The existing hosted Caddy routing is not migrated by this example change; split the live admin/generated-page origins before treating that deployment as isolated.
 - Removed live voice transport and speech-output tools/configuration. Audio attachments still enter the configured model as input; moderation of other members remains available.
 - Explicit zero memory-tier caps no longer act as unlimited ceilings; varied allocation smoke cases preserve caps and the total budget.
+- The authenticated status API recognizes its live Docker-supervised bot process as well as PM2. This is process health, not a Discord-gateway readiness check; PM2 log/restart endpoints remain PM2-specific.
 
 These are implementation changes, not a blanket premium-readiness certification. Release verification must still cover the configured provider, installation, and live container health.
 
@@ -117,4 +118,4 @@ docker compose exec maxwell python3 doctor.py --probe
 docker compose logs -f maxwell
 ```
 
-External Discord, provider, voice, browser, DNS, mail, OAuth, X, Telegram, and other integrations require the corresponding real service/configuration to be considered live-validated.
+External Discord, provider, browser, DNS, mail, OAuth, X, Telegram, and other integrations require the corresponding real service/configuration to be considered live-validated.
