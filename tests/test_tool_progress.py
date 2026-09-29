@@ -166,6 +166,22 @@ def test_tool_status_accumulates_names_and_is_deleted_when_done():
     assert posted in msg.channel.deleted
 
 
+def test_send_message_is_omitted_from_progress():
+    msg = FakeMessage()
+    prog = tool_progress.ToolProgress(msg)
+    asyncio.run(prog.start())
+    posted = msg.channel.sent[0]
+
+    asyncio.run(prog.update("send_message", "sending a reply"))
+    asyncio.run(prog.note_tool("send_message"))
+    asyncio.run(prog.tick(tool_name="send_message"))
+
+    assert posted.content == "working on it…"
+    assert prog._current_tool == ""
+    assert prog._tools_used == []
+    asyncio.run(prog.stop())
+
+
 def test_tool_status_compacts_repeated_calls():
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
