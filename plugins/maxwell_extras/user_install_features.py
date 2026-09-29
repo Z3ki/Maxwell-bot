@@ -109,7 +109,7 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
                 },
                 {
                     "name": "visibility",
-                    "description": "Choose whether this reply is private or visible in the channel",
+                    "description": "Choose whether this reply is public or private (public by default)",
                     "type": 3,
                     "required": False,
                     "choices": [
@@ -318,7 +318,7 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
         turn["search_query"] = raw_prompt
         turn["prompt"] = _slash_prompt(raw_prompt, opts)
         turn["history_limit"] = _context_limit(interaction)
-        visibility = str(opts.get("visibility") or "private").strip().lower()
+        visibility = str(opts.get("visibility") or "public").strip().lower()
         turn["visibility"] = visibility if visibility in {"private", "public"} else "private"
         mode = str(opts.get("mode") or "ask")
         web = str(opts.get("web") or "auto")
