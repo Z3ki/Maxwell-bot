@@ -8,6 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import legal_notice
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enable_legal_notices(monkeypatch):
+    monkeypatch.setenv("MAXWELL_LEGAL_NOTICE", "true")
+
 
 
 def _bot(tmp_path):
