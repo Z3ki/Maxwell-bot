@@ -109,7 +109,7 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
                 },
                 {
                     "name": "visibility",
-                    "description": "Choose whether this reply is private or visible in the channel",
+                    "description": "Choose whether this reply is public or private (public by default)",
                     "type": 3,
                     "required": False,
                     "choices": [
