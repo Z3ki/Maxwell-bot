@@ -109,6 +109,16 @@ def test_is_user_install_command_filters_name():
     assert not is_user_install_command(_interaction(name="help"))
 
 
+def test_maxwell_command_defaults_to_public_visibility():
+    from plugins.maxwell_extras.user_install_features import _enhanced_build_turn
+
+    interaction = _interaction(prompt="hello")
+    turn = _enhanced_build_turn(interaction, build_user_install_turn)
+
+    assert turn is not None
+    assert turn["visibility"] == "public"
+
+
 def test_message_command_uses_target_as_reply_parent():
     interaction = _interaction(name=USER_INSTALL_MESSAGE_ASK, prompt="unused")
     interaction.data = {
