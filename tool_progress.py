@@ -439,6 +439,8 @@ class ToolProgress:
         if self._platform != "discord":
             return
 
+        if _is_hidden_progress_tool(tool_name):
+            tool_name = None
         if tool_name:
             self._current_tool = tool_name
         tool_name_switch = bool(tool_name and not self._last_tool_name_announced)
