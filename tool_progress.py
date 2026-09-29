@@ -345,7 +345,11 @@ class ToolProgress:
         can watch the model generate the artifact in real time.
         Pass ``""`` to clear it; omit to leave the current value.
         """
-        if self._stopped or self._tool_streaming:
+        if (
+            self._stopped
+            or self._tool_streaming
+            or _is_hidden_progress_tool(tool_name)
+        ):
             return
         if self._platform != "discord":
             return
