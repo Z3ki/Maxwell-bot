@@ -318,8 +318,8 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
         turn["search_query"] = raw_prompt
         turn["prompt"] = _slash_prompt(raw_prompt, opts)
         turn["history_limit"] = _context_limit(interaction)
-        visibility = str(opts.get("visibility") or "private").strip().lower()
-        turn["visibility"] = visibility if visibility in {"private", "public"} else "private"
+        visibility = str(opts.get("visibility") or "public").strip().lower()
+        turn["visibility"] = visibility if visibility in {"private", "public"} else "public"
         mode = str(opts.get("mode") or "ask")
         web = str(opts.get("web") or "auto")
         turn["mode"] = mode.strip().lower()
