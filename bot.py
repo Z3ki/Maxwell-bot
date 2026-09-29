@@ -4006,7 +4006,7 @@ class MaxwellBot(commands.Bot):
 
         visibility = str(getattr(message, "response_visibility", "public") or "public")
         private_side_effects = {
-            "send_message", "forward_message", "create_poll", "create_thread",
+            "forward_message", "create_poll", "create_thread",
             "react", "create_invite", "leave_server",
             "thread_control", "delete_message", "edit_message", "purge_messages",
             "pin_message", "kick_member", "ban_member", "unban_member",

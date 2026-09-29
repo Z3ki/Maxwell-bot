@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 from bot import MaxwellBot
+from bot_tools import SendMessageTool
 from user_install import (
     USER_INSTALL_COMMAND_NAME,
     USER_INSTALL_COMMANDS,
@@ -313,6 +314,32 @@ def test_handle_spawns_for_non_admin():
     assert spawned[0].response_visibility == "private"
     assert spawned[0].channel.id == "private:2:dm:555"
     assert spawned[0].guild is None
+
+def test_private_maxwell_can_send_ephemeral_reply_but_not_to_another_channel():
+    interaction = _interaction(user_id=2, prompt="hi")
+    bot = object.__new__(MaxwellBot)
+    bot._control = {"tools_enabled": True, "disabled_tools": []}
+    bot.plugin_manager = None
+    bot._last_bot_send = {}
+    message = UserInstallMessageAdapter(interaction, "hi", visibility="private")
+    tool = SendMessageTool(bot)
+
+    async def run():
+        await interaction.response.defer(ephemeral=True)
+        sent = await MaxwellBot._invoke_request_tool(
+            bot, message, "send_message", tool, content="Hello!"
+        )
+        blocked = await MaxwellBot._invoke_request_tool(
+            bot, message, "send_message", tool, content="Don't post", channel_id="123456789"
+        )
+        return sent, blocked
+
+    sent, blocked = asyncio.run(run())
+    assert sent == "__MESSAGE_SENT__\nHello!"
+    assert blocked.startswith("Error: sending to another channel")
+    assert interaction.followup.payloads[0]["content"] == "Hello!"
+    assert interaction.followup.payloads[0]["ephemeral"] is True
+    assert len(interaction.followup.payloads) == 1
 
 
 def test_public_visibility_is_set_before_defer_and_keeps_server_scope():
