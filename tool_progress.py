@@ -398,7 +398,7 @@ class ToolProgress:
         user data, so they are never copied into a channel progress message.
         """
         name = str(tool_name or "").strip()
-        if not name or self._stopped:
+        if not name or self._stopped or _is_hidden_progress_tool(name):
             return
         async with self._tools_lock:
             if self._stopped:
