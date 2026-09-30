@@ -1,11 +1,10 @@
 """Hermetic regressions for the API and generated-site audit."""
 
 import asyncio
-import shutil
-import subprocess
-from pathlib import Path
+from collections import defaultdict
 from types import SimpleNamespace
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -17,21 +16,28 @@ import site_server
 import site_test
 
 
-def test_discord_session_revoked_with_admin_membership(tmp_path, monkeypatch):
+def test_operator_api_rejects_discord_token_without_basic_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAXWELL_ADMIN_USER", "operator")
+    monkeypatch.setenv("MAXWELL_ADMIN_PASSWORD", "secret")
+    monkeypatch.setattr(auth, "_auth_failures", defaultdict(list))
     monkeypatch.setattr(api, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(auth, "DISCORD_ALLOWED_USER_IDS", set())
-    monkeypatch.delenv("MAXWELL_OWNER_IDS", raising=False)
-    monkeypatch.setattr(auth, "_DISCORD_TOKENS", {})
-    monkeypatch.setattr(api, "_DISCORD_TOKENS", auth._DISCORD_TOKENS)
-    path = tmp_path / "admins.json"
-    path.write_text('["42"]')
-    auth._set_discord_token("session", {"user_id": "42", "username": "admin"})
-    request = SimpleNamespace(headers={"X-Discord-Token": "session"})
-    assert auth._discord_token_authed(request)
-    path.write_text("[]")
-    assert not auth._discord_token_authed(request)
-    assert asyncio.run(api.discord_auth_verify(request)).status == 401
-    assert "session" not in auth._DISCORD_TOKENS
+
+    async def scenario():
+        app = web.Application(middlewares=[auth._auth_middleware_unless_login])
+        app.router.add_get("/api/control", api.control_get)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get(
+                "/api/control", headers={"X-Discord-Token": "old-session"}
+            )
+            assert response.status == 401
+            assert await response.json() == {"error": "unauthorized"}
+            response = await client.get(
+                "/api/control",
+                auth=aiohttp.BasicAuth("operator", "secret"),
+            )
+            assert response.status == 200
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -191,7 +197,7 @@ def test_proxy_preserves_encoded_path_and_query(monkeypatch):
 @pytest.mark.parametrize(
     "error",
     [
-        web.HTTPFound("/admin/#discord_token=test"),
+        web.HTTPFound("/api/github/oauth/complete"),
         web.HTTPNotFound(),
         web.HTTPForbidden(),
     ],
@@ -205,66 +211,9 @@ def test_reliability_middleware_preserves_http_exceptions(monkeypatch, error):
 
         with pytest.raises(type(error)):
             await api._reliability_middleware(
-                SimpleNamespace(path="/api/auth/discord/callback", method="GET"),
+                SimpleNamespace(path="/api/github/oauth/callback", method="GET"),
                 handler,
             )
 
     asyncio.run(scenario())
 
-
-@pytest.mark.parametrize(
-    "checks",
-    [
-        """
-    const id = "1234567890abcdef1234567890abcdef";
-    S.context = [{id, scope: "global", content: "fact"}];
-    context();
-    assert($('context').innerHTML.includes('data-del-ctx="' + id + '"'));
-    """,
-        """
-    S.auth = {user: "admin", pass: "pass"};
-    startPolling();
-    assert(timers.size === 1);
-    logout(false);
-    assert(timers.size === 0);
-    await loadAll(true);
-    assert(fetches === 0);
-    """,
-    ],
-)
-def test_dashboard_identifiers_and_logout(checks):
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is not installed")
-    html = (Path(__file__).resolve().parents[1] / "web/admin/index.html").read_text()
-    script = html.split("<script>", 1)[1].split('      $("loginForm").onsubmit', 1)[0]
-    prelude = """
-    const assert = require('node:assert/strict');
-    const elements = new Map();
-    const timers = new Set();
-    let fetches = 0;
-    global.document = {
-      getElementById: id => {
-        if (!elements.has(id)) elements.set(id, {innerHTML: '', classList: {add(){}, remove(){}}});
-        return elements.get(id);
-      },
-      querySelectorAll: () => [],
-    };
-    global.localStorage = {removeItem(){}};
-    global.setInterval = () => {const timer = {}; timers.add(timer); return timer;};
-    global.clearInterval = timer => timers.delete(timer);
-    global.setTimeout = () => 0;
-    global.fetch = async () => {fetches++; throw Error('unexpected fetch');};
-    """
-    result = subprocess.run(
-        [node],
-        input=prelude
-        + script
-        + "\n(async () => {"
-        + checks
-        + "\n})().catch(e => {console.error(e); process.exitCode=1;});",
-        text=True,
-        capture_output=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr

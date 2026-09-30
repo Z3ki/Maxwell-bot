@@ -469,23 +469,23 @@ configure_env() {
   [ -n "$cmd_prefix" ] || cmd_prefix=","
   set_env_value COMMAND_PREFIX "$cmd_prefix"
 
-  printf '\n%sStep 4/5: Dashboard credentials%s\n' "$BOLD" "$RESET"
-  printf '  Empty MAXWELL_ADMIN_PASSWORD makes the dashboard/admin API answer 503. Press Enter interactively to generate one.\n'
+  printf '\n%sStep 4/5: Operator API credentials%s\n' "$BOLD" "$RESET"
+  printf '  Empty MAXWELL_ADMIN_PASSWORD makes the operator API answer 503. Press Enter interactively to generate one.\n'
   admin_user_default="${MAXWELL_ADMIN_USER:-admin}"
-  admin_user=$(prompt "Dashboard admin username" "$admin_user_default")
+  admin_user=$(prompt "Operator API username" "$admin_user_default")
   [ -n "$admin_user" ] || admin_user="admin"
   set_env_value MAXWELL_ADMIN_USER "$admin_user"
 
   admin_pw_default="${MAXWELL_ADMIN_PASSWORD:-}"
-  admin_pw=$(prompt_secret "Dashboard admin password" "$admin_pw_default")
+  admin_pw=$(prompt_secret "Operator API password" "$admin_pw_default")
   if [ -z "$admin_pw" ] && [ "$NONINTERACTIVE" != "1" ]; then
     if command -v openssl >/dev/null 2>&1; then admin_pw=$(openssl rand -hex 16); else admin_pw=$(python3 -c 'import secrets; print(secrets.token_hex(16))'); fi
-    printf '  Generated dashboard password: %s\n' "$admin_pw"
+    printf '  Generated operator API password: %s\n' "$admin_pw"
   fi
   if [ -n "$admin_pw" ]; then
     set_env_value MAXWELL_ADMIN_PASSWORD "$admin_pw"
   else
-    warn "MAXWELL_ADMIN_PASSWORD left blank; dashboard/admin API will answer 503."
+    warn "MAXWELL_ADMIN_PASSWORD left blank; operator API will answer 503."
   fi
 
   printf '\n%sStep 5/5: Optional background loops%s\n' "$BOLD" "$RESET"
@@ -624,7 +624,7 @@ final_summary() {
   Stop:      docker compose -f $compose down
   Doctor:    docker compose -f $compose exec maxwell python3 doctor.py
              docker compose -f $compose exec maxwell python3 doctor.py --probe
-  Dashboard: http://127.0.0.1:8765
+  Operator API: http://127.0.0.1:8765/api (HTTP Basic authentication)
   App cmds:  /maxwell, /config, /personality, /help, /usage, /image, /chess, /checkers
              /moderation, /memory, /reminder, /diagnostics, /maintenance
   Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d

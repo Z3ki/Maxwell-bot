@@ -1,14 +1,11 @@
 """Auth, rate-limiting, and response helpers for the Maxwell API server.
 
-Imports CORS_ORIGIN and DISCORD_ALLOWED_USER_IDS from api.config (no circular
-dep), and resolves DATA_DIR lazily via api.storage._data_dir() so tests that
-monkeypatch api.api_server.DATA_DIR keep working.
+Configuration comes from api.config without circular imports.
 """
 
 import base64
 import contextlib
 import hmac
-import json
 import os
 import re
 import time
@@ -21,15 +18,10 @@ from api.config import (
     AUTH_RATE_MAX,
     AUTH_RATE_WINDOW,
     CORS_ORIGIN,
-    DISCORD_ALLOWED_USER_IDS,
-    DISCORD_TOKEN_TTL,
 )
-from api.storage import _data_dir
 
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
-
-_DISCORD_TOKENS: dict[str, dict] = {}
 
 _auth_failures: dict[str, list[float]] = defaultdict(list)
 _last_auth_cleanup = 0.0
@@ -47,57 +39,6 @@ def _load_admin_creds():
     return ADMIN_USER, ADMIN_PASSWORD
 
 
-def _load_bot_admins():
-    """Read the bot's live admin allowlist from admins.json.
-
-    The bot writes this file every time `/admin` changes the admin list,
-    so a user promoted via chat can immediately OAuth into the dashboard
-    without a restart. We read it on every call (it's tiny) so promotions
-    take effect without bouncing the API process.
-
-    Falls back to DISCORD_ALLOWED_USER_IDS env if no file is present, so an
-    operator who hasn't run the bot yet can still seed the allowlist.
-
-    Returns a set of user-id strings. Empty set = nobody allowed.
-    """
-    owners = {
-        item.strip()
-        for item in os.getenv("MAXWELL_OWNER_IDS", "").split(",")
-        if item.strip()
-    }
-    env_allowed = set(DISCORD_ALLOWED_USER_IDS) | owners
-    path = _data_dir() / "admins.json"
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError):
-            return env_allowed
-        ids = set()
-        if isinstance(data, list):
-            ids = {str(x).strip() for x in data if str(x).strip()}
-        elif isinstance(data, dict):
-            for key in ("admins", "owners", "user_ids"):
-                values = data.get(key)
-                if isinstance(values, list):
-                    ids.update(str(x).strip() for x in values if str(x).strip())
-        return ids | env_allowed
-    return env_allowed
-
-
-def _discord_token_authed(request) -> bool:
-    token = request.headers.get("X-Discord-Token", "")
-    info = _DISCORD_TOKENS.get(token)
-    if not info:
-        return False
-    if (
-        info.get("expires", 0) < time.time()
-        or str(info.get("user_id", "")) not in _load_bot_admins()
-    ):
-        _DISCORD_TOKENS.pop(token, None)
-        return False
-    return True
-
-
 def _json_response(data, status=200):
     return web.json_response(
         data,
@@ -105,7 +46,7 @@ def _json_response(data, status=200):
         headers={
             "Access-Control-Allow-Origin": CORS_ORIGIN,
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Discord-Token",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
         },
     )
 
@@ -215,8 +156,6 @@ def _basic_credentials(request):
 
 
 def _has_admin_auth(request) -> bool:
-    if _discord_token_authed(request):
-        return True
     _load_admin_creds()
     if not ADMIN_USER or not ADMIN_PASSWORD:
         return False
@@ -230,8 +169,6 @@ def _has_admin_auth(request) -> bool:
 @web.middleware
 async def _auth_middleware_unless_login(request, handler):
     """Middleware that requires auth for all requests, except OPTIONS and /api/login."""
-    if request.path.startswith("/api/auth/discord"):
-        return await handler(request)
     if request.method == "POST" and request.path == "/api/login":
         if _check_rate_limit(request):
             return _json_response({"error": "too many attempts, try again later"}, 429)
@@ -239,7 +176,7 @@ async def _auth_middleware_unless_login(request, handler):
     if _needs_auth(request):
         # Authenticate first. Rate-limiting valid sessions (or every request
         # before credentials are checked) lets an unauthenticated client lock
-        # the dashboard, especially behind a reverse proxy that shares one IP.
+        # the operator API, especially behind a proxy that shares one IP.
         _load_admin_creds()
         if _has_admin_auth(request):
             pass
@@ -271,17 +208,3 @@ async def _auth_middleware_unless_login(request, handler):
         )
     return resp
 
-
-def _prune_discord_tokens():
-    """Drop expired bearer tokens so the in-memory table can't grow forever."""
-    now = time.time()
-    expired = [t for t, info in _DISCORD_TOKENS.items() if info.get("expires", 0) < now]
-    for t in expired:
-        _DISCORD_TOKENS.pop(t, None)
-
-
-def _set_discord_token(token: str, user_info: dict) -> None:
-    info = dict(user_info)
-    info["expires"] = time.time() + DISCORD_TOKEN_TTL
-    _DISCORD_TOKENS[token] = info
-    _prune_discord_tokens()

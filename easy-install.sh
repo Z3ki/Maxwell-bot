@@ -302,9 +302,10 @@ configure() {
 
   write_fresh_env
   say ""
-  say "  Dashboard username: admin"
-  say "  Dashboard password: ${MAXWELL_ADMIN_PASSWORD}"
+  say "  Operator API username: admin"
+  say "  Operator API password: ${MAXWELL_ADMIN_PASSWORD}"
   say "  Save that password. You can change it later in .env."
+  say "  Operator API URL: http://127.0.0.1:8765/api (HTTP Basic authentication)"
 }
 
 main() {

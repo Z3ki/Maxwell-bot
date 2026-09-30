@@ -6,8 +6,8 @@ or `control_defaults.py`.
 
 Python plugins run **in-process**. A manifest permission is an operator
 declaration and a runtime check, not a sandbox. Do not install untrusted
-Python from the network without reviewing it. Owner-only Discord and dashboard
-controls are the only supported install/enable path.
+Python from the network without reviewing it. Owner-only Discord and authenticated
+operator API controls are the only supported install/enable path.
 
 ## Layout
 
@@ -37,7 +37,7 @@ A new plugin:
 | `id` / `name` | Unique identifier |
 | `version` | Plugin version |
 | `api_version` | Must be `1` |
-| `description`, `author` | Dashboard / `/plugins` |
+| `description`, `author` | Plugin metadata shown by Discord controls and the operator API |
 | `dependencies` | Other plugin ids that must load first |
 | `optional_dependencies` | Python packages; missing ones disable *this* plugin, not Maxwell |
 | `permissions` | Declared capabilities (`network`, `shell`, …) |
@@ -46,7 +46,7 @@ A new plugin:
 | `enabled_by_default` | Used when `data/plugins.json` has no entry yet |
 | `protected` | Cannot be disabled globally |
 | `config_schema` / `default_config` | Plugin-owned settings |
-| `requires_restart` | Dashboard warning |
+| `requires_restart` | Restart requirement reported by the operator API |
 
 Legacy manifests (`name`, `enabled_globally`, `allowed_users`, `denied_users`) still load.
 
@@ -82,13 +82,12 @@ Subclass `tools.Tool` and set:
 - `requires_admin`, `required_capabilities`, `transports`
 
 The live instance is the source of truth for native tool-calling, the
-compatibility parser, the dashboard disable list, autonomy, and audit logs.
+compatibility parser, the runtime tool disable list, autonomy, and audit logs.
 
 ## Managing plugins
 
 - Discord: `/plugins arguments:list|enable|disable` (code reload/install/uninstall are not available from Discord)
 - Tool: `manage_plugin`
-- Dashboard: Plugins tab
 - API: `GET /api/plugins`, `POST /api/plugins/install`,
   `POST /api/plugins/{name}/enable|disable|uninstall`,
   `POST /api/plugins/reload`, `PUT /api/plugins/{name}/config`

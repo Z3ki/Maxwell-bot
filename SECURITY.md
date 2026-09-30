@@ -7,10 +7,10 @@ Open a private security advisory or contact the maintainer privately before disc
 ## Deployment warnings
 
 - Never expose `/api/*` or `/data/*` without backend authentication.
-- Never publish `.env`, `data/`, logs, generated sites, PM2 dumps, dashboard credentials, or authentication material.
+- Never publish `.env`, `data/`, logs, generated sites, PM2 dumps, API credentials, or authentication material.
 - Rotate any credential that has appeared in logs, process environments, shell history, screenshots, chat transcripts, or public artifacts.
 - Use only an official Discord **bot token** from the Discord Developer Portal. User/self-bot tokens and copied browser authorization headers are not supported.
-- Generated sites must use a separate origin from the admin UI. Arbitrary generated JavaScript sharing the dashboard origin could read browser storage/credentials for that origin. Use the split-origin [`examples/Caddyfile.example`](examples/Caddyfile.example).
+- Keep generated sites separate from the authenticated operator API origin. The browser admin dashboard has been removed; delete any stale deployed `admin/` static files. Use [`examples/Caddyfile.example`](examples/Caddyfile.example) to deny `/admin` on both origins and keep operator endpoints off the public origin.
 - Treat browser/site probes as capable of making page-directed network requests. Do not place the service on a network where untrusted generated pages can reach sensitive internal services.
 - Autofix runs generated regression tests only in the configured local Docker test image (`MAXWELL_AUTOFIX_TEST_IMAGE`, default `maxwell:local`) with no network, no host credentials/socket, an unprivileged user, and resource limits. A passing regression is required before it pushes a topic branch. If the isolation image is unavailable, autofix fails closed.
 - The Maxwell service can control the host Docker daemon through `docker.sock`. A read-only socket mount, dropped capabilities, and `no-new-privileges` do **not** restrict Docker API operations or prevent host-root-equivalent control through that daemon. Treat the Maxwell service as host-root trusted. Shell/site sibling containers have narrower mounts but are still orchestrated through the daemon.
@@ -32,7 +32,7 @@ This is a defense-in-depth boundary, not a guarantee that web content is safe. K
 
 `/diagnostics` and `/maintenance` are authorized against configured Maxwell developer IDs and return ephemeral output. Diagnostic exports redact credential-like values, and secret-like controls cannot be edited through Discord. `/config` checks the caller's server permissions before changing server-scoped settings; personal settings remain private to the caller.
 
-The browser dashboard/API must still be protected with its own authentication. Do not treat Discord owner authorization as a substitute for dashboard authentication or reverse-proxy isolation.
+The operator API requires its own Basic authentication. Dashboard Discord OAuth login and browser bearer sessions have been removed. Do not treat Discord owner authorization as a substitute for API authentication or reverse-proxy isolation.
 
 ## Secrets and data
 

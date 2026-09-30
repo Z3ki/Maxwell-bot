@@ -1,6 +1,6 @@
 # Maxwell
 
-Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, a browser dashboard, background jobs, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
+Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, background jobs, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
 
 ## Install — easiest path
 
@@ -8,9 +8,9 @@ Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash
 ```
 
-The easy installer keeps the first setup small. It asks for your Discord bot token, the AI provider/model, and optionally your Discord user ID for owner controls. It generates a dashboard password, writes a compact `.env`, and then hands off to the Docker installer.
+The easy installer keeps the first setup small. It asks for your Discord bot token, the AI provider/model, and optionally your Discord user ID for owner controls. It generates an operator API password, writes a compact `.env`, and then hands off to the Docker installer.
 
-The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For production, select a published release; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases). The initial `0.1.0` release is prepared but not published yet.
+The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.0`, select `--version v0.1.0`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases).
 
 Before running it, create a bot in the Discord Developer Portal and enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**. The setup machine needs Git, curl, and Python 3. Maxwell itself runs in Docker. On supported Linux systems the installer can install Docker; on macOS/Windows use Docker Desktop.
 
@@ -25,8 +25,8 @@ The easy install uses provider-neutral names:
 | `AI_API_KEY` | API key; blank is normal for local providers that do not require one |
 | `DISCORD_BOT_TOKEN` | Official Discord bot token |
 | `MAXWELL_OWNER_IDS` | Comma-separated Discord user IDs allowed to use owner/admin controls |
-| `MAXWELL_ADMIN_USER` | Dashboard username |
-| `MAXWELL_ADMIN_PASSWORD` | Dashboard password |
+| `MAXWELL_ADMIN_USER` | Operator API username |
+| `MAXWELL_ADMIN_PASSWORD` | Operator API password |
 
 Example:
 
@@ -116,7 +116,7 @@ docker compose down
 ./run.sh -d --build
 ```
 
-Dashboard/API: `http://127.0.0.1:8765`
+Authenticated operator API: `http://127.0.0.1:8765`. Administration is available through Discord `/config`; there is no web admin dashboard.
 
 To update:
 
@@ -137,7 +137,7 @@ The personal-app `/maxwell` command and context-menu actions are available when 
 Private `/maxwell` replies, when selected, are sent only as ephemeral interaction follow-ups; `send_message` can answer privately, but cannot target another chat from a private request.
 `/maxwell` replies are public by default. Choose `visibility: Private` for one request, or open `/config` → **Default visibility** → **Private** to save that choice. Explicit command options override saved preferences, including the number of recent channel messages to read. `/config` itself always opens privately, with a settings overview, explanations, marked current choices, reset controls, and a Close button.
 
-The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` with shared styles and the Maxwell cat icon under `/assets/`. Copy the full `web/` contents when updating the website and update the public route allowlist as shown in `examples/Caddyfile.example`. Keep `/admin/` on the separate operator origin.
+The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` with shared styles and the Maxwell cat icon under `/assets/`. Copy the full `web/` contents when updating the website and update the public route allowlist as shown in `examples/Caddyfile.example`. The browser admin dashboard and its Discord OAuth login have been removed. Remove any previously deployed `admin/` static files; keep the authenticated operator API on a separate origin.
 
 Developer access is determined by configured Maxwell owner IDs. Diagnostics redact secret-like values, and maintenance refuses to edit secret controls.
 
@@ -193,8 +193,8 @@ jobs.py                 Background jobs
 control_defaults.py     Runtime control defaults
 user_install.py         Discord user-install/app-command support
 plugin_manager.py       Compatibility façade over maxwell_core
-api/api_server.py       Dashboard/admin API
-web/                    Dashboard frontend
+api/api_server.py       Operator and generated-site APIs
+web/                    Public landing, guide, contact, and policy pages
 doctor.py               Install/config checker
 easy-install.sh         Three-step installer
 install.sh              Full installer
@@ -224,7 +224,7 @@ docs/PLUGINS.md         Plugin development API
 
 Keep `.env` and `data/` private. They may contain Discord tokens, API keys, credentials, private context, and operational state. Never use a Discord user/self-bot token; Maxwell expects an official bot token from the Developer Portal.
 
-The Maxwell container has access to the host Docker daemon for sandbox/site-container features. Treat that service as host-root trusted even though the main container drops capabilities and uses `no-new-privileges`. Read [`SECURITY.md`](SECURITY.md) before exposing the dashboard or enabling powerful tools on a public server.
+The Maxwell container has access to the host Docker daemon for sandbox/site-container features. Treat that service as host-root trusted even though the main container drops capabilities and uses `no-new-privileges`. Read [`SECURITY.md`](SECURITY.md) before exposing the operator API or enabling powerful tools on a public server.
 
 ## Troubleshooting
 

@@ -11,7 +11,7 @@ async def supervise(commands: list[list[str]], stop_timeout: float = 15.0) -> in
     """Stop all children if any child exits, or the container receives a signal.
 
     An API crash must restart the container rather than leave a healthy-looking
-    bot with a dead dashboard. Forward shutdown and reap every child.
+    bot with a dead operator API. Forward shutdown and reap every child.
     """
     loop = asyncio.get_running_loop()
     stopped = asyncio.Event()

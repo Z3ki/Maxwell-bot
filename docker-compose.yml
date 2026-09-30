@@ -1,5 +1,5 @@
 # Linux default. Host networking keeps localhost Ollama, site backends on
-# 127.0.0.1:8800-8899 and the dashboard on :8765 working
+# 127.0.0.1:8800-8899 and the operator API on :8765 working
 # without port-map gymnastics. Python and system packages stay inside the
 # image so they cannot fight the host.
 #

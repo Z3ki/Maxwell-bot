@@ -13,7 +13,7 @@ Discord transport
    plugin manager · tool registry · prompt manager · hook bus · services
         │
         ▼
- plugins/<feature>/   (tools, prompts, jobs, hooks, dashboard/API extras)
+ plugins/<feature>/   (tools, prompts, jobs, hooks, API extras)
         │
         ├── providers.py   OpenAI-compatible adapter (pluggable factory)
         ├── rag_memory.py  MemoryService implementation
@@ -46,7 +46,7 @@ Anything that can be added without editing the host:
 - Prompt components
 - Providers and memory backends
 - Background jobs and autonomous behaviours
-- Dashboard panels and `/api/plugin/<id>/…` routes
+- Authenticated `/api/plugin/<id>/…` routes
 - Storage namespaces under `data/plugins/<id>/`
 
 ## Compatibility

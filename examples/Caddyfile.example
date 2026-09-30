@@ -1,9 +1,7 @@
-# Set MAXWELL_PUBLIC_BASE_URL=https://maxwell.example.com and
-# DISCORD_REDIRECT_BASE=https://admin.maxwell.example.com in .env.
-# Do not serve generated JavaScript on the dashboard origin: dashboard
-# credentials are stored in origin-scoped browser storage.
+# Set MAXWELL_PUBLIC_BASE_URL=https://maxwell.example.com in .env.
+# Keep the authenticated operator API on a separate origin from generated sites.
+# The browser admin dashboard has been removed; never serve stale admin files.
 admin.maxwell.example.com {
-	root * /var/www/maxwell
 	header X-Frame-Options "DENY"
 	header X-Content-Type-Options "nosniff"
 	header Referrer-Policy "strict-origin-when-cross-origin"
@@ -13,14 +11,6 @@ admin.maxwell.example.com {
 	}
 	handle /data/* {
 		reverse_proxy 127.0.0.1:8765
-	}
-	@admin path /admin /admin/*
-	handle @admin {
-		file_server
-	}
-	@legal path /terms /terms/* /privacy /privacy/* /guide /guide/* /contact /contact/* /assets/*
-	handle @legal {
-		file_server
 	}
 	handle {
 		respond "Not found" 404
@@ -34,7 +24,7 @@ maxwell.example.com {
 
 	# Copy web/ contents into /var/www/maxwell. Expose only the landing and
 	# policy/support pages and their assets here; operator controls stay on the
-	# separate admin origin. Do not expose the entire web/ directory.
+	# separate API origin. Do not expose the entire web/ directory.
 	@public_pages path / /index.html /terms /terms/* /privacy /privacy/* /guide /guide/* /contact /contact/* /assets/*
 	handle @public_pages {
 		root * /var/www/maxwell

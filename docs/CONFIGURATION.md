@@ -3,7 +3,7 @@
 Maxwell has two configuration layers:
 
 1. `.env` for provider endpoints, credentials, identity, paths, feature availability, and startup behavior.
-2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the dashboard and restricted maintenance controls. The shared Maxwell persona is locked in code.
+2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the authenticated operator API and restricted maintenance controls. The shared Maxwell persona is locked in code.
 
 Keep `.env` and `data/` private.
 
@@ -39,11 +39,12 @@ Do not set conflicting values in both namespaces.
 | `AI_MODEL` / `OLLAMA_MODEL` | Yes | Primary chat model. |
 | `AI_API_KEY` / `OLLAMA_API_KEY` | Sometimes | Provider key; blank can be valid for local endpoints. |
 | `MAXWELL_OWNER_IDS` | Strongly recommended | Comma-separated Discord IDs authorized for owner/admin features. |
-| `MAXWELL_ADMIN_USER` | Optional | Dashboard username; defaults to `admin`. |
-| `MAXWELL_ADMIN_PASSWORD` | Strongly recommended | Dashboard password. A blank value leaves the admin API unavailable. |
+| `MAXWELL_ADMIN_USER` | Optional | Operator API HTTP Basic username; defaults to `admin`. |
+| `MAXWELL_ADMIN_PASSWORD` | Strongly recommended | Operator API HTTP Basic password. A blank value leaves the API unavailable. |
 | `MAXWELL_HOST_BIND` | Installer-managed | Absolute host checkout path used by sibling containers. |
 | `MAXWELL_SITE_DIR` | Optional | Generated-site directory. Leave unset for the repository default or use an absolute host path. |
-| `MAXWELL_PUBLIC_BASE_URL` | Optional | Public origin for generated sites. Keep it separate from the dashboard origin. |
+| `MAXWELL_PUBLIC_BASE_URL` | Optional | Public origin for generated sites. Keep it separate from the operator API origin. |
+| `DISCORD_CLIENT_ID` | Optional | Discord application ID for bot invite URLs; falls back to the bot ID. Not a browser login setting. |
 
 See [`.env.example`](../.env.example) for the complete advanced environment reference.
 
@@ -65,7 +66,7 @@ Blank IDs do not grant implicit ownership.
 
 ## Discord slash commands
 
-`/config` opens a private, click-through menu for personal defaults. Choose a setting, select a saved value, or open a text form for language and style. In a server, authorized managers also see tool-progress and ticket-greeting controls. Maxwell's shared prompt and server-level instructions cannot be edited through commands, plugins, the dashboard, or the control API. `/personality` stores a short reply-style preference under your Discord user ID; it does not change Maxwell for other users.
+`/config` opens a private, click-through menu for personal defaults. Choose a setting, select a saved value, or open a text form for language and style. In a server, authorized managers also see tool-progress and ticket-greeting controls. Maxwell's shared prompt and server-level instructions cannot be edited through commands, plugins, or the control API. `/personality` stores a short reply-style preference under your Discord user ID; it does not change Maxwell for other users.
 
 Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` replace the former owner command and independently restrict every request to configured Maxwell developers. Sensitive control values remain redacted and cannot be edited through Discord.
 
@@ -106,7 +107,7 @@ Frequently used controls include:
 | `autofix_enabled` | Runtime autofix switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
-The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the dashboard or `/maintenance` to editing `bot_control.json` while Maxwell is running.
+The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the authenticated operator API or `/maintenance` to editing `bot_control.json` while Maxwell is running. There is no browser admin frontend or Discord browser OAuth login.
 
 ## Prompt size and provider caching
 

@@ -22,7 +22,7 @@ Discord bot / app commands
         ├── rag_memory.py          SQLite/RAG memory
         ├── knowledge_graph.py     entity/relationship memory
         ├── autonomy.py / rem.py   background host loops
-        └── api/ + web/            dashboard
+        └── api/                   authenticated operator and generated-site APIs
 ```
 
 ## Main modules
@@ -45,8 +45,8 @@ Discord bot / app commands
 | `message_pipeline.py` | Message-processing pipeline helpers. |
 | `user_install.py` | Discord user-install/app-command and context-menu support. |
 | `plugins/maxwell_extras/` | Owner control panel, app-command progress, rich `/maxwell` output. |
-| `api/api_server.py`, `api/state.py`, `api/storage.py` | Dashboard/admin API, sanitized controls, persisted admin state. |
-| `web/` | Dashboard frontend. |
+| `api/api_server.py`, `api/state.py`, `api/storage.py` | Authenticated operator API, generated-site APIs, sanitized controls, persisted admin state. |
+| `web/` | Static public landing page, guide, contact, terms, privacy, and assets; no admin frontend. |
 | `site_server.py`, `site_backend.py` | Generated-site serving/backend runtime integration. |
 | `docker/` | Bot image (`maxwell.Dockerfile`), shell sandbox, and site-runtime images. |
 | `docker-compose.yml` | Linux Compose file (host network). `docker-compose.bridge.yml` is the Docker Desktop variant. |
@@ -97,7 +97,7 @@ Current/latest factual questions in normal chat and `/maxwell` auto mode run `we
 
 Owner/admin identity comes from configured admin IDs such as `MAXWELL_OWNER_IDS` / `CREATOR_ID` and persisted admin state.
 
-`/diagnostics` can show redacted runtime/control data. `/maintenance` can make validated persistent updates to `DATA_DIR/bot_control.json`. Both commands independently check configured Maxwell developer IDs. The dashboard uses the same sanitized runtime-control model.
+`/diagnostics` can show redacted runtime/control data. `/maintenance` can make validated persistent updates to `DATA_DIR/bot_control.json`. Both commands independently check configured Maxwell developer IDs. The operator API uses the same sanitized runtime-control model, authenticated with HTTP Basic credentials from `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`.
 
 ## Runtime controls
 

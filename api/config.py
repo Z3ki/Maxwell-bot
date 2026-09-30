@@ -39,15 +39,6 @@ BASE_SITE_DIR = Path(
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
 
-DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "").strip()
-DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
-DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "").strip()
-DISCORD_ALLOWED_USER_IDS = {
-    uid.strip()
-    for uid in os.getenv("DISCORD_ALLOWED_USER_IDS", "").split(",")
-    if uid.strip()
-}
-
 REM_ENABLED_DEFAULT = _parse_bool(
     os.getenv("REM_ENABLED"), _parse_bool(os.getenv("ENABLE_REM"), False)
 )
@@ -62,4 +53,3 @@ MAX_AUTONOMY_GOALS = 50
 AUTH_RATE_WINDOW = 300
 AUTH_RATE_MAX = 10
 AUTH_CLEANUP_INTERVAL = 600
-DISCORD_TOKEN_TTL = 7 * 24 * 3600

@@ -8,7 +8,7 @@ Maxwell's supported runtime is Docker. The host needs Git, curl, Python 3 for se
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash
 ```
 
-The easy installer clones/updates Maxwell, asks for the minimum useful configuration, writes a compact `.env`, generates the dashboard password, and hands off to the normal Docker installer.
+The easy installer clones/updates Maxwell, asks for the minimum useful configuration, writes a compact `.env`, generates the operator API password, and hands off to the normal Docker installer.
 
 It asks for:
 
@@ -24,14 +24,14 @@ Before starting, enable the privileged Discord gateway intents **Message Content
 
 The default command installs an unreleased `main` development snapshot. Both installers resolve the selected branch/tag once and use that immutable commit for the app, setup scripts, and configuration handoff. The checkout is detached; do not use `git pull` to update it.
 
-After a release is published, install its exact tag:
+For version `0.1.0`, select the exact tag `v0.1.0`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/vX.Y.Z/easy-install.sh -o /tmp/maxwell-install.sh
-bash /tmp/maxwell-install.sh --version vX.Y.Z
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.0/easy-install.sh -o /tmp/maxwell-install.sh
+bash /tmp/maxwell-install.sh --version v0.1.0
 ```
 
-Replace `vX.Y.Z` with a published tag from [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). The initial version in `VERSION` is `0.1.0`; no release tag is published by merely changing that file. Exact full commit IDs are also supported with `--ref <40-character-sha>`. `--version` and `--ref` are mutually exclusive. Use `--dir <path>` to select the installation directory.
+See [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases) for release availability and assets. Changing `VERSION` alone does not publish a release tag. Exact full commit IDs are also supported with `--ref <40-character-sha>`. `--version` and `--ref` are mutually exclusive. Use `--dir <path>` to select the installation directory.
 
 For a fork, set `MAXWELL_REPO_URL`; `MAXWELL_VERSION` / `MAXWELL_REF` are the environment equivalents. `MAXWELL_BRANCH` selects development snapshots only. A missing/invalid revision or incomplete checkout fails before replacing an existing installation. Tracked local changes must be committed or saved first; `.env`, memory, generated sites, and other persistent untracked runtime files are retained.
 
@@ -53,7 +53,7 @@ The full installer can configure:
 1. Discord bot token.
 2. Primary provider URL/model/key.
 3. Identity and owner IDs.
-4. Dashboard credentials.
+4. Operator API credentials.
 5. Optional autonomy/REM background features.
 
 Prompts read from `/dev/tty`, so an interactive `curl | bash` install still works. When there is no controlling TTY, the installer switches to non-interactive mode and reads environment variables.
@@ -218,7 +218,7 @@ Recognized current/latest factual questions in normal chat and `/maxwell` auto m
 
 ## Docker behavior
 
-Linux uses `docker-compose.yml` with host networking. This keeps host-local Ollama, Discord voice UDP, generated-site backends, and the dashboard reachable without extra port mapping.
+Linux uses `docker-compose.yml` with host networking. This keeps host-local Ollama, Discord voice UDP, generated-site backends, and the operator API reachable without extra port mapping.
 
 Docker Desktop uses `docker-compose.bridge.yml`. The installer rewrites local service addresses to `host.docker.internal` where appropriate and publishes the admin API on host loopback. For a manual bridge install, make sure `MAXWELL_API_HOST=0.0.0.0` is set inside the container configuration.
 
@@ -239,7 +239,7 @@ docker compose exec maxwell python3 doctor.py
 docker compose exec maxwell python3 doctor.py --probe
 ```
 
-Dashboard/API: `http://127.0.0.1:8765`
+Operator API: `http://127.0.0.1:8765/api`, authenticated with HTTP Basic using `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`. Use Discord `/config` and authorized `/maintenance` controls for interactive settings; there is no browser admin frontend.
 
 Stop:
 
@@ -257,15 +257,13 @@ Rebuild/start:
 
 Use [`examples/Caddyfile.example`](../examples/Caddyfile.example) as the reference for a split-origin deployment.
 
-The public root is a static product landing page, not an operator dashboard. Copy the contents of `web/` into `/var/www/maxwell` when using the example: it serves only `/`, `/index.html`, `/terms/`, and `/privacy/` there. Generated sites stay under `/var/www/maxwell/bot`; the admin dashboard is served only on the separate admin hostname. The landing page has no dashboard controls or links. Updating static files does not require restarting the bot.
+The public root is static: landing page, guide, contact, terms, privacy, and assets. Copy the contents of `web/` into `/var/www/maxwell` when using the example. Generated sites stay under `/var/www/maxwell/bot`; the authenticated operator API is available only on a separate API hostname. Updating static files does not require restarting the bot.
 
-Keep generated HTML/JavaScript on a different origin from the admin dashboard. Set:
+When upgrading an existing deployment, remove stale admin frontend files from the deployed static root, including any `admin/` directory; copying the current `web/` files does not delete old files. Keep `/admin` and `/admin/*` denied on public routes.
 
-- `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin.
-- `DISCORD_REDIRECT_BASE` / `DISCORD_REDIRECT_URI` to the dashboard origin.
-- `MAXWELL_CORS_ORIGIN` when the dashboard accesses the admin API cross-origin.
+Keep generated HTML/JavaScript on a different origin from the operator API. Set `MAXWELL_PUBLIC_BASE_URL` to the generated-site origin. Set `MAXWELL_CORS_ORIGIN` only if an authorized API client requires cross-origin access.
 
-Do not serve arbitrary generated pages from the dashboard origin. Generated JavaScript sharing an origin with the dashboard can access browser storage/credentials for that origin.
+The operator API uses HTTP Basic authentication with `MAXWELL_ADMIN_USER` and `MAXWELL_ADMIN_PASSWORD`, not Discord browser OAuth. Do not serve arbitrary generated pages from the API origin: generated JavaScript sharing an origin can access browser credentials for that origin.
 
 ## Updating
 
@@ -312,7 +310,7 @@ Email tools use the SMTP/IMAP settings documented in [`../email_integration/READ
 | Local Ollama is unreachable on Docker Desktop | Use the installer/bridge setup so local addresses are rewritten to `host.docker.internal`. |
 | Discord token is invalid | Copy or regenerate the **bot token** in the Discord Developer Portal. Do not use a browser authorization header or user token. |
 | `curl | bash` prompts do not appear | Run in an interactive terminal with `/dev/tty`, or configure the full installer non-interactively with environment variables. |
-| Dashboard returns 503 | Set `MAXWELL_ADMIN_PASSWORD` and restart the stack. |
+| Operator API returns 503 | Set `MAXWELL_ADMIN_PASSWORD` and restart the stack. |
 
 ## Development checks
 

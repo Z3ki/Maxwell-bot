@@ -14,7 +14,7 @@ plugin host. Remaining work for a later session:
   unless `BOT_BIRTHDAY` is set; "real person" identity wording removed
 - Taint gate fails closed on a fresh user message (no `,confirm`)
 - Plugin runtime (`spawn`/`after`/timeouts/health) is core, not extras
-- Dashboard Plugins tab + owner API enable/disable/reload/config
+- Authenticated owner API enable/disable/reload/config
 - Sample plugin under `examples/sample_plugin/`
 - Autonomy routing, visible-output suppression, modern user-install send,
   `/diagnostics`, `/maintenance`, and `/maxwell` embed wrapping use host APIs instead of wrapping

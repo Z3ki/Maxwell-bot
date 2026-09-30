@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0 — initial versioned release preparation
+## 0.1.0 — 2026-09-30
 
-Not published yet. A release is published only by pushing a matching `v0.1.0` tag after verification; `main` remains an unreleased development snapshot.
+Initial versioned release. Install with `--version v0.1.0`; `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
 
 ### Installation and deployment
 
@@ -38,7 +38,8 @@ Not published yet. A release is published only by pushing a matching `v0.1.0` ta
 
 ### Public site
 
-- The public site is a product landing page, separate from operator/admin surfaces. Hosted premium availability is not implied by this release-preparation work.
+- The public site is a product landing page, separate from operator APIs. Hosted premium plans are not available in this release.
 - Guide, contact, terms, and privacy pages share responsive styles and the Maxwell icon; the Caddy example explicitly allows these public routes and assets without exposing operator controls.
+- Removed the browser admin dashboard, its static proxy routes, and Discord OAuth login/session flow. Discord `/config` and the authenticated Basic operator API remain available.
 
 External Discord, provider, mail, and browser integrations remain dependent on the operator's configuration. Passing local checks is not a claim that every external integration is production-validated.

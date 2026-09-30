@@ -117,25 +117,9 @@ def check_required_settings(cfg) -> None:
             "CREATOR_NAME, CREATOR_ID, and MAXWELL_OWNER_IDS are empty — prompts will have no owner",
         )
     if cfg.MAXWELL_ADMIN_PASSWORD:
-        line("ok", "dashboard password set")
+        line("ok", "operator API password set")
     else:
         line("warn", "MAXWELL_ADMIN_PASSWORD empty", "the admin API will answer 503")
-    client_id = os.getenv("DISCORD_CLIENT_ID", "").strip()
-    client_secret = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
-    if client_id and client_secret:
-        line(
-            "ok",
-            "Discord OAuth configured",
-            "dashboard login only — bot add is Discord's own OAuth URL",
-        )
-    elif client_id or client_secret:
-        line(
-            "warn",
-            "Discord OAuth incomplete",
-            "set both DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET",
-        )
-    else:
-        line("ok", "Discord OAuth unset", "dashboard is Basic auth only")
 
 
 def check_system_tools() -> None:

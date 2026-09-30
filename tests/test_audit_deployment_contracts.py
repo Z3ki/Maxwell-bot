@@ -6,27 +6,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-import api.api_server as api
-
 ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.mark.parametrize("explicit_base", [True, False])
-def test_oauth_returns_to_dashboard_not_generated_site(monkeypatch, explicit_base):
-    monkeypatch.setenv("MAXWELL_PUBLIC_BASE_URL", "https://sites.example.test")
-    monkeypatch.setenv(
-        "DISCORD_REDIRECT_URI", "https://admin.example.test/api/auth/discord/callback"
-    )
-    if explicit_base:
-        monkeypatch.setenv("DISCORD_REDIRECT_BASE", "https://admin.example.test/")
-    else:
-        monkeypatch.delenv("DISCORD_REDIRECT_BASE", raising=False)
-    request = SimpleNamespace(scheme="https", host="untrusted.example.test")
-    assert api._discord_redirect_base(request) == "https://admin.example.test"
 
 
 def test_api_empty_template_paths_use_checkout_defaults(tmp_path):

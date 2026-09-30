@@ -20,7 +20,7 @@ ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE") or APP_ROOT / ".env")
 # .env is the source of truth — same contract as config.py. PM2 caches env
 # from first start and never re-reads .env, so we load it here with
 # override=True on every process start. Keeps the API server's config
-# (DISCORD_CLIENT_SECRET, admin creds, …) in lockstep with the repo .env.
+# (admin credentials and runtime limits) in lockstep with the repo .env.
 try:
     from dotenv import load_dotenv as _load_dotenv
 

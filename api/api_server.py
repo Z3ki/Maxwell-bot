@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backend server for the Maxwell dashboard/admin API.
+"""Backend server for the Maxwell operator and generated-site APIs.
 
 All API and data routes require Basic username/password auth by default.
 """
@@ -143,8 +143,6 @@ from api.config import (  # noqa: E402
     API_PORT,
     BASE_SITE_DIR,
     CORS_ORIGIN,
-    DISCORD_CLIENT_ID,
-    DISCORD_CLIENT_SECRET,
     MAX_AUTONOMY_GOALS,
     MAX_COMMANDS,
 )
@@ -152,25 +150,17 @@ import site_backend  # noqa: E402
 import site_server  # noqa: E402
 
 from api.auth import (  # noqa: E402
-    _DISCORD_TOKENS,
-    _discord_token_authed,
-    _set_discord_token,
     _auth_middleware_unless_login,
     _get_client_ip,
     _has_admin_auth,
     _json_response,
     _load_admin_creds,
-    _load_bot_admins,
     _record_auth_failure,
     _safe_compare,
 )
 
 _load_admin_creds()
 _file_lock = asyncio.Lock()
-
-# Discord OAuth bearer tokens issued by the /api/auth/discord flow. Kept in
-# process memory; users re-authenticate after a restart.
-
 
 from api.state import (  # noqa: E402
     _load_autonomy_goals,
@@ -220,7 +210,7 @@ async def data_file(request):
 async def rag_memory_stats(request):
     """Per-channel message counts + overall RAG memory stats from SQLite.
 
-    Replaces the old /data/memory.json fetch for the admin dashboard.
+    Replaces the old file-based /data/memory.json response.
     """
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
@@ -352,9 +342,8 @@ async def rag_entities_list(request):
             }
         )
     except sqlite3.Error as e:
-        # The table is created by the bot on first run. A dashboard opened
-        # against a database from before this feature should show an empty
-        # panel, not a 500 that fails the whole page load.
+        # The table is created by the bot on first run. Older databases return
+        # an empty roster until the bot creates it.
         if "no such table" in str(e):
             return _json_response({"entities": [], "count": 0, "facts": 0})
         return _json_response({"error": f"rag db: {e}"}, 500)
@@ -383,7 +372,7 @@ async def context_get(request):
     """List shared-context facts from the live RAG SQLite DB.
 
     The old JSON file (`data/shared_context.json`) is a one-time migration
-    source for the bot and is not written back. Dashboard edits must hit
+    source for the bot and is not written back. Operator edits must hit
     the same `kind='shared_context'` rows the bot injects into prompts.
     """
     if not _has_admin_auth(request):
@@ -443,7 +432,7 @@ async def context_post(request):
     metadata = {
         "visibility": visibility,
         "source_user_id": str(body.get("source_user_id") or "admin")[:64],
-        "source_channel_id": str(body.get("source_channel_id") or "dashboard")[:64],
+        "source_channel_id": str(body.get("source_channel_id") or "admin")[:64],
         "source_guild_id": str(body.get("source_guild_id") or "")[:64],
         "source_kind": "admin",
         "tags": [str(t).strip()[:32] for t in tags if str(t).strip()][:12],
@@ -621,7 +610,7 @@ async def auto_channel_post(request):
         return _json_response({"error": "invalid json"}, 400)
     if not isinstance(body, dict):
         return _json_response({"error": "body must be an object"}, 400)
-    # Accept both `id` (older clients) and `channel_id` (admin dashboard).
+    # Accept both `id` and `channel_id` from operator API clients.
     cid = _clean_id(body.get("id") or body.get("channel_id") or "")
     if not cid:
         return _json_response({"error": "empty"}, 400)
@@ -638,7 +627,7 @@ async def auto_channel_post(request):
 
 
 async def auto_channel_del(request):
-    # Accept both `id` (older clients) and `channel_id` (admin dashboard).
+    # Accept both `id` and `channel_id` from operator API clients.
     cid = _clean_id(request.query.get("id") or request.query.get("channel_id") or "")
     path = DATA_DIR / "auto_channels.json"
     async with _file_lock:
@@ -1204,10 +1193,8 @@ async def control_get(request):
     """Return the live control set: persisted values merged over DEFAULT_CONTROL
     and run through the same sanitizer a PUT goes through.
 
-    The dashboard used to read /data/bot_control.json directly, which is only
-    what has ever been *written*. Any key an operator never touched came back
-    undefined, so its input rendered blank instead of showing the default the
-    bot is actually running with.
+    Persisted files contain only overrides; merging defaults reflects the
+    controls the bot is actually running with.
     """
     return _json_response({"ok": True, "control": _load_control()})
 
@@ -1599,7 +1586,7 @@ async def autonomy_log_clear(request):
 # ---------- Context cleanup agent (removed — RAG memory active) ----------
 # The old ContextCleanupEngine (context_cleanup.py) has been replaced by the
 # RAG vector memory system (rag_memory.py). These endpoints are kept as no-op
-# stubs so the admin dashboard and any external callers don't 404; they all
+# stubs for external API callers; they all
 # report that the engine has been removed.
 _CC_REMOVED = "context cleanup engine removed (RAG memory active)"
 
@@ -2150,7 +2137,7 @@ async def bot_status(request):
 
 # ---------- Login ----------
 async def login_post(request):
-    """Validate dashboard credentials without persisting them."""
+    """Validate operator credentials without persisting them."""
     try:
         body = await request.json()
     except Exception:
@@ -2168,230 +2155,6 @@ async def login_post(request):
         _record_auth_failure(request)
         return _json_response({"error": "unauthorized"}, 401)
     return _json_response({"ok": True, "message": "credentials valid"})
-
-
-# ---------- Discord OAuth login ----------
-# Dashboard identify login. The frontend hits /api/auth/discord/state, Discord
-# redirects to /api/auth/discord/callback, and the dashboard stores the bearer
-# as `X-Discord-Token`. Bot add is Discord's own OAuth URL — no /install page.
-_DISCORD_STATES: dict[str, dict] = {}
-
-
-def _oauth_next_path(raw) -> str:
-    del raw
-    return "/admin/"
-
-
-def _discord_snowflake(raw) -> str:
-    value = str(raw or "").strip()
-    if value.isdigit() and 17 <= len(value) <= 20:
-        return value
-    return ""
-
-
-def _oauth_state_payload(entry) -> dict | None:
-    if isinstance(entry, (int, float)):
-        issued = float(entry)
-        if issued <= 0:
-            return None
-        return {"issued": issued, "next": "/admin/", "guild_id": ""}
-    if not isinstance(entry, dict):
-        return None
-    try:
-        issued = float(entry.get("issued") or 0)
-    except (TypeError, ValueError):
-        return None
-    if issued <= 0:
-        return None
-    return {
-        "issued": issued,
-        "next": _oauth_next_path(entry.get("next")),
-        "guild_id": _discord_snowflake(entry.get("guild_id")),
-    }
-
-
-
-def _oauth_error_redirect(base: str, next_path: str, error: str):
-    raise web.HTTPFound(f"{base}{next_path}#error={error}")
-
-
-def _discord_redirect_base(request) -> str:
-    # Keep bearer tokens on the dashboard origin, never on generated sites.
-    fixed = os.getenv("DISCORD_REDIRECT_BASE", "").strip().rstrip("/")
-    if fixed:
-        return fixed
-    callback = os.getenv("DISCORD_REDIRECT_URI", "").strip()
-    if callback:
-        from urllib.parse import urlsplit
-
-        parsed = urlsplit(callback)
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
-            return f"{parsed.scheme}://{parsed.netloc}"
-    fixed = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if fixed:
-        return fixed
-    return f"{request.scheme}://{request.host}"
-
-
-async def discord_auth_state(request):
-    import secrets as _secrets
-
-    # This endpoint is unauthenticated (OAuth entry point), so bound the
-    # in-memory state table: drop expired states (TTL matches the callback's
-    # 600s check) and cap the table so a spammer can't balloon memory.
-    _DISCORD_STATE_TTL = 600
-    _DISCORD_STATE_MAX = 200
-    now = time.time()
-    expired = [
-        s
-        for s, entry in _DISCORD_STATES.items()
-        if not (payload := _oauth_state_payload(entry))
-        or now - payload["issued"] > _DISCORD_STATE_TTL
-    ]
-    for s in expired:
-        _DISCORD_STATES.pop(s, None)
-    while len(_DISCORD_STATES) >= _DISCORD_STATE_MAX:
-        # Evict an arbitrary (oldest-insertion) entry to cap table size.
-        _DISCORD_STATES.pop(next(iter(_DISCORD_STATES)), None)
-
-    state = _secrets.token_urlsafe(24)
-    _DISCORD_STATES[state] = {
-        "issued": now,
-        "next": _oauth_next_path(request.query.get("next")),
-        "guild_id": _discord_snowflake(request.query.get("guild_id")),
-    }
-    redirect = (
-        os.getenv("DISCORD_REDIRECT_URI")
-        or f"{_discord_redirect_base(request)}/api/auth/discord/callback"
-    )
-    client_id = DISCORD_CLIENT_ID
-    from urllib.parse import quote as _url_quote
-
-    return _json_response(
-        {
-            "client_id": client_id,
-            "redirect_uri": redirect,
-            "state": state,
-            "authorize_url": (
-                "https://discord.com/api/oauth2/authorize"
-                f"?client_id={_url_quote(client_id, safe='')}"
-                "&response_type=code"
-                f"&redirect_uri={_url_quote(redirect, safe='')}"
-                "&scope=identify"
-                f"&state={_url_quote(state, safe='')}"
-            )
-            if client_id
-            else "",
-            "enabled": bool(client_id and DISCORD_CLIENT_SECRET),
-        }
-    )
-
-
-async def discord_auth_callback(request):
-    code = request.query.get("code")
-    state = request.query.get("state")
-    base = _discord_redirect_base(request)
-    payload = _oauth_state_payload(_DISCORD_STATES.pop(state, None)) if state else None
-    next_path = payload["next"] if payload else "/admin/"
-    if not code or not state:
-        return _json_response({"error": "missing code/state"}, 400)
-    if not payload or time.time() - payload["issued"] > 600:
-        return _json_response({"error": "invalid or expired state"}, 400)
-    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
-        return _json_response({"error": "discord oauth not configured"}, 503)
-    redirect = (
-        os.getenv("DISCORD_REDIRECT_URI")
-        or f"{base}/api/auth/discord/callback"
-    )
-    import aiohttp as _aiohttp
-
-    async with _aiohttp.ClientSession() as sess:
-        token_resp = await sess.post(
-            "https://discord.com/api/oauth2/token",
-            data={
-                "client_id": DISCORD_CLIENT_ID,
-                "client_secret": DISCORD_CLIENT_SECRET,
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect,
-                "scope": "identify",
-            },
-            headers={"Accept": "application/json"},
-        )
-        if token_resp.status != 200:
-            body = await token_resp.text()
-            logger.warning("discord token exchange failed: %s", body[:300])
-            _oauth_error_redirect(base, next_path, "exchange_failed")
-        token_json = await token_resp.json()
-        access_token = token_json.get("access_token")
-        if not access_token:
-            _oauth_error_redirect(base, next_path, "exchange_failed")
-        me_resp = await sess.get(
-            "https://discord.com/api/users/@me",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        if me_resp.status != 200:
-            _oauth_error_redirect(base, next_path, "exchange_failed")
-        me = await me_resp.json()
-    user_id = str(me.get("id", ""))
-    username = str(me.get("username", "")) + "#" + str(me.get("discriminator", "0"))
-    avatar = me.get("avatar")
-    avatar_url = (
-        f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png" if avatar else ""
-    )
-    # Source of truth: the bot's live admins.json (updated by `/admin`).
-    # Anyone in this list can use the bot's admin commands AND log into the
-    # dashboard via Discord OAuth. No hardcoded env list to keep in sync.
-    allowed = _load_bot_admins()
-    if not allowed:
-        logger.error(
-            "discord oauth denied: admins.json missing/empty and "
-            "DISCORD_ALLOWED_USER_IDS unset (fail closed)"
-        )
-        _oauth_error_redirect(base, next_path, "unauthorized")
-    if user_id not in allowed:
-        logger.warning("discord oauth denied for user %s (%s)", user_id, username)
-        _oauth_error_redirect(base, next_path, "unauthorized")
-    import secrets as _secrets
-
-    bearer = _secrets.token_urlsafe(48)
-    _set_discord_token(bearer, {
-        "user_id": user_id,
-        "username": username,
-        "avatar_url": avatar_url,
-    })
-    dest = f"{base}{next_path}"
-    # Token stays in the hash fragment so it never hits server logs as a query.
-    raise web.HTTPFound(f"{dest}#discord_token={bearer}")
-
-
-
-
-
-
-async def discord_auth_verify(request):
-    # Token via query string removed: bearer tokens in URLs leak into access
-    # logs, browser history, and Referer headers. The dashboard always sends
-    # the X-Discord-Token header.
-    token = request.headers.get("X-Discord-Token", "")
-    if not _discord_token_authed(request):
-        return _json_response({"ok": False}, 401)
-    info = _DISCORD_TOKENS[token]
-    return _json_response(
-        {
-            "ok": True,
-            "user_id": info["user_id"],
-            "username": info["username"],
-            "avatar_url": info.get("avatar_url", ""),
-        }
-    )
-
-
-async def discord_auth_logout(request):
-    # See discord_auth_verify: no token-in-query-string fallback.
-    token = request.headers.get("X-Discord-Token", "")
-    _DISCORD_TOKENS.pop(token, None)
-    return _json_response({"ok": True})
 
 
 # ---------- System Stats ----------
@@ -2427,7 +2190,7 @@ async def system_stats(request):
         uptime_text = Path("/proc/uptime").read_text(encoding="utf-8").strip()
         uptime_seconds = float(uptime_text.split()[0])
     except Exception as e:
-        # Non-Linux or restricted /proc: the dashboard shows 0 uptime.
+        # Non-Linux or restricted /proc: report 0 uptime.
         logger.debug("Could not read /proc/uptime: %s", e)
     return _json_response(
         {
@@ -2447,7 +2210,7 @@ async def _options_handler(request):
         headers={
             "Access-Control-Allow-Origin": CORS_ORIGIN,
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Discord-Token",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
         },
     )
 
@@ -2810,10 +2573,6 @@ app.router.add_get("/api/discord/state", discord_state)
 app.router.add_get("/api/inbox", inbox_get)
 app.router.add_post("/api/inbox/{id}/act", inbox_act)
 app.router.add_post("/api/login", login_post)
-app.router.add_get("/api/auth/discord/state", discord_auth_state)
-app.router.add_get("/api/auth/discord/callback", discord_auth_callback)
-app.router.add_get("/api/auth/discord/verify", discord_auth_verify)
-app.router.add_post("/api/auth/discord/logout", discord_auth_logout)
 app.router.add_get("/api/pm2", pm2_status)
 app.router.add_get("/api/pm2/logs", pm2_logs)
 app.router.add_post("/api/pm2/restart", pm2_restart)
@@ -2822,7 +2581,7 @@ app.router.add_get("/api/chat/history", chat_history)
 
 
 async def plugins_get(request):
-    # Merge on-disk enablement with discovered manifests so the dashboard
+    # Merge on-disk enablement with discovered manifests so operators
     # can list tools/capabilities without constructing MaxwellBot.
     state = _load(DATA_DIR / "plugins.json")
     if not isinstance(state, dict):

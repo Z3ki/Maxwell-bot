@@ -66,6 +66,6 @@ COPY . /app
 ENTRYPOINT ["/entrypoint.sh"]
 
 # API is started by the entrypoint unless MAXWELL_START_API=0. Bot process
-# presence is the real liveness signal (dashboard may be off).
+# presence is the real liveness signal (operator API may be off).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["python3", "/app/docker/healthcheck.py"]
