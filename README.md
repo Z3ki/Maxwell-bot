@@ -135,6 +135,9 @@ Maxwell uses Discord slash commands. `/help` browses commands by topic; `/config
 
 The personal-app `/maxwell` command and context-menu actions are available when user install is enabled. `/maxwell` text replies are rendered as Discord embeds. Fast app-command responses stay in the deferred interaction; if a command uses a tool or is still running after about 10 seconds, Maxwell leaves a stable `working on it…` status and sends the final answer as a follow-up.
 Private `/maxwell` replies, when selected, are sent only as ephemeral interaction follow-ups; `send_message` can answer privately, but cannot target another chat from a private request.
+`/maxwell` replies are public by default. Choose `visibility: Private` for one request, or open `/config` → **Default visibility** → **Private** to save that choice. Explicit command options override saved preferences, including the number of recent channel messages to read. `/config` itself always opens privately, with a settings overview, explanations, marked current choices, reset controls, and a Close button.
+
+The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` with shared styles and the Maxwell cat icon under `/assets/`. Copy the full `web/` contents when updating the website and update the public route allowlist as shown in `examples/Caddyfile.example`. Keep `/admin/` on the separate operator origin.
 
 Developer access is determined by configured Maxwell owner IDs. Diagnostics redact secret-like values, and maintenance refuses to edit secret controls.
 

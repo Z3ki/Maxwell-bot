@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 from pathlib import Path
@@ -16,7 +17,7 @@ _DEFAULTS: dict[str, Any] = {
     "detail": "balanced",
     "context": 25,
     "language": "",
-    "visibility": "private",
+    "visibility": "public",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800
@@ -28,14 +29,37 @@ class UserPreferenceStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache: dict[str, Any] | None = None
+        self._cache_signature: tuple[int, int, int, int] | None = None
 
-    def _read(self) -> dict[str, Any]:
+    def _read(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
+            stat = self.path.stat()
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            if self._cache is not None and signature == self._cache_signature:
+                return self._cache
             value = json.loads(self.path.read_text("utf-8"))
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return {"users": {}}
-        users = value.get("users") if isinstance(value, dict) else None
-        return {"users": users} if isinstance(users, dict) else {"users": {}}
+        except (OSError, TypeError, ValueError) as exc:
+            self._cache = None
+            self._cache_signature = None
+            if for_write and not isinstance(exc, FileNotFoundError):
+                raise ValueError("Cannot read preferences safely; refusing to overwrite the file") from exc
+            return {"users": {}, "unavailable": not isinstance(exc, FileNotFoundError)}
+        users = value.get("users", {}) if isinstance(value, dict) else None
+        if not isinstance(users, dict):
+            if for_write:
+                raise ValueError("Invalid preferences format; refusing to overwrite the file")
+            return {"users": {}, "unavailable": True}
+        self._cache = {"users": users}
+        self._cache_signature = signature
+        return self._cache
+
+    def _write(self, root: dict[str, Any]) -> None:
+        # A failed atomic replacement must never leave an unpersisted choice
+        # in cache. Other instances detect successful replacements by stat.
+        self._cache = None
+        self._cache_signature = None
+        _atomic_json_write_sync(self.path, root)
 
     def get(self, user_id: Any) -> dict[str, Any]:
         uid = str(user_id or "").strip()
@@ -46,11 +70,15 @@ class UserPreferenceStore:
             row = root["users"].get(uid)
             row = row if isinstance(row, dict) else {}
             defaults = dict(_DEFAULTS)
+            if root.get("unavailable"):
+                # Do not publish a reply or read channel context when an
+                # unreadable file prevents us from honoring a saved opt-out.
+                defaults.update(visibility="private", context=0)
             raw_defaults = row.get("defaults")
             if isinstance(raw_defaults, dict):
                 defaults.update(
                     {
-                        key: value
+                        key: copy.deepcopy(value)
                         for key, value in raw_defaults.items()
                         if key in _ALLOWED_DEFAULTS
                     }
@@ -64,7 +92,7 @@ class UserPreferenceStore:
         if not uid or key not in _ALLOWED_DEFAULTS:
             raise ValueError("invalid user preference")
         with _LOCK:
-            root = self._read()
+            root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
             row = row if isinstance(row, dict) else {}
             defaults = row.get("defaults")
@@ -73,7 +101,7 @@ class UserPreferenceStore:
             defaults[key] = value
             row["defaults"] = defaults
             root["users"][uid] = row
-            _atomic_json_write_sync(self.path, root)
+            self._write(root)
 
     def reset_default(self, user_id: Any, key: str) -> None:
         uid = str(user_id or "").strip()
@@ -81,7 +109,7 @@ class UserPreferenceStore:
         if not uid or key not in _ALLOWED_DEFAULTS:
             raise ValueError("invalid user preference")
         with _LOCK:
-            root = self._read()
+            root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
             if not isinstance(row, dict):
                 return
@@ -96,7 +124,7 @@ class UserPreferenceStore:
                 root["users"][uid] = row
             else:
                 root["users"].pop(uid, None)
-            _atomic_json_write_sync(self.path, root)
+            self._write(root)
 
     def set_personality(self, user_id: Any, value: str | None) -> str:
         uid = str(user_id or "").strip()
@@ -106,7 +134,7 @@ class UserPreferenceStore:
         if len(text) > _PERSONALITY_LIMIT:
             raise ValueError(f"personal style is limited to {_PERSONALITY_LIMIT} characters")
         with _LOCK:
-            root = self._read()
+            root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
             row = row if isinstance(row, dict) else {}
             if text:
@@ -118,7 +146,7 @@ class UserPreferenceStore:
                     root["users"][uid] = row
                 else:
                     root["users"].pop(uid, None)
-            _atomic_json_write_sync(self.path, root)
+            self._write(root)
         return text
 
 

@@ -547,7 +547,7 @@ def build_user_install_turn(interaction: Any) -> dict[str, Any] | None:
     if not str(prompt).strip():
         return None
     options = dict(_option_pairs(data.get("options")))
-    requested_visibility = str(options.get("visibility") or "private").strip().lower()
+    requested_visibility = str(options.get("visibility") or "public").strip().lower()
     visibility = (
         requested_visibility if requested_visibility in {"private", "public"} else "private"
     )

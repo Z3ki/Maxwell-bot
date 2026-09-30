@@ -111,7 +111,7 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
                 },
                 {
                     "name": "visibility",
-                    "description": "Choose whether this reply is public or private (public by default)",
+                    "description": "Public by default; choose Private or save your default in /config",
                     "type": 3,
                     "required": False,
                     "choices": [
@@ -166,8 +166,15 @@ def _options(interaction: Any) -> dict[str, Any]:
     return {name: value for name, value in ui._option_pairs(data.get("options"))}
 
 
-def _context_limit(interaction: Any) -> int:
-    raw = _options(interaction).get("context", 25)
+def _context_limit(interaction: Any, *, options: dict[str, Any] | None = None) -> int:
+    opts = _options(interaction) if options is None else options
+    if options is None and "context" not in opts and _USER_PREFERENCE_STORE is not None:
+        user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+        try:
+            opts["context"] = _USER_PREFERENCE_STORE.get(user_id)["defaults"].get("context", 25)
+        except Exception:
+            opts["context"] = 0
+    raw = opts.get("context", 25)
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -312,14 +319,14 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
             try:
                 defaults = store.get(user_id).get("defaults") or {}
             except Exception:
-                defaults = {}
+                defaults = {"visibility": "private", "context": 0}
             for key in ("mode", "web", "detail", "context", "language", "visibility"):
                 if key not in opts and key in defaults:
                     opts[key] = defaults[key]
         raw_prompt = str(turn.get("prompt") or "")
         turn["search_query"] = raw_prompt
         turn["prompt"] = _slash_prompt(raw_prompt, opts)
-        turn["history_limit"] = _context_limit(interaction)
+        turn["history_limit"] = _context_limit(interaction, options=opts)
         visibility = str(opts.get("visibility") or "public").strip().lower()
         turn["visibility"] = visibility if visibility in {"private", "public"} else "private"
         mode = str(opts.get("mode") or "ask")

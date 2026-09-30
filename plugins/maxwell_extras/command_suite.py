@@ -63,12 +63,43 @@ _PERSONAL_VALUE_CHOICES = {
         ("No recent context", "0"), ("Last 10 messages", "10"),
         ("Last 25 messages", "25"), ("Last 50 messages", "50"),
     ],
-    "visibility": [("Private", "private"), ("Public", "public")],
+    "visibility": [("Public — visible in this channel", "public"), ("Private — only you can see the reply", "private")],
+}
+_CHOICE_HELP = {
+    "auto": "Searches when current information is needed.",
+    "search": "Searches the web before answering.",
+    "off": "Turn this feature off.",
+    "on": "Turn this feature on.",
+    "quick": "Short answers for quick questions.",
+    "balanced": "Enough explanation without a long reply.",
+    "deep": "Detailed explanations and examples.",
+    "public": "Others in this channel can see Maxwell's reply.",
+    "private": "Only you see the reply; server-wide actions are unavailable.",
+    "0": "Use your request without reading recent channel messages.",
+    "10": "A little context from this channel.",
+    "25": "Useful context for an ongoing conversation.",
+    "50": "More context; may take longer to process.",
+}
+_SETTING_HELP = {
+    "mode": "For everyday questions, choose Answer normally. Choose Research for a sourced answer.",
+    "web": "Automatic works for most requests. Off prevents web search for this request mode.",
+    "detail": "Quick keeps it brief. Balanced is the default. Deep asks for a fuller explanation.",
+    "context": "Only recent messages Maxwell can access in this channel are included. Choose none to use just your request.",
+    "visibility": "Public replies appear in the channel. Choose Private to turn public replies off for your requests. You can override this on any /maxwell command.",
+    "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
+    "style": "For example: Keep replies short and skip emojis. This changes your reply style; it cannot change protected instructions or permissions.",
+    "byok": "Your chosen provider receives your request context. Keys are encrypted at rest; custom endpoints are disabled.",
+    "channels": "Choose where Maxwell can respond. Clear the channel selection to allow all channels.",
+    "plugins": "Select the optional tools to allow in this server. Reset inherits the existing global and personal choices.",
+    "capabilities": "Selected groups are disabled. Leave a group unselected to allow its tools.",
+    "moderation": "Controls moderation tools for this server. Discord permissions still apply.",
+    "progress": "Show updates while tools run, or keep the channel quieter with Off.",
+    "ticket": "Controls automatic greetings in recognized ticket channels.",
 }
 
 CONFIG_COMMAND = {
     "name": "config",
-    "description": "Open private personal, server, or application-owner settings.",
+    "description": "Customize your replies or manage this server with a private settings menu.",
     **_APP_META,
 }
 CANCEL_COMMAND = {
@@ -219,7 +250,7 @@ def _friendly_personal_value(key: str, value: Any) -> str:
     if key == "context":
         return "No recent messages" if text == "0" else f"Last {text} messages"
     if key == "visibility":
-        return {"private": "Private (recommended default)", "public": "Public"}.get(text, "Private")
+        return {"private": "Private — only you", "public": "Public — visible in this channel"}.get(text, "Private — only you")
     return text
 
 
@@ -230,6 +261,8 @@ class _ConfigScopeSelect(discord.ui.Select):
             options.append(discord.SelectOption(label="This server", value="server"))
         if panel.is_owner:
             options.append(discord.SelectOption(label="Application owner", value="owner"))
+        for option in options:
+            option.default = option.value == panel.scope
         super().__init__(
             placeholder="Choose a settings area",
             min_values=1,
@@ -254,9 +287,8 @@ class _ConfigScopeSelect(discord.ui.Select):
             await _send(interaction, "That settings area is unavailable.")
             return
         self.panel.scope = requested_scope
-        self.panel.selected_key = {
-            "personal": "mode", "server": "channels", "owner": "diagnostics"
-        }[self.panel.scope]
+        self.panel.selected_key = "overview"
+        self.panel.notice = ""
         self.panel._build()
         await interaction.response.edit_message(
             content=self.panel.render(), view=self.panel,
@@ -271,12 +303,16 @@ class _ConfigSettingSelect(discord.ui.Select):
             "server": _SERVER_SETTINGS,
             "owner": _OWNER_SETTINGS,
         }[panel.scope]
-        options = [
-            discord.SelectOption(label=label, value=key, description=description[:100])
+        options = [discord.SelectOption(
+            label="Overview — start here", value="overview",
+            description="See your setup and choose what to change.",
+            default=panel.selected_key == "overview",
+        )] + [
+            discord.SelectOption(label=label, value=key, description=description[:100], default=key == panel.selected_key)
             for key, (label, description) in settings.items()
         ]
         super().__init__(
-            placeholder="Choose a setting",
+            placeholder="What would you like to change?",
             min_values=1,
             max_values=1,
             options=options,
@@ -289,6 +325,7 @@ class _ConfigSettingSelect(discord.ui.Select):
         if not await self.panel.authorized(interaction):
             return
         self.panel.selected_key = self.values[0]
+        self.panel.notice = ""
         self.panel._build()
         await interaction.response.edit_message(
             content=self.panel.render(), view=self.panel,
@@ -298,12 +335,13 @@ class _ConfigSettingSelect(discord.ui.Select):
 
 class _ConfigValueSelect(discord.ui.Select):
     def __init__(self, panel: "_ConfigPanel", choices: list[tuple[str, str]]):
+        current = panel.choice_value()
         options = [
-            discord.SelectOption(label=label, value=value)
+            discord.SelectOption(label=label, value=value, default=value == current, description=_CHOICE_HELP.get(value))
             for label, value in choices
         ]
         super().__init__(
-            placeholder="Choose a value to save it",
+            placeholder="Choose an option — saves immediately",
             min_values=1,
             max_values=1,
             options=options,
@@ -590,6 +628,22 @@ class _OwnerReloadButton(discord.ui.Button):
             await _send(interaction, "Could not reload the operator control file.")
         else:
             await _send(interaction, "Reloaded the operator control file.")
+
+
+class _ConfigCloseButton(discord.ui.Button):
+    def __init__(self, panel: "_ConfigPanel"):
+        super().__init__(label="Close", style=discord.ButtonStyle.secondary,
+                         custom_id="maxwell:config:close", row=4)
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        await interaction.response.edit_message(
+            content="Settings closed. Your saved choices are ready for your next request. Run `/config` to return.",
+            view=None, allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self.panel.stop()
 
 
 class _ConfigEditButton(discord.ui.Button):
@@ -893,7 +947,8 @@ class _ConfigPanel(discord.ui.View):
         self.user_id = _user_id(interaction)
         self.guild_id = _guild_id(interaction)
         self.scope = "personal"
-        self.selected_key = "mode"
+        self.selected_key = "overview"
+        self.notice = ""
         self.selected_provider = "openai"
         self.owner_quota_action = "status"
         try:
@@ -925,6 +980,10 @@ class _ConfigPanel(discord.ui.View):
     async def interaction_check(self, interaction: Any) -> bool:
         return await self.authorized(interaction)
 
+    async def on_error(self, interaction: Any, error: Exception, item: Any) -> None:
+        logger.warning("Config action failed (%s)", type(error).__name__)
+        await _send(interaction, "Could not complete that settings change. Please try again; if it keeps happening, contact the operator.")
+
     async def on_timeout(self) -> None:
         try:
             await self.command_interaction.edit_original_response(
@@ -940,6 +999,9 @@ class _ConfigPanel(discord.ui.View):
         if self.can_choose_scope:
             self.add_item(_ConfigScopeSelect(self))
         self.add_item(_ConfigSettingSelect(self))
+        self.add_item(_ConfigCloseButton(self))
+        if self.selected_key == "overview":
+            return
         base_row = 2 if self.can_choose_scope else 1
         if self.scope == "personal" and self.selected_key == "byok":
             self.add_item(_ByokProviderSelect(self, base_row))
@@ -1048,6 +1110,12 @@ class _ConfigPanel(discord.ui.View):
                 return "Reload trusted bot_control.json"
         return "Unavailable"
 
+    def choice_value(self) -> str:
+        if self.scope == "personal":
+            return str(self.store.get(self.user_id)["defaults"].get(self.selected_key, ""))
+        current = self._current_value()
+        return {"On": "on", "Off": "off"}.get(current, "")
+
     def _byok_status(self) -> dict[str, str] | None:
         vault = getattr(self.bot, "_byok_vault", None)
         if vault is None or not getattr(vault, "enabled", False):
@@ -1055,13 +1123,13 @@ class _ConfigPanel(discord.ui.View):
         return vault.status(self.user_id)
 
     def render(self) -> str:
+        if self.selected_key == "overview":
+            return self.overview()
         if self.scope == "personal":
             title = "Your personal settings"
             selected = _PERSONAL_SETTINGS.get(self.selected_key, ("Setting", ""))[0]
             hint = (
-                "These defaults follow you when you use Maxwell. Private replies are "
-                "the fallback; public replies appear in the channel. BYOK providers "
-                "receive the authorized request context you send them."
+                "These choices apply to your requests. You can override them on an individual `/maxwell` command."
             )
             value = self._current_value()
             if self.selected_key == "byok":
@@ -1089,11 +1157,48 @@ class _ConfigPanel(discord.ui.View):
             value = self._current_value()
             if len(value) > 240:
                 value = value[:237] + "..."
+        guidance = _SETTING_HELP.get(self.selected_key, "")
+        safe_value = discord.utils.escape_markdown(value)
         return (
             f"**{title}**\n{hint}\n\n"
-            f"Selected: **{selected}**\nCurrent: {value}\n\n"
-            "Choose a setting below. Selecting a value saves it; use **Reset this setting** to restore its default."
+            f"### {selected}\n{guidance}\n\n**Current:** {safe_value}\n\n"
+            f"{self.notice}\n"
+            "Choose an option to save it immediately. **Reset this setting** restores its default where available. "
+            "Choose **Overview** to return to your setup."
         )[:1900]
+
+    def overview(self) -> str:
+        if self.scope == "personal":
+            defaults = self.store.get(self.user_id)["defaults"]
+            rows = [
+                f"**{_PERSONAL_SETTINGS[key][0]}:** {_friendly_personal_value(key, defaults.get(key))}"
+                for key in ("visibility", "mode", "web", "detail", "context")
+            ]
+            return (
+                "## Your personal settings\nMake Maxwell work the way you like. This menu is only visible to you.\n\n"
+                + "\n".join(rows)
+                + "\n\n**Start here:** choose **Default visibility** to turn public replies off, "
+                "**Reply style** to change the tone, or **Response language** to choose a language.\n\n"
+                "Choose a setting below. Changes save immediately and only affect your requests. "
+                "An option on `/maxwell` overrides your saved choice for that request."
+            )
+        if self.scope == "server":
+            guild = getattr(self.command_interaction, "guild", None)
+            name = discord.utils.escape_markdown(str(getattr(guild, "name", "this server"))[:80])
+            return (
+                f"## Settings for {name}\nThese choices affect everyone in this server.\n\n"
+                "**Where Maxwell replies** — choose Response channels.\n"
+                "**What Maxwell can do** — choose Plugin tools or Enabled capabilities.\n"
+                "**Keep chat quieter** — choose Tool progress or Ticket greetings.\n\n"
+                "Choose a setting below to see its current state and explanation. "
+                "Only the server owner or members with Manage Server can make changes."
+            )
+        return (
+            "## Application owner settings\nThese controls affect the entire hosted bot.\n\n"
+            "Choose Runtime diagnostics to inspect the service, Message allowance to manage usage, "
+            "or Global tool access to control tool execution.\n\n"
+            "Access is checked again whenever a control is used."
+        )
 
     async def set_choice(self, interaction: Any, value: str) -> None:
         if not await self.authorized(interaction):
@@ -1161,6 +1266,8 @@ class _ConfigPanel(discord.ui.View):
         else:
             await _send(interaction, "That setting cannot be changed with this menu.")
             return
+        self.notice = "**Saved.** Your next request will use this choice." if self.scope == "personal" else "**Saved.** This setting is now active."
+        self._build()
         await interaction.response.edit_message(
             content=self.render(), view=self,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -1194,6 +1301,8 @@ class _ConfigPanel(discord.ui.View):
 
     async def reset(self, interaction: Any) -> None:
         if not await self.authorized(interaction):
+            return
+        if self.selected_key == "overview":
             return
         if self.scope == "personal":
             if self.selected_key == "style":
@@ -1248,6 +1357,7 @@ class _ConfigPanel(discord.ui.View):
             saver = getattr(self.bot, "_save_ticket_greeting_servers", None)
             if callable(saver):
                 saver()
+        self.notice = "**Reset.** The default is restored."
         self._build()
         await interaction.response.edit_message(
             content=self.render(), view=self,

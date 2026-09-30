@@ -48,10 +48,8 @@ def test_user_preferences_are_isolated_and_resettable(tmp_path):
     second = store.get("200")
     assert first["defaults"]["mode"] == "research"
     assert first["defaults"]["context"] == 10
-    assert first["defaults"]["visibility"] == "private"
     assert first["personality"] == "Keep replies concise."
     assert second["defaults"]["mode"] == "code"
-    assert second["defaults"]["visibility"] == "private"
     assert second["personality"] == ""
 
     store.reset_default("100", "mode")
@@ -120,6 +118,7 @@ def test_config_value_menu_updates_a_personal_default(tmp_path):
     bot = SimpleNamespace(_user_preferences=store)
     panel = command_suite._ConfigPanel(bot, store, interaction)
     responses = []
+    panel.selected_key = "mode"
 
     class ComponentResponse:
         async def edit_message(self, content, *, view, **kwargs):
@@ -424,3 +423,40 @@ def test_config_text_settings_open_a_bounded_modal(tmp_path):
     assert modal is not None
     assert modal.title == "Edit response language"
     assert modal.children[0].max_length == 80
+
+
+def test_visibility_menu_marks_saved_choice_and_reset_restores_public(tmp_path):
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100))
+    panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
+    assert panel.selected_key == "overview"
+    panel.selected_key = "visibility"
+    panel._build()
+    edits = []
+
+    class Response:
+        async def edit_message(self, **payload):
+            edits.append(payload)
+
+    interaction.response = Response()
+    asyncio.run(panel.set_choice(interaction, "private"))
+    menu = next(item for item in panel.children if isinstance(item, command_suite._ConfigValueSelect))
+    assert [option.value for option in menu.options if option.default] == ["private"]
+    asyncio.run(panel.reset(interaction))
+    assert store.get("100")["defaults"]["visibility"] == "public"
+
+
+def test_config_close_removes_controls(tmp_path):
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100))
+    panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
+    edits = []
+
+    class Response:
+        async def edit_message(self, **payload):
+            edits.append(payload)
+
+    interaction.response = Response()
+    close = next(item for item in panel.children if isinstance(item, command_suite._ConfigCloseButton))
+    asyncio.run(close.callback(interaction))
+    assert edits[-1]["view"] is None

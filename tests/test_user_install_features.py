@@ -198,3 +198,43 @@ def test_modern_session_send_preserves_embed_view_and_multiple_files():
     assert payload["allowed_mentions"].everyone is False
     assert payload["allowed_mentions"].users is False
     assert payload["allowed_mentions"].roles is False
+
+
+def test_saved_visibility_and_context_apply_but_explicit_options_win(tmp_path, monkeypatch):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    monkeypatch.setattr(mod, "_USER_PREFERENCE_STORE", store)
+    store.set_default("1", "visibility", "private")
+    store.set_default("1", "context", 0)
+    interaction = _interaction(options=[{"name": "prompt", "value": "hello"}])
+    original = lambda _: {"prompt": "hello", "attachments": [], "note": ""}
+    turn = mod._enhanced_build_turn(interaction, original)
+    assert turn["visibility"] == "private"
+    assert turn["history_limit"] == 0
+    assert mod._context_limit(interaction) == 0
+    # Another user gets public defaults, never the first user's saved choices.
+    interaction.user.id = 2
+    assert mod._enhanced_build_turn(interaction, original)["visibility"] == "public"
+    interaction.user.id = 1
+    interaction.data["options"] += [
+        {"name": "visibility", "value": "public"},
+        {"name": "context", "value": 10},
+    ]
+    turn = mod._enhanced_build_turn(interaction, original)
+    assert turn["visibility"] == "public"
+    assert turn["history_limit"] == 10
+    assert mod._context_limit(interaction) == 10
+
+
+def test_saved_zero_context_skips_live_channel_read(tmp_path, monkeypatch):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default("1", "context", 0)
+    monkeypatch.setattr(mod, "_USER_PREFERENCE_STORE", store)
+    interaction = _interaction()
+
+    def history(**kwargs):
+        raise AssertionError("Channel history must not be fetched with context disabled")
+
+    interaction.channel.history = history
+    assert asyncio.run(mod._snapshot_channel_history(None, interaction)) == []

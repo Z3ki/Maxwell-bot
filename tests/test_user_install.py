@@ -307,12 +307,12 @@ def test_handle_spawns_for_non_admin():
     claimed = asyncio.run(handle_user_install_interaction(bot, interaction))
     assert claimed is True
     assert interaction.response.deferred is True
-    assert interaction.response.deferred_ephemeral is True
+    assert interaction.response.deferred_ephemeral is False
     assert spawned
     assert is_user_install_message(spawned[0])
     assert spawned[0].content == "ping me"
-    assert spawned[0].response_visibility == "private"
-    assert spawned[0].channel.id == "private:2:dm:555"
+    assert spawned[0].response_visibility == "public"
+    assert spawned[0].channel.id == 555
     assert spawned[0].guild is None
 
 def test_private_maxwell_can_send_ephemeral_reply_but_not_to_another_channel():

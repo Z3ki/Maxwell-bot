@@ -18,7 +18,7 @@ admin.maxwell.example.com {
 	handle @admin {
 		file_server
 	}
-	@legal path /terms /terms/* /privacy /privacy/*
+	@legal path /terms /terms/* /privacy /privacy/* /guide /guide/* /contact /contact/* /assets/*
 	handle @legal {
 		file_server
 	}
@@ -33,8 +33,9 @@ maxwell.example.com {
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
 	# Copy web/ contents into /var/www/maxwell. Expose only the landing and
-	# policy pages here; operator controls stay on the separate admin origin.
-	@public_pages path / /index.html /terms /terms/* /privacy /privacy/*
+	# policy/support pages and their assets here; operator controls stay on the
+	# separate admin origin. Do not expose the entire web/ directory.
+	@public_pages path / /index.html /terms /terms/* /privacy /privacy/* /guide /guide/* /contact /contact/* /assets/*
 	handle @public_pages {
 		root * /var/www/maxwell
 		file_server

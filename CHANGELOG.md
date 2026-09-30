@@ -30,8 +30,15 @@ Not published yet. A release is published only by pushing a matching `v0.1.0` ta
 - Removed voice-channel joining/listening, DM call answering, speech generation, tools, prompts, admin controls, and dedicated dependencies.
 - Audio attachments remain supported as model input. Voice moderation of other members is unchanged.
 
+### Discord request preferences
+
+- `/maxwell` replies are public by default; saved private visibility and channel-context limits are honored unless explicit command options override them.
+- `/config` opens privately with an overview, current selections, explanations, immediate-save feedback, reset controls, and Close.
+- Preference reads reuse unchanged files while detecting external updates. Unreadable preferences fail closed to private replies without channel context; writes refuse to overwrite corrupt files.
+
 ### Public site
 
 - The public site is a product landing page, separate from operator/admin surfaces. Hosted premium availability is not implied by this release-preparation work.
+- Guide, contact, terms, and privacy pages share responsive styles and the Maxwell icon; the Caddy example explicitly allows these public routes and assets without exposing operator controls.
 
 External Discord, provider, mail, and browser integrations remain dependent on the operator's configuration. Passing local checks is not a claim that every external integration is production-validated.
