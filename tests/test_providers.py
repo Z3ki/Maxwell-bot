@@ -5,6 +5,8 @@ import logging
 
 import pytest
 
+from media_payloads import merge_followup_media
+
 from providers import (
     OllamaProvider,
     ProviderUsageExhaustedError,
@@ -12,6 +14,39 @@ from providers import (
     _is_content_policy_block,
     _is_policy_block_text,
 )
+
+
+def test_tool_followup_keeps_original_media_in_typed_parts():
+    provider = OllamaProvider("http://vision.test/v1", "vision-model", 10, 0.5)
+    provider.available = True
+    provider.enable_audio_input = True
+    session = FakeSession(FakeResponse())
+    provider._session = session
+    original = [
+        {"b64": "PHOTO", "mime_type": "image/jpeg"},
+        {"b64": "VOICE", "mime_type": "audio/wav"},
+    ]
+    messages = [
+        {"role": "user", "content": "Compare the picture with this voice note."},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "lookup", "type": "function",
+            "function": {"name": "web_search", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "lookup", "content": "Found context."},
+    ]
+    asyncio.run(provider.generate_chat_completion(
+        messages, media=merge_followup_media(original, [], ["TOOLPHOTO"])
+    ))
+    parts = session.payloads[0]["messages"][0]["content"]
+    assert {p["image_url"]["url"] for p in parts if p["type"] == "image_url"} == {
+        "data:image/jpeg;base64,PHOTO", "data:image/png;base64,TOOLPHOTO",
+    }
+    assert [p["input_audio"] for p in parts if p["type"] == "input_audio"] == [
+        {"data": "VOICE", "format": "wav"}
+    ]
+    assert all("PHOTO" not in p["text"] and "VOICE" not in p["text"]
+               for p in parts if p["type"] == "text")
+    assert messages[0]["content"] == "Compare the picture with this voice note."
 
 
 class _FakeAsyncStream:

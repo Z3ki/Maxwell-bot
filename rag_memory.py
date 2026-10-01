@@ -32,6 +32,8 @@ from pathlib import Path
 import aiohttp
 import numpy as np
 
+from media_payloads import sanitize_media_memory, strip_media_payloads
+
 logger = logging.getLogger(__name__)
 
 # ─── constants ────────────────────────────────────────────────────────
@@ -535,7 +537,7 @@ def _strip_for_embedding(text: str) -> str:
     """
     import re
 
-    s = str(text or "")
+    s = strip_media_payloads(str(text or ""))
     if not s:
         return ""
     s = re.sub(r"https?://\S+", " ", s)
@@ -1855,7 +1857,9 @@ class RAGMemoryManager:
                 "timestamp": row["timestamp"],
             }
             entry.update(_decode_metadata(row["metadata"]))
-            result.append(entry)
+            # Older rows may contain a payload cut off by the storage cap.
+            # Sanitize before transcript clipping, including result metadata.
+            result.append(sanitize_media_memory(entry))
         return result
 
     async def add_to_channel_memory(self, channel_id: str, message: dict):
@@ -1883,6 +1887,7 @@ class RAGMemoryManager:
         # the caller's _lock to make the (SELECT existing, INSERT,
         # DELETE excess) sequence atomic across writers.
         channel_id = str(channel_id)
+        message = sanitize_media_memory(message)
         msg_id = str(message.get("message_id") or uuid.uuid4().hex)
         content = str(message.get("content") or "")
         author = str(message.get("author") or "")

@@ -30,6 +30,11 @@ import discord
 from discord.ext import commands
 from discord.utils import MISSING
 from process_utils import communicate_process
+from media_payloads import (
+    merge_followup_media,
+    sanitize_media_memory,
+    strip_media_payloads,
+)
 from message_quota import (
     MessageQuota,
     MessageQuotaExceeded,
@@ -13005,8 +13010,11 @@ class MaxwellBot(commands.Bot):
                     timeout=ai_timeout, priority="user", key=channel_id
                 )
                 try:
-                    # Attach images from tools so the model can SEE them
-                    followup_images = all_tool_images if all_tool_images else []
+                    # Keep the original attachments visible throughout tool
+                    # use, alongside media returned by this request's tools.
+                    followup_media = merge_followup_media(
+                        active_media, all_tool_media, all_tool_images
+                    )
                     # Post a progress message during the followup LLM generation
                     # too — without this, the user sees the progress message
                     # get deleted (by the previous tool dispatch) and then nothing
@@ -13058,8 +13066,7 @@ class MaxwellBot(commands.Bot):
                         followup = await self._generate_response(
                             result_messages,
                             provider=_current_request_provider.get(),
-                            images=followup_images,
-                            media=all_tool_media,
+                            media=followup_media,
                             timeout=ai_timeout,
                             max_tokens=max_out_tokens,
                             tools=provider_tools,
@@ -13807,7 +13814,10 @@ class MaxwellBot(commands.Bot):
         channel_id = getattr(channel, "id", None)
         if channel_id is None or not hasattr(self, "memory"):
             return
-        mem_params: dict = dict(params or {})
+        # Persistence happens before the follow-up parser extracts binary
+        # markers. Clean here so later turns never replay base64 as chat text.
+        result = strip_media_payloads(result)
+        mem_params: dict = sanitize_media_memory(dict(params or {}))
         try:
             for heavy_key in ("body", "content", "code", "html", "data"):
                 if (
@@ -13820,8 +13830,7 @@ class MaxwellBot(commands.Bot):
                     )
             params_text = json.dumps(mem_params, ensure_ascii=False, sort_keys=True)
         except TypeError:
-            params_text = str(params or {})
-            mem_params = dict(params or {})
+            params_text = strip_media_payloads(str(mem_params))
         await self.memory.add_to_channel_memory(
             str(channel_id),
             {
@@ -14182,7 +14191,7 @@ class MaxwellBot(commands.Bot):
                     )
 
         def _truncate_tool_result(tr: str, tool_name: str = "") -> str:
-            tr = _IMG_RE.sub("", _AUDIO_RE.sub("", tr)).strip()
+            tr = strip_media_payloads(tr).strip()
             # Site file contents must come back whole. Truncating the middle
             # with a marker is how "[large content omitted, N chars]" ended
             # up as the published page.
@@ -15930,10 +15939,11 @@ class MaxwellBot(commands.Bot):
                 # "12m ago" on every replayed line invalidates the cached prefix.
                 stamp = _format_context_timestamp(msg.get("timestamp"), relative=False)
                 if msg.get("is_tool"):
+                    tool_content = strip_media_payloads(str(msg.get("content") or ""))
                     line = (
-                        f"[{stamp}] [Tool] {msg.get('content', '')[:4000]}"
+                        f"[{stamp}] [Tool] {tool_content[:4000]}"
                         if stamp
-                        else f"[Tool] {msg.get('content', '')[:4000]}"
+                        else f"[Tool] {tool_content[:4000]}"
                     )
                     if current_turn is None or current_turn.get("role") != "user":
                         _new_turn("user", "")
@@ -15995,7 +16005,7 @@ class MaxwellBot(commands.Bot):
                         autonomy_tag += f"; reason: {reason[:200]}"
                     autonomy_tag += "]"
                 header = f"[{stamp}] " if stamp else ""
-                content_str = str(msg.get("content", ""))[:2500]
+                content_str = strip_media_payloads(str(msg.get("content", "")))[:2500]
                 # 2026-07-21: assistant turns get NO 'You/Maxwell(id):'
                 # author prefix — the role already says it's the bot,
                 # and putting that string inside the assistant content
