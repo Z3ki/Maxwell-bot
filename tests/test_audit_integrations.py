@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from providers import OllamaProvider
+from providers import OpenAICompatibleProvider
 from utils import JsonStateStore, render_discord_context_text
 
 
@@ -42,7 +42,7 @@ def test_media_annotation_uses_path_not_query_extension():
 
 
 def test_provider_tool_fallback_preserves_stream_callbacks(monkeypatch):
-    provider = OllamaProvider("http://example.test", "test", 10, 0.5)
+    provider = OpenAICompatibleProvider("http://example.test", "test", 10, 0.5)
     complete = AsyncMock(
         side_effect=[RuntimeError("tools not supported"), {"content": "ok"}]
     )
@@ -146,7 +146,7 @@ class _Session:
 
 
 def test_provider_preserves_existing_multimodal_parts():
-    provider = OllamaProvider("http://example.test", "test", 10, 0.5)
+    provider = OpenAICompatibleProvider("http://example.test", "test", 10, 0.5)
     provider.available = True
     provider._session = session = _Session([_Response()])
     original_parts = [
@@ -165,7 +165,7 @@ def test_provider_preserves_existing_multimodal_parts():
 
 
 def test_provider_embedded_media_routes_to_vision():
-    provider = OllamaProvider(
+    provider = OpenAICompatibleProvider(
         "http://example.test", "text", 10, 0.5, vision_model="vision"
     )
     provider.available = True
@@ -196,7 +196,7 @@ def test_provider_usage_is_not_swapped_during_response_cleanup():
             first_cleaning.set()
             await second_done.wait()
 
-        provider = OllamaProvider("http://example.test", "test", 10, 0.5)
+        provider = OpenAICompatibleProvider("http://example.test", "test", 10, 0.5)
         provider.available = True
         provider._session = _Session(
             [
@@ -250,7 +250,7 @@ def test_provider_parameter_repair_retries_same_endpoint(error):
         async def text(self):
             return error
 
-    provider = OllamaProvider(
+    provider = OpenAICompatibleProvider(
         "http://primary.test",
         "primary",
         10,

@@ -13,13 +13,13 @@ The easy installer and `.env.simple.example` use provider-neutral names:
 
 | Variable | Purpose |
 |---|---|
-| `AI_API_URL` | Primary OpenAI-compatible API base URL |
+| `AI_BASE_URL` | Primary OpenAI-compatible API base URL |
 | `AI_MODEL` | Primary chat model |
 | `AI_API_KEY` | Primary API key; blank is normal for local endpoints that do not require one |
 
-The runtime reads these names directly; legacy `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY` remain supported for existing installations. Non-empty `AI_API_URL` and `AI_MODEL` take precedence over legacy settings. An explicitly set `AI_API_KEY`, including a blank value for a local endpoint, takes precedence over a legacy key.
+The runtime reads these names directly; legacy `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY` remain supported for existing installations. Non-empty `AI_BASE_URL` and `AI_MODEL` take precedence over legacy settings. An explicitly set `AI_API_KEY`, including a blank value for a local endpoint, takes precedence over a legacy key.
 
-The simple template also includes interpolation aliases for older tooling. They are not required by the runtime. Advanced provider controls retain the historical `OLLAMA_*` namespace; Maxwell is not Ollama-only.
+All advanced generation, retry, fallback and vision controls use `AI_*`. Deprecated `OLLAMA_*` inputs remain supported; see [PROVIDERS.md](PROVIDERS.md).
 
 For an older install:
 
@@ -35,9 +35,9 @@ Do not set conflicting values in both namespaces.
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Official bot token from the Discord Developer Portal. User/self-bot tokens are not supported. |
 | `DISCORD_TOKEN` | Deprecated alias | Used only when the official bot-token setting is empty. |
-| `AI_API_URL` / `OLLAMA_BASE_URL` | Yes | Primary OpenAI-compatible endpoint. |
-| `AI_MODEL` / `OLLAMA_MODEL` | Yes | Primary chat model. |
-| `AI_API_KEY` / `OLLAMA_API_KEY` | Sometimes | Provider key; blank can be valid for local endpoints. |
+| `AI_BASE_URL` / legacy `OLLAMA_BASE_URL` | Yes | Primary OpenAI-compatible endpoint. |
+| `AI_MODEL` / legacy `OLLAMA_MODEL` | Yes | Primary chat model. |
+| `AI_API_KEY` / legacy `OLLAMA_API_KEY` | Sometimes | Provider key; blank can be valid for local endpoints. |
 | `MAXWELL_OWNER_IDS` | Strongly recommended | Comma-separated Discord IDs authorized for owner/admin features. |
 | `MAXWELL_ADMIN_USER` | Optional | Operator API HTTP Basic username; defaults to `admin`. |
 | `MAXWELL_ADMIN_PASSWORD` | Strongly recommended | Operator API HTTP Basic password. A blank value leaves the API unavailable. |

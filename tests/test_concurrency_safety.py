@@ -9,9 +9,10 @@ from concurrency_safety import ChannelWorkQueues, ToolConcurrency, offload
 def test_sync_work_is_offloaded():
     async def run():
         started = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
         def blocking():
-            started.set()
+            loop.call_soon_threadsafe(started.set)
             time.sleep(0.02)
             return 42
 

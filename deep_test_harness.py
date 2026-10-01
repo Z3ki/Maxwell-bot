@@ -173,7 +173,7 @@ class DeepTestHarness:
         def test_config_structure():
             cfg = config.Config
             assert hasattr(cfg, "DISCORD_TOKEN")
-            assert hasattr(cfg, "OLLAMA_MODEL")
+            assert hasattr(cfg, "AI_MODEL")
             assert hasattr(cfg, "ENABLE_SHELL")
             assert hasattr(cfg, "ENABLE_RAG")
             assert hasattr(cfg, "ENABLE_AUTONOMY")

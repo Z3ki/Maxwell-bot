@@ -175,7 +175,7 @@ def test_validate_accepts_legacy_discord_token_alias():
     "missing,expected",
     [
         ("DISCORD_BOT_TOKEN", "DISCORD_BOT_TOKEN"),
-        ("OLLAMA_MODEL", "OLLAMA_MODEL"),
+        ("OLLAMA_MODEL", "AI_MODEL"),
     ],
 )
 def test_validate_names_the_missing_requirement(missing, expected):

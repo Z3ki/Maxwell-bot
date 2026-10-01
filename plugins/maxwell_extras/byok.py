@@ -259,6 +259,8 @@ def make_request_provider(bot: Any, credential: dict[str, str]):
     """Build an uncached, single-credential client for one authenticated user."""
     provider_id = credential["provider"]
     config = PROVIDERS[provider_id]
+    from maxwell_core.providers.models import ProviderPolicy
+
     client = bot._make_chat_provider(
         name=f"byok:{provider_id}",
         base_url=config["base_url"],
@@ -269,11 +271,13 @@ def make_request_provider(bot: Any, credential: dict[str, str]):
         disable_reasoning=True,
         retry_attempts=1,
         empty_response_retries=0,
+        policy=ProviderPolicy(
+            sensitive_credentials=True, public_network_only=True,
+            allow_provider_fallback=False, max_request_seconds=300,
+            max_response_bytes=2 * 1024 * 1024, max_output_tokens=4096,
+        ),
     )
     client.available = True
-    client._byok_sensitive = True
-    client._byok_public_only = True
-    client._byok_response_limit = 2 * 1024 * 1024
     return client
 
 

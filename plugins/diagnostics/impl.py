@@ -42,9 +42,8 @@ class UsageTool(Tool):
 
     def _api_key(self) -> str:
         return (
-            os.environ.get("OLLAMA_API_KEY", "")
-            or os.environ.get("OPENAI_COMPAT_API_KEY", "")
-            or ""
+            os.environ.get("AI_API_KEY", os.environ.get("OLLAMA_API_KEY",
+                os.environ.get("OPENAI_COMPAT_API_KEY", "")))
         ).strip()
 
     async def execute(self, message: Message, **kwargs) -> str:
@@ -53,7 +52,7 @@ class UsageTool(Tool):
             return "Error: MAXWELL_USAGE_URL is not configured"
         key = self._api_key()
         if not key:
-            return "Error: no API key configured (OLLAMA_API_KEY or OPENAI_COMPAT_API_KEY)."
+            return "Error: no API key configured (AI_API_KEY or OPENAI_COMPAT_API_KEY)."
         session = await _get_shared_session()
         headers = {
             "Authorization": f"Bearer {key}",

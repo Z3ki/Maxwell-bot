@@ -5,7 +5,7 @@
 // is the single source of truth — edit .env, `pm2 restart`, done. No env
 // merging in this file (PM2 caches env from first start and --update-env
 // does NOT re-read .env, which used to pin stale values like the old
-// OLLAMA_FALLBACK_MODEL forever).
+// AI_FALLBACK_MODEL forever).
 //
 // Only runtime flags that must exist before the interpreter boots live here:
 // PYTHONUNBUFFERED (live logs). Everything else belongs in .env.

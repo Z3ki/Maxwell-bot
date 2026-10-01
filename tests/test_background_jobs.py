@@ -18,7 +18,7 @@ from jobs import (
 
 
 class FakeConfig:
-    OLLAMA_MAX_TOKENS = 16384
+    AI_MAX_OUTPUT_TOKENS = 16384
 
 
 class FakeAuthor:

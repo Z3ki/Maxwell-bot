@@ -34,15 +34,47 @@ ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE") or APP_ROOT / ".env")
 # .env is the SOURCE OF TRUTH — always override whatever PM2/the shell
 # injected. PM2 caches the env from first start and `--update-env` does
 # NOT re-read the .env file, so without override=True every restart kept
-# stale values (e.g. the old OLLAMA_FALLBACK_MODEL) forever.
+# stale values (e.g. the old AI_FALLBACK_MODEL) forever.
 load_dotenv(ENV_FILE, override=True)
+
+
+# Deprecated environment aliases. Presence (including blank) wins for AI_*
+# so credentials and optional routes can explicitly be cleared.
+_AI_LEGACY_ENV = {
+    "AI_BASE_URL": "OLLAMA_BASE_URL",
+    "AI_API_KEY": "OLLAMA_API_KEY",
+    "AI_MODEL": "OLLAMA_MODEL",
+    "AI_REM_MODEL": "OLLAMA_REM_MODEL",
+    "AI_TEMPERATURE": "OLLAMA_TEMPERATURE",
+    "AI_DISABLE_REASONING": "OLLAMA_DISABLE_REASONING",
+    "AI_REASONING_EFFORT": "OLLAMA_REASONING_EFFORT",
+    "AI_FALLBACK_BASE_URL": "OLLAMA_FALLBACK_BASE_URL",
+    "AI_FALLBACK_API_KEY": "OLLAMA_FALLBACK_API_KEY",
+    "AI_FALLBACK_MODEL": "OLLAMA_FALLBACK_MODEL",
+    "AI_FALLBACK_DISABLE_REASONING": "OLLAMA_FALLBACK_DISABLE_REASONING",
+    "AI_FALLBACK_REASONING_EFFORT": "OLLAMA_FALLBACK_REASONING_EFFORT",
+    "AI_VISION_BASE_URL": "OLLAMA_VISION_BASE_URL",
+    "AI_VISION_API_KEY": "OLLAMA_VISION_API_KEY",
+    "AI_VISION_MODEL": "OLLAMA_VISION_MODEL",
+    "AI_VISION_DISABLE_REASONING": "OLLAMA_VISION_DISABLE_REASONING",
+    "AI_RETRY_ATTEMPTS": "OLLAMA_RETRY_ATTEMPTS",
+    "AI_EMPTY_RESPONSE_RETRIES": "OLLAMA_EMPTY_RESPONSE_RETRIES",
+    "AI_ENDPOINT_COOLDOWN_SECONDS": "OLLAMA_ENDPOINT_COOLDOWN_SECONDS",
+    "AI_MAX_OUTPUT_TOKENS": "OLLAMA_MAX_TOKENS",
+}
+
+
+def _env_name(name: str) -> str:
+    if name in os.environ:
+        return name
+    return _AI_LEGACY_ENV.get(name, name)
 
 
 def _int_env(
     name: str, default: int, min_value: int | None = None, max_value: int | None = None
 ) -> int:
     try:
-        value = int(os.getenv(name, str(default)))
+        value = int(os.getenv(_env_name(name), str(default)))
     except (TypeError, ValueError):
         value = default
     if min_value is not None:
@@ -59,7 +91,7 @@ def _float_env(
     max_value: float | None = None,
 ) -> float:
     try:
-        value = float(os.getenv(name, str(default)))
+        value = float(os.getenv(_env_name(name), str(default)))
     except (TypeError, ValueError):
         value = default
     if not math.isfinite(value):
@@ -72,7 +104,7 @@ def _float_env(
 
 
 def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
+    value = os.getenv(_env_name(name))
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -171,12 +203,14 @@ def _feature_env(
         FEATURE_REASONS[name] = "on by default" if default else "off by default"
         return default
     if detect():
-        FEATURE_REASONS[name] = (
-            on_text or (f"auto: {needs} found" if needs else "auto: available")
+        FEATURE_REASONS[name] = on_text or (
+            f"auto: {needs} found" if needs else "auto: available"
         )
         return True
     FEATURE_REASONS[name] = off_text or (
-        f"auto: off, {needs} not installed" if needs else "auto: off, dependency missing"
+        f"auto: off, {needs} not installed"
+        if needs
+        else "auto: off, dependency missing"
     )
     return False
 
@@ -199,59 +233,76 @@ class Config:
         if item.strip().isdigit()
     )
 
-
-    OLLAMA_BASE_URL = _first_env(
-        "AI_API_URL", "OLLAMA_BASE_URL", default="http://localhost:11434"
+    AI_BASE_URL = _first_env(
+        "AI_BASE_URL", "AI_API_URL", "OLLAMA_BASE_URL", default="http://localhost:11434"
     )
     # An explicitly blank friendly key clears a stale legacy credential.
-    OLLAMA_API_KEY = os.getenv(
-        "AI_API_KEY", os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", ""))
+    AI_API_KEY = os.getenv(
+        "AI_API_KEY",
+        os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")),
     ).strip()
     # No default model on purpose: a hardcoded one that your endpoint does
     # not serve fails later, as an opaque 404 from the provider. Empty fails
     # at startup with a sentence that says what to do.
-    OLLAMA_MODEL = _first_env("AI_MODEL", "OLLAMA_MODEL")
-    OLLAMA_REM_MODEL = os.getenv("OLLAMA_REM_MODEL") or OLLAMA_MODEL
+    AI_MODEL = _first_env("AI_MODEL", "OLLAMA_MODEL")
+    AI_REM_MODEL = os.getenv(_env_name("AI_REM_MODEL")) or AI_MODEL
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
-    OLLAMA_MAX_TOKENS = _int_env(
-        "OLLAMA_MAX_TOKENS", 16384, min_value=1, max_value=131072
+    AI_MAX_OUTPUT_TOKENS = _int_env(
+        "AI_MAX_OUTPUT_TOKENS", 16384, min_value=1, max_value=131072
     )
     # 0.7 rather than 1.0: at 1.0 the tail of the distribution is wide enough
     # that a chat model wanders — it picks a tic and rides it, which is the
     # generation-side half of the repetition the scrubber cleans up after.
     # 0.7 keeps him improvising without letting the sampler pick the odd token
-    # for its own sake. Raise it back per-install with OLLAMA_TEMPERATURE.
-    OLLAMA_TEMPERATURE = _float_env("OLLAMA_TEMPERATURE", 0.7, min_value=0.0)
-    OLLAMA_DISABLE_REASONING = _bool_env("OLLAMA_DISABLE_REASONING", True)
+    # for its own sake. Raise it back per-install with AI_TEMPERATURE.
+    AI_TEMPERATURE = _float_env("AI_TEMPERATURE", 0.7, min_value=0.0)
+    AI_DISABLE_REASONING = _bool_env("AI_DISABLE_REASONING", True)
     # Optional chat-completions reasoning_effort (e.g. "low"). Ignored when
-    # OLLAMA_DISABLE_REASONING is on. Blank leaves the field off the payload.
-    OLLAMA_REASONING_EFFORT = os.getenv("OLLAMA_REASONING_EFFORT", "").strip()
-    OLLAMA_FALLBACK_BASE_URL = os.getenv("OLLAMA_FALLBACK_BASE_URL", "").strip()
-    OLLAMA_FALLBACK_API_KEY = os.getenv("OLLAMA_FALLBACK_API_KEY", "").strip()
-    OLLAMA_FALLBACK_MODEL = os.getenv("OLLAMA_FALLBACK_MODEL", "").strip()
-    OLLAMA_FALLBACK_DISABLE_REASONING = _bool_env(
-        "OLLAMA_FALLBACK_DISABLE_REASONING", True
-    )
-    OLLAMA_FALLBACK_REASONING_EFFORT = os.getenv(
-        "OLLAMA_FALLBACK_REASONING_EFFORT", ""
+    # AI_DISABLE_REASONING is on. Blank leaves the field off the payload.
+    AI_REASONING_EFFORT = os.getenv(_env_name("AI_REASONING_EFFORT"), "").strip()
+    AI_FALLBACK_BASE_URL = os.getenv(_env_name("AI_FALLBACK_BASE_URL"), "").strip()
+    AI_FALLBACK_API_KEY = os.getenv(_env_name("AI_FALLBACK_API_KEY"), "").strip()
+    AI_FALLBACK_MODEL = os.getenv(_env_name("AI_FALLBACK_MODEL"), "").strip()
+    AI_FALLBACK_DISABLE_REASONING = _bool_env("AI_FALLBACK_DISABLE_REASONING", True)
+    AI_FALLBACK_REASONING_EFFORT = os.getenv(
+        _env_name("AI_FALLBACK_REASONING_EFFORT"), ""
     ).strip()
     # Optional vision/omni model for image/video (and audio, if enabled) turns.
     # Text-only primaries like deepseek-v4-flash 400 on image_url; when this is
     # set, media requests go here first. Blank base/key inherit the primary.
-    OLLAMA_VISION_BASE_URL = os.getenv("OLLAMA_VISION_BASE_URL", "").strip()
-    OLLAMA_VISION_API_KEY = os.getenv("OLLAMA_VISION_API_KEY", "").strip()
-    OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "").strip()
-    OLLAMA_VISION_DISABLE_REASONING = _bool_env("OLLAMA_VISION_DISABLE_REASONING", True)
-    OLLAMA_RETRY_ATTEMPTS = _int_env(
-        "OLLAMA_RETRY_ATTEMPTS", 3, min_value=1, max_value=10
-    )
+    AI_VISION_BASE_URL = os.getenv(_env_name("AI_VISION_BASE_URL"), "").strip()
+    AI_VISION_API_KEY = os.getenv(_env_name("AI_VISION_API_KEY"), "").strip()
+    AI_VISION_MODEL = os.getenv(_env_name("AI_VISION_MODEL"), "").strip()
+    AI_VISION_DISABLE_REASONING = _bool_env("AI_VISION_DISABLE_REASONING", True)
+    AI_RETRY_ATTEMPTS = _int_env("AI_RETRY_ATTEMPTS", 3, min_value=1, max_value=10)
     # Extra bounded recovery attempts for HTTP 200 responses that contain
     # neither assistant text nor tool calls. These use a different endpoint
     # when available and a non-streaming request to bypass flaky SSE gateways.
-    OLLAMA_EMPTY_RESPONSE_RETRIES = _int_env(
-        "OLLAMA_EMPTY_RESPONSE_RETRIES", 2, min_value=0, max_value=5
+    AI_EMPTY_RESPONSE_RETRIES = _int_env(
+        "AI_EMPTY_RESPONSE_RETRIES", 2, min_value=0, max_value=5
     )
+
+    # Deprecated Python configuration aliases for third-party integrations.
+    OLLAMA_BASE_URL = AI_BASE_URL
+    OLLAMA_API_KEY = AI_API_KEY
+    OLLAMA_MODEL = AI_MODEL
+    OLLAMA_REM_MODEL = AI_REM_MODEL
+    OLLAMA_TEMPERATURE = AI_TEMPERATURE
+    OLLAMA_DISABLE_REASONING = AI_DISABLE_REASONING
+    OLLAMA_REASONING_EFFORT = AI_REASONING_EFFORT
+    OLLAMA_FALLBACK_BASE_URL = AI_FALLBACK_BASE_URL
+    OLLAMA_FALLBACK_API_KEY = AI_FALLBACK_API_KEY
+    OLLAMA_FALLBACK_MODEL = AI_FALLBACK_MODEL
+    OLLAMA_FALLBACK_DISABLE_REASONING = AI_FALLBACK_DISABLE_REASONING
+    OLLAMA_FALLBACK_REASONING_EFFORT = AI_FALLBACK_REASONING_EFFORT
+    OLLAMA_VISION_BASE_URL = AI_VISION_BASE_URL
+    OLLAMA_VISION_API_KEY = AI_VISION_API_KEY
+    OLLAMA_VISION_MODEL = AI_VISION_MODEL
+    OLLAMA_VISION_DISABLE_REASONING = AI_VISION_DISABLE_REASONING
+    OLLAMA_RETRY_ATTEMPTS = AI_RETRY_ATTEMPTS
+    OLLAMA_EMPTY_RESPONSE_RETRIES = AI_EMPTY_RESPONSE_RETRIES
+    OLLAMA_MAX_TOKENS = AI_MAX_OUTPUT_TOKENS
 
     # Toggle for "omni" (audio+vision capable) model input. On by default:
     # Gemini behind the current proxy transcribes wav/mp3; endpoints that
@@ -358,7 +409,7 @@ class Config:
     # These are the "context manager" brains — separate from the autonomy
     # tick loop so they can run on a different (e.g. cheaper/faster) model
     # than autonomy. Defaults fall back to the autonomy config, which in
-    # turn falls back to the main OLLAMA_* provider, so a fresh install
+    # turn falls back to the main AI_* provider, so a fresh install
     # with no AUX_* vars behaves exactly as before (all background agents
     # shared one endpoint).
     AUX_BASE_URL = os.getenv("AUX_BASE_URL", "").strip()
@@ -402,7 +453,7 @@ class Config:
     GPT_IMAGE_API_KEY = os.getenv("GPT_IMAGE_API_KEY", "")
 
     # hd_image: Gemini image model on the OpenAI-compatible endpoint. Blank
-    # base/key inherit the primary chat endpoint (OLLAMA_*), which is where
+    # base/key inherit the primary chat endpoint (AI_*), which is where
     # the image model lives anyway — one key, one host.
     #
     # Generation goes through /chat/completions rather than
@@ -433,7 +484,9 @@ class Config:
     # accepted as an alias because that is the name the docs always used.
     REM_ENABLED = _bool_env("REM_ENABLED", _bool_env("ENABLE_REM", False))
     FEATURE_REASONS["REM_ENABLED"] = (
-        "enabled in .env" if REM_ENABLED else "off by default (opt in with ENABLE_REM=true)"
+        "enabled in .env"
+        if REM_ENABLED
+        else "off by default (opt in with ENABLE_REM=true)"
     )
     REM_INTERVAL_SECONDS = _int_env("REM_INTERVAL_SECONDS", 600, min_value=10)
     REM_MAX_TURNS = _int_env("REM_MAX_TURNS", 3, min_value=0, max_value=10)
@@ -476,9 +529,9 @@ class Config:
     MAXWELL_EMAIL_FROM = (
         os.getenv("MAXWELL_EMAIL_FROM", "").strip() or MAXWELL_EMAIL_USER
     )
-    MAXWELL_EMAIL_FROM_NAME = os.getenv(
-        "MAXWELL_EMAIL_FROM_NAME", BOT_NAME
-    ).strip() or BOT_NAME
+    MAXWELL_EMAIL_FROM_NAME = (
+        os.getenv("MAXWELL_EMAIL_FROM_NAME", BOT_NAME).strip() or BOT_NAME
+    )
     # Senders whose mail is never filed as an inbox notice. Comma-separated;
     # a full address, or a leading-dot domain (".google.com") for it and its
     # subdomains. Empty by default: which machine mail matters is the
@@ -486,9 +539,7 @@ class Config:
     # MAILER-DAEMON bounce means something he sent did not arrive, and a
     # heuristic cannot tell those apart. The mail itself is untouched — it
     # stays on the server and the email_* tools still read it.
-    MAXWELL_EMAIL_IGNORE_SENDERS = os.getenv(
-        "MAXWELL_EMAIL_IGNORE_SENDERS", ""
-    ).strip()
+    MAXWELL_EMAIL_IGNORE_SENDERS = os.getenv("MAXWELL_EMAIL_IGNORE_SENDERS", "").strip()
 
     # Admin / owner allowlists. Re-exported here so Config is the single
     # source of truth; bot_tools.refresh_owner_ids() still does a runtime
@@ -515,7 +566,6 @@ class Config:
         ("ENABLE_EMAIL_TOOLS", "email tools"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_RAG", "RAG vector memory"),
-
         ("ENABLE_AUTONOMY", "autonomy engine"),
         ("REM_ENABLED", "REM dreaming pass"),
     )
@@ -548,17 +598,17 @@ class Config:
                 "MAXWELL_DEV_GUILD_IDS must contain at least one Discord guild ID "
                 "when MAXWELL_DEV_MODE=true."
             )
-        if not cls.OLLAMA_BASE_URL:
+        if not cls.AI_BASE_URL:
             raise ValueError(
-                "OLLAMA_BASE_URL is required — point it at any OpenAI-compatible "
+                "AI_BASE_URL is required — point it at any OpenAI-compatible "
                 "endpoint (local Ollama, OpenRouter, LM Studio, ...)."
             )
-        if not cls.OLLAMA_MODEL:
+        if not cls.AI_MODEL:
             raise ValueError(
-                "OLLAMA_MODEL is required — set the model name your endpoint serves."
+                "AI_MODEL is required — set the model name your endpoint serves."
             )
-        if cls.OLLAMA_MAX_TOKENS < 1:
-            raise ValueError("OLLAMA_MAX_TOKENS must be >= 1")
+        if cls.AI_MAX_OUTPUT_TOKENS < 1:
+            raise ValueError("AI_MAX_OUTPUT_TOKENS must be >= 1")
 
         # Soft warnings — these don't block startup but they WILL cause
         # runtime errors the first time someone hits the feature, which is

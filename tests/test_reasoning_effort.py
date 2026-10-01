@@ -1,11 +1,11 @@
 """Provider reasoning_effort passthrough."""
 
 import providers
-from providers import OllamaProvider, ProviderEndpoint
+from providers import OpenAICompatibleProvider, ProviderEndpoint
 
 
 def _primary(reasoning_effort=""):
-    p = OllamaProvider(
+    p = OpenAICompatibleProvider(
         "http://127.0.0.1:8317/v1",
         "grok-4.6",
         100,
@@ -32,7 +32,7 @@ def test_no_effort_by_default():
 
 
 def test_effort_not_sent_on_fallback_endpoint():
-    p = OllamaProvider(
+    p = OpenAICompatibleProvider(
         "http://127.0.0.1:8317/v1",
         "grok-4.6",
         100,
@@ -51,7 +51,7 @@ def test_effort_not_sent_on_fallback_endpoint():
 
 
 def test_fallback_reasoning_effort_in_payload():
-    p = OllamaProvider(
+    p = OpenAICompatibleProvider(
         "http://127.0.0.1:8317/v1",
         "grok-4.6",
         100,
@@ -84,6 +84,6 @@ def test_disable_reasoning_still_wins():
 
 def test_endpoint_field_defaults_empty():
     assert ProviderEndpoint("primary", "http://x/v1", "m").reasoning_effort == ""
-    assert providers.OllamaProvider(
+    assert providers.OpenAICompatibleProvider(
         "http://x/v1", "m", 10, 0.5
     ).reasoning_effort == ""

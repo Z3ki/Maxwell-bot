@@ -1,12 +1,44 @@
 """Tests for RAGMemoryManager (replaces old MemoryManager tests)."""
 import asyncio
 
+import pytest
+
 from rag_memory import MemoryRequester, RAGMemoryManager
+
+_managers = []
+
+
+@pytest.fixture(autouse=True)
+def _memory_lifecycle(monkeypatch):
+    """Storage tests own their managers and never contact a live embed API."""
+    _managers.clear()
+    original_init = RAGMemoryManager.__init__
+
+    def tracked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        _managers.append(self)
+
+    async def no_remote_embedding(self, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(RAGMemoryManager, "__init__", tracked_init)
+    monkeypatch.setattr(RAGMemoryManager, "_embed", no_remote_embedding)
+    yield
+    for manager in _managers:
+        manager._db.close()
+    _managers.clear()
 
 
 def _run(coro):
     """Run an async coroutine in a fresh event loop."""
-    return asyncio.run(coro)
+    async def managed():
+        try:
+            return await coro
+        finally:
+            for manager in _managers:
+                await manager.flush()
+
+    return asyncio.run(managed())
 
 
 def _requester(channel="chan1", user="123", guild="", *, is_dm=True, is_admin=False, public=False):

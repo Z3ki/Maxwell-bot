@@ -191,11 +191,11 @@ class HDImageGeneratorTool(Tool):
         cfg = self.bot.config
         base = (
             getattr(cfg, "GEMINI_IMAGE_BASE_URL", "")
-            or getattr(cfg, "OLLAMA_BASE_URL", "")
+            or getattr(cfg, "AI_BASE_URL", "")
             or ""
         ).rstrip("/")
         key = getattr(cfg, "GEMINI_IMAGE_API_KEY", "") or getattr(
-            cfg, "OLLAMA_API_KEY", ""
+            cfg, "AI_API_KEY", ""
         )
         model = getattr(cfg, "GEMINI_IMAGE_MODEL", "") or "gemini-3.1-flash-image"
         url = base if base.endswith("/chat/completions") else f"{base}/chat/completions"
@@ -314,7 +314,7 @@ class HDImageGeneratorTool(Tool):
 
         api_url, api_key, model = self._endpoint()
         if not api_url or api_url == "/chat/completions":
-            return "Error: HD image generation is not configured (no GEMINI_IMAGE_BASE_URL or OLLAMA_BASE_URL)"
+            return "Error: HD image generation is not configured (no GEMINI_IMAGE_BASE_URL or AI_BASE_URL)"
 
         # Normalize the image param: a single ref, a list, or a
         # comma/newline-separated string all mean the same thing.

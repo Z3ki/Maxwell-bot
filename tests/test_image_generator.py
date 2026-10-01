@@ -142,7 +142,7 @@ def test_pollinations_posts_image_bytes(monkeypatch):
 @pytest.mark.parametrize("forbidden", [False, True])
 def test_generated_images_record_confirmed_delivery(monkeypatch, hd, forbidden):
     bot = _tool().bot
-    bot.config.OLLAMA_BASE_URL = "https://example.invalid/v1"
+    bot.config.AI_BASE_URL = "https://example.invalid/v1"
     receipts = []
     bot._record_delivery = lambda origin, sent: receipts.append((origin, sent.id))
     message = _Message()

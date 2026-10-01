@@ -1,9 +1,10 @@
-"""Ollama AI Provider for Maxwell Bot"""
+"""OpenAI-compatible chat transport and compatibility helpers for Maxwell."""
 
 import asyncio
 import contextlib
 import copy
 import ipaddress
+from functools import wraps
 import json
 import logging
 import math
@@ -12,12 +13,34 @@ import re
 import socket
 import time
 from collections import deque
-from dataclasses import dataclass
 from typing import Any
 
 import random as _random
 
 import aiohttp
+
+from maxwell_core.providers.base import ChatProvider
+from maxwell_core.providers.models import (
+    BearerAuthentication,
+    CompletionMessage as _CompletionMessage,
+    ProviderAuthentication,
+    ProviderCapabilities,
+    ProviderConfig,
+    ProviderEndpoint,
+    ProviderPolicy,
+    ProviderResult,
+)
+from maxwell_core.providers.errors import (
+    ProviderError,
+    ProviderAuthenticationError,
+    ProviderEmptyResponseError,
+    ProviderInvalidRequestError,
+    ProviderRateLimitError,
+    ProviderRequestError,
+    ProviderUnavailableError,
+    ProviderMediaUnsupportedError,
+    ProviderUsageExhaustedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +56,12 @@ class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
         if literal is not None:
             if not literal.is_global:
                 raise OSError("provider host resolved to a non-public address")
-            addresses = [(socket.AF_INET6 if literal.version == 6 else socket.AF_INET, str(literal))]
+            addresses = [
+                (
+                    socket.AF_INET6 if literal.version == 6 else socket.AF_INET,
+                    str(literal),
+                )
+            ]
         else:
             loop = asyncio.get_running_loop()
             infos = await loop.getaddrinfo(
@@ -102,6 +130,7 @@ async def _read_json_response_limited(resp, limit: int) -> Any:
         return json.loads(raw.decode(charset))
     except (UnicodeError, LookupError, json.JSONDecodeError) as exc:
         raise RuntimeError("Provider returned invalid JSON") from exc
+
 
 # asyncio holds only a weak reference to a running task, so a bare
 # `create_task(...)` whose result nobody keeps can be garbage-collected
@@ -1123,7 +1152,7 @@ async def _read_sse_response(
 # steer traffic away from it for this long instead of retrying it in the same
 # request. This avoids hammering a shared upstream pool (e.g. OpenRouter's
 # pooled free keys) that is already rate-limiting us, which only makes the
-# limit worse. Override via OLLAMA_ENDPOINT_COOLDOWN_SECONDS.
+# limit worse. Override via AI_ENDPOINT_COOLDOWN_SECONDS.
 DEFAULT_ENDPOINT_COOLDOWN_SECONDS = 60.0
 # A provider can acknowledge a request with HTTP 200 and still emit no
 # assistant content or tool call. Keep ordinary retries small, but give this
@@ -1175,7 +1204,12 @@ def _reported_cost_usd(raw) -> float:
 def _normalize_llm_usage(raw) -> dict:
     """Map OpenAI / OpenRouter / Ollama usage blobs onto one shape."""
     if not isinstance(raw, dict):
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+        }
     prompt = _first_present_token_count(
         raw, "prompt_tokens", "input_tokens", "prompt_eval_count"
     )
@@ -1320,14 +1354,8 @@ def compute_llm_timing(
         ttft_ms = total_ms
     tail_ms = max(0.0, total_ms - ttft_ms)
     chunk_stream = False
-    if (
-        stream
-        and last_token_s is not None
-        and first_token_s is not None
-    ):
-        decode_span_ms = max(
-            0.0, (float(last_token_s) - float(first_token_s)) * 1000.0
-        )
+    if stream and last_token_s is not None and first_token_s is not None:
+        decode_span_ms = max(0.0, (float(last_token_s) - float(first_token_s)) * 1000.0)
         chunk_stream = decode_span_ms > 0
     else:
         decode_span_ms = 0.0
@@ -1396,11 +1424,7 @@ def format_timing_debug(
         window = rows[-8:]
         if len(window) > 1:
             ttfts = [float(r.get("ttft_ms") or 0) for r in window]
-            tpss = [
-                float(r["tps"])
-                for r in window
-                if r.get("tps") is not None
-            ]
+            tpss = [float(r["tps"]) for r in window if r.get("tps") is not None]
             lines.append(f"recent {len(window)}")
             if ttfts:
                 lines.append(
@@ -1416,8 +1440,7 @@ def format_timing_debug(
                     )
                 else:
                     lines.append(
-                        f"  tps n/a  "
-                        f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
+                        f"  tps n/a  (min {min(tpss):.1f} / max {max(tpss):.1f})"
                     )
             for rec in reversed(window[:-1][:5]):
                 tps = rec.get("tps")
@@ -1475,8 +1498,7 @@ def _weighted_tps(records) -> float | None:
             try:
                 gen_ms = max(
                     0.0,
-                    float(rec.get("total_ms") or 0)
-                    - float(rec.get("ttft_ms") or 0),
+                    float(rec.get("total_ms") or 0) - float(rec.get("ttft_ms") or 0),
                 )
             except (TypeError, ValueError):
                 continue
@@ -1545,6 +1567,7 @@ def _format_timing_row(rec: dict, indent: str = "") -> list[str]:
         ),
     ]
 
+
 USAGE_EXHAUSTED_MESSAGE = (
     "The api is down cuz yall drained the usage and im not rich so wait like 2 hours"
 )
@@ -1593,68 +1616,6 @@ MIME_MAP = {
     ".aac": "audio/aac",
     ".wma": "audio/x-ms-wma",
 }
-
-
-class ProviderUsageExhaustedError(RuntimeError):
-    """Raised when the upstream provider is out of quota, credits, or cooldown capacity."""
-
-    user_message = USAGE_EXHAUSTED_MESSAGE
-
-
-class ProviderRequestError(RuntimeError):
-    """A deterministic non-2xx that every available endpoint already rejected.
-
-    Retrying with the same payload reproduces it exactly, so the retry loop
-    re-raises this instead of sleeping through its remaining attempts.
-    """
-
-
-class ProviderEmptyResponseError(RuntimeError):
-    """Every provider attempt completed without a usable assistant response."""
-
-    user_message = "The model returned an empty response after retries. Please try again in a moment."
-
-
-class _CompletionMessage(dict):
-    """Assistant payload with usage kept outside its wire-format keys."""
-
-    def __init__(self, message: dict, usage: dict):
-        super().__init__(message)
-        self.usage = dict(usage)
-
-
-class ProviderResult(str):
-    """A ``str`` subclass carrying per-call ``tool_calls`` / ``usage``.
-
-    Behaves exactly like a ``str`` everywhere a string is expected (f-strings,
-    ``len()``, ``or ""``, ``str()``, slicing, etc.), but also exposes the
-    native tool calls and token usage for *this specific call* so the caller
-    does not have to read shared provider instance state.
-
-    Reading ``provider._last_tool_calls`` / ``provider._last_usage`` after an
-    ``await`` was racy: with ``ai_concurrency > 1`` (or background ticks sharing
-    the same provider), a concurrent ``generate_response`` could overwrite the
-    shared state between the call and the consume, causing one channel to
-    execute another channel's tool calls. Attaching the values to the returned
-    object makes the handoff per-call and race-free.
-    """
-
-    __slots__ = ("tool_calls", "usage", "assistant_message")
-
-    def __new__(
-        cls,
-        content,
-        tool_calls: list | None = None,
-        usage: dict | None = None,
-        assistant_message: dict | None = None,
-    ):
-        inst = super().__new__(
-            cls, content if isinstance(content, str) else str(content or "")
-        )
-        inst.tool_calls = list(tool_calls) if tool_calls else []
-        inst.usage = dict(usage) if usage else {}
-        inst.assistant_message = assistant_message
-        return inst
 
 
 def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
@@ -1902,16 +1863,6 @@ def _strip_media_parts(chat_messages: list[dict]) -> bool:
     return changed
 
 
-@dataclass(frozen=True)
-class ProviderEndpoint:
-    name: str
-    base_url: str
-    model: str
-    api_key: str = ""
-    disable_reasoning: bool = False
-    reasoning_effort: str = ""
-
-
 def normalize_base_url(base_url: str) -> str:
     """Normalize an OpenAI-compatible base URL to the API root.
 
@@ -1933,8 +1884,31 @@ def normalize_base_url(base_url: str) -> str:
     return f"{base}/v1"
 
 
-class OllamaProvider:
-    """OpenAI-compatible LLM Provider with multimodal support using /v1/chat/completions"""
+def _bounded_provider_request(method):
+    """Enforce a policy deadline across initialization, retries and cleanup."""
+
+    @wraps(method)
+    async def bounded(self, *args, **kwargs):
+        if self.policy.max_request_seconds is None:
+            return await method(self, *args, **kwargs)
+        try:
+            async with asyncio.timeout(self.policy.max_request_seconds):
+                return await method(self, *args, **kwargs)
+        except TimeoutError:
+            raise ProviderUnavailableError(
+                "Provider request exceeded its time limit"
+            ) from None
+
+    return bounded
+
+
+class OpenAICompatibleProvider(ChatProvider):
+    """OpenAI-compatible chat client.
+
+    New code constructs one coherent upstream per client via the factory.
+    Multi-endpoint constructor arguments and _last_* attributes are deprecated
+    compatibility paths for integrations predating ProviderRouter.
+    """
 
     def __init__(
         self,
@@ -1957,7 +1931,27 @@ class OllamaProvider:
         vision_disable_reasoning: bool = True,
         empty_response_retries: int | None = None,
         reasoning_effort: str = "",
+        policy: ProviderPolicy | None = None,
+        authentication: ProviderAuthentication | None = None,
+        config: ProviderConfig | None = None,
     ):
+        self._policy = policy or ProviderPolicy()
+        self.authentication = authentication or BearerAuthentication(api_key.strip())
+        self.config = config
+        self.name = config.name if config else "primary"
+        self.capabilities = (
+            config.capabilities
+            if config
+            else ProviderCapabilities(
+                vision=True,
+                audio=enable_audio_input,
+                reasoning=True,
+                model_discovery=True,
+            )
+        )
+        if not self.policy.allow_provider_fallback and (fallback_model or vision_model):
+            raise ValueError("Provider policy forbids alternate credentials/routes")
+        self._validate_endpoint(base_url)
         self.base_url = normalize_base_url(base_url)
         self.model = model
         self.reasoning_effort = (reasoning_effort or "").strip()
@@ -1969,8 +1963,11 @@ class OllamaProvider:
             try:
                 empty_response_retries = int(
                     os.getenv(
-                        "OLLAMA_EMPTY_RESPONSE_RETRIES",
-                        str(DEFAULT_EMPTY_RESPONSE_RETRIES),
+                        "AI_EMPTY_RESPONSE_RETRIES",
+                        os.getenv(
+                            "OLLAMA_EMPTY_RESPONSE_RETRIES",
+                            str(DEFAULT_EMPTY_RESPONSE_RETRIES),
+                        ),
                     )
                     or DEFAULT_EMPTY_RESPONSE_RETRIES
                 )
@@ -2014,6 +2011,7 @@ class OllamaProvider:
         self._session = None
         self._session_lock = asyncio.Lock()
         self.available = False
+        # Deprecated snapshots for diagnostics/legacy callers; never inference inputs.
         self._last_usage: dict = {}
         self._last_tool_calls: list = []
         self._last_assistant_message: dict | None = None
@@ -2043,41 +2041,94 @@ class OllamaProvider:
         try:
             self._cooldown_seconds = float(
                 os.getenv(
-                    "OLLAMA_ENDPOINT_COOLDOWN_SECONDS",
-                    str(DEFAULT_ENDPOINT_COOLDOWN_SECONDS),
+                    "AI_ENDPOINT_COOLDOWN_SECONDS",
+                    os.getenv(
+                        "OLLAMA_ENDPOINT_COOLDOWN_SECONDS",
+                        str(DEFAULT_ENDPOINT_COOLDOWN_SECONDS),
+                    ),
                 )
                 or DEFAULT_ENDPOINT_COOLDOWN_SECONDS
             )
         except (TypeError, ValueError):
             self._cooldown_seconds = DEFAULT_ENDPOINT_COOLDOWN_SECONDS
 
-    def _display_error(self, detail: Any) -> str:
-        """Never copy BYOK upstream bodies into logs or surfaced exceptions."""
-        if getattr(self, "_byok_sensitive", False):
-            return "provider rejected or could not complete the request"
-        return str(detail or "")
+    @property
+    def policy(self) -> ProviderPolicy:
+        return self._policy
 
-    def _redact_provider_payload(self, value: Any) -> Any:
+    def _validate_endpoint(self, base_url: str) -> None:
+        if not self.policy.public_network_only:
+            return
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError(
+                "Public-only providers require HTTPS without URL credentials"
+            )
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            return
+        if not address.is_global:
+            raise ValueError("Provider address must be public")
+
+    async def _auth_headers(self, endpoint: ProviderEndpoint) -> dict[str, str]:
+        headers = self._headers(endpoint)
+        if endpoint.name == "primary":
+            # The injectable source is authoritative, including no auth.
+            headers.pop("Authorization", None)
+            try:
+                headers.update(await self.authentication.headers())
+            except Exception:
+                raise ProviderAuthenticationError(
+                    "Unable to obtain provider credentials"
+                ) from None
+        return headers
+
+    def _display_error(self, detail: Any, secrets: tuple[str, ...] = ()) -> str:
+        """Never copy BYOK upstream bodies into logs or surfaced exceptions."""
+        if self.policy.sensitive_credentials:
+            return "provider rejected or could not complete the request"
+        text = str(detail or "")
+        for secret in (*secrets, self.api_key):
+            if secret:
+                text = text.replace(secret, "[redacted]")
+        return text
+
+    def _redact_provider_payload(
+        self, value: Any, secrets: tuple[str, ...] = ()
+    ) -> Any:
         """Remove a BYOK credential if a malicious upstream echoes it back."""
-        if not getattr(self, "_byok_sensitive", False) or not self.api_key:
+        if not self.policy.sensitive_credentials:
             return value
         if isinstance(value, str):
-            return value.replace(self.api_key, "[redacted]")
+            for secret in secrets or (self.api_key,):
+                if secret:
+                    value = value.replace(secret, "[redacted]")
+            return value
         if isinstance(value, list):
-            return [self._redact_provider_payload(item) for item in value]
+            return [self._redact_provider_payload(item, secrets) for item in value]
         if isinstance(value, dict):
             return {
-                self._redact_provider_payload(key): self._redact_provider_payload(item)
+                self._redact_provider_payload(
+                    key, secrets
+                ): self._redact_provider_payload(item, secrets)
                 for key, item in value.items()
             }
         return value
 
     def _response_limit(self) -> int:
         try:
-            configured = int(getattr(self, "_byok_response_limit", 10 * 1024 * 1024))
+            configured = int(self.policy.max_response_bytes or 10 * 1024 * 1024)
         except (TypeError, ValueError):
             configured = 10 * 1024 * 1024
-        return max(64 * 1024, min(configured, 10 * 1024 * 1024))
+        return max(1, min(configured, 10 * 1024 * 1024))
 
     def _headers(self, endpoint: ProviderEndpoint = None) -> dict[str, str]:
         api_key = self.api_key if endpoint is None else endpoint.api_key
@@ -2091,7 +2142,8 @@ class OllamaProvider:
         if "opencode.ai" in base.lower():
             session = (
                 os.getenv("OPENCODE_SESSION")
-                or os.getenv("OLLAMA_OPENCODE_SESSION")
+                or os.getenv("AI_OPENCODE_SESSION")
+                or os.getenv("OLLAMA_OPENCODE_SESSION")  # deprecated alias
                 or "maxwell"
             ).strip()
             if session:
@@ -2335,7 +2387,7 @@ class OllamaProvider:
                     keepalive_timeout=30,
                     resolver=(
                         _PublicOnlyResolver()
-                        if getattr(self, "_byok_public_only", False)
+                        if self.policy.public_network_only
                         else None
                     ),
                 )
@@ -2356,8 +2408,8 @@ class OllamaProvider:
                 async with session.get(
                     f"{endpoint.base_url}/models",
                     timeout=aiohttp.ClientTimeout(total=10),
-                    headers=self._headers(endpoint),
-                    allow_redirects=False,
+                    headers=await self._auth_headers(endpoint),
+                    allow_redirects=self.policy.allow_redirects,
                 ) as resp:
                     if resp.status == 200:
                         initialized = True
@@ -2370,11 +2422,12 @@ class OllamaProvider:
                         )
             except Exception as e:
                 logger.error(
-                    f"Provider endpoint {endpoint.name} initialization failed: {e}"
+                    f"Provider endpoint {endpoint.name} initialization failed: {self._display_error(e)}"
                 )
         self.available = initialized
         return initialized
 
+    @_bounded_provider_request
     async def generate_response(
         self,
         messages: list[dict],
@@ -2387,14 +2440,11 @@ class OllamaProvider:
         prefer_fallback: bool = False,
         request_id: str = "",
         **kwargs,
-    ) -> str:
+    ) -> ProviderResult:
         """Generate response. images is legacy b64 list, media is list of {b64, mime_type}.
 
-        When the model returns native OpenAI-style ``tool_calls``, content may be
-        empty. Those calls are stored on ``self._last_tool_calls`` (raw provider
-        format) and ``self._last_assistant_message`` for the orchestration loop.
-        Callers that pass ``tools=`` must check ``_last_tool_calls`` before treating
-        empty content as a failure.
+        Native tool calls, usage, model and timing belong to the returned
+        ProviderResult. Deprecated _last_* attributes are diagnostics only.
 
         If ``on_tool_call_name`` is provided, it's forwarded to the streaming
         layer so the caller gets a callback the moment a tool call name arrives
@@ -2450,7 +2500,7 @@ class OllamaProvider:
         tool_calls = tool_calls if isinstance(tool_calls, list) else []
         # Response cleanup may yield after generation, so shared _last_usage
         # can already belong to another request by the time this await returns.
-        usage = dict(getattr(message, "usage", self._last_usage) or {})
+        usage = dict(getattr(message, "usage", {}) or {})
         # Keep the shared stash for backward-compat callers / tests, but callers
         # should prefer the ProviderResult attributes (race-free).
         self._last_tool_calls = tool_calls
@@ -2467,14 +2517,18 @@ class OllamaProvider:
             content = "".join(parts)
         content = content if isinstance(content, str) else str(content or "")
         if not content and not tool_calls:
-            raise RuntimeError("Empty response from provider")
+            raise ProviderEmptyResponseError("Empty response from provider")
         return ProviderResult(
             content,
             tool_calls=tool_calls,
             usage=usage,
             assistant_message=message,
+            model=getattr(message, "model", None),
+            provider=getattr(message, "provider", self.name),
+            timing=getattr(message, "timing", {}),
         )
 
+    @_bounded_provider_request
     async def generate_chat_completion(
         self,
         messages: list[dict],
@@ -2492,6 +2546,10 @@ class OllamaProvider:
         custom_tool_calls: bool = False,
         prefer_fallback: bool = False,
         request_id: str = "",
+        retry_attempts: int | None = None,
+        empty_response_retries: int | None = None,
+        stream: bool | None = None,
+        allow_media_degrade: bool = True,
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools.
 
@@ -2499,21 +2557,39 @@ class OllamaProvider:
         first time a tool_call delta with a function name arrives in the SSE
         stream. This lets callers update a live progress message mid-generation.
         """
-        byok_request = bool(getattr(self, "_byok_sensitive", False))
+        retry_budget = (
+            self.retry_attempts
+            if retry_attempts is None
+            else max(1, min(retry_attempts, 10))
+        )
+        empty_budget = (
+            self.empty_response_retries
+            if empty_response_retries is None
+            else max(0, min(empty_response_retries, 5))
+        )
+        byok_request = bool(self.policy.sensitive_credentials)
+        if self.policy.max_request_seconds is not None:
+            timeout = min(timeout, self.policy.max_request_seconds)
+        if self.policy.max_output_tokens is not None:
+            max_tokens = min(
+                max_tokens or self.max_tokens, self.policy.max_output_tokens
+            )
         if byok_request:
             try:
                 timeout = max(1, min(int(timeout), 300))
             except (TypeError, ValueError):
                 timeout = 120
             try:
-                max_tokens = max(1, min(int(max_tokens or self.max_tokens or 4096), 4096))
+                max_tokens = max(
+                    1, min(int(max_tokens or self.max_tokens or 4096), 4096)
+                )
             except (TypeError, ValueError):
                 max_tokens = 4096
         if not self.available:
             logger.warning("Provider marked unavailable; retrying initialization")
             await self.initialize()
             if not self.available:
-                raise RuntimeError("Provider not available")
+                raise ProviderUnavailableError("Provider not available")
 
         chat_messages = copy.deepcopy(messages)
 
@@ -2544,7 +2620,8 @@ class OllamaProvider:
                 content = msg.get("content") or ""
                 if isinstance(content, list):
                     content = "\n".join(
-                        str(part.get("text") or "") for part in content
+                        str(part.get("text") or "")
+                        for part in content
                         if isinstance(part, dict) and part.get("type") == "text"
                     )
                 if msg["role"] == "user" and (
@@ -2565,7 +2642,8 @@ class OllamaProvider:
             if target is not None:
                 existing_content = target.get("content") or ""
                 parts = (
-                    list(existing_content) if isinstance(existing_content, list)
+                    list(existing_content)
+                    if isinstance(existing_content, list)
                     else [{"type": "text", "text": existing_content}]
                 )
                 attached = 0
@@ -2610,9 +2688,12 @@ class OllamaProvider:
         last_error = None
         last_usage_error = None
         has_media = any(
-            isinstance(part, dict) and part.get("type") in {"image_url", "input_audio", "video_url"}
+            isinstance(part, dict)
+            and part.get("type") in {"image_url", "input_audio", "video_url"}
             for msg in chat_messages
-            for part in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+            for part in (
+                msg.get("content") if isinstance(msg.get("content"), list) else []
+            )
         )
         # Endpoints that rejected this call's media (text-only models 400 on
         # image_url; OpenRouter 404s on input audio). Steer retries away so a
@@ -2623,9 +2704,9 @@ class OllamaProvider:
         # the error, so they're excluded from the rest of this call.
         dead: set[str] = set()
         max_attempts = (
-            min(self.retry_attempts, 2)
+            min(retry_budget, 2)
             if fast_fallback and len(self._endpoints) > 1
-            else self.retry_attempts
+            else retry_budget
         )
         # NOT a `for attempt in range(1, max_attempts + 1)`: several branches
         # below extend `max_attempts` mid-flight so a deterministic 4xx can be
@@ -2642,9 +2723,7 @@ class OllamaProvider:
         empty_response_recoveries = 0
         # Leave room for the explicitly configured empty-response recoveries in
         # addition to the bounded deterministic failover extensions below.
-        attempt_ceiling = (
-            max_attempts + 2 * len(self._endpoints) + 2 + self.empty_response_retries
-        )
+        attempt_ceiling = max_attempts + 2 * len(self._endpoints) + 2 + empty_budget
         recovery_endpoint: ProviderEndpoint | None = None
         while attempt < min(max_attempts, attempt_ceiling):
             attempt += 1
@@ -2679,6 +2758,10 @@ class OllamaProvider:
                 temperature=temperature,
                 disable_reasoning=disable_reasoning,
             )
+            if stream is not None:
+                data["stream"] = bool(stream)
+                if not stream:
+                    data.pop("stream_options", None)
             if byok_request:
                 # Avoid showing any response fragment in progress UI before
                 # the complete body has passed the credential scrubber.
@@ -2719,18 +2802,24 @@ class OllamaProvider:
                 ),
                 len(data.get("tools") or []),
             )
+            credential_secrets: tuple[str, ...] = ()
             try:
+                headers = await self._auth_headers(endpoint)
+                credential_secrets = tuple(
+                    value.removeprefix("Bearer ") for value in headers.values() if value
+                )
                 async with session.post(
                     f"{endpoint.base_url}/chat/completions",
                     json=data,
                     timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
-                    headers=self._headers(endpoint),
-                    allow_redirects=False,
+                    headers=headers,
+                    allow_redirects=self.policy.allow_redirects,
                 ) as resp:
                     headers_ms = (time.perf_counter() - request_start) * 1000
                     if resp.status == 503:
+                        raw_error_text = await _read_response_text_limited(resp)
                         error_text = self._display_error(
-                            await _read_response_text_limited(resp)
+                            raw_error_text, credential_secrets
                         )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
@@ -2749,12 +2838,13 @@ class OllamaProvider:
                             prefer_fallback=prefer_fallback,
                         ):
                             continue
-                        raise RuntimeError(
+                        raise ProviderUnavailableError(
                             f"Provider overloaded after retries: {error_text[:200]}"
                         )
                     if resp.status == 429:
+                        raw_error_text = await _read_response_text_limited(resp)
                         error_text = self._display_error(
-                            await _read_response_text_limited(resp)
+                            raw_error_text, credential_secrets
                         )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
@@ -2764,7 +2854,7 @@ class OllamaProvider:
                             len(error_text),
                         )
                         self._cool_endpoint(endpoint.name)
-                        if _is_usage_exhausted_error(resp.status, error_text):
+                        if _is_usage_exhausted_error(resp.status, raw_error_text):
                             last_usage_error = ProviderUsageExhaustedError(
                                 f"Provider {endpoint.name} usage exhausted: {error_text[:200]}"
                             )
@@ -2791,12 +2881,13 @@ class OllamaProvider:
                             prefer_fallback=prefer_fallback,
                         ):
                             continue
-                        raise RuntimeError(
+                        raise ProviderRateLimitError(
                             f"Provider rate limited after retries: {error_text[:200]}"
                         )
                     if resp.status != 200:
+                        raw_error_text = await _read_response_text_limited(resp)
                         error_text = self._display_error(
-                            await _read_response_text_limited(resp)
+                            raw_error_text, credential_secrets
                         )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s body=%s",
@@ -2806,6 +2897,14 @@ class OllamaProvider:
                             len(error_text),
                             error_text[:200],
                         )
+                        if (
+                            has_media
+                            and not allow_media_degrade
+                            and _is_media_unsupported_error(resp.status, error_text)
+                        ):
+                            raise ProviderMediaUnsupportedError(
+                                "Provider cannot accept this media"
+                            )
                         # Text-only models 400 on image_url/video_url; some
                         # fallbacks 404 on input audio. Mark broken and retry a
                         # media-capable endpoint (typically vision / primary).
@@ -2863,8 +2962,9 @@ class OllamaProvider:
                                 prefer_fallback=prefer_fallback,
                             ):
                                 continue
-                            raise RuntimeError(
-                                f"Provider {endpoint.name} degraded and no fallback available: {error_text[:200]}"
+                            raise ProviderUnavailableError(
+                                f"Provider {endpoint.name} degraded and no fallback available: {error_text[:200]}",
+                                cooldown=True,
                             )
                         # Region / geo blocks (DeepSeek V4 Flash China opt-in)
                         # are not transient. Don't burn a 2s retry on the same
@@ -2885,7 +2985,7 @@ class OllamaProvider:
                                 prefer_fallback=prefer_fallback,
                             ):
                                 continue
-                            raise RuntimeError(
+                            raise ProviderAuthenticationError(
                                 f"Provider {endpoint.name} 403 and no fallback available: {error_text[:200]}"
                             )
                         # Content-policy prompt blocks (Gemini "sensitive words
@@ -2914,9 +3014,10 @@ class OllamaProvider:
                                 prefer_fallback=prefer_fallback,
                             ):
                                 continue
-                            raise RuntimeError(
+                            raise ProviderUnavailableError(
                                 f"Provider {endpoint.name} blocked this prompt on content "
-                                f"policy and no fallback endpoint was available"
+                                f"policy and no fallback endpoint was available",
+                                cooldown=True,
                             )
                         # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
                         if (
@@ -3068,7 +3169,14 @@ class OllamaProvider:
                                 alternatives[0].name,
                             )
                             continue
-                        raise ProviderRequestError(
+                        error_class = (
+                            ProviderAuthenticationError
+                            if resp.status in {401, 403}
+                            else ProviderInvalidRequestError
+                            if resp.status == 400
+                            else ProviderRequestError
+                        )
+                        raise error_class(
                             f"Provider API error: {resp.status} - {error_text}"
                         )
 
@@ -3082,7 +3190,9 @@ class OllamaProvider:
                             on_tool_call_name=on_tool_call_name,
                             on_token=on_token,
                             custom_tool_calls=custom_tool_calls,
-                            max_bytes=self._response_limit() if byok_request else None,
+                            max_bytes=self._response_limit()
+                            if self.policy.max_response_bytes
+                            else None,
                         )
                         ended_at = time.perf_counter()
                         result = {
@@ -3100,13 +3210,15 @@ class OllamaProvider:
                             await _read_json_response_limited(
                                 resp, self._response_limit()
                             )
-                            if byok_request
+                            if byok_request or self.policy.max_response_bytes
                             else await resp.json()
                         )
                         ended_at = time.perf_counter()
                         json_ms = (ended_at - request_start) * 1000
                     if byok_request:
-                        result = self._redact_provider_payload(result)
+                        result = self._redact_provider_payload(
+                            result, credential_secrets
+                        )
                     if not isinstance(result, dict):
                         result_preview = (
                             "[redacted]"
@@ -3157,9 +3269,7 @@ class OllamaProvider:
                             logger.warning(
                                 "Provider %s also included error in body: %s",
                                 endpoint.name,
-                                "[redacted]"
-                                if byok_request
-                                else str(err_obj)[:300],
+                                "[redacted]" if byok_request else str(err_obj)[:300],
                             )
                             upstream_code = (
                                 err_obj.get("code", "")
@@ -3241,9 +3351,10 @@ class OllamaProvider:
                             prefer_fallback=prefer_fallback,
                         ):
                             continue
-                        raise RuntimeError(
+                        raise ProviderUnavailableError(
                             "Prompt was blocked by the provider's content policy and "
-                            "no fallback endpoint was available"
+                            "no fallback endpoint was available",
+                            cooldown=True,
                         )
                     if not content and not message.get("tool_calls"):
                         # Some providers return choices with a message but blank content (e.g. refusals, reasoning-only, or bugs).
@@ -3265,7 +3376,7 @@ class OllamaProvider:
                             prefer_fallback=prefer_fallback,
                         ):
                             continue
-                        if empty_response_recoveries < self.empty_response_retries:
+                        if empty_response_recoveries < empty_budget:
                             empty_response_recoveries += 1
                             max_attempts = min(
                                 attempt_ceiling, max(max_attempts, attempt + 1)
@@ -3309,7 +3420,7 @@ class OllamaProvider:
                         raise ProviderEmptyResponseError("Empty response from provider")
 
                     usage = _normalize_llm_usage(result.get("usage", {}))
-                    self._last_usage = {
+                    request_usage = {
                         "prompt_tokens": usage["prompt_tokens"],
                         "completion_tokens": usage["completion_tokens"],
                         "total_tokens": usage["total_tokens"],
@@ -3320,8 +3431,8 @@ class OllamaProvider:
                         last_token_s=last_token_s,
                         ended_at=ended_at,
                         headers_ms=headers_ms,
-                        usage=self._last_usage,
-                        endpoint=endpoint.name,
+                        usage=request_usage,
+                        endpoint=(endpoint.name if len(self._endpoints) > 1 else self.name),
                         model=str(data.get("model") or ""),
                         stream=bool(data.get("stream")),
                         content_chars=len(content or ""),
@@ -3334,7 +3445,8 @@ class OllamaProvider:
                         ),
                         tool_call_payloads=message.get("tool_calls") or [],
                     )
-                    self._last_timing = timing
+                    self._last_usage = request_usage  # deprecated diagnostics only
+                    self._last_timing = timing  # deprecated diagnostics only
                     self._timing_history.append(timing)
                     # Healthy response: this endpoint is no longer rate-limited.
                     self._endpoint_cooldown.pop(endpoint.name, None)
@@ -3350,9 +3462,17 @@ class OllamaProvider:
                         timing.get("tps"),
                         len(content or ""),
                         len(message.get("tool_calls") or []),
-                        self._last_usage.get("total_tokens", 0),
+                        request_usage.get("total_tokens", 0),
                     )
-                    return _CompletionMessage(message, usage)
+                    return _CompletionMessage(
+                        message,
+                        usage,
+                        model=str(data.get("model") or ""),
+                        provider=endpoint.name
+                        if len(self._endpoints) > 1
+                        else self.name,
+                        timing=timing,
+                    )
             except asyncio.TimeoutError:
                 logger.warning(
                     "Provider timing timeout request_id=%s endpoint=%s elapsed_ms=%.1f timeout=%s",
@@ -3371,7 +3491,7 @@ class OllamaProvider:
                     prefer_fallback=prefer_fallback,
                 ):
                     continue
-                raise RuntimeError(
+                raise ProviderUnavailableError(
                     f"Provider request timed out after {timeout}s"
                 ) from asyncio.TimeoutError
             except ProviderUsageExhaustedError:
@@ -3384,30 +3504,36 @@ class OllamaProvider:
                 if await self._retry_after_attempt(
                     attempt,
                     endpoint,
-                    f"Provider {endpoint.name} error: {e}",
+                    f"Provider {endpoint.name} error: {self._display_error(e, credential_secrets)}",
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
                     has_media=has_media,
                     prefer_fallback=prefer_fallback,
                 ):
                     continue
-                raise
+                if isinstance(e, ProviderError):
+                    raise
+                raise ProviderUnavailableError(
+                    self._display_error(e, credential_secrets)
+                ) from None
             except Exception as e:
                 last_error = e
                 if await self._retry_after_attempt(
                     attempt,
                     endpoint,
-                    f"Provider {endpoint.name} error: {e}",
+                    f"Provider {endpoint.name} error: {self._display_error(e, credential_secrets)}",
                     max_attempts=max_attempts,
                     fast_fallback=fast_fallback,
                     has_media=has_media,
                     prefer_fallback=prefer_fallback,
                 ):
                     continue
-                raise RuntimeError(f"Provider call failed: {last_error}") from e
+                raise ProviderUnavailableError(
+                    f"Provider call failed: {self._display_error(last_error, credential_secrets)}"
+                ) from None
         if last_usage_error:
             raise last_usage_error
-        raise RuntimeError("Provider call failed after retries")
+        raise ProviderUnavailableError("Provider call failed after retries")
 
     async def _retry_after_attempt(
         self,
@@ -3443,3 +3569,7 @@ class OllamaProvider:
             )
             await asyncio.sleep(_random.uniform(0.05, 0.25))
         return True
+
+
+# Deprecated import alias. New integrations must use OpenAICompatibleProvider.
+OllamaProvider = OpenAICompatibleProvider

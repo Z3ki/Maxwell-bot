@@ -64,7 +64,7 @@ Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_VERSION, MAXWELL_REF,
   MAXWELL_BRANCH (development snapshots only),
   MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
-  DISCORD_BOT_TOKEN, AI_API_URL, AI_MODEL, AI_API_KEY,
+  DISCORD_BOT_TOKEN, AI_BASE_URL, AI_MODEL, AI_API_KEY (AI_API_URL alias accepted),
   OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,
   BOT_NAME, CREATOR_NAME, CREATOR_ID, COMMAND_PREFIX
@@ -361,7 +361,7 @@ configure_env() {
   if [ -f .env ]; then
     defaults_file=$(mktemp)
     if ! python3 scripts/env_defaults.py .env \
-      DISCORD_BOT_TOKEN DISCORD_TOKEN AI_API_URL AI_MODEL AI_API_KEY \
+      DISCORD_BOT_TOKEN DISCORD_TOKEN AI_BASE_URL AI_API_URL AI_MODEL AI_API_KEY \
       OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
       BOT_NAME CREATOR_NAME CREATOR_ID MAXWELL_OWNER_IDS COMMAND_PREFIX \
       MAXWELL_ADMIN_USER MAXWELL_ADMIN_PASSWORD ENABLE_AUTONOMY ENABLE_REM REM_ENABLED ENABLE_SHELL \
@@ -387,10 +387,10 @@ configure_env() {
   if [ -n "$bot_token" ]; then set_env_value DISCORD_BOT_TOKEN "$bot_token"; ok "Discord bot token saved"; else warn "DISCORD_BOT_TOKEN left blank; set it in .env before starting."; fi
 
   printf '\n%sStep 2/5: LLM provider%s\n' "$BOLD" "$RESET"
-  base_default="${AI_API_URL:-${OLLAMA_BASE_URL:-http://localhost:11434}}"
+  base_default="${AI_BASE_URL:-${AI_API_URL:-${OLLAMA_BASE_URL:-http://localhost:11434}}}"
   model_default="${AI_MODEL:-${OLLAMA_MODEL:-qwen3:8b}}"
-  api_key_default="${AI_API_KEY:-${OLLAMA_API_KEY:-}}"
-  if [ "$NONINTERACTIVE" != "1" ] && [ -z "${AI_API_URL:-}" ] && [ -z "${OLLAMA_BASE_URL:-}" ] && [ -z "${AI_MODEL:-}" ] && [ -z "${OLLAMA_MODEL:-}" ]; then
+  api_key_default="${AI_API_KEY-${OLLAMA_API_KEY-}}"
+  if [ "$NONINTERACTIVE" != "1" ] && [ -z "${AI_BASE_URL:-}" ] && [ -z "${AI_API_URL:-}" ] && [ -z "${OLLAMA_BASE_URL:-}" ] && [ -z "${AI_MODEL:-}" ] && [ -z "${OLLAMA_MODEL:-}" ]; then
     printf '  Choose an OpenAI-compatible provider:\n' > "$TTY"
     printf '    1) Local Ollama (http://localhost:11434)\n    2) OpenRouter (https://openrouter.ai/api/v1, key from openrouter.ai/keys, free model moonshotai/kimi-k2.6:free)\n    3) OpenAI (https://api.openai.com/v1)\n    4) LM Studio (http://localhost:1234/v1)\n    5) Custom OpenAI-compatible URL\n' > "$TTY"
     provider=$(prompt "Provider" "1")
@@ -422,7 +422,8 @@ configure_env() {
   base=$(prompt "AI API URL" "$base_default")
   model=$(prompt "Model name" "$model_default")
   key=$(prompt_secret "API key (blank for local providers)" "$api_key_default")
-  set_env_value AI_API_URL "$base"
+  set_env_value AI_BASE_URL "$base"
+  set_env_value AI_API_URL "$base" # deprecated alias for older installers
   set_env_value OLLAMA_BASE_URL "$base"
   if [ -n "$model" ]; then
     set_env_value AI_MODEL "$model"
@@ -616,7 +617,7 @@ final_summary() {
   cat <<EOF
   Install path: $(pwd -P)
   Maxwell runs in Docker, not on the host Python.
-  Primary AI settings: AI_API_URL, AI_MODEL, AI_API_KEY (OLLAMA_* aliases are kept).
+  Primary AI settings: AI_BASE_URL, AI_MODEL, AI_API_KEY (OLLAMA_* aliases are kept).
 
   Start:     cd $(pwd -P) && ./run.sh -d
              (or: docker compose -f $compose up -d)

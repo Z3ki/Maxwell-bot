@@ -108,6 +108,32 @@ def _state(interaction: _Interaction, *, age: float = 0.0):
     return state
 
 
+def test_send_message_does_not_create_or_escalate_interaction_progress():
+    async def run():
+        interaction = _Interaction(901)
+        state = _state(interaction)
+        await mod._note_interaction_tool(state, "send_message")
+        await mod._note_interaction_tool(state, " SEND_MESSAGE ")
+        assert state.tool_calls == []
+        assert state.escalated is False
+        assert interaction.edits == []
+        await mod._note_interaction_tool(state, "web_search")
+        state.tool_status_last_edit -= 2.0
+        await mod._note_interaction_tool(state, "send_message")
+        await mod._flush_tool_status(state)
+        assert state.tool_calls == ["web_search"]
+        assert interaction.original.content == "Maxwell is using: `web_search`"
+        await mod._clear_working_status(state)
+    asyncio.run(run())
+
+
+def test_interaction_progress_renderer_filters_hidden_tools_defensively():
+    assert mod._tool_status_text(["send_message"]) == "working on it…"
+    assert mod._tool_status_text(["web_search", "send_message", "fetch_url"]) == (
+        "Maxwell is using: `web_search`, `fetch_url`"
+    )
+
+
 def test_fast_answer_uses_original_interaction():
     async def run():
         mod._patch_session()

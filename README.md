@@ -20,7 +20,7 @@ The easy install uses provider-neutral names:
 
 | Variable | Purpose |
 |---|---|
-| `AI_API_URL` | OpenAI-compatible API base URL |
+| `AI_BASE_URL` | OpenAI-compatible API base URL |
 | `AI_MODEL` | Main chat model |
 | `AI_API_KEY` | API key; blank is normal for local providers that do not require one |
 | `DISCORD_BOT_TOKEN` | Official Discord bot token |
@@ -32,7 +32,7 @@ Example:
 
 ```env
 DISCORD_BOT_TOKEN=your-discord-bot-token
-AI_API_URL=https://openrouter.ai/api/v1
+AI_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=moonshotai/kimi-k2.6:free
 AI_API_KEY=your-api-key
 MAXWELL_OWNER_IDS=123456789012345678
@@ -40,7 +40,7 @@ MAXWELL_ADMIN_USER=admin
 MAXWELL_ADMIN_PASSWORD=change-me
 ```
 
-The runtime reads `AI_*` directly. `.env.simple.example` also supplies `OLLAMA_*` interpolation aliases for older tooling. Friendly endpoint/model settings take precedence; an explicitly blank `AI_API_KEY` clears a legacy credential. Avoid conflicting settings.
+The runtime reads `AI_*` directly. Legacy `OLLAMA_*` variables and `AI_API_URL` remain supported. Friendly endpoint/model settings take precedence; an explicitly blank `AI_API_KEY` clears a legacy credential. Avoid conflicting settings.
 
 For an older `.env`, run:
 
@@ -48,14 +48,14 @@ For an older `.env`, run:
 python3 scripts/migrate_ai_env.py .env
 ```
 
-That adds the friendly `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY` settings while preserving compatibility aliases.
+That adds the friendly `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY` settings while preserving compatibility aliases.
 
 ## Provider examples
 
 ### Local Ollama
 
 ```env
-AI_API_URL=http://localhost:11434
+AI_BASE_URL=http://localhost:11434
 AI_MODEL=qwen3:8b
 AI_API_KEY=
 ```
@@ -65,7 +65,7 @@ The easy installer can offer to install Ollama on Linux if it is missing.
 ### OpenRouter
 
 ```env
-AI_API_URL=https://openrouter.ai/api/v1
+AI_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=moonshotai/kimi-k2.6:free
 AI_API_KEY=your-openrouter-key
 ```
@@ -73,7 +73,7 @@ AI_API_KEY=your-openrouter-key
 ### OpenAI
 
 ```env
-AI_API_URL=https://api.openai.com/v1
+AI_BASE_URL=https://api.openai.com/v1
 AI_MODEL=gpt-4.1-mini
 AI_API_KEY=your-openai-key
 ```
@@ -81,7 +81,7 @@ AI_API_KEY=your-openai-key
 ### LM Studio
 
 ```env
-AI_API_URL=http://localhost:1234/v1
+AI_BASE_URL=http://localhost:1234/v1
 AI_MODEL=local-model
 AI_API_KEY=
 ```
@@ -149,7 +149,7 @@ For the full configuration wizard:
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The advanced `.env.example` still uses the historical `OLLAMA_*` provider names because many optional settings are grouped under that namespace. They are compatibility names for the primary OpenAI-compatible chat provider, not a requirement to use Ollama.
+Both environment templates use provider-neutral `AI_*` names. Legacy `OLLAMA_*` variables and `AI_API_URL` remain deprecated input aliases. Ollama remains fully supported through its OpenAI-compatible endpoint. See [provider architecture and migration](docs/PROVIDERS.md).
 
 Manual Docker setup:
 
