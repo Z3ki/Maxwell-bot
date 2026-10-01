@@ -116,7 +116,7 @@ _GENERATING_PLACEHOLDER = "generating…"
 _HIDDEN_PROGRESS_TOOLS = frozenset({"send_message"})
 
 
-def _is_hidden_progress_tool(tool_name: str | None) -> bool:
+def is_hidden_progress_tool(tool_name: str | None) -> bool:
     return str(tool_name or "").strip().lower() in _HIDDEN_PROGRESS_TOOLS
 
 
@@ -348,7 +348,7 @@ class ToolProgress:
         if (
             self._stopped
             or self._tool_streaming
-            or _is_hidden_progress_tool(tool_name)
+            or is_hidden_progress_tool(tool_name)
         ):
             return
         if self._platform != "discord":
@@ -398,7 +398,7 @@ class ToolProgress:
         user data, so they are never copied into a channel progress message.
         """
         name = str(tool_name or "").strip()
-        if not name or self._stopped or _is_hidden_progress_tool(name):
+        if not name or self._stopped or is_hidden_progress_tool(name):
             return
         async with self._tools_lock:
             if self._stopped:
@@ -439,7 +439,7 @@ class ToolProgress:
         if self._platform != "discord":
             return
 
-        if _is_hidden_progress_tool(tool_name):
+        if is_hidden_progress_tool(tool_name):
             tool_name = None
         if tool_name:
             self._current_tool = tool_name

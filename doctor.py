@@ -95,11 +95,11 @@ def check_required_settings(cfg) -> None:
             "official bot token from the Discord Developer Portal",
         )
         problems.append("set DISCORD_BOT_TOKEN in .env")
-    if cfg.OLLAMA_BASE_URL and cfg.OLLAMA_MODEL:
-        line("ok", "model endpoint", f"{cfg.OLLAMA_MODEL} @ {cfg.OLLAMA_BASE_URL}")
+    if cfg.AI_BASE_URL and cfg.AI_MODEL:
+        line("ok", "model endpoint", f"{cfg.AI_MODEL} @ {cfg.AI_BASE_URL}")
     else:
-        line("bad", "model endpoint incomplete", "set OLLAMA_BASE_URL and OLLAMA_MODEL")
-        problems.append("set OLLAMA_BASE_URL and OLLAMA_MODEL in .env")
+        line("bad", "model endpoint incomplete", "set AI_BASE_URL and AI_MODEL")
+        problems.append("set AI_BASE_URL and AI_MODEL in .env")
     from identity import identity_values
 
     ident = identity_values(cfg)
@@ -272,8 +272,8 @@ async def _probe_chat(cfg) -> tuple[str, str]:
     from providers import normalize_base_url
 
     # Same URL the bot itself builds, so a green line here means the bot works.
-    url = f"{normalize_base_url(cfg.OLLAMA_BASE_URL)}/models"
-    headers = {"Authorization": f"Bearer {cfg.OLLAMA_API_KEY}"} if cfg.OLLAMA_API_KEY else {}
+    url = f"{normalize_base_url(cfg.AI_BASE_URL)}/models"
+    headers = {"Authorization": f"Bearer {cfg.AI_API_KEY}"} if cfg.AI_API_KEY else {}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -314,7 +314,7 @@ def probe(cfg) -> None:
     state, detail = asyncio.run(_probe_chat(cfg))
     line(state, "chat endpoint", detail)
     if state == "bad":
-        problems.append("the model endpoint is unreachable — check OLLAMA_BASE_URL/API key")
+        problems.append("the model endpoint is unreachable — check AI_BASE_URL/API key")
     if cfg.ENABLE_RAG:
         state, detail = asyncio.run(_probe_embeddings(cfg))
         line(state, "embedding endpoint", detail)

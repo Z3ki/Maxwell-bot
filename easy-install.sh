@@ -158,19 +158,19 @@ set_value() {
 
 choose_provider() {
   local choice
-  AI_API_URL="${AI_API_URL:-}"
-  AI_MODEL="${AI_MODEL:-}"
-  AI_API_KEY="${AI_API_KEY:-}"
+  AI_BASE_URL="${AI_BASE_URL:-${AI_API_URL:-${OLLAMA_BASE_URL:-}}}"
+  AI_MODEL="${AI_MODEL:-${OLLAMA_MODEL:-}}"
+  AI_API_KEY="${AI_API_KEY-${OLLAMA_API_KEY-}}"
   PROVIDER_KIND="custom"
 
-  if [ -n "$AI_API_URL" ] && [ -n "$AI_MODEL" ]; then
+  if [ -n "$AI_BASE_URL" ] && [ -n "$AI_MODEL" ]; then
     return
   fi
 
   say ""
   say "${BOLD}2/3 - AI provider${RESET}"
   if [ -z "$TTY" ]; then
-    AI_API_URL="${AI_API_URL:-http://localhost:11434}"
+    AI_BASE_URL="${AI_BASE_URL:-http://localhost:11434}"
     AI_MODEL="${AI_MODEL:-qwen3:8b}"
     PROVIDER_KIND="ollama"
     return
@@ -188,35 +188,35 @@ MENU
   case "$choice" in
     1)
       PROVIDER_KIND="ollama"
-      AI_API_URL="http://localhost:11434"
+      AI_BASE_URL="http://localhost:11434"
       AI_MODEL="qwen3:8b"
       AI_API_KEY=""
       ;;
     2)
       PROVIDER_KIND="openrouter"
-      AI_API_URL="https://openrouter.ai/api/v1"
+      AI_BASE_URL="https://openrouter.ai/api/v1"
       AI_MODEL="moonshotai/kimi-k2.6:free"
       ;;
     3)
       PROVIDER_KIND="openai"
-      AI_API_URL="https://api.openai.com/v1"
+      AI_BASE_URL="https://api.openai.com/v1"
       AI_MODEL="gpt-4.1-mini"
       ;;
     4)
       PROVIDER_KIND="lmstudio"
-      AI_API_URL="http://localhost:1234/v1"
+      AI_BASE_URL="http://localhost:1234/v1"
       AI_MODEL="local-model"
       AI_API_KEY=""
       ;;
     5)
       PROVIDER_KIND="custom"
-      AI_API_URL=$(prompt "AI API URL" "http://localhost:8000/v1")
+      AI_BASE_URL=$(prompt "AI API URL" "http://localhost:8000/v1")
       AI_MODEL=""
       ;;
     *)
       warn "Unknown choice; using Ollama defaults."
       PROVIDER_KIND="ollama"
-      AI_API_URL="http://localhost:11434"
+      AI_BASE_URL="http://localhost:11434"
       AI_MODEL="qwen3:8b"
       AI_API_KEY=""
       ;;
@@ -229,16 +229,16 @@ MENU
       ;;
   esac
 
-  [ -n "$AI_API_URL" ] || fail "AI_API_URL cannot be empty."
+  [ -n "$AI_BASE_URL" ] || fail "AI_BASE_URL cannot be empty."
   [ -n "$AI_MODEL" ] || fail "AI_MODEL cannot be empty."
 }
 
 maybe_install_ollama() {
   [ "$PROVIDER_KIND" = "ollama" ] || return 0
   command -v ollama >/dev/null 2>&1 && return 0
-  [ -n "$TTY" ] || { warn "Ollama is not installed. Install it before starting Maxwell, or use AI_API_URL for another provider."; return 0; }
+  [ -n "$TTY" ] || { warn "Ollama is not installed. Install it before starting Maxwell, or use AI_BASE_URL for another provider."; return 0; }
   if ! yes_no "Ollama is missing. Install it now?" "yes"; then
-    warn "Skipping Ollama install. Maxwell will need a reachable API at $AI_API_URL."
+    warn "Skipping Ollama install. Maxwell will need a reachable API at $AI_BASE_URL."
     return 0
   fi
   if [ "$(uname -s 2>/dev/null || true)" != "Linux" ]; then
@@ -257,7 +257,7 @@ write_fresh_env() {
   cp .env.simple.example .env
   chmod 600 .env
   set_value DISCORD_BOT_TOKEN "$DISCORD_BOT_TOKEN"
-  set_value AI_API_URL "$AI_API_URL"
+  set_value AI_BASE_URL "$AI_BASE_URL"
   set_value AI_MODEL "$AI_MODEL"
   set_value AI_API_KEY "$AI_API_KEY"
   set_value MAXWELL_OWNER_IDS "$MAXWELL_OWNER_IDS"
@@ -266,7 +266,7 @@ write_fresh_env() {
   fi
   set_value MAXWELL_ADMIN_USER "admin"
   set_value MAXWELL_ADMIN_PASSWORD "$MAXWELL_ADMIN_PASSWORD"
-  ok "wrote a small .env using AI_API_URL / AI_MODEL / AI_API_KEY"
+  ok "wrote a small .env using AI_BASE_URL / AI_MODEL / AI_API_KEY"
 }
 
 configure() {
@@ -331,7 +331,7 @@ main() {
   say ""
   ok "Maxwell setup finished"
   say "  Config: $INSTALL_DIR/.env"
-  say "  Friendly AI settings: AI_API_URL, AI_MODEL, AI_API_KEY"
+  say "  Friendly AI settings: AI_BASE_URL, AI_MODEL, AI_API_KEY"
   say "  Advanced settings: $INSTALL_DIR/.env.example"
 }
 

@@ -6,6 +6,10 @@ import sys
 from pathlib import Path
 
 _URL_KEYS = {
+    "AI_BASE_URL",
+    "AI_API_URL",  # deprecated input
+    "AI_FALLBACK_BASE_URL",
+    "AI_VISION_BASE_URL",
     "OLLAMA_BASE_URL",
     "OLLAMA_FALLBACK_BASE_URL",
     "OLLAMA_VISION_BASE_URL",

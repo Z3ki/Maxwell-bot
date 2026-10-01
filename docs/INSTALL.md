@@ -16,7 +16,7 @@ It asks for:
 2. The AI provider/model and API key if the provider needs one.
 3. An optional Discord owner user ID for restricted `/diagnostics` and `/maintenance` commands.
 
-The easy config uses `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`, read directly by the runtime. `.env.simple.example` also supplies historical `OLLAMA_*` aliases for older tooling. An explicitly blank friendly key clears a legacy credential.
+The easy config uses `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`, read directly by the runtime. Existing historical `OLLAMA_*` variables and `AI_API_URL` remain accepted. An explicitly blank friendly key clears a legacy credential.
 
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
 
@@ -46,7 +46,7 @@ Use the full wizard when you want advanced settings during installation:
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The full wizard writes `AI_API_URL`, `AI_MODEL`, and `AI_API_KEY`, plus `OLLAMA_*` compatibility aliases. Those names do not mean Maxwell requires Ollama; OpenRouter, OpenAI, LM Studio, and other compatible endpoints work too.
+The full wizard writes `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`, plus `OLLAMA_*` compatibility aliases. Those names do not mean Maxwell requires Ollama; OpenRouter, OpenAI, LM Studio, and other compatible endpoints work too.
 
 The full installer can configure:
 
@@ -101,9 +101,9 @@ For the full installer, export the values it understands and run non-interactive
 MAXWELL_NONINTERACTIVE=1 \
 MAXWELL_INSTALL_DIR="$HOME/maxwell" \
 DISCORD_BOT_TOKEN="your-discord-bot-token" \
-OLLAMA_BASE_URL="https://openrouter.ai/api/v1" \
-OLLAMA_MODEL="moonshotai/kimi-k2.6:free" \
-OLLAMA_API_KEY="your-openrouter-key" \
+AI_BASE_URL="https://openrouter.ai/api/v1" \
+AI_MODEL="moonshotai/kimi-k2.6:free" \
+AI_API_KEY="your-openrouter-key" \
 MAXWELL_OWNER_IDS="123456789012345678" \
 MAXWELL_ADMIN_PASSWORD="change-me" \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh)"
@@ -128,7 +128,7 @@ Minimum friendly config:
 
 ```ini
 DISCORD_BOT_TOKEN=your-discord-bot-token
-AI_API_URL=http://localhost:11434
+AI_BASE_URL=http://localhost:11434
 AI_MODEL=qwen3:8b
 AI_API_KEY=
 MAXWELL_OWNER_IDS=123456789012345678
@@ -151,7 +151,7 @@ python3 scripts/migrate_ai_env.py .env
 After migration, humans can edit:
 
 ```ini
-AI_API_URL=...
+AI_BASE_URL=...
 AI_MODEL=...
 AI_API_KEY=...
 ```
@@ -163,7 +163,7 @@ The migration preserves compatibility aliases for older code/tooling. Avoid assi
 ### Ollama
 
 ```ini
-AI_API_URL=http://localhost:11434
+AI_BASE_URL=http://localhost:11434
 AI_MODEL=qwen3:8b
 AI_API_KEY=
 ```
@@ -173,7 +173,7 @@ If RAG embeddings use local Ollama too, configure the embedding endpoint/model i
 ### OpenRouter
 
 ```ini
-AI_API_URL=https://openrouter.ai/api/v1
+AI_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=moonshotai/kimi-k2.6:free
 AI_API_KEY=your-openrouter-key
 ```
@@ -181,7 +181,7 @@ AI_API_KEY=your-openrouter-key
 ### OpenAI
 
 ```ini
-AI_API_URL=https://api.openai.com/v1
+AI_BASE_URL=https://api.openai.com/v1
 AI_MODEL=gpt-4.1-mini
 AI_API_KEY=your-openai-key
 ```
@@ -189,7 +189,7 @@ AI_API_KEY=your-openai-key
 ### LM Studio
 
 ```ini
-AI_API_URL=http://localhost:1234/v1
+AI_BASE_URL=http://localhost:1234/v1
 AI_MODEL=the-loaded-model-name
 AI_API_KEY=
 ```

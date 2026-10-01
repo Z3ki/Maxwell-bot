@@ -8,31 +8,13 @@ turn loop.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-
-@dataclass(frozen=True)
-class ProviderCapabilities:
-    text: bool = True
-    streaming: bool = True
-    native_tools: bool = True
-    vision: bool = False
-    audio: bool = False
-    reasoning: bool = False
-    structured_output: bool = False
-    model_discovery: bool = False
-    context_window: int | None = None
-
-
-@dataclass
-class ProviderConfig:
-    name: str
-    kind: str = "openai_compat"
-    base_url: str = ""
-    api_key: str = ""
-    model: str = ""
-    extras: dict[str, Any] = field(default_factory=dict)
+from .models import (
+    ProviderCapabilities,
+    ProviderConfig as ProviderConfig,
+    ProviderResult,
+)
 
 
 class ChatProvider(ABC):
@@ -42,11 +24,11 @@ class ChatProvider(ABC):
     capabilities: ProviderCapabilities = ProviderCapabilities()
 
     @abstractmethod
-    async def initialize(self) -> None:
+    async def initialize(self) -> bool | None:
         raise NotImplementedError
 
     @abstractmethod
-    async def generate_response(self, *args: Any, **kwargs: Any) -> Any:
+    async def generate_response(self, *args: Any, **kwargs: Any) -> ProviderResult:
         raise NotImplementedError
 
     async def generate_chat_completion(self, *args: Any, **kwargs: Any) -> Any:

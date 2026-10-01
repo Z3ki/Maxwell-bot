@@ -46,3 +46,12 @@ continues using the old key:
 If rotation fails before it commits, the old key remains active. If the database
 or the new key is lost after commit, saved credentials cannot be recovered;
 users must save their provider keys again.
+# Provider architecture
+
+Personal OpenAI, OpenRouter and Groq API keys use independent
+`OpenAICompatibleProvider` clients with a construction-time `ProviderPolicy`.
+They do not inherit Maxwell's funded fallback or vision credentials. Public
+HTTPS validation, DNS pinning, TLS verification, redirect blocking, total time
+and response-size limits, and credential redaction are enforced by the client.
+See [PROVIDERS.md](PROVIDERS.md). ChatGPT login and OAuth are not implemented;
+future OAuth credentials must be stored separately from the BYOK API-key table.

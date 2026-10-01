@@ -24,8 +24,8 @@ def _make_bot():
         "night_fallback_end_hour": 9,
     }
     bot.config = SimpleNamespace(
-        OLLAMA_FALLBACK_BASE_URL="https://fallback.example/v1",
-        OLLAMA_FALLBACK_MODEL="fallback-model",
+        AI_FALLBACK_BASE_URL="https://fallback.example/v1",
+        AI_FALLBACK_MODEL="fallback-model",
     )
     bot.ai_provider = _FakeProvider()
     bot._sleep_until = 0.0
@@ -65,7 +65,7 @@ def test_night_window_does_not_put_bot_to_sleep(monkeypatch):
 
 def test_night_fallback_is_disabled_without_a_configured_fallback(monkeypatch):
     bot = _make_bot()
-    bot.config.OLLAMA_FALLBACK_MODEL = ""
+    bot.config.AI_FALLBACK_MODEL = ""
     monkeypatch.setattr(
         bot_mod.time, "localtime", lambda: SimpleNamespace(tm_hour=23)
     )

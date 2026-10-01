@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 import discord
+from tool_progress import is_hidden_progress_tool
 from user_install import (
     USER_INSTALL_MESSAGE_CAP,
     UserInstallSession,
@@ -153,7 +154,7 @@ def _tool_status_text(calls: list[str]) -> str:
     order: list[str] = []
     for value in calls:
         name = str(value or "").strip()
-        if not name:
+        if not name or is_hidden_progress_tool(name):
             continue
         if name not in counts:
             order.append(name)
@@ -165,7 +166,7 @@ def _tool_status_text(calls: list[str]) -> str:
     ]
     if len(order) > 8:
         visible.append(f"+{len(order) - 8} more")
-    return "Maxwell is using: " + ", ".join(visible)
+    return "Maxwell is using: " + ", ".join(visible) if visible else _STATUS_TEXT
 
 
 async def _flush_tool_status(state: _InteractionProgressState) -> None:
@@ -194,6 +195,8 @@ async def _flush_tool_status_later(
 async def _note_interaction_tool(
     state: _InteractionProgressState, name: str
 ) -> None:
+    if not str(name or "").strip() or is_hidden_progress_tool(name):
+        return
     await _mark_working(state)
     async with state.lock:
         if state.completed:

@@ -15,7 +15,7 @@ from plugins.maxwell_extras.byok import (
     VaultUnavailable,
     make_request_provider,
 )
-from providers import OllamaProvider, ProviderRequestError, _PublicOnlyResolver
+from providers import OpenAICompatibleProvider, ProviderRequestError, _PublicOnlyResolver
 
 
 KEY_A = "11" * 32
@@ -72,11 +72,11 @@ def test_provider_registry_builds_separate_single_credential_clients():
 
     def factory(*, name, **kwargs):
         made.append(kwargs)
-        client = OllamaProvider(**kwargs)
+        client = OpenAICompatibleProvider(**kwargs)
         client.name = name
         return client
 
-    main = OllamaProvider("https://main.example/v1", "main", 100, 0.4, api_key="main-key")
+    main = OpenAICompatibleProvider("https://main.example/v1", "main", 100, 0.4, api_key="main-key")
     bot = SimpleNamespace(_make_chat_provider=factory, ai_provider=main)
     one = make_request_provider(
         bot,
@@ -94,7 +94,7 @@ def test_provider_registry_builds_separate_single_credential_clients():
     ]
     assert [row["api_key"] for row in made] == ["user-one-key", "user-two-key"]
     assert len(one._endpoints) == len(two._endpoints) == 1
-    assert one._byok_public_only and two._byok_public_only
+    assert one.policy.public_network_only and two.policy.public_network_only
     assert main.api_key == "main-key"
     assert main.base_url == "https://main.example/v1"
 
@@ -181,7 +181,7 @@ class _Session:
 
 def _provider():
     def factory(*, name, **kwargs):
-        client = OllamaProvider(**kwargs)
+        client = OpenAICompatibleProvider(**kwargs)
         client.name = name
         return client
 

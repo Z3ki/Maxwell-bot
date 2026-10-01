@@ -17,14 +17,21 @@ import providers  # noqa: E402
 
 
 async def main() -> int:
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    base_url = os.environ.get(
+        "AI_BASE_URL",
+        os.environ.get(
+            "AI_API_URL", os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        ),
+    )
     if not base_url.endswith("/v1"):
         base_url = base_url.rstrip("/") + "/v1"
-    model = os.environ.get("OLLAMA_MODEL", "minimax-m3:cloud")
-    api_key = os.environ.get("OLLAMA_API_KEY", "")
+    model = os.environ.get(
+        "AI_MODEL", os.environ.get("OLLAMA_MODEL", "minimax-m3:cloud")
+    )
+    api_key = os.environ.get("AI_API_KEY", os.environ.get("OLLAMA_API_KEY", ""))
 
     print(f"Testing stream=True against PRIMARY {base_url} model={model}")
-    p = providers.OllamaProvider(
+    p = providers.OpenAICompatibleProvider(
         base_url=base_url,
         model=model,
         max_tokens=200,
@@ -65,7 +72,7 @@ async def main() -> int:
     print(
         f"  result_keys: {list(result.keys()) if isinstance(result, dict) else type(result).__name__}"
     )
-    print(f"  last_usage: {p._last_usage!r}")
+    print(f"  request_usage: {result.usage!r}")
     print(f"  content_chars: {len(content or '')}")
     print(f"  content: {content!r}")
     print(f"  reasoning_chars: {len(reasoning or '')}")
@@ -77,7 +84,7 @@ async def main() -> int:
             "FAIL: both content and reasoning are empty — model produced nothing mergeable"
         )
         return 1
-    if not p._last_usage or p._last_usage.get("total_tokens", 0) <= 0:
+    if not result.usage or result.usage.get("total_tokens", 0) <= 0:
         print("WARN: usage not populated (some providers omit it on free tier)")
 
     print("PASS")

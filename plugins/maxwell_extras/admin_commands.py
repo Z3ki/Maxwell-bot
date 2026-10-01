@@ -178,7 +178,7 @@ def _runtime_data(bot: Any) -> dict[str, Any]:
     config = getattr(bot, "config", None)
     model = (
         getattr(getattr(bot, "provider", None), "model", None)
-        or getattr(config, "OLLAMA_MODEL", None)
+        or getattr(config, "AI_MODEL", None)
         or "unknown"
     )
     return {

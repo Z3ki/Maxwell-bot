@@ -19,19 +19,25 @@ import providers  # noqa: E402  -- production module under test
 
 async def main() -> int:
     base_url = os.environ.get(
-        "OLLAMA_FALLBACK_BASE_URL", "https://openrouter.ai/api/v1"
+        "AI_FALLBACK_BASE_URL",
+        os.environ.get("OLLAMA_FALLBACK_BASE_URL", "https://openrouter.ai/api/v1"),
     )
-    api_key = os.environ.get("OLLAMA_FALLBACK_API_KEY", "")
+    api_key = os.environ.get(
+        "AI_FALLBACK_API_KEY", os.environ.get("OLLAMA_FALLBACK_API_KEY", "")
+    )
     model = os.environ.get(
-        "OLLAMA_FALLBACK_MODEL",
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        "AI_FALLBACK_MODEL",
+        os.environ.get(
+            "OLLAMA_FALLBACK_MODEL",
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        ),
     )
     if not api_key:
-        print("FAIL: OLLAMA_FALLBACK_API_KEY is empty; cannot test", file=sys.stderr)
+        print("FAIL: AI_FALLBACK_API_KEY is empty; cannot test", file=sys.stderr)
         return 2
 
     print(f"Testing stream=True against {base_url} model={model}")
-    p = providers.OllamaProvider(
+    p = providers.OpenAICompatibleProvider(
         base_url=base_url,
         model=model,
         max_tokens=120,
@@ -71,7 +77,7 @@ async def main() -> int:
     print(
         f"  result_keys: {list(result.keys()) if isinstance(result, dict) else type(result).__name__}"
     )
-    print(f"  last_usage: {p._last_usage!r}")
+    print(f"  request_usage: {result.usage!r}")
     print(f"  result preview: {str(result)[:400]!r}")
 
     if not isinstance(result, dict):
@@ -99,7 +105,7 @@ async def main() -> int:
     if tool_calls:
         print("UNEXPECTED: got tool_calls for a non-tool prompt")
         return 1
-    if not p._last_usage or p._last_usage.get("total_tokens", 0) <= 0:
+    if not result.usage or result.usage.get("total_tokens", 0) <= 0:
         print("WARN: usage not populated (some providers omit it on free tier)")
 
     print("PASS")

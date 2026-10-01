@@ -786,11 +786,11 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
     This test runs against the live provider configured in .env so
     it verifies the real streaming path end-to-end: HTTP -> SSE
     parsing -> on_token callback -> tick() -> progress message edit.
-    Skipped if OLLAMA_BASE_URL is not set (CI / no network).
+    Skipped if AI_BASE_URL is not set (CI / no network).
     """
     import os as _os
     from pathlib import Path as _Path
-    # Load .env so OLLAMA_BASE_URL / OLLAMA_MODEL are visible in pytest
+    # Load .env so AI_BASE_URL / AI_MODEL are visible in pytest
     _env_path = _Path(__file__).resolve().parent.parent / ".env"
     if _env_path.exists():
         for _line in _env_path.read_text(encoding="utf-8").splitlines():
@@ -799,12 +799,12 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
                 continue
             _k, _, _v = _line.partition("=")
             _os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
-    base_url = _os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
+    base_url = _os.getenv("AI_BASE_URL", "").rstrip("/")
     if not base_url:
         import pytest
-        pytest.skip("OLLAMA_BASE_URL not set; real-API progress test skipped")
-    model = _os.getenv("OLLAMA_MODEL", "kimi-k2.6:cloud")
-    api_key = _os.getenv("OLLAMA_API_KEY", "")
+        pytest.skip("AI_BASE_URL not set; real-API progress test skipped")
+    model = _os.getenv("AI_MODEL", "kimi-k2.6:cloud")
+    api_key = _os.getenv("AI_API_KEY", "")
 
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
@@ -812,7 +812,7 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
     pending: list = []
 
     async def drive():
-        from providers import OllamaProvider as _Prov
+        from providers import OpenAICompatibleProvider as _Prov
 
         prov = _Prov(
             base_url=base_url,
@@ -822,14 +822,14 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
             api_key=api_key,
             retry_attempts=1,
         )
-        fb = _os.getenv("OLLAMA_FALLBACK_BASE_URL", "")
+        fb = _os.getenv("AI_FALLBACK_BASE_URL", "")
         if fb:
             prov._endpoints.append(
                 type(prov._endpoints[0])(
                     "fallback",
                     fb,
-                    _os.getenv("OLLAMA_FALLBACK_MODEL", ""),
-                    _os.getenv("OLLAMA_FALLBACK_API_KEY", ""),
+                    _os.getenv("AI_FALLBACK_MODEL", ""),
+                    _os.getenv("AI_FALLBACK_API_KEY", ""),
                     True,
                 )
             )
