@@ -300,6 +300,9 @@ def test_web_search_taints_the_turn(monkeypatch):
 
 def test_real_search_result_drives_final_reply_references(monkeypatch):
     class FakeDDGS:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def text(self, query, **kwargs):
             return [{"title": "T", "href": "https://example.com/page", "body": "Evidence"}]
 
