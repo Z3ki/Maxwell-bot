@@ -10,6 +10,11 @@ from bot_tools import (
     _sanitize_web_query,
     _web_search_backends,
 )
+from web_references import (
+    begin_web_references,
+    ensure_web_references,
+    reset_web_references,
+)
 
 
 GLUED = (
@@ -291,3 +296,22 @@ def test_web_search_taints_the_turn(monkeypatch):
     msg = SimpleNamespace(id=9, guild=None)
     asyncio.run(WebSearchTool(bot).execute(msg, query="hi"))
     assert tainted.get("ok") is True
+
+
+def test_real_search_result_drives_final_reply_references(monkeypatch):
+    class FakeDDGS:
+        def text(self, query, **kwargs):
+            return [{"title": "T", "href": "https://example.com/page", "body": "Evidence"}]
+
+    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
+    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    token = begin_web_references()
+    try:
+        result = asyncio.run(WebSearchTool(_search_bot()).execute(None, query="facts"))
+        assert "Web references: [1](<https://example.com/page>)" in result
+        final = bot_module._sanitize_visible_reply("The answer. [1](<https://example.com/page>)")
+        assert "[1]" in final
+        assert ensure_web_references(final) == final
+        assert "[1](<https://example.com/page>)" in ensure_web_references("The answer.")
+    finally:
+        reset_web_references(token)
