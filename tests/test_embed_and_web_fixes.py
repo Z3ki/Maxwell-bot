@@ -54,6 +54,13 @@ def _unit_vec(seed: int) -> np.ndarray:
 # ─── 1. embed_cache seeding ──────────────────────────────────────────
 
 
+def test_blob_to_embedding_is_writable():
+    vec = np.arange(8, dtype=np.float32)
+    unpacked = rag_memory._blob_to_embedding(rag_memory._embedding_to_blob(vec))
+    unpacked /= np.linalg.norm(unpacked) + 1e-8
+    assert unpacked.flags.writeable
+
+
 def test_embed_cache_seed_skips_legacy_truncated_rows(tmp_path, monkeypatch):
     """Rows over the old 8000-char cutoff must not be seeded into the cache.
 

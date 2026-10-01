@@ -667,6 +667,35 @@ async def _safe_call(cb, *args, **kwargs):
         logger.debug("SSE callback raised: %s", e)
 
 
+def _keep_tool_call_provider_fields(slot: dict, tc_delta: dict) -> None:
+    """Keep provider fields the next request must echo.
+
+    Gemini rejects a follow-up tool turn when ``thought_signature`` (often
+    under ``extra_content.google``) was present on the function call and
+    then dropped. Streaming only used to copy id, type, and function.
+    """
+    if not isinstance(tc_delta, dict):
+        return
+    for key, value in tc_delta.items():
+        if key in {"index", "id", "type", "function"} or str(key).startswith("_"):
+            continue
+        if value in (None, "", {}, []):
+            continue
+        if not slot.get(key):
+            slot[key] = value
+    fn = tc_delta.get("function")
+    if not isinstance(fn, dict):
+        return
+    slot_fn = slot.setdefault("function", {})
+    for key, value in fn.items():
+        if key in {"name", "arguments"} or str(key).startswith("_"):
+            continue
+        if value in (None, "", {}, []):
+            continue
+        if not slot_fn.get(key):
+            slot_fn[key] = value
+
+
 def _append_tool_call_arguments(slot: dict, incoming) -> None:
     """Accumulate streaming tool-call arguments onto ``slot``.
 
@@ -1005,6 +1034,7 @@ async def _read_sse_response(
                             slot["id"] = tc_delta["id"]
                         if tc_delta.get("type"):
                             slot["type"] = tc_delta["type"]
+                        _keep_tool_call_provider_fields(slot, tc_delta)
                         fn = tc_delta.get("function") or {}
                         if fn.get("name"):
                             slot["function"]["name"] = (

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.2 — 2026-10-01
+
+Install with `--version v0.1.2`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
+
+### Discord
+
+- `send_media` names uploads from the URL path, the response type, and the file bytes. A QR link whose query contains `https://z3ki.dev` is uploaded as `.png`, so Discord renders it.
+- An in-flight turn keeps running when the same person sends another message that does not mention, ping, or reply to Maxwell.
+
+### Shell
+
+- `scripts/setup_shell_host.sh` installs gVisor `runsc`, the cgroup, and the egress firewall in one step. `install.sh --with-shell` runs it. The default install still leaves shell disabled.
+- When Docker's storage driver cannot enforce a per-container size limit, the script moves only `overlay2` onto XFS with project quotas. Existing containers stay on the default runtime.
+- The sandbox image is built from `docker/Dockerfile`.
+
+### Providers and memory
+
+- Gemini tool-call signatures are kept on the follow-up request, so a tool turn stays on the primary model instead of falling over to the backup.
+- Recalled embeddings are writable. Search no longer fails with `output array is read-only` and drops long-term memory.
+- Reminder delivery backs off for 15 minutes when a channel is gone, instead of fetching it every few seconds.
+
+External Discord, provider, mail, and browser integrations remain dependent on the operator's configuration. Passing local checks is not a claim that every external integration is production-validated.
+
 ## 0.1.1 — 2026-10-01
 
 Install with `--version v0.1.1`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

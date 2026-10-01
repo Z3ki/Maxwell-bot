@@ -482,8 +482,13 @@ def _embedding_to_blob(vec: np.ndarray) -> bytes:
 
 
 def _blob_to_embedding(blob: bytes) -> np.ndarray:
-    """Unpack BLOB back to float32 numpy array."""
-    return np.frombuffer(blob, dtype=np.float32)
+    """Unpack BLOB back to a writable float32 numpy array.
+
+    ``frombuffer`` views the SQLite bytes as read-only. In-place
+    normalization (``query_norm /= ...``) then raises
+    ``ValueError: output array is read-only`` and drops long-term memory.
+    """
+    return np.array(np.frombuffer(blob, dtype=np.float32), dtype=np.float32, copy=True)
 
 
 def _split_embed_chunks(s: str) -> list[str]:

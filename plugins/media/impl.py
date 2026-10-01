@@ -406,6 +406,7 @@ class SendMediaTool(Tool):
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
 
+        content_type = ""
         try:
             session = await _get_shared_session()
             async with session.get(
@@ -413,33 +414,18 @@ class SendMediaTool(Tool):
             ) as resp:
                 if resp.status != 200:
                     return f"Error: HTTP {resp.status}"
+                content_type = ""
+                headers = getattr(resp, "headers", None)
+                if headers is not None:
+                    with contextlib.suppress(Exception):
+                        content_type = headers.get("Content-Type", "") or ""
                 media_bytes = await _read_response_limited(resp, self.MAX_SIZE)
         except asyncio.TimeoutError:
             return f"Error: timed out downloading {url}"
         except Exception as e:
             return f"Error downloading: {e}"
 
-        filename = _safe_attachment_filename(
-            url.rsplit("/", 1)[-1].split("?")[0], default="media"
-        )
-        ext = os.path.splitext(filename)[1].lower()
-        if ext not in (
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".webp",
-            ".mp4",
-            ".webm",
-            ".weba",
-            ".mp3",
-        ):
-            # Unknown extension: don't disguise it as a PNG; use a generic safe suffix.
-            # Discord still transports the raw bytes, so this is only a naming hint.
-            logger.warning(
-                f"SendMediaTool normalizing unknown extension {ext!r} to .bin"
-            )
-            filename = os.path.splitext(filename)[0] + ".bin"
+        filename = media_attachment_filename(url, content_type, media_bytes)
 
         file = File(BytesIO(media_bytes), filename=filename)
         sent = None

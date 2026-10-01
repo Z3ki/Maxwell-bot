@@ -268,12 +268,21 @@ class ReminderTool(Tool):
         return f"Reminder {row['id']} scheduled for {_utc_iso(due_at)}."
 
 
+# A deleted channel used to be fetched on every 5s tick, which spammed the
+# log and stalled the event loop. Back off that channel instead of retrying.
+_UNAVAILABLE_CHANNEL_UNTIL: dict[str, float] = {}
+_UNAVAILABLE_CHANNEL_BACKOFF_SECONDS = 900.0
+
+
 async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
+    now = time.time()
     for item in await store.due():
         rid = str(item.get("id") or "")
         channel_id = str(item.get("channel_id") or "")
         owner_id = str(item.get("owner_id") or "")
         if not rid or not channel_id:
+            continue
+        if now < _UNAVAILABLE_CHANNEL_UNTIL.get(channel_id, 0.0):
             continue
         channel = None
         with contextlib.suppress(Exception):
@@ -282,8 +291,12 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
             with contextlib.suppress(Exception):
                 channel = await bot.fetch_channel(int(channel_id))
         if channel is None:
+            _UNAVAILABLE_CHANNEL_UNTIL[channel_id] = (
+                now + _UNAVAILABLE_CHANNEL_BACKOFF_SECONDS
+            )
             logger.warning("Reminder %s channel %s is unavailable", rid, channel_id)
             continue
+        _UNAVAILABLE_CHANNEL_UNTIL.pop(channel_id, None)
         text = str(item.get("text") or "")[:1800]
         try:
             await channel.send(

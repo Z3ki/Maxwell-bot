@@ -33,6 +33,7 @@ RESOLVED_COMMIT=""
 RECONFIGURE=0
 LOCAL_MODE=0
 CONFIGURE_ONLY=0
+WITH_SHELL="${MAXWELL_WITH_SHELL:-0}"
 NONINTERACTIVE="${MAXWELL_NONINTERACTIVE:-0}"
 SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-0}"
 TTY=""
@@ -59,6 +60,8 @@ Options:
   --ref <commit>      Install an exact 40-character Git commit.
                       Without either option, main is a development snapshot.
   --configure-only    Prepare .env and run.sh without installing or starting Docker.
+  --with-shell        Also install gVisor, the shell firewall, and storage quotas.
+                      This restarts Docker. Skip it on hosts that should not run shell.
 
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_VERSION, MAXWELL_REF,
@@ -76,6 +79,7 @@ while [ "$#" -gt 0 ]; do
     --help|-h) usage; exit 0 ;;
     --reconfigure) RECONFIGURE=1 ;;
     --configure-only) CONFIGURE_ONLY=1 ;;
+    --with-shell) WITH_SHELL=1 ;;
     --no-extras) warn "--no-extras is ignored; extras ship in the Docker image." ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
@@ -645,6 +649,7 @@ main() {
     handoff=(--local)
     [ "$RECONFIGURE" = "1" ] && handoff+=(--reconfigure)
     [ "$CONFIGURE_ONLY" = "1" ] && handoff+=(--configure-only)
+    [ "$WITH_SHELL" = "1" ] && handoff+=(--with-shell)
     exec env MAXWELL_INSTALL_COMMIT="$RESOLVED_COMMIT" \
       MAXWELL_INSTALL_DIR="$INSTALL_DIR" MAXWELL_REPO_URL="$REPO_URL" \
       MAXWELL_VERSION="$RELEASE_VERSION" MAXWELL_REF="$RELEASE_REF" \
@@ -661,6 +666,11 @@ main() {
   fi
   install_docker
   start_stack
+  if [ "$WITH_SHELL" = "1" ]; then
+    step "Configuring the isolated shell host"
+    bash "$SCRIPT_DIR/scripts/setup_shell_host.sh"
+    ok "shell host configured"
+  fi
   run_doctor
   final_summary
 }

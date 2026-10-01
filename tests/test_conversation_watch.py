@@ -656,7 +656,7 @@ def test_memory_lock_timeout_is_bounded():
     assert MaxwellBot._channel_lock_timeout(bot) == 3.0
 
 
-def test_only_the_user_being_answered_interrupts_generation():
+def test_only_a_directed_followup_interrupts_generation():
     bot = _bot()
     fake = SimpleNamespace(done=lambda: False)
 
@@ -666,11 +666,21 @@ def test_only_the_user_being_answered_interrupts_generation():
         bot._active_requests[cid] = fake
         bot._active_request_user[cid] = str(chatter.author.id)
         bot._active_request_messages = {}
-        assert MaxwellBot._should_interrupt_inflight(bot, chatter) is True
+        # Same user talking past Maxwell does not cancel the turn.
+        assert MaxwellBot._should_interrupt_inflight(bot, chatter) is False
+        mentioned = _plain_followup(content="maxwell wait")
+        mentioned.mentions = [bot.user]
+        assert MaxwellBot._should_interrupt_inflight(bot, mentioned) is True
+        reply = _plain_followup(
+            content="do the other one",
+            reference=SimpleNamespace(resolved=SimpleNamespace(author=bot.user)),
+        )
+        assert MaxwellBot._should_interrupt_inflight(bot, reply) is True
         other = _plain_followup(content="hey", author_id=42, display_name="Bob")
+        other.mentions = [bot.user]
         assert MaxwellBot._should_interrupt_inflight(bot, other) is False
         bot._active_request_user[cid] = "999"
-        assert MaxwellBot._should_interrupt_inflight(bot, chatter) is False
+        assert MaxwellBot._should_interrupt_inflight(bot, mentioned) is False
 
     asyncio.run(run())
 

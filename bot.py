@@ -3797,7 +3797,14 @@ class MaxwellBot(commands.Bot):
         return "" if author is None else str(author)
 
     def _should_interrupt_inflight(self, message) -> bool:
-        """Stop a generation only when the same user sends a newer message."""
+        """Stop a generation only when the same user addresses Maxwell again.
+
+        A later message that does not mention, ping, or reply to Maxwell
+        leaves the in-flight turn running.
+        """
+        addresses = getattr(self, "_message_addresses_self", None)
+        if not callable(addresses) or not addresses(message):
+            return False
         author = getattr(message, "author", None)
         if author is None or getattr(author, "bot", False):
             return False

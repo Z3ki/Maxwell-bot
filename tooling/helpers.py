@@ -1996,6 +1996,65 @@ def _filename_from_url(url: str, content_type: str = "", default: str = "file") 
     return name or default
 
 
+_MEDIA_ATTACHMENT_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".weba", ".mp3",
+}
+
+
+def _sniff_media_extension(blob: bytes) -> str:
+    """Extension Discord will render, from the file bytes rather than the URL."""
+    data = bytes(blob or b"")
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return ".mp4"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".webm"
+    if data.startswith(b"ID3") or data[:2] == b"\xff\xfb":
+        return ".mp3"
+    return ""
+
+
+def media_attachment_filename(
+    url: str,
+    content_type: str = "",
+    blob: bytes = b"",
+    default: str = "media",
+) -> str:
+    """Filename for a Discord upload.
+
+    The path is the only name source. Query strings often contain other URLs
+    (``data=https://z3ki.dev``), and treating that as the filename turned PNG
+    bytes into ``z3ki.bin``, which Discord will not render.
+    """
+    path = unquote(urlparse(url or "").path or "")
+    raw_name = Path(path).name if path else ""
+    name = (
+        _safe_attachment_filename(raw_name, default=default) if raw_name else default
+    )
+    current = os.path.splitext(name)[1].lower()
+    if current in _MEDIA_ATTACHMENT_EXTS:
+        return name
+    stem = os.path.splitext(name)[0] if current else name
+    if stem in {"", ".", ".."}:
+        stem = default
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    chosen = (
+        _sniff_media_extension(blob)
+        or _HOST_MIME_EXT.get(mime, "")
+        or ""
+    )
+    if chosen not in _MEDIA_ATTACHMENT_EXTS:
+        chosen = ".bin"
+    return _safe_attachment_filename(stem + chosen, default=default + chosen)
+
+
 def _host_file_slug(raw: Any, fallback: str) -> str:
     slug = re.sub(r"[^a-z0-9-]", "-", str(raw or "").lower().strip())[:30].strip("-")
     if not slug or len(slug) < 2:
@@ -3868,7 +3927,9 @@ async def _run_docker_cmd(
 
 # Image used by the shell sandbox. Built from docker/Dockerfile on first use.
 SANDBOX_IMAGE_NAME = "maxwell-shell"
-SANDBOX_DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
+SANDBOX_DOCKERFILE_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "docker")
+)
 
 
 async def _ensure_sandbox_image(image: str = SANDBOX_IMAGE_NAME) -> None:

@@ -62,6 +62,54 @@ class FakeMessage:
         return await self.channel.send(content=content, file=file, **kwargs)
 
 
+def test_media_attachment_keeps_png_for_query_urls():
+    from tooling.helpers import media_attachment_filename
+
+    png = b"\x89PNG\r\n\x1a\n" + b"not-a-real-body"
+    url = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=https://z3ki.dev"
+    name = media_attachment_filename(url, "image/png", png)
+    assert name.endswith(".png")
+    assert not name.endswith(".bin")
+    assert "z3ki" not in name
+    assert media_attachment_filename(
+        "https://cdn.example/photo.jpg?token=1", "application/octet-stream", b"nope"
+    ) == "photo.jpg"
+
+
+def test_send_media_qr_url_uploads_png(monkeypatch):
+    png = b"\x89PNG\r\n\x1a\n" + b"qr"
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "image/png"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def session():
+        return SimpleNamespace(get=lambda *_args, **_kwargs: Response())
+
+    async def read(*_args):
+        return png
+
+    monkeypatch.setattr("plugins.media.impl._get_shared_session", session)
+    monkeypatch.setattr("plugins.media.impl._read_response_limited", read)
+    message = FakeMessage()
+    tool = SendMediaTool(SimpleNamespace(_record_delivery=lambda *_a: None))
+    result = asyncio.run(
+        tool.execute(
+            message,
+            url="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=https://z3ki.dev",
+        )
+    )
+    assert result.startswith("__MEDIA_SENT__")
+    assert message.files[0].filename.endswith(".png")
+    assert not message.files[0].filename.endswith(".bin")
+
+
 def test_send_file_tool_sends_text_file():
     tool = SendFileTool(bot=None)
     message = FakeMessage()

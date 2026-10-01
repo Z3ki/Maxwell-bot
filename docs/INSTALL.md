@@ -24,12 +24,17 @@ Before starting, enable the privileged Discord gateway intents **Message Content
 
 The default command installs an unreleased `main` development snapshot. Both installers resolve the selected branch/tag once and use that immutable commit for the app, setup scripts, and configuration handoff. The checkout is detached; do not use `git pull` to update it.
 
-For version `0.1.1`, select the exact tag `v0.1.1`:
+For version `0.1.2`, select the exact tag `v0.1.2`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.1/easy-install.sh -o /tmp/maxwell-install.sh
-bash /tmp/maxwell-install.sh --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.2/easy-install.sh -o /tmp/maxwell-install.sh
+bash /tmp/maxwell-install.sh --version v0.1.2
 ```
+
+To also prepare the public shell sandbox on that Linux Docker host, pass
+`--with-shell`. It installs gVisor and the host firewall, and it restarts
+Docker when the storage driver has to change. Hosts that should not run
+shell can omit the flag; Maxwell then keeps shell disabled.
 
 See [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases) for release availability and assets. Changing `VERSION` alone does not publish a release tag. Exact full commit IDs are also supported with `--ref <40-character-sha>`. `--version` and `--ref` are mutually exclusive. Use `--dir <path>` to select the installation directory.
 

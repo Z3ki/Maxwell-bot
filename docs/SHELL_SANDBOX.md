@@ -31,6 +31,23 @@ References: [Contabo nested virtualization support](https://help.contabo.com/en/
 
 ## Host setup
 
+On the Linux Docker host (not inside the Maxwell container):
+
+```bash
+sudo bash scripts/setup_shell_host.sh
+```
+
+`install.sh --with-shell` runs that same script after the container starts.
+It installs gVisor `runsc`, registers it without changing Docker's default
+runtime, installs the cgroup and egress units, and—only when the current
+storage driver rejects `--storage-opt size`—moves `overlay2` onto an XFS
+filesystem mounted with project quotas. That storage step restarts Docker.
+Shell stays disabled until both readiness markers exist. Do not create the
+marker files by hand.
+
+The steps below are what the script performs. Use them when you need to
+provision a host without the script.
+
 1. Install gVisor using its official installation guide. Merge this runtime
    into `/etc/docker/daemon.json`, preserving any existing configuration:
 

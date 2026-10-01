@@ -600,6 +600,46 @@ def test_read_sse_native_tool_call_with_object_arguments():
     assert parsed["content"] == "hi"
 
 
+def test_read_sse_preserves_gemini_thought_signature():
+    from providers import _read_sse_response
+
+    frame = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_sig",
+                            "type": "function",
+                            "extra_content": {
+                                "google": {"thought_signature": "sig-123"}
+                            },
+                            "function": {
+                                "name": "send_message",
+                                "arguments": "{\"content\":\"hi\"}",
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    class Resp:
+        content = _FakeAsyncStream(
+            [f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode("utf-8")]
+        )
+
+    merged = asyncio.run(_read_sse_response(Resp()))
+    call = merged["choices"][0]["message"]["tool_calls"][0]
+    assert call["extra_content"]["google"]["thought_signature"] == "sig-123"
+    assert call["function"]["name"] == "send_message"
+
+
 def test_generate_response_returns_native_tool_calls():
     """generate_response now supports native tool_calls instead of rejecting them."""
     provider = OpenAICompatibleProvider("http://example.test", "base-model", 10, 0.5)
