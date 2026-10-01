@@ -529,15 +529,35 @@ class _OwnerDiagnosticsSelect(discord.ui.Select):
         if section not in self._SECTIONS or not _is_application_owner(self.panel.bot, interaction):
             await _send(interaction, "That diagnostics view is unavailable.")
             return
-        from .admin_commands import _control, _embed, _json_file, _plugin_data, _redact, _runtime_data
+        from .admin_commands import (
+            _control,
+            _embed,
+            _json_file,
+            _plugin_data,
+            _redact,
+            _runtime_data,
+            _send as _send_owner,
+        )
 
         if section == "controls":
-            await _send(interaction, embed=_embed(self.panel.bot, section), file=_json_file(_redact(_control(self.panel.bot)), "maxwell-controls.json"))
+            await _send_owner(
+                interaction,
+                embed=_embed(self.panel.bot, section),
+                file=_json_file(_redact(_control(self.panel.bot)), "maxwell-controls.json"),
+            )
         elif section == "data":
-            payload = {"runtime": _runtime_data(self.panel.bot), "controls": _redact(_control(self.panel.bot)), "plugins": _plugin_data(self.panel.bot)}
-            await _send(interaction, content="Redacted Maxwell diagnostics export.", file=_json_file(payload, "maxwell-diagnostics.json"))
+            payload = {
+                "runtime": _runtime_data(self.panel.bot),
+                "controls": _redact(_control(self.panel.bot)),
+                "plugins": _plugin_data(self.panel.bot),
+            }
+            await _send_owner(
+                interaction,
+                content="Redacted Maxwell diagnostics export.",
+                file=_json_file(payload, "maxwell-diagnostics.json"),
+            )
         else:
-            await _send(interaction, embed=_embed(self.panel.bot, section))
+            await _send_owner(interaction, embed=_embed(self.panel.bot, section))
 
 
 class _OwnerQuotaModal(discord.ui.Modal):
@@ -546,8 +566,11 @@ class _OwnerQuotaModal(discord.ui.Modal):
         self.panel = panel
         self.user_id_input = discord.ui.TextInput(label="Discord user ID", max_length=20, required=True)
         self.action_input = discord.ui.TextInput(
-            label="Action: status, set, clear, reset, exempt, unexempt",
-            max_length=10, required=True, default="status",
+            label="Action",
+            placeholder="status, set, clear, reset, exempt, unexempt",
+            max_length=10,
+            required=True,
+            default="status",
         )
         self.amount_input = discord.ui.TextInput(label="Limit (for set only)", max_length=6, required=False)
         self.add_item(self.user_id_input)
@@ -981,7 +1004,7 @@ class _ConfigPanel(discord.ui.View):
         return await self.authorized(interaction)
 
     async def on_error(self, interaction: Any, error: Exception, item: Any) -> None:
-        logger.warning("Config action failed (%s)", type(error).__name__)
+        logger.warning("Config action failed (%s: %s)", type(error).__name__, error)
         await _send(interaction, "Could not complete that settings change. Please try again; if it keeps happening, contact the operator.")
 
     async def on_timeout(self) -> None:

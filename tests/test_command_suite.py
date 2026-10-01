@@ -328,6 +328,62 @@ def test_config_owner_scope_is_bound_to_configured_application_owner(tmp_path):
     assert "Application owner settings" in panel.render()
 
 
+def test_owner_diagnostics_sends_embed_and_export(tmp_path):
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    bot = SimpleNamespace(
+        config=SimpleNamespace(MAXWELL_OWNER_IDS={"99"}),
+        _control={"tools_enabled": True},
+        _user_preferences=store,
+        guilds=[],
+        tools={},
+        latency=0.01,
+        user=SimpleNamespace(id=1, name="Maxwell", display_name="Maxwell"),
+        provider=SimpleNamespace(model="test"),
+        plugin_manager=None,
+    )
+    interaction = SimpleNamespace(user=SimpleNamespace(id=99), guild=None, guild_id=None)
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    panel.scope = "owner"
+    panel.selected_key = "diagnostics"
+    panel._build()
+    select = next(item for item in panel.children if isinstance(item, command_suite._OwnerDiagnosticsSelect))
+    sent = []
+
+    class Response:
+        def is_done(self):
+            return False
+
+        async def send_message(self, **payload):
+            sent.append(payload)
+
+    interaction.response = Response()
+
+    async def choose(section: str) -> None:
+        select._values = [section]
+        await select.callback(interaction)
+
+    asyncio.run(choose("runtime"))
+    assert sent[-1]["embed"].title == "Maxwell Diagnostics"
+    assert "file" not in sent[-1]
+
+    asyncio.run(choose("controls"))
+    assert sent[-1]["embed"].title == "Maxwell Diagnostics"
+    assert sent[-1]["file"].filename == "maxwell-controls.json"
+
+    asyncio.run(choose("data"))
+    assert sent[-1]["content"] == "Redacted Maxwell diagnostics export."
+    assert sent[-1]["file"].filename == "maxwell-diagnostics.json"
+
+
+def test_owner_quota_modal_labels_fit_discord_limits():
+    modal = command_suite._OwnerQuotaModal(SimpleNamespace())
+    for child in modal.children:
+        assert len(child.label) <= 45
+        placeholder = getattr(child, "placeholder", None)
+        if placeholder:
+            assert len(placeholder) <= 100
+
+
 def test_owner_global_toggle_is_fixed_and_persisted(tmp_path):
     store = UserPreferenceStore(tmp_path / "user_preferences.json")
     bot = SimpleNamespace(
