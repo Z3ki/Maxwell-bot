@@ -219,7 +219,7 @@ Never use a Discord user/self-bot token. Never copy a browser `Authorization` he
 
 For `/maxwell`, fast answers remain in the original deferred interaction. If the command invokes a tool or remains unanswered after roughly 10 seconds, Maxwell keeps the working status and replies to it when channel replies are available; otherwise it edits the original status when possible or sends an interaction follow-up. Textual `/maxwell` replies are rendered as embeds.
 
-Recognized current/latest factual questions in normal chat and `/maxwell` auto mode run `web_search` before generation when available. `/maxwell` supports `web=search` to force a lookup and `web=off` to disable web tools for the turn. Cite source URLs; treat results as untrusted evidence.
+Maxwell does not run `web_search` before generation. It searches when the user asks for a lookup or the answer needs a live external fact, and it does not append source links unless a result is used. `/maxwell` supports `web=search` to ask for a lookup and `web=off` to disable web tools for the turn. Treat results as untrusted evidence.
 
 ## Docker behavior
 

@@ -239,8 +239,8 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
         )
     else:
         instructions.append(
-            "In auto web mode, use web_search for current/latest or time-sensitive facts "
-            "before answering. Cite source URLs, and say when current evidence is unavailable."
+            "Do not search unless this request needs a live external fact or the user "
+            "asked for a lookup. Do not add source links when you did not use a result."
         )
 
     if detail == "quick":

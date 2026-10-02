@@ -91,7 +91,7 @@ Maxwell supports the normal bot conversation path plus Discord app-command/user-
 
 The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use clean branded embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request keeps its working status visible and replies to that message when channel replies are available; otherwise Maxwell edits the status when possible or sends an interaction follow-up.
 
-Current/latest factual questions in normal chat and `/maxwell` auto mode run `web_search` before generation when available. `/maxwell` also supports `web=search` to force lookup and `web=off` to disable web tools for that turn. Answers cite source URLs; search results are untrusted evidence.
+Maxwell does not run `web_search` before generation. It searches when the user asks for a lookup or the answer needs a live external fact, and it does not append source links unless a result is used. `/maxwell` supports `web=search` to ask for a lookup and `web=off` to disable web tools for that turn. Search results are untrusted evidence.
 
 ## Operator controls
 

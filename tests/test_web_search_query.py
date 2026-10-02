@@ -24,36 +24,11 @@ GLUED = (
 )
 
 
-def test_freshness_classifier_searches_current_facts_not_banter():
-    assert MaxwellBot._needs_up_to_date_info("What's the latest Python version?")
-    assert MaxwellBot._needs_up_to_date_info(
-        "How much usage does the Ollama Cloud 20$ plan include?"
-    )
-    assert MaxwellBot._needs_up_to_date_info("What changed recently?")
-    assert not MaxwellBot._needs_up_to_date_info("Tell me a joke right now.")
-    assert not MaxwellBot._needs_up_to_date_info(
-        "What do you think of pizza right now?"
-    )
-
-
-def test_search_query_uses_slash_request_and_respects_web_option():
-    wrapped = (
-        "Auto web mode: current/latest requests use web_search.\n\n"
-        "User request:\nWhat's the latest Python version?"
-    )
-    assert MaxwellBot._extract_search_query(wrapped) == (
-        "What's the latest Python version?"
-    )
-    assert MaxwellBot._automatic_web_search_query(
-        SimpleNamespace(user_install_web_mode="off"), wrapped
-    ) == ""
-    assert MaxwellBot._automatic_web_search_query(
-        SimpleNamespace(user_install_web_mode="search"), "Explain photosynthesis"
-    ) == "Explain photosynthesis"
-    assert MaxwellBot._automatic_web_search_query(
-        SimpleNamespace(user_install_web_mode="auto", user_install_mode="research"),
-        "Explain photosynthesis",
-    ) == "Explain photosynthesis"
+def test_host_does_not_search_before_generation():
+    assert not hasattr(MaxwellBot, "_run_preflight_web_search")
+    assert not hasattr(MaxwellBot, "_automatic_web_search_query")
+    assert "what now" in bot_module.WEB_REFERENCE_INSTRUCTION
+    assert "Search references" not in bot_module.WEB_REFERENCE_INSTRUCTION
 
 
 def test_sanitize_web_query_truncates_unclosed_bracket():
@@ -147,52 +122,6 @@ def test_normalize_web_hit_accepts_url_and_excerpt():
     formatted = _format_web_hits([hit])
     assert "https://ex.com/a" in formatted
     assert "hello body" in formatted
-
-
-def test_preflight_search_executes_before_generation_and_injects_tool_result():
-    calls = []
-    remembered = []
-
-    async def execute(message, name, params, *, disabled, compatible):
-        calls.append((name, params, disabled, compatible))
-        return "Tool web_search: 1. Python releases\\nhttps://python.org/downloads/\\nPython 3.x"
-
-    async def remember(message, name, params, result):
-        remembered.append((name, params, result))
-
-    bot = SimpleNamespace(
-        _control={"tools_enabled": True, "disabled_tools": []},
-        _message_tool_platform=lambda _message: "discord",
-        _compatible_tool_names=lambda _platform: {"web_search"},
-        _execute_tool_by_name=execute,
-        _remember_tool_call=remember,
-    )
-    message = SimpleNamespace(id=42, user_install_web_mode="auto")
-    schemas = [{"type": "function", "function": {"name": "web_search"}}]
-    messages = [{"role": "user", "content": "What's the latest Python version?"}]
-
-    async def run():
-        await MaxwellBot._run_preflight_web_search(
-            bot,
-            message,
-            messages[-1]["content"],
-            messages,
-            openai_tools=schemas,
-            provider_tools=schemas,
-            custom_tool_calls=False,
-        )
-
-    asyncio.run(run())
-    assert calls[0][0] == "web_search"
-    assert calls[0][1]["query"] == "What's the latest Python version?"
-    assert calls[0][2] == set()
-    assert calls[0][3] == {"web_search"}
-    assert remembered[0][0] == "web_search"
-    assert "untrusted evidence" in messages[1]["content"]
-    assert messages[-2]["role"] == "assistant"
-    assert messages[-2]["tool_calls"][0]["function"]["name"] == "web_search"
-    assert messages[-1]["role"] == "tool"
-    assert "https://python.org/downloads/" in messages[-1]["content"]
 
 
 def _search_bot():
@@ -311,10 +240,11 @@ def test_real_search_result_drives_final_reply_references(monkeypatch):
     token = begin_web_references()
     try:
         result = asyncio.run(WebSearchTool(_search_bot()).execute(None, query="facts"))
-        assert "Web references: [1](<https://example.com/page>)" in result
-        final = bot_module._sanitize_visible_reply("The answer. [1](<https://example.com/page>)")
-        assert "[1]" in final
-        assert ensure_web_references(final) == final
-        assert "[1](<https://example.com/page>)" in ensure_web_references("The answer.")
+        assert "https://example.com/page" in result
+        assert "Web references:" not in result
+        assert "Search references:" not in result
+        final = bot_module._sanitize_visible_reply("No usable web results for this.")
+        assert ensure_web_references(final) == "No usable web results for this."
+        assert ensure_web_references("The answer.") == "The answer."
     finally:
         reset_web_references(token)

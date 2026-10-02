@@ -60,10 +60,11 @@ def test_slash_prompt_applies_research_web_detail_and_language():
     assert text.endswith("compare the new releases")
 
 
-def test_slash_prompt_auto_mode_sets_current_fact_search_rule():
+def test_slash_prompt_auto_mode_does_not_force_search():
     text = mod._slash_prompt("hello", {})
-    assert "current/latest" in text
-    assert "web_search" in text
+    assert "Do not search unless" in text
+    assert "current/latest" not in text
+    assert "web_search" not in text
     assert text.endswith("User request:\nhello")
 
 
