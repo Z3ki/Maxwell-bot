@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 — 2026-10-01
+
+Install with `--version v0.1.3`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
+
+### Shell
+
+- Shell guests resolve names through `1.1.1.1` and `8.8.8.8`. Docker's `127.0.0.11` stub does not answer on the gVisor sandbox network.
+
 ## 0.1.2 — 2026-10-01
 
 Install with `--version v0.1.2`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

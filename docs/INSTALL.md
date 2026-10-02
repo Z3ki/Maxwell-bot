@@ -24,11 +24,11 @@ Before starting, enable the privileged Discord gateway intents **Message Content
 
 The default command installs an unreleased `main` development snapshot. Both installers resolve the selected branch/tag once and use that immutable commit for the app, setup scripts, and configuration handoff. The checkout is detached; do not use `git pull` to update it.
 
-For version `0.1.2`, select the exact tag `v0.1.2`:
+For version `0.1.3`, select the exact tag `v0.1.3`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.2/easy-install.sh -o /tmp/maxwell-install.sh
-bash /tmp/maxwell-install.sh --version v0.1.2
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.3/easy-install.sh -o /tmp/maxwell-install.sh
+bash /tmp/maxwell-install.sh --version v0.1.3
 ```
 
 To also prepare the public shell sandbox on that Linux Docker host, pass

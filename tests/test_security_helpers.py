@@ -185,6 +185,10 @@ PY"""
         assert args[args.index("--cgroup-parent") + 1] == "maxwell-shell.slice"
         assert "no-new-privileges:true" in args
         assert args[args.index("--network") + 1] == "maxwell-shell-egress"
+        start = " ".join(args[args.index("sh"):])
+        assert "nameserver 1.1.1.1" in start
+        assert "nameserver 8.8.8.8" in start
+        assert "127.0.0.11" not in start
         assert "host" not in " ".join(args)
         assert not any(value.startswith("/") and ":/" in value for value in args)
         assert "--privileged" not in args

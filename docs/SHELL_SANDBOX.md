@@ -95,8 +95,11 @@ provision a host without the script.
    the guest. It blocks host-local services, the sandbox subnet, private and
    reserved IPv4, and the metadata link-local range; the host `INPUT` rule blocks
    bridge access to host services. IPv6 is disabled for this network and dropped
-   by the host filter when Docker's IPv6 chains are available. Public IPv4
+   by the host filter when Docker's IPv6 chains are available. The bridge
+   interface is `br-maxwell-sh` (Linux rejects a longer name). Public IPv4
    egress remains available for package repositories and developer tools.
+   Each guest replaces Docker's `127.0.0.11` stub with `1.1.1.1` and `8.8.8.8`,
+   because that stub does not answer on the gVisor sandbox network.
 
    Add provider/VPC-specific internal or management CIDRs to
    `/etc/maxwell-shell/blocked-cidrs` before running the setup script. If that

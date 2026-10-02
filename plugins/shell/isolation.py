@@ -128,6 +128,17 @@ def validate_runsc_runtime(runtimes: Any) -> tuple[bool, str]:
     return True, "runsc configured without network bypass options"
 
 
+# User-defined networks only publish Docker's 127.0.0.11 stub. That stub does
+# not answer inside a gVisor sandbox network, so the guest writes public
+# resolvers itself before it stays up for later execs.
+_SHELL_DNS = ("1.1.1.1", "8.8.8.8")
+
+
+def _guest_start_command() -> str:
+    servers = " ".join(f"'nameserver {server}'" for server in _SHELL_DNS)
+    return f"printf '%s\\n' {servers} > /etc/resolv.conf && exec sleep infinity"
+
+
 def docker_run_args(
     *,
     container_name: str,
@@ -168,6 +179,7 @@ def docker_run_args(
         "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=512m",
         "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m",
         image,
+        "sh", "-c", _guest_start_command(),
     ]
 
 
