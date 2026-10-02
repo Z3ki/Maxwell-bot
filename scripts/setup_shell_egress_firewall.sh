@@ -8,7 +8,8 @@ set -euo pipefail
 
 readonly NETWORK="maxwell-shell-egress"
 readonly SUBNET="172.30.240.0/20"
-readonly BRIDGE="br-maxwell-shell"
+# Linux rejects interface names longer than 15 bytes (IFNAMSIZ minus the NUL).
+readonly BRIDGE="br-maxwell-sh"
 readonly READY_DIR="/etc/maxwell-shell"
 readonly READY_FILE="${READY_DIR}/egress-ready"
 readonly EXTRA_CIDRS="${READY_DIR}/blocked-cidrs"

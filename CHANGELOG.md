@@ -12,6 +12,7 @@ Install with `--version v0.1.2`. `main` remains a development snapshot. Release 
 ### Shell
 
 - `scripts/setup_shell_host.sh` installs gVisor `runsc`, the cgroup, and the egress firewall in one step. `install.sh --with-shell` runs it. The default install still leaves shell disabled.
+- The shell bridge is `br-maxwell-sh`. A longer name is rejected by Linux before the network exists.
 - When Docker's storage driver cannot enforce a per-container size limit, the script moves only `overlay2` onto XFS with project quotas. Existing containers stay on the default runtime.
 - The sandbox image is built from `docker/Dockerfile`.
 

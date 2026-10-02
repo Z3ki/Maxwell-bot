@@ -84,8 +84,8 @@ for rule in \
     read -r -a rule_args <<<"${rule}"
     iptables -C MAXWELL-SHELL-EGRESS "${rule_args[@]}"
 done
-ip6tables -C FORWARD -i br-maxwell-shell -j MAXWELL-SHELL-FORWARD6
-ip6tables -C INPUT -i br-maxwell-shell -j MAXWELL-SHELL-HOST-IN6
+ip6tables -C FORWARD -i br-maxwell-sh -j MAXWELL-SHELL-FORWARD6
+ip6tables -C INPUT -i br-maxwell-sh -j MAXWELL-SHELL-HOST-IN6
 
 python3 - "${HOST_PROBE_FILE}" "${HOST_PROBE_INFO}" <<'PY' &
 import http.server
