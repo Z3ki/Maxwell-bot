@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.
 
 The easy installer keeps the first setup small. It asks for your Discord bot token, the AI provider/model, and optionally your Discord user ID for owner controls. It generates an operator API password, writes a compact `.env`, and then hands off to the Docker installer.
 
-The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.3`, select `--version v0.1.3`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
+The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.4`, select `--version v0.1.4`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
 
 Before running it, create a bot in the Discord Developer Portal and enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**. The setup machine needs Git, curl, and Python 3. Maxwell itself runs in Docker. On supported Linux systems the installer can install Docker; on macOS/Windows use Docker Desktop.
 

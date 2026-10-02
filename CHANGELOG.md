@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4 — 2026-10-01
+
+Install with `--version v0.1.4`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
+
+### Search
+
+- Maxwell does not run `web_search` before answering, and it does not append a Search references list. A lookup still happens when you ask for one, or through `/maxwell web=search`. `web=off` still disables web tools.
+
 ## 0.1.3 — 2026-10-01
 
 Install with `--version v0.1.3`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
