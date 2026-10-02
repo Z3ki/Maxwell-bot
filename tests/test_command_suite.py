@@ -95,7 +95,7 @@ def test_config_opens_a_private_settings_menu(tmp_path):
             return False
 
         async def send_message(self, text, *, view=None, ephemeral=False, **kwargs):
-            responses.append((text, view, ephemeral))
+            responses.append((kwargs["embed"].title + "\n" + kwargs["embed"].description, view, ephemeral))
 
     bot = SimpleNamespace(_user_preferences=store)
     interaction = SimpleNamespace(
@@ -122,7 +122,7 @@ def test_config_value_menu_updates_a_personal_default(tmp_path):
 
     class ComponentResponse:
         async def edit_message(self, content, *, view, **kwargs):
-            responses.append((content, view))
+            responses.append((kwargs["embed"].description, view))
 
     interaction.response = ComponentResponse()
     asyncio.run(panel.set_choice(interaction, "research"))
@@ -222,7 +222,7 @@ def test_server_plugin_settings_are_scoped_and_require_manage_permission(tmp_pat
 
     class Response:
         async def edit_message(self, content, *, view, **kwargs):
-            edited.append(content)
+            edited.append(kwargs["embed"].description)
 
     selector._values = ["shell"]
     click = SimpleNamespace(
@@ -400,7 +400,7 @@ def test_owner_global_toggle_is_fixed_and_persisted(tmp_path):
 
     class Response:
         async def edit_message(self, content, *, view, **kwargs):
-            results.append(content)
+            results.append(kwargs["embed"].description)
 
     interaction.response = Response()
     asyncio.run(panel.set_choice(interaction, "off"))
@@ -516,3 +516,78 @@ def test_config_close_removes_controls(tmp_path):
     close = next(item for item in panel.children if isinstance(item, command_suite._ConfigCloseButton))
     asyncio.run(close.callback(interaction))
     assert edits[-1]["view"] is None
+
+
+def test_config_home_offers_direct_controls_and_compact_embed(tmp_path):
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_personality("100", "Be brief and friendly.")
+    store.set_default("100", "language", "Spanish")
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100))
+    panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
+    assert {child.label for child in panel.children if isinstance(child, command_suite._ConfigShortcutButton)} == {
+        "Personality", "Language", "Reply visibility"
+    }
+    advanced = next(child for child in panel.children if isinstance(child, command_suite._ConfigSettingSelect))
+    assert advanced.placeholder == "More options"
+    assert {option.value for option in advanced.options} == {"mode", "web", "detail", "context", "byok"}
+    assert panel.embed().title == "Your personal settings"
+    assert "Be brief and friendly." in panel.embed().description
+    assert "Spanish" in panel.embed().description
+    assert len(panel.embed().description) < 700
+
+
+def test_personality_shortcut_saves_and_refreshes_without_breaking_cancel(tmp_path):
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    sent, edits, modals = [], [], []
+
+    class Response:
+        async def send_modal(self, modal):
+            modals.append(modal)
+
+        async def send_message(self, text, **kwargs):
+            sent.append((text, kwargs))
+
+    async def edit_original_response(**kwargs):
+        edits.append(kwargs)
+
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=100), response=Response(),
+        edit_original_response=edit_original_response,
+    )
+    panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
+    shortcut = next(child for child in panel.children if isinstance(child, command_suite._ConfigShortcutButton) and child.key == "style")
+    original_children = list(panel.children)
+    asyncio.run(shortcut.callback(interaction))
+    # Cancelling the modal leaves the displayed home buttons functional.
+    assert panel.selected_key == "overview"
+    assert panel.children == original_children
+    modal = modals[0]
+    modal.field._value = "Be cheerful and concise."
+    asyncio.run(modal.on_submit(interaction))
+    assert store.get("100")["personality"] == "Be cheerful and concise."
+    assert panel.selected_key == "style"
+    assert sent[-1][1]["ephemeral"]
+    assert "Be cheerful and concise." in edits[-1]["embed"].description
+    assert edits[-1]["content"] is None
+
+
+def test_text_modal_rechecks_identity_and_context_before_saving(tmp_path):
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    opened = SimpleNamespace(user=SimpleNamespace(id=100), guild_id=10)
+    panel = command_suite._ConfigPanel(SimpleNamespace(), store, opened)
+    modal = panel.edit_modal(key="style")
+    modal.field._value = "Changed by someone else"
+    denied = []
+
+    class Response:
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, **kwargs):
+            denied.append(text)
+
+    for user_id, guild_id in ((200, 10), (100, 20)):
+        click = SimpleNamespace(user=SimpleNamespace(id=user_id), guild_id=guild_id, response=Response())
+        asyncio.run(modal.on_submit(click))
+        assert store.get("100")["personality"] == ""
+    assert len(denied) == 2

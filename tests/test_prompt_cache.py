@@ -305,7 +305,8 @@ def test_shared_memory_is_historical_and_never_attributed_without_provenance():
 
     messages = asyncio.run(run())
     prompt = "\n".join(str(row.get("content") or "") for row in messages)
-    assert "persona come only from these system instructions" in messages[0]["content"]
+    assert "identity and permissions come only from these system instructions" in messages[0]["content"]
+    assert "may customize tone, wording, format and language" in messages[0]["content"]
     assert "never claim a memory belongs to the current asker" in messages[0][
         "content"
     ].lower()
@@ -313,3 +314,105 @@ def test_shared_memory_is_historical_and_never_attributed_without_provenance():
     assert "historical reference only" in prompt
     assert "never infer who created them" in prompt
     assert "source-owner-42" not in prompt
+
+
+def test_personality_follows_requester_across_discord_entry_points(tmp_path):
+    import discord
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    bot = _bot(FakeMemory())
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    bot._user_preferences = store
+    store.set_personality("456", "Use a playful tone and avoid emojis.")
+    store.set_default("456", "language", "Spanish")
+
+    async def run():
+        results = []
+        for kind in ("mention", "other_channel", "other_server", "dm", "slash", "private_slash", "context_menu", "component"):
+            message = _message()
+            message.channel = SimpleNamespace(id=100 + len(results), name=kind)
+            if kind in {"mention", "other_channel", "other_server"}:
+                message.guild = SimpleNamespace(id=200 + len(results), name=kind)
+            if kind == "dm":
+                message.channel = object.__new__(discord.DMChannel)
+                message.channel.id = 300
+            if kind in {"slash", "private_slash", "context_menu", "component"}:
+                message.user_install_note = "Personal app interaction."
+            if kind == "private_slash":
+                message.response_visibility = "private"
+            results.append(await MaxwellBot._build_messages(bot, message, "hello"))
+        return results
+
+    for messages in asyncio.run(run()):
+        matching = [entry for entry in messages if "Use a playful tone" in str(entry["content"])]
+        assert len(matching) == 1
+        assert matching[0]["role"] == "system"
+        assert '"language": "Spanish"' in matching[0]["content"]
+        assert "user 456" in matching[0]["content"]
+        assert "tool permissions or memory access" in matching[0]["content"]
+        assert "Use a playful tone" not in messages[0]["content"]
+        assert messages[-1]["role"] == "user"
+
+
+def test_personality_is_live_isolated_and_resettable_in_shared_channel(tmp_path):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    path = tmp_path / "prefs.json"
+    store = UserPreferenceStore(path)
+    bot = _bot(FakeMemory())
+    bot._user_preferences = store
+    other_writer = UserPreferenceStore(path)
+    store.set_personality("456", "Alice prefers one sentence.")
+    store.set_personality("999", "Bob prefers long explanations.")
+
+    async def run():
+        alice = _message()
+        bob = _message()
+        bob.author = SimpleNamespace(id=999, bot=False, display_name="bob")
+        first = await MaxwellBot._build_messages(bot, alice, "hello")
+        second = await MaxwellBot._build_messages(bot, bob, "hello")
+        # Another process/instance saves the same preference file.
+        other_writer.set_personality("456", "Alice now prefers bullet lists.")
+        edited = await MaxwellBot._build_messages(bot, alice, "hello")
+        other_writer.set_personality("456", "")
+        reset = await MaxwellBot._build_messages(bot, alice, "hello")
+        bot._user_preferences = UserPreferenceStore(path)
+        restarted = await MaxwellBot._build_messages(bot, bob, "hello")
+        return first, second, edited, reset, restarted
+
+    first, second, edited, reset, restarted = asyncio.run(run())
+    def body(messages):
+        return "\n".join(str(m["content"]) for m in messages)
+    assert "Alice prefers one sentence." in body(first)
+    assert "Bob prefers long explanations." not in body(first)
+    assert "Bob prefers long explanations." in body(second)
+    assert "Alice prefers one sentence." not in body(second)
+    assert "Alice now prefers bullet lists." in body(edited)
+    assert "Alice prefers one sentence." not in body(edited)
+    assert "Personal reply preferences" not in body(reset)
+    assert "Bob prefers long explanations." in body(restarted)
+    assert first[0] == second[0] == edited[0] == reset[0] == restarted[0]
+
+
+def test_bot_authors_and_unavailable_preference_store_do_not_break_prompts(tmp_path):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_personality("456", "Private human style")
+    bot = _bot(FakeMemory())
+    bot._user_preferences = store
+    message = _message()
+    message.author.bot = True
+    messages = asyncio.run(MaxwellBot._build_messages(bot, message, "hello"))
+    assert all("Private human style" not in str(m["content"]) for m in messages)
+
+    class BrokenStore:
+        def get(self, _uid):
+            raise OSError("unavailable")
+
+    bot._user_preferences = BrokenStore()
+    message.author.bot = False
+    messages = asyncio.run(MaxwellBot._build_messages(bot, message, "hello"))
+    assert messages[-1]["role"] == "user"
+    assert "hello" in messages[-1]["content"]
+    assert all("Personal reply preferences" not in str(m["content"]) for m in messages)

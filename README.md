@@ -131,11 +131,11 @@ For a published release, use `bash install.sh --dir "$PWD" --version vX.Y.Z` ins
 
 ## Discord app commands
 
-Maxwell uses Discord slash commands. `/help` browses commands by topic; `/config` opens a private settings menu for personal defaults and authorized server controls; `/personality` also edits your reply-style preference. Focused commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` provide separate, developer-restricted operator functions.
+Maxwell uses Discord slash commands. `/help` browses commands by topic; `/config` opens a private settings menu with direct buttons for **Personality**, **Language**, and **Reply visibility**. **More options** contains web search, answer detail, channel context, response mode, and your own API key. Authorized members can switch to server controls, and configured application owners can access global controls and diagnostics.
 
 The personal-app `/maxwell` command and context-menu actions are available when user install is enabled. `/maxwell` text replies are rendered as Discord embeds. Fast app-command responses stay in the deferred interaction; if a command uses a tool or is still running after about 10 seconds, Maxwell leaves a stable `working on it…` status and sends the final answer as a follow-up.
 Private `/maxwell` replies, when selected, are sent only as ephemeral interaction follow-ups; `send_message` can answer privately, but cannot target another chat from a private request.
-`/maxwell` replies are public by default. Choose `visibility: Private` for one request, or open `/config` → **Default visibility** → **Private** to save that choice. Explicit command options override saved preferences, including the number of recent channel messages to read. `/config` itself always opens privately, with a settings overview, explanations, marked current choices, reset controls, and a Close button.
+`/maxwell` replies are public by default. Choose `visibility: Private` for one request, or open `/config` → **Reply visibility** → **Private** to save that choice. Explicit command options override saved preferences, including the number of recent channel messages to read. Your saved personality and language apply to your replies across channels, servers, and DMs, including ordinary messages, mentions, slash commands, and context-menu requests. They are isolated by Discord user ID and do not change Maxwell's shared identity or permissions. `/config` always opens privately, with a compact embed, marked current choices, reset controls, and a Close button.
 
 The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` with shared styles and the Maxwell cat icon under `/assets/`. Copy the full `web/` contents when updating the website and update the public route allowlist as shown in `examples/Caddyfile.example`. The browser admin dashboard and its Discord OAuth login have been removed. Remove any previously deployed `admin/` static files; keep the authenticated operator API on a separate origin.
 
@@ -171,7 +171,7 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for Docker Desktop, reverse-proxy, OAut
 - Plugin-driven tools and extras: bundled features live under `plugins/`, loaded by `maxwell_core`.
 - Tools for web/search, files/media, Discord management, moderation, polls, generated sites, image generation, shell sandboxing, coding/background jobs, and more.
 - Fail-closed handling for destructive tools after fetched/web content has tainted the current turn.
-- Personal and server settings through `/config` and `/personality`; restricted operator controls through `/diagnostics` and `/maintenance`.
+- Personal, server, and restricted application-owner settings through `/config`.
 - SQLite-backed RAG/vector memory plus scoped context, entity/knowledge-graph memory, and optional REM-style consolidation.
 - Optional autonomy/background actions with runtime controls.
 - Generated static sites and optional backend containers.
