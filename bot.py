@@ -6105,8 +6105,9 @@ class MaxwellBot(commands.Bot):
             message_snapshots=_field("message_snapshots") or _field("snapshots") or [],
         )
         donors = [cached, previous]
-        for state in self._inflight_for_message(message_id):
-            donors.append(state.get("message"))
+        donors.extend(
+            state.get("message") for state in self._inflight_for_message(message_id)
+        )
         return preserve_message_delivery(snapshot, *donors)
 
     @classmethod
