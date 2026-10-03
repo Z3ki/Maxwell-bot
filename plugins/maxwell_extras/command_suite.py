@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+from functools import wraps
 from typing import Any
 
 import discord
@@ -29,7 +30,7 @@ _PERSONAL_SETTINGS = {
     "web": ("Web research", "Choose when Maxwell searches the web."),
     "detail": ("Answer detail", "Choose how much detail Maxwell gives."),
     "context": ("Channel context", "Choose how many recent channel messages Maxwell may use."),
-    "visibility": ("Default visibility", "Choose whether /maxwell replies are private or visible in the channel."),
+    "visibility": ("Default visibility", "Choose whether /maxwell and message app replies are private or public."),
     "language": ("Response language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("Bring your own key", "Select a provider/model, save an encrypted key, test it, or delete it."),
@@ -85,7 +86,7 @@ _SETTING_HELP = {
     "web": "Automatic works for most requests. Off prevents web search for this request mode.",
     "detail": "Quick keeps it brief. Balanced is the default. Deep asks for a fuller explanation.",
     "context": "Only recent messages Maxwell can access in this channel are included. Choose none to use just your request.",
-    "visibility": "Public replies appear in the channel. Choose Private to turn public replies off for your requests. You can override this on any /maxwell command.",
+    "visibility": "Applies to /maxwell and message app actions. Public replies appear in the channel; Private replies are only visible to you. You can override this on /maxwell. Servers must allow Use External Apps for user-installed apps to reply publicly.",
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",
     "byok": "Your chosen provider receives your request context. Keys are encrypted at rest; custom endpoints are disabled.",
@@ -232,6 +233,45 @@ async def _send(interaction: Any, text: str) -> None:
     await ui._ephemeral(interaction, str(text)[:1900])
 
 
+async def _acknowledge(interaction: Any, *, thinking: bool = False) -> None:
+    response = getattr(interaction, "response", None)
+    done = getattr(response, "is_done", None)
+    defer = getattr(response, "defer", None)
+    if callable(defer) and not (callable(done) and done()):
+        await defer(ephemeral=True, thinking=thinking)
+
+
+async def _edit_panel(interaction: Any, **payload: Any) -> None:
+    response = interaction.response
+    done = getattr(response, "is_done", None)
+    if callable(done) and done():
+        await interaction.edit_original_response(**payload)
+    else:
+        await response.edit_message(**payload)
+
+
+def _config_action(*, thinking: bool = False):
+    """Acknowledge before I/O and serialize changes to a shared settings panel."""
+    def decorate(callback):
+        @wraps(callback)
+        async def run(self, interaction, *args, **kwargs):
+            panel = getattr(self, "panel", self)
+            if not await panel.authorized(interaction):
+                return
+            await _acknowledge(interaction, thinking=thinking)
+            async with panel._action_lock:
+                context = kwargs.pop("context", getattr(self, "_config_context", None))
+                if context is not None and context != (panel.scope, panel.selected_key):
+                    await _send(interaction, "This control has changed. Use the current settings menu.")
+                    return
+                if not await panel.authorized(interaction):
+                    return
+                await panel._refresh_personal()
+                await callback(self, interaction, *args, **kwargs)
+        return run
+    return decorate
+
+
 def _preference_store(bot: Any) -> Any:
     return getattr(bot, "_user_preferences", None)
 
@@ -273,6 +313,7 @@ class _ConfigScopeSelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -290,7 +331,7 @@ class _ConfigScopeSelect(discord.ui.Select):
         self.panel.selected_key = "overview"
         self.panel.notice = ""
         self.panel._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.panel.embed(), view=self.panel,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -325,13 +366,14 @@ class _ConfigSettingSelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
         self.panel.selected_key = self.values[0]
         self.panel.notice = ""
         self.panel._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.panel.embed(), view=self.panel,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -355,7 +397,7 @@ class _ConfigValueSelect(discord.ui.Select):
         self.panel = panel
 
     async def callback(self, interaction: Any) -> None:
-        await self.panel.set_choice(interaction, self.values[0])
+        await self.panel.set_choice(interaction, self.values[0], context=self._config_context)
 
 
 class _GuildCapabilitySelect(discord.ui.Select):
@@ -380,6 +422,7 @@ class _GuildCapabilitySelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -394,7 +437,7 @@ class _GuildCapabilitySelect(discord.ui.Select):
             await _send(interaction, "Could not save the server capability settings.")
             return
         self.panel._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.panel.embed(), view=self.panel,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -432,6 +475,7 @@ class _GuildPluginSelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -444,7 +488,7 @@ class _GuildPluginSelect(discord.ui.Select):
             await _send(interaction, "Could not save the plugin settings.")
             return
         self.panel._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.panel.embed(), view=self.panel,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -475,6 +519,7 @@ class _GuildChannelSelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -502,7 +547,7 @@ class _GuildChannelSelect(discord.ui.Select):
             mapping[self.panel.guild_id] = value
             await saver(mapping, self.panel.guild_id, unblock_autonomy=False)
         self.panel._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.panel.embed(), view=self.panel,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -526,6 +571,7 @@ class _OwnerDiagnosticsSelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=True)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -581,6 +627,7 @@ class _OwnerQuotaModal(discord.ui.Modal):
         self.add_item(self.action_input)
         self.add_item(self.amount_input)
 
+    @_config_action(thinking=True)
     async def on_submit(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -640,6 +687,7 @@ class _OwnerReloadButton(discord.ui.Button):
         super().__init__(label="Reload controls", style=discord.ButtonStyle.secondary, custom_id="maxwell:config:reload", row=row)
         self.panel = panel
 
+    @_config_action(thinking=True)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -663,10 +711,11 @@ class _ConfigCloseButton(discord.ui.Button):
                          custom_id="maxwell:config:close", row=4)
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             embed=None, content="Settings closed. Your saved choices are ready for your next request. Run `/config` to return.",
             view=None, allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -692,13 +741,17 @@ class _ConfigShortcutButton(discord.ui.Button):
         if self.key in {"style", "language"}:
             await interaction.response.send_modal(self.panel.edit_modal(key=self.key))
         else:
-            self.panel.selected_key = self.key
-            self.panel.notice = ""
-            self.panel._build()
-            await interaction.response.edit_message(
-                content=None, embed=self.panel.embed(), view=self.panel,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            await self._show_setting(interaction)
+
+    @_config_action()
+    async def _show_setting(self, interaction: Any) -> None:
+        self.panel.selected_key = self.key
+        self.panel.notice = ""
+        self.panel._build()
+        await _edit_panel(interaction,
+            content=None, embed=self.panel.embed(), view=self.panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 class _ConfigEditButton(discord.ui.Button):
@@ -732,7 +785,7 @@ class _ConfigResetButton(discord.ui.Button):
         self.panel = panel
 
     async def callback(self, interaction: Any) -> None:
-        await self.panel.reset(interaction)
+        await self.panel.reset(interaction, context=self._config_context)
 
 
 class _ConfigTextModal(discord.ui.Modal):
@@ -750,21 +803,20 @@ class _ConfigTextModal(discord.ui.Modal):
         )
         self.add_item(self.field)
 
+    @_config_action(thinking=True)
     async def on_submit(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
         value = str(self.field.value or "").strip()
         try:
-            self.panel.set_text_value(self.key, value)
+            await asyncio.to_thread(self.panel.set_text_value, self.key, value)
+            await self.panel._refresh_personal()
         except ValueError as exc:
             await _send(interaction, str(exc))
             return
         self.panel.selected_key = self.key
         self.panel.notice = "**Saved.** Your next reply will use this setting."
-        await interaction.response.send_message(
-            "Saved. This applies to your replies across channels, servers and DMs.", ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await _send(interaction, "Saved. This applies to your replies across channels, servers and DMs.")
         self.panel._build()
         try:
             await self.panel.command_interaction.edit_original_response(
@@ -796,6 +848,7 @@ class _ByokCredentialsModal(discord.ui.Modal):
         self.add_item(self.model)
         self.add_item(self.api_key)
 
+    @_config_action(thinking=True)
     async def on_submit(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -826,11 +879,7 @@ class _ByokCredentialsModal(discord.ui.Modal):
             return
         self.panel.selected_provider = self.provider
         self.panel._build()
-        await interaction.response.send_message(
-            "Saved. This provider will receive the request context you send to Maxwell.",
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await _send(interaction, "Saved. This provider will receive the request context you send to Maxwell.")
         try:
             await self.panel.command_interaction.edit_original_response(
                 content=None, embed=self.panel.embed(), view=self.panel,
@@ -860,12 +909,13 @@ class _ByokProviderSelect(discord.ui.Select):
         )
         self.panel = panel
 
+    @_config_action(thinking=False)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
         self.panel.selected_provider = self.values[0]
         self.panel._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.panel.embed(), view=self.panel,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -905,6 +955,7 @@ class _ByokTestButton(discord.ui.Button):
         )
         self.panel = panel
 
+    @_config_action(thinking=True)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -966,6 +1017,7 @@ class _ByokDeleteButton(discord.ui.Button):
         )
         self.panel = panel
 
+    @_config_action(thinking=True)
     async def callback(self, interaction: Any) -> None:
         if not await self.panel.authorized(interaction):
             return
@@ -994,13 +1046,15 @@ class _ByokDeleteButton(discord.ui.Button):
 
 
 class _ConfigPanel(discord.ui.View):
-    def __init__(self, bot: Any, store: Any, interaction: Any):
+    def __init__(self, bot: Any, store: Any, interaction: Any, *, personal: dict | None = None):
         super().__init__(timeout=180)
         self.bot = bot
         self.store = store
         self.command_interaction = interaction
         self.user_id = _user_id(interaction)
         self.guild_id = _guild_id(interaction)
+        self._action_lock = asyncio.Lock()
+        self.personal = personal if personal is not None else store.get(self.user_id)
         self.scope = "personal"
         self.selected_key = "overview"
         self.notice = ""
@@ -1016,6 +1070,13 @@ class _ConfigPanel(discord.ui.View):
         self.is_owner = _is_application_owner(bot, interaction)
         self.can_choose_scope = self.can_manage_server or self.is_owner
         self._build()
+
+    def add_item(self, item):
+        item._config_context = (self.scope, self.selected_key)
+        return super().add_item(item)
+
+    async def _refresh_personal(self) -> None:
+        self.personal = await asyncio.to_thread(self.store.get, self.user_id)
 
     async def authorized(self, interaction: Any) -> bool:
         if _user_id(interaction) != self.user_id:
@@ -1118,7 +1179,7 @@ class _ConfigPanel(discord.ui.View):
                     f"{status['provider_label']} / {status['model']} / "
                     f"key {status['masked_key']}"
                 )
-            row = self.store.get(self.user_id)
+            row = self.personal
             if self.selected_key == "style":
                 return str(row.get("personality") or "not set")
             value = row.get("defaults", {}).get(self.selected_key)
@@ -1170,7 +1231,7 @@ class _ConfigPanel(discord.ui.View):
 
     def choice_value(self) -> str:
         if self.scope == "personal":
-            return str(self.store.get(self.user_id)["defaults"].get(self.selected_key, ""))
+            return str(self.personal["defaults"].get(self.selected_key, ""))
         current = self._current_value()
         return {"On": "on", "Off": "off"}.get(current, "")
 
@@ -1237,7 +1298,7 @@ class _ConfigPanel(discord.ui.View):
 
     def overview(self) -> str:
         if self.scope == "personal":
-            personal = self.store.get(self.user_id)
+            personal = self.personal
             defaults = personal["defaults"]
             style = str(personal.get("personality") or "Default personality")
             style = discord.utils.escape_markdown(style[:180] + ("…" if len(style) > 180 else ""))
@@ -1247,7 +1308,7 @@ class _ConfigPanel(discord.ui.View):
                 "## Your personal settings\n"
                 f"**Personality**\n{style}\n\n"
                 f"**Language:** {language}\n"
-                f"**/maxwell replies:** {visibility}\n\n"
+                f"**App replies:** {visibility}\n\n"
                 "Your personality and language follow you across channels, servers and DMs.\n"
                 "Use the buttons to change them. More options has web search, answer detail and other command defaults."
             )
@@ -1269,6 +1330,7 @@ class _ConfigPanel(discord.ui.View):
             "Access is checked again whenever a control is used."
         )
 
+    @_config_action()
     async def set_choice(self, interaction: Any, value: str) -> None:
         if not await self.authorized(interaction):
             return
@@ -1277,7 +1339,8 @@ class _ConfigPanel(discord.ui.View):
                 await _send(interaction, "That value is not available for this setting.")
                 return
             stored: Any = int(value) if self.selected_key == "context" else value
-            self.store.set_default(self.user_id, self.selected_key, stored)
+            await asyncio.to_thread(self.store.set_default, self.user_id, self.selected_key, stored)
+            await self._refresh_personal()
         elif self.selected_key == "moderation":
             if value not in {"on", "off"}:
                 await _send(interaction, "That setting value is unavailable.")
@@ -1320,7 +1383,7 @@ class _ConfigPanel(discord.ui.View):
             (disabled_set.discard if enabled else disabled_set.add)(self.guild_id)
             saver = getattr(self.bot, "_save_progress_servers", None)
             if callable(saver):
-                saver()
+                await asyncio.to_thread(saver)
         elif self.selected_key == "ticket":
             if value not in {"on", "off"}:
                 await _send(interaction, "That setting value is unavailable.")
@@ -1331,13 +1394,13 @@ class _ConfigPanel(discord.ui.View):
             (enabled_set.add if value == "on" else enabled_set.discard)(self.guild_id)
             saver = getattr(self.bot, "_save_ticket_greeting_servers", None)
             if callable(saver):
-                saver()
+                await asyncio.to_thread(saver)
         else:
             await _send(interaction, "That setting cannot be changed with this menu.")
             return
         self.notice = "**Saved.** Your next request will use this choice." if self.scope == "personal" else "**Saved.** This setting is now active."
         self._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.embed(), view=self,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -1356,19 +1419,20 @@ class _ConfigPanel(discord.ui.View):
     def edit_modal(self, *, key: str | None = None) -> _ConfigTextModal | None:
         key = key or self.selected_key
         if self.scope == "personal" and key == "language":
-            current = str(self.store.get(self.user_id)["defaults"].get("language") or "")
+            current = str(self.personal["defaults"].get("language") or "")
             return _ConfigTextModal(
                 self, key="language", label="Response language", current=current,
                 max_length=80, placeholder="For example: Spanish",
             )
         if self.scope == "personal" and key == "style":
-            current = str(self.store.get(self.user_id).get("personality") or "")
+            current = str(self.personal.get("personality") or "")
             return _ConfigTextModal(
                 self, key="style", label="Personality", current=current,
                 max_length=800, placeholder="For example: Keep replies brief and direct",
             )
         return None
 
+    @_config_action()
     async def reset(self, interaction: Any) -> None:
         if not await self.authorized(interaction):
             return
@@ -1376,12 +1440,12 @@ class _ConfigPanel(discord.ui.View):
             return
         if self.scope == "personal":
             if self.selected_key == "style":
-                self.store.set_personality(self.user_id, "")
+                await asyncio.to_thread(self.store.set_personality, self.user_id, "")
             elif self.selected_key == "byok":
                 await _send(interaction, "Use **Delete key** to remove BYOK credentials.")
                 return
             else:
-                self.store.reset_default(self.user_id, self.selected_key)
+                await asyncio.to_thread(self.store.reset_default, self.user_id, self.selected_key)
         elif self.selected_key in {"capabilities", "moderation"}:
             disabled = _guild_disabled(self.bot, self.guild_id)
             if self.selected_key == "capabilities":
@@ -1421,15 +1485,17 @@ class _ConfigPanel(discord.ui.View):
             getattr(self.bot, "_progress_servers_off", set()).discard(self.guild_id)
             saver = getattr(self.bot, "_save_progress_servers", None)
             if callable(saver):
-                saver()
+                await asyncio.to_thread(saver)
         elif self.selected_key == "ticket":
             getattr(self.bot, "_ticket_greeting_servers", set()).discard(self.guild_id)
             saver = getattr(self.bot, "_save_ticket_greeting_servers", None)
             if callable(saver):
-                saver()
+                await asyncio.to_thread(saver)
+        if self.scope == "personal":
+            await self._refresh_personal()
         self.notice = "**Reset.** The default is restored."
         self._build()
-        await interaction.response.edit_message(
+        await _edit_panel(interaction,
             content=None, embed=self.embed(), view=self,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -1443,9 +1509,18 @@ async def _handle_config(bot: Any, interaction: Any) -> bool:
     if store is None:
         await _send(interaction, "Personal settings are unavailable right now.")
         return True
-    panel = _ConfigPanel(bot, store, interaction)
+    await _acknowledge(interaction, thinking=True)
+    personal = await asyncio.to_thread(store.get, _user_id(interaction))
+    panel = _ConfigPanel(bot, store, interaction, personal=personal)
     response = getattr(interaction, "response", None)
     sender = getattr(response, "send_message", None)
+    done = getattr(response, "is_done", None)
+    if callable(done) and done():
+        await interaction.edit_original_response(
+            content=None, embed=panel.embed(), view=panel,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
     if not callable(sender):
         await _send(interaction, panel.render())
         return True

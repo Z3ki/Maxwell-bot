@@ -372,7 +372,7 @@ def _patch_session() -> None:
             await _clear_working_status(state, delete=False)
             status_message = state.status_message
             flags = getattr(status_message, "flags", None)
-            ephemeral = bool(getattr(flags, "ephemeral", False) or kwargs.get("ephemeral"))
+            ephemeral = bool(self.ephemeral or getattr(flags, "ephemeral", False) or kwargs.get("ephemeral"))
             channel = getattr(self.interaction, "channel", None)
             send = getattr(channel, "send", None)
             if (
@@ -410,7 +410,7 @@ def _patch_session() -> None:
             if (
                 status_message is not None
                 and (
-                    not bool(kwargs.get("ephemeral"))
+                    not ephemeral
                     or bool(getattr(flags, "ephemeral", False))
                 )
                 and not has_file_payload

@@ -423,3 +423,60 @@ def test_handle_ignores_other_commands():
     interaction = _interaction(name="wiki")
     bot = SimpleNamespace(_is_admin=lambda uid: True)
     assert asyncio.run(handle_user_install_interaction(bot, interaction)) is False
+
+
+def test_saved_visibility_is_used_for_slash_and_message_actions(tmp_path, monkeypatch):
+    import user_install as ui
+    from plugins.maxwell_extras import user_install_features as features
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    store = UserPreferenceStore(tmp_path / "preferences.json")
+    monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [])
+    monkeypatch.setattr(ui, "USER_INSTALL_NAMES", ui.USER_INSTALL_NAMES | {features.MESSAGE_EXPLAIN, features.MESSAGE_FACT_CHECK})
+    monkeypatch.setattr(features, "_USER_PREFERENCE_STORE", store)
+    original = ui.build_user_install_turn
+    monkeypatch.setattr(ui, "build_user_install_turn", lambda interaction: features._enhanced_build_turn(interaction, original))
+
+    async def run():
+        received = []
+
+        async def on_message(message):
+            received.append(message)
+            await message.reply("answer")
+
+        bot = SimpleNamespace(_user_preferences=store, on_message=on_message)
+        for visibility in ("public", "private"):
+            store.set_default(1, "visibility", visibility)
+            for name in ("maxwell", "Ask Maxwell", "Summarize", features.MESSAGE_EXPLAIN, features.MESSAGE_FACT_CHECK):
+                interaction = _interaction(name=name)
+                if name != "maxwell":
+                    interaction.data.update(type=3, target_id="42", options=[], resolved={"messages": {
+                        "42": {"id": "42", "content": "selected content", "author": {"id": "7", "username": "Alice"},
+                               "attachments": [{"id": "9", "filename": "voice-message.ogg", "content_type": "audio/ogg",
+                                                "url": "https://cdn.discordapp.com/voice.ogg", "duration_secs": 3,
+                                                "waveform": "AAAA"}]}
+                    }})
+                assert await ui.handle_user_install_interaction(bot, interaction)
+                assert interaction.response.deferred_ephemeral is (visibility == "private")
+                assert interaction.followup.payloads[-1]["ephemeral"] is (visibility == "private")
+                if name != "maxwell":
+                    message = received[-1]
+                    assert message.user_install_message_action
+                    assert "message action" in message.user_install_note.lower() or "message context menu" in message.user_install_note.lower()
+                    assert message.reference.resolved.content == "selected content"
+                    attachment = message.reference.resolved.attachments[0]
+                    assert attachment.duration == 3
+                    assert attachment.waveform == "AAAA"
+            user_action = _interaction(name="Ask Maxwell")
+            user_action.data.update(type=2, target_id="7", options=[], resolved={
+                "users": {"7": {"id": "7", "username": "Alice"}}
+            })
+            assert await ui.handle_user_install_interaction(bot, user_action)
+            assert user_action.response.deferred_ephemeral is (visibility == "private")
+            assert user_action.followup.payloads[-1]["ephemeral"] is (visibility == "private")
+            explicit = _interaction()
+            explicit.data["options"].append({"name": "visibility", "value": "private" if visibility == "public" else "public"})
+            assert await ui.handle_user_install_interaction(bot, explicit)
+            assert explicit.response.deferred_ephemeral is (visibility == "public")
+
+    asyncio.run(run())

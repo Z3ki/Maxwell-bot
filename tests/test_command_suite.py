@@ -591,3 +591,103 @@ def test_text_modal_rechecks_identity_and_context_before_saving(tmp_path):
         asyncio.run(modal.on_submit(click))
         assert store.get("100")["personality"] == ""
     assert len(denied) == 2
+
+
+def test_config_acknowledges_slow_save_and_rejects_stale_control(tmp_path):
+    import threading
+
+    async def run():
+        store = UserPreferenceStore(tmp_path / "prefs.json")
+        acknowledged = asyncio.Event()
+        started = threading.Event()
+        release = threading.Event()
+        edits, notices = [], []
+
+        class Response:
+            def __init__(self):
+                self.done = False
+
+            def is_done(self):
+                return self.done
+
+            async def defer(self, **kwargs):
+                self.done = True
+                acknowledged.set()
+
+        async def edit_original_response(**kwargs):
+            edits.append(kwargs)
+
+        async def send(text, **kwargs):
+            notices.append(text)
+
+        def click():
+            return SimpleNamespace(user=SimpleNamespace(id=100), response=Response(),
+                                   edit_original_response=edit_original_response,
+                                   followup=SimpleNamespace(send=send))
+
+        panel = command_suite._ConfigPanel(SimpleNamespace(), store, click())
+        panel.selected_key = "visibility"
+        panel._build()
+        old_control = next(item for item in panel.children if isinstance(item, command_suite._ConfigValueSelect))
+        old_control._values = ["private"]
+        original = store.set_default
+
+        def slow_save(*args):
+            started.set()
+            assert release.wait(5)
+            original(*args)
+
+        store.set_default = slow_save
+        task = asyncio.create_task(old_control.callback(click()))
+        try:
+            await asyncio.wait_for(acknowledged.wait(), 1)
+            # The event loop can keep serving interactions while disk I/O waits.
+            assert await asyncio.to_thread(started.wait, 1)
+            assert not task.done()
+        finally:
+            release.set()
+            await task
+        assert store.get(100)["defaults"]["visibility"] == "private"
+        assert "Private" in edits[-1]["embed"].description
+        panel.selected_key = "mode"
+        panel._build()
+        await old_control.callback(click())
+        assert store.get(100)["defaults"]["mode"] == "ask"
+        assert "control has changed" in notices[-1]
+
+    asyncio.run(run())
+
+
+def test_config_defers_before_loading_preferences(tmp_path):
+    async def run():
+        store = UserPreferenceStore(tmp_path / "prefs.json")
+        events = []
+        get = store.get
+
+        def read(uid):
+            assert events == ["ack"]
+            return get(uid)
+
+        store.get = read
+
+        class Response:
+            done = False
+
+            def is_done(self):
+                return self.done
+
+            async def defer(self, **kwargs):
+                assert kwargs == {"ephemeral": True, "thinking": True}
+                self.done = True
+                events.append("ack")
+
+        async def edit_original_response(**kwargs):
+            assert kwargs["embed"].title == "Your personal settings"
+            events.append("render")
+
+        interaction = SimpleNamespace(data={"name": "config"}, user=SimpleNamespace(id=100),
+                                      response=Response(), edit_original_response=edit_original_response)
+        assert await command_suite._handle_config(SimpleNamespace(_user_preferences=store), interaction)
+        assert events == ["ack", "render"]
+
+    asyncio.run(run())

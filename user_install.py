@@ -12,6 +12,7 @@ clicked message (Discord's official way to point at channel content).
 from __future__ import annotations
 
 import inspect
+import asyncio
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -303,6 +304,16 @@ def parse_target_user(interaction: Any) -> Any | None:
     return _user_from_resolved(raw)
 
 
+def resolve_response_visibility(
+    interaction: Any, *, defaults: dict | None = None, fallback: str = "public"
+) -> str:
+    """One visibility policy for slash, message and user context commands."""
+    options = dict(_option_pairs(_interaction_data(interaction).get("options")))
+    value = options.get("visibility", (defaults or {}).get("visibility", fallback))
+    value = str(value or "public").strip().lower()
+    return value if value in {"public", "private"} else "private"
+
+
 def _user_from_resolved(raw: Any) -> Any:
     if not isinstance(raw, dict):
         return raw
@@ -390,6 +401,8 @@ def _attachment_from_resolved(raw: Any) -> Any:
         url=raw.get("url") or "",
         proxy_url=raw.get("proxy_url") or raw.get("url") or "",
         content_type=raw.get("content_type"),
+        duration=raw.get("duration_secs"),
+        waveform=raw.get("waveform"),
         size=int(raw.get("size") or 0),
         width=raw.get("width"),
         height=raw.get("height"),
@@ -521,6 +534,8 @@ def build_user_install_turn(interaction: Any) -> dict[str, Any] | None:
             ),
             "note": " ".join(note_bits),
             "command": name,
+            "message_action": True,
+            "visibility": "public",
         }
     if cmd_type == 2:
         target = parse_target_user(interaction)
@@ -542,15 +557,12 @@ def build_user_install_turn(interaction: Any) -> dict[str, Any] | None:
             "reference": None,
             "note": " ".join(note_bits),
             "command": name,
+            "visibility": "public",
         }
     prompt, attachments = parse_user_install_command(interaction)
     if not str(prompt).strip():
         return None
-    options = dict(_option_pairs(data.get("options")))
-    requested_visibility = str(options.get("visibility") or "public").strip().lower()
-    visibility = (
-        requested_visibility if requested_visibility in {"private", "public"} else "private"
-    )
+    visibility = resolve_response_visibility(interaction)
     return {
         "prompt": str(prompt).strip(),
         "attachments": attachments,
@@ -730,6 +742,7 @@ class UserInstallMessageAdapter:
         web_mode: str = "auto",
         mode: str = "ask",
         visibility: str = "private",
+        message_action: bool = False,
     ):
         self.user_install = True
         self.tool_platform = "user_install"
@@ -778,6 +791,7 @@ class UserInstallMessageAdapter:
         self.reference = reference
         self.user_install_history = list(history or [])
         self.user_install_note = note
+        self.user_install_message_action = bool(message_action)
         self.user_install_search_query = str(search_query or "")
         self.user_install_web_mode = str(web_mode or "auto").strip().lower()
         self.user_install_mode = str(mode or "ask").strip().lower()
@@ -806,7 +820,7 @@ class UserInstallMessageAdapter:
 async def _ephemeral(interaction: Any, text: str) -> None:
     response = getattr(interaction, "response", None)
     is_done = getattr(response, "is_done", None)
-    if callable(is_done) and not is_done():
+    if not callable(is_done) or not is_done():
         send = getattr(response, "send_message", None)
         if callable(send):
             await send(
@@ -839,15 +853,21 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
             return True
     if not is_user_install_command(interaction):
         return False
-    turn = build_user_install_turn(interaction)
+    turn = await asyncio.to_thread(build_user_install_turn, interaction)
     if turn is None or not str(turn.get("prompt") or "").strip():
         await _ephemeral(interaction, "Maxwell could not read that command.")
         return True
     try:
-        visibility = (
-            "public"
-            if str(turn.get("visibility") or "private").strip().lower() == "public"
-            else "private"
+        store = getattr(bot, "_user_preferences", None)
+        defaults = None
+        if store is not None:
+            try:
+                personal = await asyncio.to_thread(store.get, getattr(getattr(interaction, "user", None), "id", ""))
+                defaults = personal.get("defaults") or {}
+            except Exception:
+                defaults = {"visibility": "private", "context": 0}
+        visibility = resolve_response_visibility(
+            interaction, defaults=defaults, fallback=turn.get("visibility") or "public"
         )
         response = getattr(interaction, "response", None)
         is_done = getattr(response, "is_done", None)
@@ -876,6 +896,8 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         mentions=turn.get("mentions") or [],
         reference=turn.get("reference"),
         history=history,
+        note=note,
+        message_action=bool(turn.get("message_action")),
         search_query=turn.get("search_query") or str(turn["prompt"]),
         web_mode=turn.get("web") or "auto",
         mode=turn.get("mode") or "ask",

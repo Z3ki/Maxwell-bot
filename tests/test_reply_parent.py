@@ -229,3 +229,18 @@ def test_ping_replying_to_maxwell_does_not_walk_the_chain():
     assert "you/Maxwell" in blob
     assert "alice buried ending" not in blob
     assert "was replying to" not in blob
+
+
+def test_message_app_action_treats_selected_message_as_requested_source():
+    bot = _bot()
+    message, parent = _self_reply(bot, ping=False)
+    parent.author = SimpleNamespace(id=7, display_name="Alice", bot=False)
+    parent.content = "A selected message the requester wants explained."
+    message.user_install = True
+    message.user_install_message_action = True
+    lines = bot._reply_parent_context_lines(message)
+    context = "\n".join(lines)
+    assert parent.content in context
+    assert "ask YOU" in context
+    assert "source material" in context
+    assert "They are answering Alice, not you" not in context

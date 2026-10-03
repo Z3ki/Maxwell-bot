@@ -303,6 +303,8 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
                 "incomplete unless Maxwell is also in this server."
             ),
             "command": name,
+            "message_action": True,
+            "visibility": _saved_visibility(interaction),
             "mode": "research" if name == MESSAGE_FACT_CHECK else "ask",
             "web": "search" if name == MESSAGE_FACT_CHECK else "auto",
             "search_query": str(getattr(target, "content", "") or prompt),
@@ -311,6 +313,7 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
     turn = original_build(interaction)
     if turn is None:
         return None
+    turn["visibility"] = _saved_visibility(interaction, fallback=turn.get("visibility") or "public")
     if cmd_type == 1 and name == ui.USER_INSTALL_COMMAND_NAME:
         opts = _options(interaction)
         user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
@@ -340,6 +343,17 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
             f"context={turn['history_limit']}."
         ).strip()
     return turn
+
+
+def _saved_visibility(interaction: Any, *, fallback: str = "public") -> str:
+    defaults = None
+    user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+    if _USER_PREFERENCE_STORE is not None and user_id:
+        try:
+            defaults = _USER_PREFERENCE_STORE.get(user_id).get("defaults") or {}
+        except Exception:
+            defaults = {"visibility": "private"}
+    return ui.resolve_response_visibility(interaction, defaults=defaults, fallback=fallback)
 
 
 async def _snapshot_channel_history(bot: Any, interaction: Any) -> list[dict[str, Any]]:

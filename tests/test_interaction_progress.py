@@ -139,7 +139,7 @@ def test_fast_answer_uses_original_interaction():
         mod._patch_session()
         interaction = _Interaction(1)
         state = _state(interaction)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
         sent = await session.send("done")
         assert sent is interaction.original
         assert interaction.original.content == "done"
@@ -155,7 +155,7 @@ def test_tool_escalation_keeps_status_and_replies_to_it():
         mod._patch_session()
         interaction = _Interaction(2)
         state = _state(interaction)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
         await interaction.response.defer()
         await mod._mark_working(state)
         sent = await session.send("final answer")
@@ -179,7 +179,7 @@ def test_answer_between_five_and_ten_seconds_stays_original():
         mod._patch_session()
         interaction = _Interaction(3)
         state = _state(interaction, age=6.0)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
         sent = await session.send("still fast enough")
         assert sent is interaction.original
         assert interaction.original.content == "still fast enough"
@@ -195,7 +195,7 @@ def test_answer_after_ten_seconds_replies_to_working_status():
         mod._patch_session()
         interaction = _Interaction(4)
         state = _state(interaction, age=11.0)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
         sent = await session.send("late answer")
         assert interaction.original.content == mod._STATUS_TEXT
         assert interaction.original_deleted is False
@@ -213,7 +213,7 @@ def test_interaction_tool_status_is_kept_as_reply_parent():
         mod._patch_session()
         interaction = _Interaction(6)
         state = _state(interaction)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
         await interaction.response.defer()
 
         await mod._note_interaction_tool(state, "web_search")
@@ -239,7 +239,7 @@ def test_slow_reply_falls_back_to_editing_status_when_channel_send_fails():
         interaction = _Interaction(7)
         interaction.channel.fail_send = True
         state = _state(interaction, age=11.0)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
 
         sent = await session.send("late answer")
         assert interaction.channel.sent == []
@@ -257,7 +257,7 @@ def test_ephemeral_working_status_is_not_replied_to_publicly():
         interaction = _Interaction(8)
         interaction.original.flags.ephemeral = True
         _state(interaction, age=11.0)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
 
         sent = await session.send("private late answer")
         assert interaction.channel.sent == []
@@ -273,7 +273,7 @@ def test_ephemeral_answer_does_not_replace_public_working_status():
         mod._patch_session()
         interaction = _Interaction(9)
         _state(interaction, age=11.0)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="private")
 
         sent = await session.send("private late answer", ephemeral=True)
         assert interaction.original.content == mod._STATUS_TEXT
@@ -293,7 +293,7 @@ def test_timeout_cannot_overwrite_final_answer_at_boundary():
         mod._patch_session()
         interaction = _RacingInteraction(5)
         state = _state(interaction)
-        session = UserInstallSession(interaction)
+        session = UserInstallSession(interaction, visibility="public")
 
         send_task = asyncio.create_task(session.send("final answer"))
         await interaction.final_edit_started.wait()
@@ -314,5 +314,20 @@ def test_timeout_cannot_overwrite_final_answer_at_boundary():
         assert interaction.followup.sent == []
         assert state.completed is True
         assert state.escalated is False
+
+    asyncio.run(run())
+
+
+def test_private_session_never_sends_slow_answer_to_channel():
+    async def run():
+        mod._patch_session()
+        interaction = _Interaction(987)
+        _state(interaction, age=11.0)
+        session = UserInstallSession(interaction, visibility="private")
+        # Even missing or misleading status flags cannot publish a private answer.
+        await session.send("private result")
+        assert interaction.channel.sent == []
+        assert interaction.followup.sent[-1][0]["ephemeral"] is True
+        assert interaction.followup.sent[-1][0]["content"] == "private result"
 
     asyncio.run(run())
