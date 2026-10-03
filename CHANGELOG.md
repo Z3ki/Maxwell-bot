@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.1.7 — 2026-10-03
+
+Install with `--version v0.1.7`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
 
 - Ask Maxwell responds directly to the selected message without a popup form, using saved reply preferences. Rewrite / Translate retains its request form.
 - `image_generator` and `hd_image` return generated media to the model for inspection without posting to Discord. The model decides whether to send it, use it in a site, regenerate, or reply normally; image MIME types and full-resolution reusable files are preserved.
+- A same-user interrupt releases its slot in the reply queue, so one busy channel cannot fill the process-wide cap.
+- Purge confirmation deletes the selected messages on discord.py 2.7.
+- Moderation requires the asker to outrank the target. Role edits and channel overwrites cannot grant permissions the asker lacks. Renaming or archiving a thread requires Manage Threads unless the asker owns that thread.
+- AFK timeout must be a Discord-legal value. AFK, system, and voice-move channels must belong to the same server.
+- A reminder whose channel is gone, or that keeps failing to send, is retired.
+- Automatic mailbox context omits the sender, subject, and snippet until a tool reads the message and marks the turn untrusted.
+- `usage` is operator-only and returns quota lines, not the raw upstream body.
+- Plugin archives unpack into a fresh directory, so a zip named `...zip` cannot delete `data/`.
+- Cookies from a proxied site stay on that site's path and cannot set a shared Domain.
+- Public address checks reject multicast, deprecated site-local, and NAT64 addresses.
 
 ## 0.1.6 — 2026-10-03
 
