@@ -244,3 +244,16 @@ def test_message_app_action_treats_selected_message_as_requested_source():
     assert "ask YOU" in context
     assert "source material" in context
     assert "They are answering Alice, not you" not in context
+
+
+def test_message_app_action_includes_earlier_dm_reply_context():
+    bot = _bot()
+    message, selected = _self_reply(bot, ping=False)
+    earlier = _parent(author=SimpleNamespace(id=7, display_name="Alice", bot=False), content="earlier DM question", id=99)
+    selected.reference = SimpleNamespace(resolved=earlier)
+    message.user_install = True
+    message.user_install_message_action = True
+    context = "\n".join(bot._reply_parent_context_lines(message))
+    assert "earlier DM question" in context
+    assert "Earlier reply context by Alice" in context
+    assert "not you, unless" not in context

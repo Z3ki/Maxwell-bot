@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `/maxwell` uses normal text and brief replies by default; saved and explicit detail preferences still apply.
+- Ask Maxwell opens a prompt form with the same actions, detail, visibility, and language as slash requests. Rewrite / Translate adds another entry point; quick message actions share the request defaults.
+- DM app requests include available participants, richer message payloads, reply chains, and permitted history, including private DM requests. Missing history is stated explicitly.
+- Maxwell can read its startup revision and changelog, recent GitHub commits, and changed-file summaries without assuming upstream changes are deployed.
+- Reply visibility, responsive settings controls, selected-message context, and channel history up to 1,000 messages are supported.
+
 ## 0.1.4 — 2026-10-01
 
 Install with `--version v0.1.4`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

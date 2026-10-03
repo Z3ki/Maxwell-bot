@@ -33,6 +33,7 @@ tests
 docs
 *.md
 !README.md
+!CHANGELOG.md
 .pi-lens
 .pi-subagents
 .commandcode

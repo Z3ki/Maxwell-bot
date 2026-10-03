@@ -7,7 +7,7 @@ context, and richer webhook payloads.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import logging
 from typing import Any
 
 import discord
@@ -16,6 +16,8 @@ import user_install as ui
 
 MESSAGE_EXPLAIN = "Explain"
 MESSAGE_FACT_CHECK = "Fact-check"
+MESSAGE_TRANSFORM = "Rewrite / Translate"
+logger = logging.getLogger(__name__)
 
 _MODE_CHOICES = [
     {"name": "Ask", "value": "ask"},
@@ -33,7 +35,7 @@ _WEB_CHOICES = [
     {"name": "Do not search", "value": "off"},
 ]
 _DETAIL_CHOICES = [
-    {"name": "Quick", "value": "quick"},
+    {"name": "Brief", "value": "quick"},
     {"name": "Balanced", "value": "balanced"},
     {"name": "Deep", "value": "deep"},
 ]
@@ -88,7 +90,7 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
                 },
                 {
                     "name": "detail",
-                    "description": "How much detail to return",
+                    "description": "Brief by default; choose Balanced or Deep for more explanation",
                     "type": 3,
                     "required": False,
                     "choices": _DETAIL_CHOICES,
@@ -152,6 +154,11 @@ def modern_user_install_commands() -> list[dict[str, Any]]:
             **meta,
         },
         {
+            "name": MESSAGE_TRANSFORM,
+            "type": 3,
+            **meta,
+        },
+        {
             "name": ui.USER_INSTALL_USER_ASK,
             "type": 2,
             **meta,
@@ -179,7 +186,7 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
 
     mode = str(options.get("mode") or "ask").strip().lower()
     web = str(options.get("web") or "auto").strip().lower()
-    detail = str(options.get("detail") or "balanced").strip().lower()
+    detail = str(options.get("detail") or "quick").strip().lower()
     language = str(options.get("language") or "").strip()[:80]
 
     mode_instruction = {
@@ -236,7 +243,13 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
         )
 
     if detail == "quick":
-        instructions.append("Keep the final answer concise and focused on the result.")
+        instructions.append(
+            "Keep the final answer concise and focused on the result. Usually use 1-3 short "
+            "sentences. Skip introductions, repeated points, and unnecessary explanation. "
+            "Use more space only when the request needs it or the user asks for detail."
+        )
+    elif detail == "balanced":
+        instructions.append("Give a focused answer with enough explanation to be useful.")
     elif detail == "deep":
         instructions.append(
             "Give a thorough answer with the important reasoning, caveats, and implementation details."
@@ -263,77 +276,52 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
     except (TypeError, ValueError):
         cmd_type = 1
 
-    if cmd_type == 3 and name in {MESSAGE_EXPLAIN, MESSAGE_FACT_CHECK}:
-        target = ui.parse_target_message(interaction)
-        if target is None:
-            return None
-        if name == MESSAGE_EXPLAIN:
-            prompt = (
-                "Explain this message clearly. Use the pointed-at message as the source "
-                "material; explain context, jargon, implications, and any code/error text "
-                "without inventing missing details."
-            )
-        else:
-            prompt = (
-                "Fact-check the claims in this message. Use web search for current or "
-                "externally verifiable claims, prefer reliable/primary sources, and separate "
-                "verified facts, unsupported claims, contradictions, and uncertainty."
-            )
-        channel = getattr(interaction, "channel", None)
-        channel_name = str(getattr(channel, "name", "") or "") or "this channel"
-        return {
-            "prompt": prompt,
-            "attachments": [],
-            "mentions": list(getattr(target, "mentions", None) or []),
-            "reference": SimpleNamespace(
-                message_id=getattr(target, "id", None),
-                resolved=target,
-            ),
-            "note": (
-                f"User-install message action ({name}) in #{channel_name}. "
-                "The pointed-at message is the reply parent. Channel transcript may be "
-                "incomplete unless Maxwell is also in this server."
-            ),
-            "command": name,
-            "message_action": True,
-            "visibility": _saved_visibility(interaction),
-            "mode": "research" if name == MESSAGE_FACT_CHECK else "ask",
-            "web": "search" if name == MESSAGE_FACT_CHECK else "auto",
-            "search_query": str(getattr(target, "content", "") or prompt),
-        }
-
     turn = original_build(interaction)
     if turn is None:
         return None
-    turn["visibility"] = _saved_visibility(interaction, fallback=turn.get("visibility") or "public")
-    if cmd_type == 1 and name == ui.USER_INSTALL_COMMAND_NAME:
-        opts = _options(interaction)
-        user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
-        store = _USER_PREFERENCE_STORE
-        if store is not None and user_id:
-            try:
-                defaults = store.get(user_id).get("defaults") or {}
-            except Exception:
-                defaults = {"visibility": "private", "context": 0}
-            for key in ("mode", "web", "detail", "context", "language", "visibility"):
-                if key not in opts and key in defaults:
-                    opts[key] = defaults[key]
-        raw_prompt = str(turn.get("prompt") or "")
-        turn["search_query"] = raw_prompt
-        turn["prompt"] = _slash_prompt(raw_prompt, opts)
-        turn["history_limit"] = _context_limit(interaction, options=opts)
-        visibility = str(opts.get("visibility") or "public").strip().lower()
-        turn["visibility"] = visibility if visibility in {"private", "public"} else "private"
-        mode = str(opts.get("mode") or "ask")
-        web = str(opts.get("web") or "auto")
-        turn["mode"] = mode.strip().lower()
-        turn["web"] = web.strip().lower()
-        detail = str(opts.get("detail") or "balanced")
-        turn["note"] = (
-            str(turn.get("note") or "")
-            + f" Personal-app options: mode={mode}, web={web}, detail={detail}, "
-            f"context={turn['history_limit']}."
-        ).strip()
+    opts = _options(interaction)
+    user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+    if _USER_PREFERENCE_STORE is not None and user_id:
+        try:
+            defaults = _USER_PREFERENCE_STORE.get(user_id).get("defaults") or {}
+        except Exception:
+            defaults = {"visibility": "private", "context": 0}
+        for key in ("mode", "web", "detail", "context", "language", "visibility"):
+            if key not in opts and key in defaults:
+                opts[key] = defaults[key]
+    if cmd_type == 3:
+        # A quick action chooses its task; the modal can explicitly override it.
+        action_mode = {
+            ui.USER_INSTALL_MESSAGE_ASK: "ask",
+            ui.USER_INSTALL_MESSAGE_SUMMARIZE: "summarize",
+            MESSAGE_EXPLAIN: "explain",
+            MESSAGE_FACT_CHECK: "research",
+            MESSAGE_TRANSFORM: "rewrite",
+        }.get(name, "ask")
+        opts["mode"] = _options(interaction).get("mode", action_mode)
+        if name == MESSAGE_FACT_CHECK:
+            opts["web"] = "search"
+            turn["prompt"] = "Fact-check the claims in the selected message. Cite primary sources and identify uncertainty."
+        elif name == MESSAGE_EXPLAIN:
+            turn["prompt"] = "Explain the selected message clearly without inventing missing details."
+        elif name == MESSAGE_TRANSFORM:
+            turn["prompt"] = "Rewrite the selected message while preserving its meaning."
+        if data.get("request_prompt"):
+            turn["prompt"] = str(data["request_prompt"]).strip()
+    raw_prompt = str(turn.get("prompt") or "")
+    target = getattr(turn.get("reference"), "resolved", None)
+    turn["search_query"] = str(getattr(target, "content", "") or raw_prompt)
+    turn["prompt"] = _slash_prompt(raw_prompt, opts)
+    turn["history_limit"] = _context_limit(interaction, options=opts)
+    turn["visibility"] = ui.resolve_response_visibility(interaction, defaults=opts)
+    turn["mode"] = str(opts.get("mode") or "ask").strip().lower()
+    turn["web"] = str(opts.get("web") or "auto").strip().lower()
+    detail = str(opts.get("detail") or "quick")
+    turn["note"] = (
+        str(turn.get("note") or "")
+        + f" Personal-app options: mode={turn['mode']}, web={turn['web']}, "
+        f"detail={detail}, context={turn['history_limit']}."
+    ).strip()
     return turn
 
 
@@ -457,11 +445,104 @@ async def _modern_session_send(
     return sent
 
 
+
+class _MessageRequestInteraction:
+    def __init__(self, interaction: Any, target: Any, prompt: str, options: list[dict]):
+        self._interaction = interaction
+        self.type = 2
+        self._maxwell_modal_request = True
+        self.data = {
+            "name": ui.USER_INSTALL_MESSAGE_ASK, "type": 3,
+            "target_id": str(target.id), "resolved": {"messages": {str(target.id): target}},
+            "request_prompt": prompt, "options": options,
+        }
+
+    def __getattr__(self, key):
+        return getattr(self._interaction, key)
+
+
+class _MessageRequestModal(discord.ui.Modal):
+    def __init__(self, bot: Any, interaction: Any, target: Any, *, mode: str = "ask"):
+        super().__init__(title="Ask Maxwell about this message", timeout=300)
+        self.bot = bot
+        self.target = target
+        self.scope = ui.private_channel_key(interaction)
+        self._submitted = False
+        self.prompt = discord.ui.TextInput(
+            placeholder="For example: explain this error or draft a reply", required=False,
+            max_length=4000, style=discord.TextStyle.paragraph,
+        )
+        self.mode = discord.ui.Select(options=[
+            discord.SelectOption(label=row["name"], value=row["value"], default=row["value"] == mode)
+            for row in _MODE_CHOICES
+        ])
+        self.detail = discord.ui.Select(options=[
+            discord.SelectOption(label="My saved detail", value="saved", default=True),
+            *[discord.SelectOption(label=row["name"], value=row["value"]) for row in _DETAIL_CHOICES],
+        ])
+        self.visibility = discord.ui.Select(options=[
+            discord.SelectOption(label="My saved visibility", value="saved", default=True),
+            discord.SelectOption(label="Public", value="public"),
+            discord.SelectOption(label="Private — only me", value="private"),
+        ])
+        self.language = discord.ui.TextInput(placeholder="For translation, e.g. Spanish", required=False, max_length=80)
+        for text, item in [("Your request (optional)", self.prompt), ("Action", self.mode),
+                           ("Answer detail", self.detail), ("Reply visibility", self.visibility),
+                           ("Language (optional)", self.language)]:
+            self.add_item(discord.ui.Label(text=text, component=item))
+        self.default_mode = mode
+
+    async def interaction_check(self, interaction: Any) -> bool:
+        if ui.private_channel_key(interaction) != self.scope:
+            await ui._ephemeral(interaction, "This request belongs to the person and channel that opened it.")
+            return False
+        return True
+
+    async def on_submit(self, interaction: Any) -> None:
+        if not await self.interaction_check(interaction):
+            return
+        if self._submitted:
+            await ui._ephemeral(interaction, "This request has already been submitted.")
+            return
+        mode = self.mode.values[0] if self.mode.values else self.default_mode
+        options = [{"name": "mode", "value": mode}]
+        for name, field in (("detail", self.detail), ("visibility", self.visibility)):
+            value = field.values[0] if field.values else "saved"
+            if value != "saved":
+                options.append({"name": name, "value": value})
+        if self.language.value:
+            options.append({"name": "language", "value": self.language.value.strip()})
+        prompt = str(self.prompt.value or "").strip() or "Work on the selected message using the chosen action."
+        self._submitted = True
+        request = _MessageRequestInteraction(interaction, self.target, prompt, options)
+        await ui.handle_user_install_interaction(self.bot, request)
+
+    async def on_error(self, interaction: Any, error: Exception) -> None:
+        logger.warning("Message request failed (%s)", type(error).__name__)
+        await ui._ephemeral(interaction, "Could not start that request. Use Ask Maxwell again to retry.")
+
+
+async def _handle_message_request(bot: Any, interaction: Any) -> bool:
+    if getattr(interaction, "_maxwell_modal_request", False):
+        return False
+    data = ui._interaction_data(interaction)
+    if data.get("type") != 3 or data.get("name") not in {ui.USER_INSTALL_MESSAGE_ASK, MESSAGE_TRANSFORM}:
+        return False
+    target = ui.parse_target_message(interaction)
+    if target is None:
+        await ui._ephemeral(interaction, "Could not read the selected message. Try again on that message.")
+        return True
+    await interaction.response.send_modal(_MessageRequestModal(
+        bot, interaction, target, mode="rewrite" if data["name"] == MESSAGE_TRANSFORM else "ask"
+    ))
+    return True
+
 def install_user_install_features(bot: Any) -> None:
     """Upgrade commands and transport before Discord command sync happens."""
 
     del bot  # install is process-wide because user_install is a shared transport module.
     global _FEATURES_INSTALLED, _ORIGINAL_BUILD_TURN
+    ui.register_interaction_handler(_handle_message_request, name="message_requests", priority=15)
     if _FEATURES_INSTALLED:
         return
 
@@ -485,6 +566,7 @@ def install_user_install_features(bot: Any) -> None:
             ui.USER_INSTALL_USER_ASK,
             MESSAGE_EXPLAIN,
             MESSAGE_FACT_CHECK,
+            MESSAGE_TRANSFORM,
             "help",
             "usage",
             "premium",

@@ -71,7 +71,8 @@ _HELP_TOPICS = {
     "start": (
         "Getting started",
         [
-            "`/maxwell prompt:<your question>` — ask Maxwell anything.",
+            "`/maxwell prompt:<your question>` — brief plain-text answers by default.",
+            "Message → Apps → Ask Maxwell — enter a request and choose the same actions as /maxwell. Rewrite / Translate opens the same form; Summarize, Explain, and Fact-check run immediately.",
             "`/cancel` — stop your running request in this interaction context.",
             "`/help` — browse this list by topic.",
             "`/usage` — check your current message allowance.",
@@ -81,8 +82,8 @@ _HELP_TOPICS = {
         "Personal settings",
         [
             "`/config` — open the private settings menu for response mode, research, detail, context, language, and reply style.",
-            "`/config` → Reply style — set or clear a personal writing preference.",
-            "`/config` → Default visibility — choose private or public replies; private is the default.",
+            "`/config` → Personality — set or clear a personal writing preference.",
+            "`/config` → Reply visibility — choose private or public replies; public is the default.",
             "`/config` → Bring your own key — save, test, view status, or delete a supported provider key privately.",
         ],
     ),

@@ -480,3 +480,61 @@ def test_saved_visibility_is_used_for_slash_and_message_actions(tmp_path, monkey
             assert explicit.response.deferred_ephemeral is (visibility == "public")
 
     asyncio.run(run())
+
+
+def test_private_dm_app_receives_live_context_and_participant_metadata(tmp_path, monkeypatch):
+    import discord
+    import user_install as ui
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default(1, "visibility", "private")
+    monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [])
+    observed = []
+
+    async def on_message(message):
+        observed.append(message)
+
+    async def history(*, limit):
+        yield SimpleNamespace(id=10, content="our earlier DM conversation", attachments=[],
+                              author=SimpleNamespace(id=7, display_name="Alice", bot=False), created_at=None)
+
+    interaction = _interaction()
+    interaction.channel = SimpleNamespace(id=555, name=None, type=discord.ChannelType.private,
+                                          recipient=SimpleNamespace(id=7, display_name="Alice", bot=False), history=history)
+    bot = SimpleNamespace(_user_preferences=store, on_message=on_message)
+    assert asyncio.run(ui.handle_user_install_interaction(bot, interaction))
+    message = observed[0]
+    assert message.response_visibility == "private"
+    assert message.user_install_source_kind == "DM"
+    assert "Alice" in message.user_install_note
+    assert "DM with Alice" in message.user_install_note
+    assert message.user_install_history[0]["content"] == "our earlier DM conversation"
+    assert message.channel.recipient.id == 7
+    # Server ephemeral requests still do not fetch server history.
+    interaction = _interaction()
+    interaction.guild_id = 123
+    interaction.channel.history = history
+    asyncio.run(ui.handle_user_install_interaction(bot, interaction))
+    assert observed[-1].user_install_history == []
+
+
+def test_resolved_message_keeps_reply_chain_buttons_embeds_and_audio():
+    import user_install as ui
+    from utils import render_discord_context_text
+    interaction = _interaction()
+    target = ui._message_from_resolved({
+        "id": "42", "channel_id": "555", "content": "this broke", "author": {"id": "7", "username": "Alice"},
+        "referenced_message": {"id": "41", "channel_id": "555", "content": "earlier DM question", "author": {"id": "1", "username": "requester"}},
+        "attachments": [{"id": "8", "filename": "voice-message.ogg", "content_type": "audio/ogg", "duration_secs": 3}],
+        "embeds": [{"title": "error", "description": "connection refused"}],
+        "components": [{"type": 1, "components": [{"type": 2, "label": "Try again", "custom_id": "retry"}]}],
+        "message_snapshots": [{"message": {"content": "forwarded conversation", "attachments": [{"id": "9", "filename": "forwarded.png", "content_type": "image/png"}]}}],
+    }, interaction)
+    assert target.reference.resolved.content == "earlier DM question"
+    assert target.attachments[0].duration == 3
+    context = render_discord_context_text(target)
+    assert "Try again" in context
+    assert "connection refused" in context
+    assert "voice-message.ogg" in context
+    assert "forwarded conversation" in context
+    assert "forwarded.png" in context

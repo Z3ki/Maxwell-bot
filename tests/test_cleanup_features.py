@@ -9,27 +9,20 @@ from plugins.maxwell_extras import maxwell_embed_output
 from plugins.maxwell_extras import taint_gate_cleanup
 
 
-def test_maxwell_slash_reply_uses_embed_shape():
-    interaction = SimpleNamespace(data={"name": "maxwell", "type": 1})
-    assert maxwell_embed_output._is_maxwell_slash(interaction)
-
-    bot = SimpleNamespace(
-        user=SimpleNamespace(
-            display_name="Maxwell el gato",
-            display_avatar=SimpleNamespace(url="https://example.com/maxwell.png"),
-        )
-    )
-    embed = maxwell_embed_output._reply_embed("hello", bot)
-    assert embed.description == "hello"
-    assert embed.colour.value == 0x5865F2
-    assert embed.author.name == "Maxwell el gato"
-    assert str(embed.author.icon_url) == "https://example.com/maxwell.png"
-    assert embed.footer.text is None
-
-
-def test_context_action_is_not_treated_as_maxwell_slash():
-    interaction = SimpleNamespace(data={"name": "Ask Maxwell", "type": 3})
-    assert not maxwell_embed_output._is_maxwell_slash(interaction)
+def test_maxwell_slash_reply_uses_plain_text(monkeypatch):
+    import user_install as ui
+    monkeypatch.setattr(ui, "_SEND_WRAPPERS", [])
+    monkeypatch.setattr(ui.UserInstallSession, "send", ui.UserInstallSession._send_impl)
+    maxwell_embed_output.install_maxwell_embed_output(SimpleNamespace())
+    followup = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=1)))
+    interaction = SimpleNamespace(data={"name": "maxwell", "type": 1}, followup=followup,
+                                  response=SimpleNamespace(is_done=lambda: True))
+    session = ui.UserInstallSession(interaction, visibility="public")
+    asyncio.run(session.send("hello"))
+    payload = followup.send.call_args.kwargs
+    assert payload["content"] == "hello"
+    assert "embed" not in payload
+    assert payload["ephemeral"] is False
 
 
 def test_autonomy_route_rejects_context_only_guild_channel():

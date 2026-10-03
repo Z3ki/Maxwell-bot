@@ -14,7 +14,7 @@ _LOCK = threading.RLock()
 _DEFAULTS: dict[str, Any] = {
     "mode": "ask",
     "web": "auto",
-    "detail": "balanced",
+    "detail": "quick",
     "context": 25,
     "language": "",
     "visibility": "public",

@@ -59,7 +59,7 @@ _PERSONAL_VALUE_CHOICES = {
         ("Brainstorm", "brainstorm"), ("Write code", "code"),
     ],
     "web": [("Automatic", "auto"), ("Always search", "search"), ("Off", "off")],
-    "detail": [("Quick", "quick"), ("Balanced", "balanced"), ("Deep", "deep")],
+    "detail": [("Brief", "quick"), ("Balanced", "balanced"), ("Deep", "deep")],
     "context": [
         ("No recent context" if count == 0 else f"Last {count:,} messages", str(count))
         for count in ui.USER_INSTALL_CONTEXT_COUNTS
@@ -84,7 +84,7 @@ _CHOICE_HELP = {
 _SETTING_HELP = {
     "mode": "For everyday questions, choose Answer normally. Choose Research for a sourced answer.",
     "web": "Automatic works for most requests. Off prevents web search for this request mode.",
-    "detail": "Quick keeps it brief. Balanced is the default. Deep asks for a fuller explanation.",
+    "detail": "Brief is the default. Balanced adds explanation. Deep asks for a fuller explanation.",
     "context": "Choose up to 1,000 messages. Very long conversations may include fewer messages. Only recent messages Maxwell can access in this channel are included. Choose none to use just your request.",
     "visibility": "Applies to /maxwell and message app actions. Public replies appear in the channel; Private replies are only visible to you. You can override this on /maxwell. Servers must allow Use External Apps for user-installed apps to reply publicly.",
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",

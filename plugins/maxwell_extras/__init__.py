@@ -2,10 +2,11 @@
 
 
 def setup(bot, ctx):
+    import user_install as ui
     from .admin_commands import install_admin_commands
     from .command_suite import install_command_suite
     from .interaction_progress import install_interaction_progress
-    from .maxwell_embed_output import install_maxwell_embed_output
+    from .updates import MaxwellUpdatesTool
     from .rich_interactions import install_rich_interactions
     from .user_install_features import (
         install_user_install_features,
@@ -51,10 +52,8 @@ def setup(bot, ctx):
     # sends the eventual answer as a separate follow-up.
     install_interaction_progress(bot, ctx)
 
-    # /maxwell must wrap the progress layer, not sit underneath it. Fast answers
-    # are edited into Discord's deferred original response by interaction_progress;
-    # converting text to an embed first keeps those fast replies rich too.
-    install_maxwell_embed_output(bot)
+    # Keep AI answers as normal Discord text; explicit rich-message tools still work.
+    ui.unwrap_session_send("maxwell_embed")
 
     # Keep stale owner-only command registrations removed. Protected global
     # controls and diagnostics are exposed through the owner scope of `/config`.
@@ -67,6 +66,7 @@ def setup(bot, ctx):
     install_rich_interactions(bot, ctx, rich_tool)
 
     return [
+        MaxwellUpdatesTool(bot),
         ReminderTool(bot, store),
         rich_tool,
         RecallCrossServerMemoryTool(bot),
@@ -87,4 +87,5 @@ def teardown(bot):
     ui.unregister_interaction_handler("admin_commands")
     uninstall_command_suite(bot)
     ui.unregister_interaction_handler("interaction_progress")
+    ui.unregister_interaction_handler("message_requests")
     del bot

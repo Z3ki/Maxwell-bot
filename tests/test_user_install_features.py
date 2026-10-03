@@ -147,10 +147,10 @@ def test_fact_check_context_action_targets_selected_message(monkeypatch):
     monkeypatch.setattr(mod.ui, "parse_target_message", lambda _interaction: target)
     interaction = _interaction(name=mod.MESSAGE_FACT_CHECK, cmd_type=3)
 
-    turn = mod._enhanced_build_turn(interaction, lambda _interaction: None)
+    turn = mod._enhanced_build_turn(interaction, mod.ui.build_user_install_turn)
     assert turn is not None
     assert "Fact-check" in turn["prompt"]
-    assert "web search" in turn["prompt"].lower()
+    assert "search the web" in turn["prompt"].lower()
     assert turn["reference"].resolved is target
     assert turn["search_query"] == "current claim"
     assert turn["mode"] == "research"
@@ -267,3 +267,88 @@ def test_large_saved_context_fetches_all_selected_messages(tmp_path, monkeypatch
     interaction.data["options"] = [{"name": "context", "value": 100}]
     assert len(asyncio.run(mod._snapshot_channel_history(None, interaction))) == 100
     assert requested[-1] == 100
+
+
+def test_message_modal_accepts_prompt_and_same_options_as_slash(tmp_path, monkeypatch):
+    import user_install as ui
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    from test_user_install import _interaction as transport_interaction
+
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default(1, "detail", "quick")
+    monkeypatch.setattr(mod, "_USER_PREFERENCE_STORE", store)
+    monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [(15, "message_requests", mod._handle_message_request)])
+    original = ui.build_user_install_turn
+    monkeypatch.setattr(ui, "build_user_install_turn", lambda interaction: mod._enhanced_build_turn(interaction, original))
+    received, opened = [], []
+
+    async def on_message(message):
+        received.append(message)
+        await message.reply("plain answer")
+
+    async def send_modal(modal):
+        opened.append(modal)
+
+    bot = SimpleNamespace(_user_preferences=store, on_message=on_message)
+    selected = SimpleNamespace(id=42, content="selected message", attachments=[], mentions=[],
+                               author=SimpleNamespace(id=7, display_name="Alice", bot=False))
+    interaction = transport_interaction(name="Ask Maxwell")
+    interaction.data.update(type=3, target_id="42", resolved={"messages": {"42": selected}})
+    interaction.response.send_modal = send_modal
+    assert asyncio.run(ui.handle_user_install_interaction(bot, interaction))
+    assert received == []  # Opening or cancelling the form does not spend an AI request.
+    modal = opened[0]
+    components = modal.to_components()
+    assert len(components) == 5
+    assert all(item["type"] == 18 for item in components)
+    assert {option.value for option in modal.mode.options} == {row["value"] for row in mod._MODE_CHOICES}
+    modal.prompt._value = "Explain why this failed."
+    modal.mode._values = ["explain"]
+    modal.detail._values = ["deep"]
+    modal.visibility._values = ["private"]
+    modal.language._value = "Spanish"
+    submission = transport_interaction()
+    submission.id = 123456
+    submission.type = 5
+    asyncio.run(modal.on_submit(submission))
+    message = received[-1]
+    assert message.id == submission.id
+    assert message.reference.resolved is selected
+    assert "Explain why this failed." in message.content
+    assert "thorough" in message.content
+    assert "Respond in Spanish" in message.content
+    assert message.response_visibility == "private"
+    assert submission.response.deferred_ephemeral
+    assert submission.followup.payloads[-1]["content"] == "plain answer"
+    assert "embed" not in submission.followup.payloads[-1]
+    asyncio.run(modal.on_submit(submission))
+    assert len(received) == 1
+
+
+def test_message_modal_rejects_other_users_and_channels():
+    from test_user_install import _interaction as transport_interaction
+    origin = transport_interaction()
+    target = SimpleNamespace(id=42)
+    modal = mod._MessageRequestModal(SimpleNamespace(), origin, target)
+    wrong_user = transport_interaction(user_id=2)
+    assert not asyncio.run(modal.interaction_check(wrong_user))
+    wrong_channel = transport_interaction()
+    wrong_channel.channel_id = 888
+    assert not asyncio.run(modal.interaction_check(wrong_channel))
+
+
+def test_app_menu_and_slash_share_brief_default_and_saved_preferences(tmp_path, monkeypatch):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    monkeypatch.setattr(mod, "_USER_PREFERENCE_STORE", store)
+    original = lambda _: {"prompt": "hello", "attachments": [], "note": ""}
+    slash = mod._enhanced_build_turn(_interaction(), original)
+    summary = mod._enhanced_build_turn(_interaction(name="Summarize", cmd_type=3), original)
+    assert "1-3 short sentences" in slash["prompt"]
+    assert "1-3 short sentences" in summary["prompt"]
+    assert summary["mode"] == "summarize"
+    store.set_default(1, "detail", "deep")
+    assert "thorough" in mod._enhanced_build_turn(_interaction(name="Explain", cmd_type=3), original)["prompt"]
+    commands = mod.modern_user_install_commands()
+    assert len([command for command in commands if command["type"] == 3]) == 5
+    assert (mod.MESSAGE_TRANSFORM, 3) in {(command["name"], command["type"]) for command in commands}
