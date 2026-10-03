@@ -258,6 +258,27 @@ Rebuild/start:
 ./run.sh -d --build
 ```
 
+### Enable custom site backends on Linux
+
+Static pages and the built-in KV API do not need this setup. Custom Python
+backends require the Linux host-network deployment, cgroup v2 with Docker's
+systemd driver, and gVisor `runsc` already registered with Docker.
+
+```bash
+docker build -t maxwell-site-runtime docker/site-runtime
+sudo bash scripts/setup_site_host.sh
+./run.sh -d
+```
+
+The trusted runtime image is shared by all new apps; model tool calls cannot
+install packages or build images. The host setup installs a persistent 2-CPU /
+4-GiB site resource pool without restarting Docker. Source and SQLite data
+remain private to each backend. Existing backend containers must be restarted
+one at a time into the pool; see [SITE_BACKEND_MIGRATION.md](SITE_BACKEND_MIGRATION.md).
+The standard backend stack and request limits are documented in
+[CONFIGURATION.md](CONFIGURATION.md#generated-site-custom-backends).
+
+
 ## Reverse proxy and public generated sites
 
 Use [`examples/Caddyfile.example`](../examples/Caddyfile.example) as the reference for a split-origin deployment.

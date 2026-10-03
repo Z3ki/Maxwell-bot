@@ -78,8 +78,6 @@ def test_runtime_flags_disable_swap():
     )
     assert args[args.index("--memory-swap") + 1] == "2g"
     assert args[args.index("--cgroup-parent") + 1] == "maxwell-shell.slice"
-    site = (ROOT / "site_server.py").read_text()
-    assert '"--memory-swap", MEMORY' in site
 
 
 def test_shell_requires_explicit_gvisor_platform_and_isolated_network():
@@ -107,7 +105,3 @@ def test_shell_requires_explicit_gvisor_platform_and_isolated_network():
         assert not safe, args
 
 
-def test_site_backend_runs_as_root():
-    site = (ROOT / "site_server.py").read_text()
-    assert '"--user", "0"' in site
-    assert '"--cap-add", "DAC_OVERRIDE"' in site

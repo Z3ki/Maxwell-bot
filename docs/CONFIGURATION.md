@@ -48,6 +48,40 @@ Do not set conflicting values in both namespaces.
 
 See [`.env.example`](../.env.example) for the complete advanced environment reference.
 
+## Generated-site custom backends
+
+`ENABLE_CREATE_SITE` gates static sites, the built-in KV API, and `site_server`.
+`backend=true` on `create_site` enables the KV API only. Use `site_server` for
+custom Python routes, authentication, server-side secrets, or WebSockets.
+The standard stack is FastAPI + Uvicorn (one worker, no reload) + SQLite.
+Backend code and lifecycle access require the site owner or a Maxwell admin.
+
+Custom backends require Linux, Docker host networking, cgroup v2 with the
+systemd driver, and the configured gVisor `runsc` runtime. Run
+`sudo bash scripts/setup_site_host.sh` on the Docker host before deploying.
+The controller needs the read-only `/etc/maxwell-sites` policy and
+`/sys/fs/cgroup` mounts in the Linux Compose file. Docker Desktop bridge
+deployments do not support this host-local proxy configuration.
+
+The shared site pool is capped at 2 CPU cores, 4 GiB RAM, no swap, and 2,048
+tasks. Each backend has 256 MiB RAM, 0.5 CPU, and bounded processes, temporary
+storage, and logs. At most 64 managed backends can exist. These are ceilings,
+not reserved allocations; reaching the shared memory cap can terminate a
+backend rather than consume the host's remaining RAM.
+
+The public proxy admits at most 128 active requests globally and 32 per site,
+including WebSockets and SSE streams. Excess requests receive HTTP 503 with
+`Retry-After: 1`; request-rate and upload limits still apply.
+Only `/data` persists across backend restarts. Keep SQLite databases there,
+use parameterized SQL and short transactions, and close connections.
+Persistent application data is not disk-quota limited; monitor disk space.
+Source files and environment secrets live outside the public static root.
+
+Existing containers enter the protected pool when restarted through
+`site_server`. This causes brief per-site downtime without deleting their
+source, secrets, or databases. See [SITE_BACKEND_MIGRATION.md](SITE_BACKEND_MIGRATION.md).
+
+
 ## Identity and ownership
 
 | Variable | Default | Purpose |

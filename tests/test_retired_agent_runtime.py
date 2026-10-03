@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 
 from bot import MaxwellBot, ToolCircuitBreaker, PUBLIC_RUNTIME_BLOCKED_TOOLS
 from plugin_manager import PluginManager
-from plugins.sites import setup as setup_sites
 
 
 def test_retired_plugins_never_initialize_even_when_persisted_enabled(tmp_path):
@@ -67,16 +66,6 @@ def test_retired_tools_are_denied_at_dispatch_even_when_offered():
         assert "retired from the public bot runtime" in asyncio.run(call(name))
         blocked[name].execute.assert_not_awaited()
     assert "shell" not in PUBLIC_RUNTIME_BLOCKED_TOOLS
-
-
-def test_site_backend_tool_is_not_registered_but_static_site_tools_remain():
-    bot = SimpleNamespace(config=SimpleNamespace(
-        MAXWELL_SITE_DIR="public/bot", MAXWELL_PUBLIC_BASE_URL="https://example.org",
-        ENABLE_CREATE_SITE=True,
-    ))
-    names = {tool.name for tool in setup_sites(bot)}
-    assert "site_server" not in names
-    assert {"create_site", "edit_site", "list_sites", "host_file"} <= names
 
 
 def test_reload_removes_tools_no_longer_published(tmp_path):

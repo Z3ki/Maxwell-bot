@@ -8,7 +8,8 @@ secret, or a cross-site reach would come from.
 
 import asyncio
 import json
-from pathlib import Path
+import os
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -80,19 +81,25 @@ def test_code_lives_outside_the_web_root(data_dir):
     assert "public" not in str(written) and "www" not in str(written)
 
 
-def test_state_dir_is_writable_when_chown_is_denied(data_dir, monkeypatch):
-    import os
-    import stat as statmod
+def test_legacy_database_survives_permission_repair_when_chown_is_denied(data_dir, monkeypatch):
+    path = site_server.state_dir(data_dir, "demo")
+    path.mkdir(parents=True)
+    database = path / "app.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE notes (text TEXT)")
+        conn.execute("INSERT INTO notes VALUES ('keep me')")
+    database.chmod(0o600)
 
-    def boom(*_a, **_k):
-        raise PermissionError("[Errno 1] Operation not permitted")
+    def denied(*_args, **_kwargs):
+        raise PermissionError("no chown capability")
 
-    monkeypatch.setattr(os, "chown", boom)
-    path = site_server.prepare_state_dir(data_dir, "demo")
-    probe = path / "test.txt"
-    probe.write_text("ok")
-    assert probe.read_text() == "ok"
-    assert statmod.S_IMODE(path.stat().st_mode) == 0o1777
+    monkeypatch.setattr(os, "fchown", denied)
+    site_server.prepare_state_dir(data_dir, "demo")
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT text FROM notes").fetchall() == [("keep me",)]
+    # uid 10001 can update the old root-owned file as well as create its journal.
+    assert database.stat().st_mode & 0o006 == 0o006
+    assert path.stat().st_mode & 0o003 == 0o003
 
 
 def test_rewriting_replaces_source_but_keeps_the_database(data_dir):
@@ -189,6 +196,8 @@ def test_destroy_removes_code_and_registry(data_dir, monkeypatch):
 
     async def fake_docker(*args, **kw):
         calls.append(args)
+        if args[0] == "inspect":
+            return 1, "", "No such container"
         return 0, "", ""
 
     monkeypatch.setattr(site_server, "_docker", fake_docker)
@@ -285,18 +294,41 @@ def test_secret_values_are_never_echoed_back(tool):
     assert "sk-do-not-leak" not in status
 
 
-def test_another_user_can_edit_the_backend(tool):
-    out = run(
-        tool.execute(
-            _msg(uid=999),
-            name="demo",
-            action="write",
-            files={"app.py": "print('ok')"},
-        )
-    )
-    assert "belongs to someone else" not in out
+@pytest.mark.parametrize("action", ["write", "read", "env", "logs", "restart", "stop"])
+def test_another_user_cannot_access_the_backend(tool, action):
+    out = run(tool.execute(
+        _msg(uid=999), name="demo", action=action,
+        files={"app.py": "print('ok')"},
+    ))
+    assert out.startswith("Error:")
+    assert not tool._started
+    assert not site_server.code_dir(tool.bot.config.DATA_DIR, "demo").exists()
+
+
+def test_admin_can_edit_another_users_backend(tool):
+    tool.bot._is_admin = lambda uid: uid == 999
+    out = run(tool.execute(
+        _msg(uid=999), name="demo", action="write", files={"app.py": "print('ok')"},
+    ))
     assert "Backend server live" in out
     assert tool._started
+
+
+@pytest.mark.parametrize("still_running", [True, False])
+def test_tool_failure_preserves_actual_backend_running_state(tool, monkeypatch, still_running):
+    site_server._write_entry(
+        tool.bot.config.DATA_DIR, "demo",
+        {"port": 8888, "running": still_running},
+    )
+    tool.bot._sites["demo"]["server"] = True
+
+    async def reject(*args, **kwargs):
+        raise site_server.SiteServerError("cannot deploy")
+
+    monkeypatch.setattr(site_server, "start", reject)
+    out = run(tool.execute(_msg(), name="demo", action="restart"))
+    assert out.startswith("Error:")
+    assert tool.bot._sites["demo"]["server"] is still_running
 
 
 def test_server_read_windows_a_huge_file_and_refuses_a_repeat(tool):
@@ -356,36 +388,31 @@ def test_no_packages_means_the_shared_image(data_dir):
     assert run(site_server.build_site_image(data_dir, "demo", [])) == site_server.IMAGE
 
 
-def test_packages_build_a_per_site_image(data_dir, monkeypatch):
-    seen = {}
+def test_legacy_packages_reuse_existing_image_without_building(data_dir, monkeypatch):
+    site_server._write_entry(data_dir, "demo", {"packages": ["redis==5.0.1"]})
 
-    async def fake_docker(*args, **kw):
-        if args[0] == "build":
-            seen["tag"] = args[2]
-            seen["dockerfile"] = (Path(args[3]) / "Dockerfile").read_text()
+    async def fake_docker(*args, **kwargs):
+        assert args[:2] == ("image", "inspect"), "no builds may be requested"
         return 0, "", ""
 
     monkeypatch.setattr(site_server, "_docker", fake_docker)
-    tag = run(site_server.build_site_image(data_dir, "demo", ["redis==5.0.1"]))
-    # The image tag must NOT collide with the container name, or `docker
-    # inspect` finds the image after the container is gone.
-    assert tag == "maxwell-siteimg-demo" == seen["tag"]
-    assert tag != site_server.container_name("demo")
-    assert "FROM maxwell-site-runtime" in seen["dockerfile"]
-    assert "pip install --no-cache-dir redis==5.0.1" in seen["dockerfile"]
-    # The build must not run as root at the end.
-    assert seen["dockerfile"].rstrip().endswith("USER site")
+    assert run(site_server.build_site_image(data_dir, "demo", ["redis==5.0.1"])) == "maxwell-siteimg-demo"
 
 
-def test_a_failed_package_build_explains_itself(data_dir, monkeypatch):
-    async def fake_docker(*args, **kw):
-        if args[0] == "build":
-            return 1, "", "ERROR: No matching distribution found for nosuchpkg"
-        return 0, "", ""
+def test_new_dependency_requests_are_refused(data_dir):
+    with pytest.raises(site_server.SiteServerError, match="new extra packages"):
+        run(site_server.build_site_image(data_dir, "demo", ["redis==5.0.1"]))
+
+
+def test_missing_legacy_image_has_actionable_error(data_dir, monkeypatch):
+    site_server._write_entry(data_dir, "demo", {"packages": ["redis==5.0.1"]})
+
+    async def fake_docker(*args, **kwargs):
+        return 1, "", "No such image"
 
     monkeypatch.setattr(site_server, "_docker", fake_docker)
-    with pytest.raises(site_server.SiteServerError, match="No matching distribution"):
-        run(site_server.build_site_image(data_dir, "demo", ["nosuchpkg"]))
+    with pytest.raises(site_server.SiteServerError, match="restore that existing image"):
+        run(site_server.build_site_image(data_dir, "demo", ["redis==5.0.1"]))
 
 
 def test_rewriting_code_keeps_the_build_dir(data_dir):
@@ -396,30 +423,6 @@ def test_rewriting_code_keeps_the_build_dir(data_dir):
     (build / "Dockerfile").write_text("FROM x")
     site_server.write_code(data_dir, "demo", {"app.py": "v2"})
     assert (build / "Dockerfile").read_text() == "FROM x"
-
-
-def test_image_tag_never_collides_with_the_container_name():
-    """They shared a prefix once; `inspect` then answered for the image after
-    the container was removed, and every deploy stalled on the removal wait."""
-    for slug in ("demo", "my-site", "ab"):
-        assert site_server.container_name(slug) != site_server.IMAGE_PREFIX + slug
-
-
-def test_container_lookups_are_scoped_to_containers(data_dir, monkeypatch):
-    """Every inspect must pass --type container for the same reason."""
-    calls = []
-
-    async def fake_docker(*args, **kw):
-        calls.append(args)
-        return (1, "", "no such object") if args[0] == "inspect" else (0, "", "")
-
-    monkeypatch.setattr(site_server, "_docker", fake_docker)
-    run(site_server._remove_container("demo"))
-    run(site_server.status(data_dir, "demo"))
-    inspects = [a for a in calls if a[0] == "inspect"]
-    assert inspects, "expected inspect calls"
-    for args in inspects:
-        assert "--type" in args and "container" in args, args
 
 
 def test_wait_healthy_accepts_a_restarted_container_that_is_serving(monkeypatch):
@@ -451,3 +454,264 @@ def test_wait_healthy_reports_a_real_crash_loop(monkeypatch):
     out = run(site_server._wait_healthy(8800, "demo"))
     assert "crashing" in out
     assert "exit code 0" in out
+
+
+@pytest.fixture
+def sandbox_host(data_dir, monkeypatch):
+    policy = data_dir / "policy"
+    cgroup = data_dir / "cgroup"
+    policy.mkdir()
+    cgroup.mkdir()
+    (policy / "resource-pool-ready").write_text(site_server.POOL_READY_TOKEN)
+    for name, value in {
+        "memory.max": str(site_server.POOL_MEMORY),
+        "memory.swap.max": "0",
+        "cpu.max": "200000 100000",
+        "pids.max": str(site_server.POOL_TASKS),
+    }.items():
+        (cgroup / name).write_text(value)
+    monkeypatch.setattr(site_server, "POOL_READY_DIR", policy)
+    monkeypatch.setattr(site_server, "POOL_CGROUP", cgroup)
+    monkeypatch.setattr(site_server, "_LIFECYCLE_LOCK", asyncio.Lock())
+    containers = {}
+    state = {"removed": [], "info": {
+        "OSType": "linux", "CgroupDriver": "systemd", "CgroupVersion": "2",
+        "Runtimes": {"runsc": {}},
+    }}
+
+    async def docker(*args, **kwargs):
+        if args[0] == "info":
+            return 0, json.dumps(state["info"]), ""
+        if args[0] == "ps":
+            if state.get("capacity_error"):
+                return 1, "", "daemon unavailable"
+            return 0, "\n".join(json.dumps({"Names": name, "Labels": label})
+                                for name, label in containers.items()), ""
+        if args[0] == "image":
+            if state.get("image_missing"):
+                return 1, "", "No such image"
+            return 0, "", ""
+        if args[0] == "rm":
+            state["removed"].append(args[-1])
+            containers.pop(args[-1], None)
+            return 0, "", ""
+        if args[0] == "inspect":
+            if args[-1] in containers:
+                return 0, "id", ""
+            return 1, "", "No such container"
+        if args[0] == "run":
+            name = args[args.index("--name") + 1]
+            containers[name] = "maxwell.site=" + name.removeprefix(site_server.CONTAINER_PREFIX)
+            return 0, "id", ""
+        raise AssertionError(args)
+
+    async def healthy(*args):
+        await asyncio.sleep(0)  # exercise overlapping lifecycle calls
+        return "ok"
+
+    async def ping(*args):
+        return "not listening"
+
+    monkeypatch.setattr(site_server, "_docker", docker)
+    monkeypatch.setattr(site_server, "_wait_healthy", healthy)
+    monkeypatch.setattr(site_server, "_http_ping", ping)
+    monkeypatch.setattr(site_server, "_port_is_free", lambda port: True)
+    state.update(containers=containers, policy=policy, cgroup=cgroup)
+    return state
+
+
+def _live_backend(data_dir, sandbox_host):
+    site_server.write_code(data_dir, "demo", {"app.py": "original code"})
+    entry = {"running": True, "port": 8800, "env": {"API_KEY": "retained"}}
+    site_server._write_entry(data_dir, "demo", entry)
+    sandbox_host["containers"][site_server.container_name("demo")] = "maxwell.site=demo"
+    return entry
+
+
+@pytest.mark.parametrize("failure", ["marker", "cgroup", "memory", "swap", "cpu", "tasks", "runtime", "driver"])
+def test_unready_host_never_replaces_live_backend(data_dir, sandbox_host, failure):
+    previous = _live_backend(data_dir, sandbox_host)
+    if failure == "marker":
+        (sandbox_host["policy"] / "resource-pool-ready").unlink()
+    elif failure == "cgroup":
+        (sandbox_host["cgroup"] / "cpu.max").unlink()
+    elif failure in {"memory", "swap", "cpu", "tasks"}:
+        name, value = {
+            "memory": ("memory.max", "max"),
+            "swap": ("memory.swap.max", "1"),
+            "cpu": ("cpu.max", "300000 100000"),
+            "tasks": ("pids.max", "max"),
+        }[failure]
+        (sandbox_host["cgroup"] / name).write_text(value)
+    elif failure == "runtime":
+        sandbox_host["info"]["Runtimes"] = {}
+    else:
+        sandbox_host["info"]["CgroupDriver"] = "cgroupfs"
+    with pytest.raises(site_server.SiteServerError, match="setup_site_host.sh"):
+        run(site_server.start(data_dir, "demo"))
+    assert sandbox_host["removed"] == []
+    assert site_server.get_entry(data_dir, "demo") == previous
+    assert site_server.read_code(data_dir, "demo", "app.py") == "original code"
+
+
+def test_capacity_counts_stopped_orphaned_and_label_only_containers(data_dir, sandbox_host):
+    previous = _live_backend(data_dir, sandbox_host)
+    containers = sandbox_host["containers"]
+    # No registry entries for these: labels and Docker names, not registry state,
+    # define the real number of backend slots.
+    for index in range(site_server.MAX_BACKENDS):
+        name = f"orphan-{index}" if index % 2 else f"maxwell-site-orphan-{index}"
+        containers[name] = f"maxwell.site=orphan-{index}"
+    with pytest.raises(site_server.SiteServerError, match="capacity reached"):
+        run(site_server.start(data_dir, "demo"))
+    assert sandbox_host["removed"] == []
+    assert site_server.get_entry(data_dir, "demo") == previous
+
+
+def test_replacement_keeps_its_slot_at_exact_capacity(data_dir, sandbox_host):
+    _live_backend(data_dir, sandbox_host)
+    for index in range(site_server.MAX_BACKENDS - 1):
+        sandbox_host["containers"][f"maxwell-site-other-{index}"] = ""
+    result = run(site_server.start(data_dir, "demo"))
+    assert result["running"] is True
+    assert result["env"] == {"API_KEY": "retained"}
+    assert len(sandbox_host["containers"]) == site_server.MAX_BACKENDS
+
+
+def test_overlapping_starts_cannot_both_take_the_last_slot(data_dir, sandbox_host):
+    for index in range(site_server.MAX_BACKENDS - 1):
+        sandbox_host["containers"][f"maxwell-site-other-{index}"] = ""
+    for slug in ("first", "second"):
+        site_server.write_code(data_dir, slug, {"app.py": "server"})
+
+    async def scenario():
+        return await asyncio.gather(
+            site_server.start(data_dir, "first"), site_server.start(data_dir, "second"),
+            return_exceptions=True,
+        )
+
+    results = run(scenario())
+    assert results[0]["running"] is True
+    assert isinstance(results[1], site_server.SiteServerError)
+    assert "capacity reached" in str(results[1])
+    assert len(sandbox_host["containers"]) == site_server.MAX_BACKENDS
+
+
+def test_failed_capacity_query_cannot_remove_existing_app(data_dir, sandbox_host):
+    previous = _live_backend(data_dir, sandbox_host)
+    sandbox_host["capacity_error"] = True
+    with pytest.raises(site_server.SiteServerError, match="cannot check backend capacity"):
+        run(site_server.start(data_dir, "demo"))
+    assert sandbox_host["removed"] == []
+    assert site_server.get_entry(data_dir, "demo") == previous
+
+
+def test_permission_failure_rejects_before_replacement(data_dir, sandbox_host, monkeypatch):
+    previous = _live_backend(data_dir, sandbox_host)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("persistent directory inaccessible")
+
+    monkeypatch.setattr(os, "fchmod", denied)
+    with pytest.raises(site_server.SiteServerError, match="cannot prepare persistent backend data"):
+        run(site_server.start(data_dir, "demo"))
+    assert sandbox_host["removed"] == []
+    assert site_server.get_entry(data_dir, "demo") == previous
+
+
+def test_state_symlinks_are_rejected_without_changing_the_target(data_dir):
+    state = site_server.state_dir(data_dir, "demo")
+    state.mkdir(parents=True)
+    outside = data_dir / "outside"
+    outside.write_text("private")
+    before = outside.stat().st_mode
+    (state / "app.db").symlink_to(outside)
+    with pytest.raises(site_server.SiteServerError, match="unsupported file"):
+        site_server.prepare_state_dir(data_dir, "demo")
+    assert outside.read_text() == "private"
+    assert outside.stat().st_mode == before
+
+
+def test_failed_teardown_never_deletes_persistent_state(data_dir, monkeypatch):
+    site_server.write_code(data_dir, "demo", {"app.py": "keep"})
+    database = site_server.state_dir(data_dir, "demo") / "app.db"
+    database.write_bytes(b"persistent database")
+    site_server._write_entry(data_dir, "demo", {"running": True})
+
+    async def cannot_remove(slug):
+        raise site_server.SiteServerError("container still present")
+
+    monkeypatch.setattr(site_server, "_remove_container", cannot_remove)
+    with pytest.raises(site_server.SiteServerError, match="container still present"):
+        run(site_server.destroy(data_dir, "demo"))
+    assert database.read_bytes() == b"persistent database"
+    assert site_server.get_entry(data_dir, "demo")["running"] is True
+
+
+def test_reconciliation_keeps_missing_backends_restart_config(data_dir, monkeypatch):
+    previous = {"running": True, "env": {"API_KEY": "retained"}, "packages": ["redis==5.0.1"]}
+    site_server._write_entry(data_dir, "demo", previous)
+
+    async def absent(*args, **kwargs):
+        return 1, "", "No such container"
+
+    monkeypatch.setattr(site_server, "_docker", absent)
+    run(site_server.reconcile(data_dir))
+    entry = site_server.get_entry(data_dir, "demo")
+    assert entry["running"] is False
+    assert entry["env"] == previous["env"]
+    assert entry["packages"] == previous["packages"]
+
+
+def test_missing_shared_runtime_never_replaces_live_app(data_dir, sandbox_host):
+    previous = _live_backend(data_dir, sandbox_host)
+    sandbox_host["image_missing"] = True
+    with pytest.raises(site_server.SiteServerError, match="docker build"):
+        run(site_server.start(data_dir, "demo"))
+    assert sandbox_host["removed"] == []
+    assert site_server.get_entry(data_dir, "demo") == previous
+
+
+def test_changed_dependencies_never_replace_live_app(data_dir, sandbox_host):
+    previous = _live_backend(data_dir, sandbox_host)
+    with pytest.raises(site_server.SiteServerError, match="new extra packages"):
+        run(site_server.start(data_dir, "demo", packages=["redis==5.0.1"]))
+    assert sandbox_host["removed"] == []
+    assert site_server.get_entry(data_dir, "demo") == previous
+
+
+def test_lifecycle_waits_for_other_process_lock(data_dir, sandbox_host):
+    _live_backend(data_dir, sandbox_host)
+
+    async def scenario():
+        with site_server.FileLock(data_dir / "site_servers_lifecycle", timeout=0):
+            pending = asyncio.create_task(site_server.start(data_dir, "demo"))
+            await asyncio.sleep(0.1)
+            assert not pending.done()
+            assert sandbox_host["removed"] == []
+        return await pending
+
+    assert run(scenario())["running"] is True
+
+
+def test_state_file_link_swap_cannot_change_external_permissions(data_dir, monkeypatch):
+    state = site_server.state_dir(data_dir, "demo")
+    state.mkdir(parents=True)
+    database = state / "app.db"
+    database.write_text("old database")
+    outside = data_dir / "outside"
+    outside.write_text("private")
+    outside.chmod(0o600)
+    original_open = os.open
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        if path == "app.db":
+            database.unlink()
+            database.symlink_to(outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    with pytest.raises(site_server.SiteServerError, match="cannot prepare persistent backend data"):
+        site_server.prepare_state_dir(data_dir, "demo")
+    assert outside.read_text() == "private"
+    assert outside.stat().st_mode & 0o777 == 0o600

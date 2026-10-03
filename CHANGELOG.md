@@ -8,6 +8,13 @@
 - Maxwell can read its startup revision and changelog, recent GitHub commits, and changed-file summaries without assuming upstream changes are deployed.
 - Reply visibility, responsive settings controls, selected-message context, and channel history up to 1,000 messages are supported.
 
+### Generated sites
+
+- Re-enabled `site_server` in the sites plugin and public dispatcher for real custom APIs, authentication, WebSockets, and server-side secrets. The `backend=true` flag remains the simple built-in KV API, not a custom server.
+- New apps use the shared Python 3.12 + FastAPI/Uvicorn stack with one worker, no reload, and SQLite under `/data`. Existing Flask applications, source, databases, and secrets are preserved.
+- Backend source, logs, environment, and lifecycle are owner/admin-only; private requests cannot mutate a public backend.
+- Required host setup: `sudo bash scripts/setup_site_host.sh`, plus the Compose policy mount. The site pool is capped at 2 CPUs / 4 GiB total, each backend at 256 MiB / 0.5 CPU, and 64 backends maximum. Existing containers must be restarted into the protected pool without deleting their persisted data.
+
 ## 0.1.4 — 2026-10-01
 
 Install with `--version v0.1.4`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

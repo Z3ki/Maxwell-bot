@@ -34,6 +34,13 @@
       "requires_admin": false
     },
     {
+      "name": "site_server",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
       "name": "delete_site",
       "returns_result": true,
       "ends_turn": false,
@@ -61,10 +68,11 @@
     "requires_tools": [
       "create_site",
       "edit_site",
+      "site_server",
       "delete_site",
       "list_sites",
       "host_file"
     ],
-    "text": "create_site: full HTML document in `body`, or url= of an existing HTML file to fetch and host. Never paste the page into chat. Real line breaks or <br> in visible HTML; never literal \\n text. Full visual freedom — invent a new look each time; no house style unless the user asked. Build the real thing on first pass with complete content. NO placeholders — no 'lorem ipsum', no 'TODO', no 'coming soon', no '[insert here]', no empty href='#' nav, no commented-out 'implement later', no fake returns. If you ship a shell that says 'Loading…' and the app never mounts, you have built nothing. If the page needs 900 lines to actually work, write 900 lines. Do not ping-pong action=read on large files. Do not recreate the site to change a line. create_site publishes static HTML/CSS/JS. The optional backend=true flag enables only the simple KV API; do not claim a custom backend server is available. Never claim an unfinished page works."
+    "text": "create_site: full HTML document in `body`, or url= of an existing HTML file to fetch and host. Never paste the page into chat. Real line breaks or <br> in visible HTML; never literal \\n text. Full visual freedom — invent a new look each time; no house style unless the user asked. Build the real thing on first pass with complete content. NO placeholders — no 'lorem ipsum', no 'TODO', no 'coming soon', no '[insert here]', no empty href='#' nav, no commented-out 'implement later', no fake returns. If you ship a shell that says 'Loading…' and the app never mounts, you have built nothing. If the page needs 900 lines to actually work, write 900 lines. Do not ping-pong action=read on large files. Do not recreate the site to change a line. create_site publishes static HTML/CSS/JS; backend=true enables only the simple KV API. For real custom routes, accounts/auth, WebSockets, external APIs or server-side secrets, create the frontend then use site_server to write complete working app.py and deploy it. New backends use the shared Python 3.12 + FastAPI/Uvicorn stack, one worker and no reload, with SQLite at /data/app.db. app.py must start Uvicorn on 0.0.0.0:$PORT; define Python routes without the /bot/<name>/api prefix. Frontend requests use relative api/... URLs (never localhost or a container port). Keep credentials in site_server env and read os.environ, never embed secrets in HTML/JS. Backend code, environment, logs and lifecycle are restricted to the site's owner or an admin; do not mutate another user's backend. write merges source files; deploy replaces the snapshot. Preserve existing Flask applications and databases; do not rewrite them merely to change stacks. Never claim an unfinished page works; exercise real API behavior and the frontend before reporting completion."
   }
 }

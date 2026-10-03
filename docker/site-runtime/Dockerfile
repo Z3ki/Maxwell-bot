@@ -1,13 +1,10 @@
 # syntax=docker/dockerfile:1
 # Runtime for site backends written by Maxwell (see site_server.py).
 #
-# Sized for what people actually build: a site with accounts, a database, and
-# other people connected to it at the same time. Both server styles are here —
-# Flask/waitress for plain request/response, FastAPI/uvicorn when the app needs
-# WebSockets — and the app picks by writing whichever one it wants in app.py.
-#
-# A site that needs something not in this list passes `packages` to
-# site_server, which builds a per-site image FROM this one.
+# New apps use one standard stack: FastAPI/Uvicorn, one worker without reload,
+# and SQLite in /data. Flask/waitress remain installed to preserve existing
+# apps. This shared image is built once by the operator, never by generated
+# code; existing per-site dependency images may be reused but not rebuilt.
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

@@ -1,0 +1,15 @@
+[Unit]
+Description=Validate Maxwell site sandbox runtime and aggregate budget
+Requires=docker.service maxwell-sites.slice
+After=docker.service maxwell-sites.slice
+PartOf=docker.service
+BindsTo=docker.service maxwell-sites.slice
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/maxwell-sites-resource-pool
+ExecStop=/usr/bin/rm -f /etc/maxwell-sites/resource-pool-ready
+
+[Install]
+WantedBy=multi-user.target docker.service

@@ -2,8 +2,8 @@
 
 ``site_backend.py`` gives a static page a place to keep things. This gives it a
 server — the site writes actual Python, it runs as its own process, and it owns
-its routes, its database, its secrets, and its outbound calls. Whatever backend
-it wants.
+its routes, its database, its secrets, and its outbound calls. New apps use
+FastAPI/Uvicorn and SQLite; legacy Flask applications remain supported.
 
 The shape:
 
@@ -11,7 +11,10 @@ The shape:
   the source and any secrets are never served as static files.
 * Each site gets a container from the ``maxwell-site-runtime`` image: code
   read-only at ``/app``, a private writable ``/data`` for its database, no
-  capabilities, half a core, 256MB, and a port published on 127.0.0.1 only.
+  capabilities, runsc isolation, uid 10001, half a core, 256MiB without swap,
+  and a port published on 127.0.0.1 only.
+* Starts require the host-installed ``maxwell-sites.slice`` aggregate budget:
+  2 CPUs, 4GiB RAM without swap, 2048 tasks and at most 64 managed containers.
 * Requests reach it at ``/bot/<slug>/api/...``, which the API server proxies to
   that port (see ``site_proxy`` in api/api_server.py). Nothing else on the box
   can be reached through that path, and the container's port is not exposed
@@ -34,11 +37,12 @@ import os
 import re
 import shutil
 import socket
+import stat
 import uuid
 from pathlib import Path
 from typing import Any
 
-from utils import FileLock, _atomic_json_write_sync, docker_bind_path
+from utils import FileLock, FileLockTimeout, _atomic_json_write_sync, docker_bind_path
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,16 @@ MEMORY = "256m"
 CPUS = "0.5"
 PIDS = "128"
 
+
+# Every managed backend (including stopped containers) consumes an admission slot.
+MAX_BACKENDS = 64
+POOL_SLICE = "maxwell-sites.slice"
+POOL_MEMORY = 4 * 1024**3
+POOL_TASKS = 2048
+POOL_READY_DIR = Path("/run/maxwell-sites-policy")
+POOL_CGROUP = Path("/run/maxwell-host-cgroup/maxwell.slice/maxwell-sites.slice")
+POOL_READY_TOKEN = "maxwell-sites-resource-pool-v1"
+SETUP_COMMAND = "sudo bash scripts/setup_site_host.sh"
 MAX_CODE_BYTES = 400_000
 MAX_FILES = 20
 MAX_ENV_KEYS = 25
@@ -108,19 +122,66 @@ SITE_GID = 10001
 
 
 def prepare_state_dir(data_dir, slug: str) -> Path:
-    """Make the container's /data writable.
+    """Preserve existing databases while allowing uid 10001 to write them.
 
-    Maxwell often runs with cap_drop=ALL, so chown(10001) is EPERM. chmod
-    still works because we own the directory. Sticky + world-writable so
-    both root (docker --user 0) and the image's site user can persist
-    /data/app.db. The host parent ``data/`` is 0700.
+    A cap-dropped controller cannot chown legacy root-owned SQLite files.
+    In that case owner-controlled chmod is safe inside this site's private
+    data mount. Never follow links or silently accept unreadable state.
     """
     path = state_dir(data_dir, slug)
-    path.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chown(path, SITE_UID, SITE_GID)
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o1777)
+    if path.is_symlink() or code_dir(data_dir, slug).is_symlink():
+        raise SiteServerError("backend data directory must not be a symlink")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        def walk_error(exc):
+            raise exc
+
+        # Descriptor-relative traversal and O_NOFOLLOW matter while a live
+        # backend can mutate /data. A link swapped after validation must never
+        # cause chmod/chown to reach a host file outside this private mount.
+        root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for _root, dirs, files, directory_fd in os.fwalk(
+                ".", dir_fd=root_fd, follow_symlinks=False, onerror=walk_error
+            ):
+                info = os.fstat(directory_fd)
+                if info.st_uid != SITE_UID or info.st_mode & 0o700 != 0o700:
+                    # Keep controller-owned directories controller-owned, so
+                    # cap_drop=ALL does not block its next lifecycle operation.
+                    os.fchmod(directory_fd, 0o1777)
+                for name in dirs + files:
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                        raise SiteServerError(f"unsupported file in backend data: {name}")
+                for name in files:
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if info.st_uid == SITE_UID and info.st_mode & 0o600 == 0o600:
+                        continue
+                    fd = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        if not stat.S_ISREG(os.fstat(fd).st_mode):
+                            raise SiteServerError(f"unsupported file in backend data: {name}")
+                        # Set mode while the controller still owns the file.
+                        os.fchmod(fd, 0o660)
+                        try:
+                            os.fchown(fd, SITE_UID, SITE_GID)
+                        except PermissionError:
+                            # SQLite must be able to update old root-owned
+                            # databases and WAL/journal files, not just /data.
+                            os.fchmod(fd, 0o666)
+                    finally:
+                        os.close(fd)
+        finally:
+            os.close(root_fd)
+    except OSError as exc:
+        raise SiteServerError(
+            f"cannot prepare persistent backend data without losing files: {exc}. "
+            "On the Docker host, grant uid 10001 read/write access to this site's "
+            "_data directory and its existing database files, then retry."
+        ) from exc
     return path
 
 
@@ -252,12 +313,110 @@ async def _docker(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
 
 async def _ensure_image() -> None:
     code, _out, _err = await _docker("image", "inspect", IMAGE, timeout=20)
-    if code == 0:
-        return
-    logger.info("Building %s (first site backend on this host)", IMAGE)
-    code, _out, err = await _docker("build", "-t", IMAGE, DOCKERFILE_DIR, timeout=600)
     if code != 0:
-        raise SiteServerError(f"could not build the site runtime image: {err.strip()[:300]}")
+        raise SiteServerError(
+            f"site runtime image {IMAGE} is missing; on the Docker host run "
+            f"docker build -t {IMAGE} docker/site-runtime, then {SETUP_COMMAND}. "
+            "Site starts never build images."
+        )
+
+
+async def _check_host_ready() -> None:
+    try:
+        ready = (POOL_READY_DIR / "resource-pool-ready").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        ready = ""
+    if ready != POOL_READY_TOKEN:
+        raise SiteServerError(
+            f"site sandbox resource pool is not ready; on the Docker host run {SETUP_COMMAND} "
+            "and mount /etc/maxwell-sites read-only at /run/maxwell-sites-policy."
+        )
+    try:
+        memory = int((POOL_CGROUP / "memory.max").read_text().strip())
+        swap = int((POOL_CGROUP / "memory.swap.max").read_text().strip())
+        quota, period = map(int, (POOL_CGROUP / "cpu.max").read_text().split())
+        tasks = int((POOL_CGROUP / "pids.max").read_text().strip())
+    except (OSError, ValueError) as exc:
+        raise SiteServerError(
+            f"site aggregate cgroup is missing/unbounded; run {SETUP_COMMAND} "
+            "and mount /sys/fs/cgroup read-only at /run/maxwell-host-cgroup."
+        ) from exc
+    if not (
+        0 < memory <= POOL_MEMORY and swap == 0
+        and 0 < quota <= 2 * period and period > 0
+        and 0 < tasks <= POOL_TASKS
+    ):
+        raise SiteServerError(
+            f"site aggregate limits changed or exceed 2 CPUs/4GiB/no swap/{POOL_TASKS} "
+            f"tasks; run {SETUP_COMMAND} before restarting any backend."
+        )
+    code, out, err = await _docker("info", "--format", "{{json .}}", timeout=20)
+    try:
+        info = json.loads(out) if code == 0 else {}
+    except json.JSONDecodeError:
+        info = {}
+    if not (
+        isinstance(info, dict)
+        and info.get("OSType") == "linux"
+        and info.get("CgroupDriver") == "systemd"
+        and str(info.get("CgroupVersion")) == "2"
+        and "runsc" in (info.get("Runtimes") or {})
+    ):
+        raise SiteServerError(
+            "site sandbox requires Linux Docker with cgroup v2, the systemd "
+            f"cgroup driver and registered runsc; run {SETUP_COMMAND} on the host. "
+            + err.strip()[:200]
+        )
+
+
+async def _admit_backend(slug: str) -> int:
+    # Query the daemon, not the registry: orphaned and stopped backends count.
+    code, out, err = await _docker(
+        "ps", "-a", "--format", "{{json .}}", timeout=20
+    )
+    if code != 0:
+        raise SiteServerError(f"cannot check backend capacity: {err.strip()[:300]}")
+    names = set()
+    try:
+        for line in out.splitlines():
+            row = json.loads(line)
+            name = row["Names"]
+            labels = row.get("Labels", "")
+            if name.startswith(CONTAINER_PREFIX) or any(
+                label.startswith("maxwell.site=") for label in labels.split(",")
+            ):
+                names.add(name)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise SiteServerError("cannot read Docker backend capacity; refusing replacement") from exc
+    # A replacement keeps its slot, but an already overfull pool fails closed.
+    if len(names) > MAX_BACKENDS or (
+        len(names) == MAX_BACKENDS and container_name(slug) not in names
+    ):
+        raise SiteServerError(
+            f"backend capacity reached ({len(names)}/{MAX_BACKENDS} containers); "
+            "stop/remove an unused backend before deploying another"
+        )
+    return len(names)
+
+
+@contextlib.asynccontextmanager
+async def _lifecycle(data_dir):
+    """Serialize daemon admission and replacements across controller processes."""
+    async with _LIFECYCLE_LOCK:
+        lock = FileLock(Path(data_dir) / "site_servers_lifecycle", timeout=0)
+        deadline = asyncio.get_running_loop().time() + 60
+        while True:
+            try:
+                lock.__enter__()
+                break
+            except FileLockTimeout:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise SiteServerError("another backend lifecycle operation is busy; retry") from None
+                await asyncio.sleep(0.05)
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
 
 
 async def _remove_container(slug: str) -> None:
@@ -405,32 +564,33 @@ def parse_packages(packages: Any) -> list[str]:
 
 
 async def build_site_image(data_dir, slug: str, packages: list[str]) -> str:
-    """Image for one site: the shared runtime plus its extra packages."""
+    """Reuse legacy dependency images; generated code never triggers a build."""
     slug = _check_slug(slug)
     packages = parse_packages(packages)
     if not packages:
         return IMAGE
-    await _ensure_image()
+    previous = get_entry(data_dir, slug) or {}
+    if packages != previous.get("packages"):
+        raise SiteServerError(
+            "new extra packages are disabled: use the shared Python/FastAPI/SQLite "
+            "stack. Existing packages may only be reused unchanged."
+        )
     tag = IMAGE_PREFIX + slug
-    build_dir = Path(data_dir) / "site_servers" / slug / "_build"
-    build_dir.mkdir(parents=True, exist_ok=True)
-    # Package names are validated above, so this cannot inject flags.
-    (build_dir / "Dockerfile").write_text(
-        f"FROM {IMAGE}\nUSER root\n"
-        f"RUN pip install --no-cache-dir {' '.join(packages)}\n"
-        "USER site\n",
-        encoding="utf-8",
-    )
-    code, _out, err = await _docker("build", "-t", tag, str(build_dir), timeout=600)
+    code, _out, err = await _docker("image", "inspect", tag, timeout=20)
     if code != 0:
         raise SiteServerError(
-            "could not install those packages:\n" + (err.strip()[-600:] or "pip failed")
+            f"legacy dependency image {tag} is missing; restore that existing image "
+            "on the Docker host before restarting. No automatic package builds. "
+            + err.strip()[:200]
         )
     return tag
 
 
 async def _remove_site_image(slug: str) -> None:
-    await _docker("image", "rm", "-f", IMAGE_PREFIX + _check_slug(slug), timeout=60)
+    tag = IMAGE_PREFIX + _check_slug(slug)
+    code, _out, err = await _docker("image", "rm", "-f", tag, timeout=60)
+    if code != 0 and "No such image" not in err:
+        raise SiteServerError(f"could not remove legacy backend image {tag}: {err.strip()[:300]}")
 
 
 def parse_env(env: Any) -> dict[str, str]:
@@ -775,6 +935,8 @@ async def _start_unlocked(
             "no app.py for this site — write the server first (it must listen on 0.0.0.0:$PORT)"
         )
     previous = _read_registry(data_dir, for_write=True).get(slug) or {}
+    await _check_host_ready()
+    await _admit_backend(slug)
     await _ensure_image()
     if env is None:
         previous_env = previous.get("env")
@@ -789,6 +951,7 @@ async def _start_unlocked(
         packages = list(previous_packages) if isinstance(previous_packages, list) else []
     packages = parse_packages(packages)
     image = await build_site_image(data_dir, slug, packages)
+    persistent = prepare_state_dir(data_dir, slug)
 
     await _remove_container(slug)
     previous_port = _registry_port(previous.get("port"))
@@ -809,7 +972,12 @@ async def _start_unlocked(
         "run", "-d",
         "--name", container_name(slug),
         "--label", f"maxwell.site={slug}",
+        "--runtime", "runsc",
+        "--cgroup-parent", POOL_SLICE,
         "--restart", "unless-stopped",
+        "--log-driver", "json-file",
+        "--log-opt", "max-size=2m",
+        "--log-opt", "max-file=2",
         "--memory", MEMORY,
         "--memory-swap", MEMORY,
         "--cpus", CPUS,
@@ -817,15 +985,12 @@ async def _start_unlocked(
         "--ulimit", "nofile=512:1024",
         "--security-opt", "no-new-privileges:true",
         "--cap-drop", "ALL",
-        "--cap-add", "DAC_OVERRIDE",
-        "--cap-add", "CHOWN",
-        "--cap-add", "FOWNER",
-        "--user", "0",
+        "--user", f"{SITE_UID}:{SITE_GID}",
         "--read-only",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=32m",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777",
         "-p", f"127.0.0.1:{port}:{CONTAINER_PORT}",
         "-v", f"{docker_bind_path(source.resolve())}:/app:ro",
-        "-v", f"{docker_bind_path(prepare_state_dir(data_dir, slug).resolve())}:/data:rw",
+        "-v", f"{docker_bind_path(persistent.resolve())}:/data:rw",
         "-e", f"PORT={CONTAINER_PORT}",
         "-e", f"SITE_SLUG={slug}",
         "-e", f"SITE_BASE_PATH=/bot/{slug}/api",
@@ -868,8 +1033,13 @@ async def _start_unlocked(
         # tells the model what to fix. Then remove it, so a broken app is not
         # left crash-looping forever holding a port.
         tail = await logs(data_dir, slug, lines=30)
-        with contextlib.suppress(Exception):
+        try:
             await _remove_container(slug)
+        except SiteServerError as exc:
+            raise SiteServerError(
+                f"the backend never came up: {health}; cleanup also failed: {exc}\n"
+                f"Its last output:\n{tail}"
+            ) from exc
         if not tail or tail.strip() in {"(no output yet)", ""}:
             tail = (
                 "(no output yet) — app.py returned without printing. "
@@ -895,7 +1065,7 @@ async def start(
     # Port selection, container replacement, and registry writes form one
     # lifecycle operation. Serialize them so two overlapping tool calls cannot
     # choose the same port or race through the same container name.
-    async with _LIFECYCLE_LOCK:
+    async with _lifecycle(data_dir):
         return await _start_unlocked(
             data_dir, slug, env=env, packages=packages
         )
@@ -915,25 +1085,23 @@ async def _stop_unlocked(data_dir, slug: str) -> bool:
 
 
 async def stop(data_dir, slug: str) -> bool:
-    async with _LIFECYCLE_LOCK:
+    async with _lifecycle(data_dir):
         return await _stop_unlocked(data_dir, slug)
 
 
 async def _destroy_unlocked(data_dir, slug: str) -> None:
     """Site is gone: container, code, database, secrets, registry row."""
     slug = _check_slug(slug)
-    with contextlib.suppress(SiteServerError, Exception):
-        await _remove_container(slug)
-    with contextlib.suppress(Exception):
-        await _remove_site_image(slug)
-    with contextlib.suppress(Exception):
-        shutil.rmtree(code_dir(data_dir, slug), ignore_errors=True)
-    with contextlib.suppress(Exception):
-        _write_entry(data_dir, slug, None)
+    await _remove_container(slug)
+    await _remove_site_image(slug)
+    source = code_dir(data_dir, slug)
+    if source.exists():
+        shutil.rmtree(source)
+    _write_entry(data_dir, slug, None)
 
 
 async def destroy(data_dir, slug: str) -> None:
-    async with _LIFECYCLE_LOCK:
+    async with _lifecycle(data_dir):
         await _destroy_unlocked(data_dir, slug)
 
 
@@ -973,16 +1141,20 @@ async def status(data_dir, slug: str) -> str:
     return (
         f"container {live} on 127.0.0.1:{entry.get('port')} "
         f"(public path /bot/{slug}/api/...)\nfiles: {files}\nenv: {secrets}\n"
-        f"extra packages: {extra}"
+        f"extra packages: {extra}\n"
+        f"new/restarted runtime: gVisor runsc, uid {SITE_UID}, no capabilities; "
+        f"{MEMORY} RAM/no swap, {CPUS} CPU, {PIDS} PIDs, 32MiB tmpfs, 4MiB logs\n"
+        f"shared pool: {POOL_SLICE}, 2 CPUs, 4GiB RAM/no swap, "
+        f"{POOL_TASKS} tasks, at most {MAX_BACKENDS} containers. "
+        "Legacy containers retain their old settings until restarted."
     )
 
 
 async def reconcile(data_dir) -> None:
-    """On boot: drop registry rows whose container is gone for good.
+    """On boot: mark missing containers absent without discarding restart config.
 
-    Containers carry --restart unless-stopped, so docker brings them back by
-    itself. This only fixes the registry when one was removed out from under
-    us (docker prune, manual rm, a site deleted while the bot was down).
+    Docker restarts existing containers itself. A missing container must not
+    erase its environment, package metadata or persistent data.
     """
     for slug, entry in list(_read_registry(data_dir).items()):
         if entry.get("running") is not True:
@@ -995,8 +1167,10 @@ async def reconcile(data_dir) -> None:
         if alive:
             continue
         if code != 0:
-            logger.info("Site backend %s has no container any more; clearing it", slug)
-            _write_entry(data_dir, slug, None)
+            logger.info("Site backend %s has no container any more; marking absent", slug)
+            absent = dict(entry)
+            absent.update(running=False, health="container absent")
+            _write_entry(data_dir, slug, absent)
         else:
             try:
                 await start(data_dir, slug)
@@ -1006,31 +1180,40 @@ async def reconcile(data_dir) -> None:
 
 
 # ── what the model is told ────────────────────────────────────────────────
-EXAMPLE_APP = '''from flask import Flask, request, jsonify
-import sqlite3, os
+EXAMPLE_APP = '''import os, sqlite3
+from contextlib import closing
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
 
-app = Flask(__name__)
+app = FastAPI()
 DB = "/data/app.db"          # only /data survives a restart
 
 def db():
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=5)
     conn.execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, text TEXT)")
+    conn.commit()
     return conn
 
-@app.get("/notes")           # the page fetches /bot/<slug>/api/notes
+class Note(BaseModel):
+    text: str
+
+@app.get("/notes")           # the page fetches api/notes
 def list_notes():
-    rows = db().execute("SELECT id, text FROM notes ORDER BY id DESC").fetchall()
-    return jsonify([{"id": r[0], "text": r[1]} for r in rows])
+    with closing(db()) as conn:
+        rows = conn.execute("SELECT id, text FROM notes ORDER BY id DESC LIMIT 100").fetchall()
+    return [{"id": row[0], "text": row[1]} for row in rows]
 
 @app.post("/notes")
-def add_note():
-    conn = db()
-    conn.execute("INSERT INTO notes (text) VALUES (?)", (request.json["text"],))
-    conn.commit()
-    return jsonify(ok=True)
+def add_note(note: Note):
+    with closing(db()) as conn:
+        conn.execute("INSERT INTO notes (text) VALUES (?)", (note.text,))
+        conn.commit()
+    return {"ok": True}
 
-from waitress import serve
-serve(app, host="0.0.0.0", port=int(os.environ["PORT"]))
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ["PORT"]),
+                workers=1, reload=False, limit_concurrency=32, backlog=64)
 '''
 
 
@@ -1049,9 +1232,11 @@ def contract(slug: str) -> str:
         "                WebSocket: new WebSocket(location.origin.replace('http', 'ws')\n"
         f"                + '/bot/{slug}/api/ws'). Never hardcode another slug.\n"
         "  Entry       : app.py, listening on 0.0.0.0:$PORT (the runtime sets PORT).\n"
-        "  Installed   : python 3.12 + flask, waitress, fastapi, uvicorn, websockets, "
-        "sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow, "
-        "and the stdlib (sqlite3, json, urllib). Anything else: pass packages=[...].\n"
+        "  Standard    : Python 3.12 + FastAPI/Uvicorn + stdlib sqlite3; one worker, "
+        "no reload, limit_concurrency=32, backlog=64. Flask/waitress remain "
+        "installed for existing apps. Also available: websockets, python-multipart, "
+        "sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow. "
+        "No new extra packages; existing dependency images can be reused unchanged.\n"
         "  WebSockets  : supported end to end — use FastAPI + uvicorn (waitress "
         "cannot do sockets). This is how you build multiplayer, live chat, or "
         "anything pushed to clients. SSE and streaming responses work too.\n"
@@ -1060,8 +1245,12 @@ def contract(slug: str) -> str:
         "  Secrets     : pass env={\"API_KEY\": \"...\"} — held outside the site "
         "directory, never served, never echoed back. Read with os.environ.\n"
         "  Outbound    : allowed, so this is where a key-carrying API call belongs.\n"
-        "  Limits      : 256MB, half a core, 128 processes, no capabilities, "
-        "32MB uploads.\n"
+        "  Isolation   : gVisor runsc, uid 10001, no capabilities, no Docker socket; "
+        "only private source/data mounts. Docker host setup is required.\n"
+        "  Limits      : per site 256MiB RAM/no swap, 0.5 CPU, 128 PIDs, 32MiB tmpfs, "
+        "4MiB rotated logs. Aggregate maxwell-sites.slice: 2 CPUs, 4GiB RAM/no swap, "
+        "2048 tasks; at most 64 managed containers including stopped ones. "
+        "Proxy: 32 concurrent requests per site/128 total; busy returns 503.\n"
         "  Logs        : site_server(action=logs) — stdout/stderr, your prints included.\n"
         "  Edit        : action=write merges files (helpers stay). action=replace "
         "patches exact text. action=deploy replaces the whole snapshot. "
@@ -1103,5 +1292,6 @@ def players():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ["PORT"]))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ["PORT"]),
+                workers=1, reload=False, limit_concurrency=32, backlog=64)
 '''

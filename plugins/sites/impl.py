@@ -114,7 +114,7 @@ class CreateSiteTool(Tool):
             'files (extra files {"path":"content"}), '
             "backend (optional, default false), encoding, permanent. "
             "Static HTML/CSS/JS is first-class. backend=true enables only the "
-            "simple site KV API; custom backend deployment is unavailable."
+            "simple site KV API. Use site_server for a full custom backend."
         )
 
     async def _fetch_site_html(self, url: str) -> str:
@@ -404,7 +404,7 @@ class CreateSiteTool(Tool):
                 result += f"\nFiles: {', '.join(written)}"
             if wants_backend:
                 result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
-                result += "\nThe simple KV API is the only supported backend here."
+                result += "\nFor custom routes, auth, server-side secrets, or WebSockets, use site_server."
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
             # Placeholders shipped in the HTML are invisible in a 200 response
             # and in a screenshot of a page that has not mounted, so they are
@@ -836,8 +836,12 @@ class SiteServerTool(_SiteOwnedTool):
             "(exact-text patch in one file, like edit_site), deploy (full snapshot, "
             "missing files disappear), start, stop, restart, status, logs, env, "
             "rm (delete a helper file, not app.py), delete (tear the server down). "
-            "app.py listens on 0.0.0.0:$PORT. flask+waitress for plain HTTP, "
-            "fastapi+uvicorn for WebSockets. Only /data is writable and persists. "
+            "New apps use Python 3.12, FastAPI and Uvicorn with one worker and no "
+            "reload; app.py listens on 0.0.0.0:$PORT. Use SQLite at /data/app.db. "
+            "Only /data is writable and persists. Existing Flask apps remain supported. "
+            "Frontend calls use relative api/... URLs; routes in Python omit the "
+            "/bot/<name>/api prefix. Secrets belong in env, never frontend files. "
+            "Backend source, secrets, and lifecycle are owner/admin-only. "
             "Frontend pages: edit_site. This tool is the server."
         )
 
@@ -862,6 +866,12 @@ class SiteServerTool(_SiteOwnedTool):
         slug, entry, _site_dir, err = self._resolve(message, name)
         if err:
             return err
+        if str(entry.get("user_id") or "") != str(message.author.id) and not _caller_is_admin(self.bot, message):
+            return "Error: only the site owner or an admin can access its backend."
+        if _private_request(message) and str(action or "status").strip().lower() not in {
+            "list", "ls", "files", "read", "cat", "status", "info", "logs", "log", "tail",
+        }:
+            return "Error: choose Public visibility before changing a site backend."
         data_dir = self.bot.config.DATA_DIR
         act = str(action or "status").strip().lower()
         if act in SITE_MUTATING_ACTIONS:
@@ -1052,9 +1062,8 @@ class SiteServerTool(_SiteOwnedTool):
                 "deploy, start, stop, restart, status, logs, env, rm, or delete."
             )
         except site_server.SiteServerError as e:
-            # A failed redeploy/start writes a non-running registry row, so
-            # keep the public site listing from claiming that its server is
-            # still live.
+            # Admission or source errors can leave the existing backend live.
+            # Only a runtime registry row can tell us replacement actually failed.
             if act in {
                 "write",
                 "update",
@@ -1076,7 +1085,13 @@ class SiteServerTool(_SiteOwnedTool):
                 "config",
             }:
                 with contextlib.suppress(Exception):
-                    await self._mark_server(slug, entry, False)
+                    runtime_entry = await asyncio.to_thread(
+                        site_server.get_entry, data_dir, slug
+                    )
+                    if isinstance(runtime_entry, dict):
+                        await self._mark_server(
+                            slug, entry, bool(runtime_entry.get("running"))
+                        )
             return f"Error: {e}"
 
     async def _mark_server(self, slug: str, entry: dict, on: bool) -> None:

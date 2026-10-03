@@ -1,0 +1,12 @@
+[Unit]
+Description=Aggregate resource limits for Maxwell custom site backends
+Before=slices.target
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=200%
+MemoryAccounting=yes
+MemoryMax=4G
+MemorySwapMax=0
+TasksAccounting=yes
+TasksMax=2048

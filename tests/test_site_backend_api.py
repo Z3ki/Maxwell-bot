@@ -449,3 +449,85 @@ def test_site_proxy_paths_are_not_killed_by_api_timeout(monkeypatch):
         return await api._reliability_middleware(req, handler)
 
     assert run(scenario()) == "ok"
+
+
+def test_proxy_bounds_concurrent_sites_and_releases_completed_slots(data_dir, monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def scenario():
+        entered = asyncio.Queue()
+        release = asyncio.Event()
+
+        async def hold(request):
+            await entered.put(True)
+            await release.wait()
+            return web.json_response({"saved": True})
+
+        upstream = web.Application()
+        upstream.router.add_get("/hold", hold)
+        upstream.router.add_get("/ok", lambda request: web.json_response({"ok": True}))
+        monkeypatch.setattr(api, "SITE_PROXY_MAX_ACTIVE", 2)
+        monkeypatch.setattr(api, "SITE_PROXY_MAX_SITE_ACTIVE", 1)
+        monkeypatch.setattr(api, "_site_server_enabled", lambda slug: True)
+        async with TestServer(upstream) as backend:
+            monkeypatch.setattr(api.site_server, "port_for", lambda *args: backend.port)
+            frontend = web.Application()
+            frontend.router.add_get("/bot/{slug}/api/{path:.*}", api.site_proxy)
+            async with TestClient(TestServer(frontend)) as client:
+                first = asyncio.create_task(client.get("/bot/guest/api/hold"))
+                await asyncio.wait_for(entered.get(), 2)
+                busy = await client.get("/bot/guest/api/ok")
+                assert busy.status == 503
+                assert busy.headers["Retry-After"] == "1"
+                second = asyncio.create_task(client.get("/bot/plain/api/hold"))
+                await asyncio.wait_for(entered.get(), 2)
+                global_busy = await client.get("/bot/third/api/ok")
+                assert global_busy.status == 503
+                release.set()
+                for pending in (first, second):
+                    response = await asyncio.wait_for(pending, 2)
+                    assert response.status == 200
+                    assert await response.json() == {"saved": True}
+                recovered = await client.get("/bot/guest/api/ok")
+                assert recovered.status == 200
+                assert await recovered.json() == {"ok": True}
+        assert api._SITE_PROXY_ACTIVE_TOTAL == 0
+        assert api._SITE_PROXY_ACTIVE == {}
+
+    run(scenario())
+
+
+def test_proxy_releases_admission_slot_on_cancellation(data_dir, monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold(request):
+            entered.set()
+            await release.wait()
+            return web.json_response({"ok": True})
+
+        upstream = web.Application()
+        upstream.router.add_get("/hold", hold)
+        monkeypatch.setattr(api, "SITE_PROXY_MAX_SITE_ACTIVE", 1)
+        async with TestServer(upstream) as backend:
+            monkeypatch.setattr(api.site_server, "port_for", lambda *args: backend.port)
+            pending = asyncio.create_task(
+                api.site_proxy(FakeRequest(match={"slug": "guest", "path": "hold"}))
+            )
+            await asyncio.wait_for(entered.wait(), 2)
+            assert api._SITE_PROXY_ACTIVE_TOTAL == 1
+            pending.cancel()
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+                assert api._SITE_PROXY_ACTIVE_TOTAL == 0
+                assert api._SITE_PROXY_ACTIVE == {}
+            finally:
+                release.set()
+
+    run(scenario())

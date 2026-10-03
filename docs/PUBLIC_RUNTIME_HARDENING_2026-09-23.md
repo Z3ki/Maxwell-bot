@@ -9,6 +9,13 @@ Source status: PR #48 was merged into `main` by the repository owner on
 work is being reviewed against `dev`; runtime and data migrations still require
 a disposable dev deployment and operator review.
 
+Current generated-site support supersedes this review's `site_server` retirement:
+the tool is owner/admin-only and deploys into a mandatory gVisor runtime and
+bounded aggregate site pool. The standard stack is FastAPI/Uvicorn + SQLite.
+See [CONFIGURATION.md](CONFIGURATION.md#generated-site-custom-backends) and
+[SITE_BACKEND_MIGRATION.md](SITE_BACKEND_MIGRATION.md). The execution map below
+records the original retirement decision, not the current capability.
+
 ## Execution map and decisions
 
 | Boundary | Actual path | Status |

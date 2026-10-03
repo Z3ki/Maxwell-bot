@@ -56,7 +56,6 @@ import site_backend as _site_backend_for_api  # noqa: E402
 
 _API_MAX_CONCURRENT = max(8, _int_env_safe("MAXWELL_API_MAX_CONCURRENT", 64))
 _API_CONCURRENCY_SEM = asyncio.Semaphore(_API_MAX_CONCURRENT)
-_SITE_PROXY_CONCURRENCY_SEM = asyncio.Semaphore(_API_MAX_CONCURRENT)
 _API_REQUEST_TIMEOUT = max(0.1, _float_env_safe("MAXWELL_API_REQUEST_TIMEOUT", 30.0))
 _API_GLOBAL_RPS = max(0.1, _float_env_safe("MAXWELL_API_GLOBAL_RPS", 120.0))
 _API_GLOBAL_BURST = max(1, _int_env_safe("MAXWELL_API_GLOBAL_BURST", 240))
@@ -974,6 +973,13 @@ SITE_PROXY_READ_TIMEOUT = 120
 SITE_UPLOAD_MAX = 32 * 1024 * 1024
 SITE_WS_MAX_MSG = 4 * 1024 * 1024
 
+# Count the entire response lifetime, including long-lived sockets/streams.
+# Reject excess work instead of building an unbounded queue inside the bot API.
+SITE_PROXY_MAX_ACTIVE = 128
+SITE_PROXY_MAX_SITE_ACTIVE = 32
+_SITE_PROXY_ACTIVE: dict[str, int] = {}
+_SITE_PROXY_ACTIVE_TOTAL = 0
+
 
 async def _proxy_websocket(request, slug: str, target: str):
     """Pump a WebSocket both ways between the visitor and the site's app.
@@ -1081,6 +1087,30 @@ async def site_proxy(request):
     slug = _safe_site_slug(request.match_info.get("slug", ""))
     if not slug:
         return _site_json({"error": "bad slug"}, 404)
+    global _SITE_PROXY_ACTIVE_TOTAL
+    active = _SITE_PROXY_ACTIVE.get(slug, 0)
+    if (
+        _SITE_PROXY_ACTIVE_TOTAL >= SITE_PROXY_MAX_ACTIVE
+        or active >= SITE_PROXY_MAX_SITE_ACTIVE
+    ):
+        response = _site_json({"error": "site backend busy; try again shortly"}, 503)
+        response.headers["Retry-After"] = "1"
+        return response
+    # No await between checking and acquiring: atomic on this event loop.
+    _SITE_PROXY_ACTIVE[slug] = active + 1
+    _SITE_PROXY_ACTIVE_TOTAL += 1
+    try:
+        return await _site_proxy_request(request, slug)
+    finally:
+        _SITE_PROXY_ACTIVE_TOTAL -= 1
+        remaining = _SITE_PROXY_ACTIVE[slug] - 1
+        if remaining:
+            _SITE_PROXY_ACTIVE[slug] = remaining
+        else:
+            del _SITE_PROXY_ACTIVE[slug]
+
+
+async def _site_proxy_request(request, slug: str):
     if not _SITE_PROXY_RATE.allow(f"{_get_client_ip(request)}:{slug}"):
         return _site_json({"error": "slow down"}, 429)
     if not await asyncio.to_thread(_site_server_enabled, slug):
@@ -2337,10 +2367,8 @@ async def _reliability_middleware(request, handler):
     try:
         # Public long-lived sockets must not occupy the admin API's capacity.
         if request.path.startswith("/bot/"):
-            if _SITE_PROXY_CONCURRENCY_SEM.locked():
-                return _site_json({"error": "too many site connections"}, 503)
-            async with _SITE_PROXY_CONCURRENCY_SEM:
-                return await handler(request)
+            # site_proxy owns global/per-site admission for the stream lifetime.
+            return await handler(request)
         async with _API_CONCURRENCY_SEM:
             return await asyncio.wait_for(
                 handler(request), timeout=_API_REQUEST_TIMEOUT

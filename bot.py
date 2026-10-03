@@ -1384,7 +1384,7 @@ FOLLOWUP_TOOL_NAMES = RESULT_TOOL_NAMES
 PUBLIC_RUNTIME_BLOCKED_TOOLS = frozenset({
     "agent_life", "user_sandbox", "spawn_background", "github_repo",
     "plugin_workbench", "manage_plugin", "update_base_personality",
-    "update_server_prompt", "site_server",
+    "update_server_prompt",
 })
 
 # Core identity shared across Discord chats.

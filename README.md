@@ -165,6 +165,13 @@ bash install.sh --local
 
 See [`docs/INSTALL.md`](docs/INSTALL.md) for Docker Desktop, reverse-proxy, OAuth, migration, and unattended-install details.
 
+### Custom site backends
+
+Generated sites support real custom Python backends through `site_server`: API routes, authentication, WebSockets, external services, and server-side secrets. `create_site(backend=true)` still enables only the built-in KV API; use `site_server` for application logic. New applications use one shared Python 3.12 + FastAPI/Uvicorn image, one worker with no reload, and SQLite at `/data/app.db`. Frontend requests use relative `api/...` URLs. Put credentials in backend environment variables, never in public HTML/JavaScript. Backend source, logs, environment, and lifecycle are restricted to the site owner or an application admin.
+
+Before deploying backends, run `sudo bash scripts/setup_site_host.sh` on the Docker host and apply the Compose configuration that mounts `/etc/maxwell-sites` read-only at `/run/maxwell-sites-policy`. The dedicated site pool is limited to **2 CPUs / 4 GiB** in aggregate; each site has a **256 MiB / 0.5 CPU** limit, with at most **64** backend sites. Host setup is required: backend deployment fails closed without the resource policy. Existing Flask applications and `/data` databases remain supported and are not rewritten or deleted; existing containers need an operator-managed restart into the pool.
+
+
 ## Main features
 
 - Discord text, images, audio, video, attachments, embeds, replies, and message context.
@@ -176,7 +183,7 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for Docker Desktop, reverse-proxy, OAut
 - Personal, server, and restricted application-owner settings through `/config`.
 - SQLite-backed RAG/vector memory plus scoped context, entity/knowledge-graph memory, and optional REM-style consolidation.
 - Optional autonomy/background actions with runtime controls.
-- Generated static sites and optional backend containers.
+- Generated static sites and custom FastAPI/SQLite backend containers with server-side secrets and aggregate resource limits.
 
 - Docker-first runtime so host Python/package versions do not fight the bot.
 

@@ -505,9 +505,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "the site root."
             ),
             "backend": _bool(
-                "Optional, default false. Enable only if the site needs a server "
-                "(state, REST, websockets, auth, or persistence). Static HTML/CSS/JS "
-                "sites omit it."
+                "Optional, default false. Enables only the built-in simple KV API. "
+                "Use site_server for custom routes, auth, WebSockets, server-side "
+                "secrets, or a SQLite database. Static HTML/CSS/JS sites omit it."
             ),
             "permanent": _bool(
                 "Skip the auto-expiry clock so the site stays up until deleted"
@@ -555,13 +555,12 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 'Server source as JSON: {"app.py": "...", "helpers.py": "..."}. '
                 "write merges these into the existing source (other files stay). "
                 "deploy replaces the whole snapshot — missing files disappear. "
-                "app.py is the entry and must listen on 0.0.0.0:$PORT. flask, "
-                "waitress, fastapi, uvicorn, websockets, sqlalchemy, bcrypt, "
-                "pyjwt, requests, httpx, jinja2, pillow and the stdlib are "
-                "installed. Use fastapi+uvicorn instead of flask+waitress when "
-                "the app needs WebSockets. Only /data is writable and only /data "
-                "survives a restart — put the database at /data/app.db. Routes "
-                "are served under /bot/<name>/api/."
+                "New apps use Python 3.12 + FastAPI/Uvicorn, one worker, no reload. "
+                "app.py must listen on 0.0.0.0:$PORT. SQLite is available in the "
+                "stdlib; put the database at /data/app.db. Only /data is writable "
+                "and survives a restart. Existing Flask applications are supported. "
+                "Routes are served under /bot/<name>/api/; define routes without "
+                "that prefix and call relative api/... URLs from the frontend."
             ),
             "path": _str(
                 "For read/replace/rm/write-one-file: which server file (default app.py)"
@@ -578,11 +577,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 'Secrets and config as JSON: {"API_KEY": "sk-..."}. Held outside '
                 "the site directory, never served and never echoed back; read "
                 "them with os.environ. Setting env restarts the server."
-            ),
-            "packages": _str(
-                'Extra pip packages as a JSON list, e.g. ["redis==5.0.1"]. Only '
-                "needed for something outside the installed set. Builds a per-site "
-                "image, so the first deploy takes longer."
             ),
             "lines": _int("For logs: how many lines (default 40, max 200)"),
             "start_line": _int(
