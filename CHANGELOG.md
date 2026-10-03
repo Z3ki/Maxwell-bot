@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.5 — 2026-10-03
+
+Install with `--version v0.1.5`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
+
+### Discord and revision history
 
 - `/maxwell` uses normal text and brief replies by default; saved and explicit detail preferences still apply.
 - Ask Maxwell opens a prompt form with the same actions, detail, visibility, and language as slash requests. Rewrite / Translate adds another entry point; quick message actions share the request defaults.
@@ -14,6 +18,8 @@
 - New apps use the shared Python 3.12 + FastAPI/Uvicorn stack with one worker, no reload, and SQLite under `/data`. Existing Flask applications, source, databases, and secrets are preserved.
 - Backend source, logs, environment, and lifecycle are owner/admin-only; private requests cannot mutate a public backend.
 - Required host setup: `sudo bash scripts/setup_site_host.sh`, plus the Compose policy mount. The site pool is capped at 2 CPUs / 4 GiB total, each backend at 256 MiB / 0.5 CPU, and 64 backends maximum. Existing containers must be restarted into the protected pool without deleting their persisted data.
+- Custom backend code runs as an unprivileged user under gVisor, with read-only source, private persistent data, no capabilities, no swap, bounded temporary storage, and rotated logs. Model calls reuse the trusted runtime image rather than building per-site images.
+- The public API proxy limits active work to 32 connections per site and 128 globally, including WebSockets and SSE. Busy requests receive HTTP 503 instead of queuing without bounds.
 
 ## 0.1.4 — 2026-10-01
 

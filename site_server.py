@@ -529,9 +529,8 @@ def parse_files(files: Any) -> dict[str, str]:
     return out
 
 
-# A site that needs something outside the baked-in toolkit gets a per-site
-# image built FROM the shared one. Pinned or bare names only — no flags, no
-# URLs, no git+ssh, nothing that turns a package list into a shell.
+# Legacy dependency metadata is retained only to select an already-built image.
+# Accept plain/pinned names, never flags or URLs; new package installs are disabled.
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,60}(\[[A-Za-z0-9,_-]{1,40}\])?(==[A-Za-z0-9._-]{1,20})?$")
 MAX_PACKAGES = 15
 
