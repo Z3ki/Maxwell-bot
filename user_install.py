@@ -39,6 +39,7 @@ USER_INSTALL_NAMES = frozenset(
 # only user-installed (not also in that server).
 USER_INSTALL_MESSAGE_CAP = 6
 USER_INSTALL_HISTORY_LIMIT = 25
+USER_INSTALL_CONTEXT_COUNTS = (0, 10, 25, 50, 100, 250, 500, 1000)
 
 
 def private_channel_key(interaction: Any) -> str:
@@ -314,6 +315,21 @@ def resolve_response_visibility(
     return value if value in {"public", "private"} else "private"
 
 
+def normalize_context_limit(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return USER_INSTALL_HISTORY_LIMIT
+    return count if count in USER_INSTALL_CONTEXT_COUNTS else USER_INSTALL_HISTORY_LIMIT
+
+
+def resolve_context_limit(interaction: Any, *, defaults: dict | None = None) -> int:
+    options = dict(_option_pairs(_interaction_data(interaction).get("options")))
+    return normalize_context_limit(
+        options.get("context", (defaults or {}).get("context", USER_INSTALL_HISTORY_LIMIT))
+    )
+
+
 def _user_from_resolved(raw: Any) -> Any:
     if not isinstance(raw, dict):
         return raw
@@ -457,8 +473,13 @@ def merge_user_install_history(
     return fresh + memory
 
 
-async def snapshot_channel_history(bot: Any, interaction: Any) -> list[dict[str, Any]]:
+async def snapshot_channel_history(
+    bot: Any, interaction: Any, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     """Recent channel messages when Maxwell can actually read the channel."""
+    limit = resolve_context_limit(interaction) if limit is None else normalize_context_limit(limit)
+    if limit <= 0:
+        return []
     cid = getattr(interaction, "channel_id", None)
     channel = getattr(interaction, "channel", None)
     history = getattr(channel, "history", None)
@@ -481,7 +502,7 @@ async def snapshot_channel_history(bot: Any, interaction: Any) -> list[dict[str,
         return []
     rows: list[dict[str, Any]] = []
     try:
-        result = history(limit=USER_INSTALL_HISTORY_LIMIT)
+        result = history(limit=limit)
         if hasattr(result, "__aiter__"):
             rows.extend(
                 [_memory_row_from_message(msg) async for msg in result]
@@ -743,6 +764,7 @@ class UserInstallMessageAdapter:
         mode: str = "ask",
         visibility: str = "private",
         message_action: bool = False,
+        history_limit: int | None = None,
     ):
         self.user_install = True
         self.tool_platform = "user_install"
@@ -790,6 +812,9 @@ class UserInstallMessageAdapter:
         self.mention_everyone = False
         self.reference = reference
         self.user_install_history = list(history or [])
+        self.user_install_history_limit = (
+            None if history_limit is None else normalize_context_limit(history_limit)
+        )
         self.user_install_note = note
         self.user_install_message_action = bool(message_action)
         self.user_install_search_query = str(search_query or "")
@@ -869,6 +894,7 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         visibility = resolve_response_visibility(
             interaction, defaults=defaults, fallback=turn.get("visibility") or "public"
         )
+        history_limit = resolve_context_limit(interaction, defaults=defaults)
         response = getattr(interaction, "response", None)
         is_done = getattr(response, "is_done", None)
         if not (callable(is_done) and is_done()):
@@ -879,7 +905,7 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         logger.exception("user-install defer failed")
         return True
     history = (
-        await snapshot_channel_history(bot, interaction)
+        await snapshot_channel_history(bot, interaction, limit=history_limit)
         if visibility == "public"
         else []
     )
@@ -896,6 +922,7 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         mentions=turn.get("mentions") or [],
         reference=turn.get("reference"),
         history=history,
+        history_limit=history_limit,
         note=note,
         message_action=bool(turn.get("message_action")),
         search_query=turn.get("search_query") or str(turn["prompt"]),

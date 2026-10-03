@@ -691,3 +691,26 @@ def test_config_defers_before_loading_preferences(tmp_path):
         assert events == ["ack", "render"]
 
     asyncio.run(run())
+
+
+def test_large_context_can_be_saved_and_reused_by_app_commands(tmp_path, monkeypatch):
+    from plugins.maxwell_extras import user_install_features
+
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    monkeypatch.setattr(user_install_features, "_USER_PREFERENCE_STORE", store)
+    edits = []
+
+    class Response:
+        async def edit_message(self, **kwargs):
+            edits.append(kwargs)
+
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100), response=Response(), data={"options": []})
+    panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
+    panel.selected_key = "context"
+    panel._build()
+    asyncio.run(panel.set_choice(interaction, "1000"))
+    assert store.get(100)["defaults"]["context"] == 1000
+    assert user_install_features._context_limit(interaction) == 1000
+    assert "Last 1000 messages" in edits[-1]["embed"].description
+    select = next(item for item in panel.children if isinstance(item, command_suite._ConfigValueSelect))
+    assert next(option for option in select.options if option.value == "1000").default

@@ -22,14 +22,14 @@ _PERSONAL_DEFAULT_VALUES = {
     "mode": {"ask", "research", "summarize", "explain", "rewrite", "translate", "brainstorm", "code"},
     "web": {"auto", "search", "off"},
     "detail": {"quick", "balanced", "deep"},
-    "context": {"0", "10", "25", "50"},
+    "context": {str(count) for count in ui.USER_INSTALL_CONTEXT_COUNTS},
     "visibility": {"private", "public"},
 }
 _PERSONAL_SETTINGS = {
     "mode": ("Response mode", "Choose how Maxwell approaches your requests."),
     "web": ("Web research", "Choose when Maxwell searches the web."),
     "detail": ("Answer detail", "Choose how much detail Maxwell gives."),
-    "context": ("Channel context", "Choose how many recent channel messages Maxwell may use."),
+    "context": ("Channel context", "Choose up to 1,000 recent channel messages for app requests."),
     "visibility": ("Default visibility", "Choose whether /maxwell and message app replies are private or public."),
     "language": ("Response language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
@@ -61,8 +61,8 @@ _PERSONAL_VALUE_CHOICES = {
     "web": [("Automatic", "auto"), ("Always search", "search"), ("Off", "off")],
     "detail": [("Quick", "quick"), ("Balanced", "balanced"), ("Deep", "deep")],
     "context": [
-        ("No recent context", "0"), ("Last 10 messages", "10"),
-        ("Last 25 messages", "25"), ("Last 50 messages", "50"),
+        ("No recent context" if count == 0 else f"Last {count:,} messages", str(count))
+        for count in ui.USER_INSTALL_CONTEXT_COUNTS
     ],
     "visibility": [("Public — visible in this channel", "public"), ("Private — only you can see the reply", "private")],
 }
@@ -85,7 +85,7 @@ _SETTING_HELP = {
     "mode": "For everyday questions, choose Answer normally. Choose Research for a sourced answer.",
     "web": "Automatic works for most requests. Off prevents web search for this request mode.",
     "detail": "Quick keeps it brief. Balanced is the default. Deep asks for a fuller explanation.",
-    "context": "Only recent messages Maxwell can access in this channel are included. Choose none to use just your request.",
+    "context": "Choose up to 1,000 messages. Very long conversations may include fewer messages. Only recent messages Maxwell can access in this channel are included. Choose none to use just your request.",
     "visibility": "Applies to /maxwell and message app actions. Public replies appear in the channel; Private replies are only visible to you. You can override this on /maxwell. Servers must allow Use External Apps for user-installed apps to reply publicly.",
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",

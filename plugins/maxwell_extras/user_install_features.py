@@ -38,10 +38,8 @@ _DETAIL_CHOICES = [
     {"name": "Deep", "value": "deep"},
 ]
 _CONTEXT_CHOICES = [
-    {"name": "No channel context", "value": 0},
-    {"name": "Last 10 messages", "value": 10},
-    {"name": "Last 25 messages", "value": 25},
-    {"name": "Last 50 messages", "value": 50},
+    {"name": "No channel context" if count == 0 else f"Last {count:,} messages", "value": count}
+    for count in ui.USER_INSTALL_CONTEXT_COUNTS
 ]
 
 _FEATURES_INSTALLED = False
@@ -174,13 +172,7 @@ def _context_limit(interaction: Any, *, options: dict[str, Any] | None = None) -
             opts["context"] = _USER_PREFERENCE_STORE.get(user_id)["defaults"].get("context", 25)
         except Exception:
             opts["context"] = 0
-    raw = opts.get("context", 25)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 25
-    return value if value in {0, 10, 25, 50} else 25
-
+    return ui.normalize_context_limit(opts.get("context", ui.USER_INSTALL_HISTORY_LIMIT))
 
 def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
     """Add explicit per-command intent without changing the user's text."""
@@ -356,10 +348,12 @@ def _saved_visibility(interaction: Any, *, fallback: str = "public") -> str:
     return ui.resolve_response_visibility(interaction, defaults=defaults, fallback=fallback)
 
 
-async def _snapshot_channel_history(bot: Any, interaction: Any) -> list[dict[str, Any]]:
+async def _snapshot_channel_history(
+    bot: Any, interaction: Any, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     """Read only the amount of live channel context selected by the user."""
 
-    limit = _context_limit(interaction)
+    limit = _context_limit(interaction) if limit is None else ui.normalize_context_limit(limit)
     if limit <= 0:
         return []
     cid = getattr(interaction, "channel_id", None)

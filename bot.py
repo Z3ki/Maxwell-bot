@@ -15035,6 +15035,10 @@ class MaxwellBot(commands.Bot):
 
         # Collect recent users from conversation for pinging support
         conv_users = {}
+        app_history_limit = (
+            getattr(message, "user_install_history_limit", None)
+            if is_user_install_message(message) else None
+        )
         mem = None
         try:
             caid = str(message.author.id)
@@ -15048,7 +15052,7 @@ class MaxwellBot(commands.Bot):
                     channel_id,
                     requester=_memory_requester_for(self, message),
                 )
-                if hasattr(self, "memory")
+                if hasattr(self, "memory") and app_history_limit != 0
                 else []
             )
             for m in (mem or [])[-50:]:
@@ -15626,8 +15630,9 @@ class MaxwellBot(commands.Bot):
         memory = mem if mem is not None else await self.memory.get_channel_memory(
             channel_id, requester=_memory_requester_for(self, message)
         )
-        memory = merge_user_install_history(
-            memory, getattr(message, "user_install_history", None)
+        memory = (
+            merge_user_install_history(memory, getattr(message, "user_install_history", None))
+            if app_history_limit != 0 else []
         )
         if memory:
             # 2026-07-19: Discord chat does not need a 200k-char dump. Keep
@@ -15666,6 +15671,10 @@ class MaxwellBot(commands.Bot):
                     2000,
                 ),
             )
+            if app_history_limit is not None:
+                # Explicit app context choices must survive the ordinary chat
+                # count limit; character/model budgets still bound the prompt.
+                count = max(0, min(_safe_int(app_history_limit, 25), 1000))
             if self._is_short_live_turn(message, user_message):
                 # Watch/ambient turns still need the current thread. 20 lines
                 # cuts off the exchange and he riffs on the last 'lol'. Keep
@@ -15680,7 +15689,7 @@ class MaxwellBot(commands.Bot):
             # fixed boundary keeps the same start for a block of turns; the
             # window overshoots `count` by at most one block, which the char
             # budget below still bounds.
-            block = max(1, min(16, count // 8))
+            block = 1 if app_history_limit is not None else max(1, min(16, count // 8))
             start = max(0, len(memory) - count)
             recent_memory = memory[start - (start % block) :] if count else []
             recent_ids = {id(msg) for msg in recent_memory}
@@ -15721,6 +15730,7 @@ class MaxwellBot(commands.Bot):
                 nonlocal current_turn
                 if current_turn is not None and current_turn.get("parts"):
                     current_turn["content"] = "\n".join(current_turn["parts"])
+                    current_turn["_history_rows"] = list(current_turn["parts"])
                     turn_sequences.append(current_turn)
                 current_turn = None
 
@@ -15846,6 +15856,7 @@ class MaxwellBot(commands.Bot):
                     merged[-1]["content"] = (
                         merged[-1].get("content", "") + "\n" + turn.get("content", "")
                     )
+                    merged[-1]["_history_rows"].extend(turn["_history_rows"])
                 else:
                     merged.append(dict(turn))
             # The live message is appended as a final user turn below. To
@@ -15874,6 +15885,19 @@ class MaxwellBot(commands.Bot):
                 while len(merged) > 1 and used > target:
                     used -= len(merged[0].get("_rendered", ""))
                     merged.pop(0)
+                if app_history_limit is not None and merged and used > target:
+                    # Large app snapshots often contain one all-user turn.
+                    # Keep its newest message rows instead of dropping the
+                    # entire transcript in the final prompt-budget pass.
+                    rows = merged[0]["_history_rows"]
+                    row_chars = sum(len(row) + 1 for row in rows)
+                    start = 0
+                    while start < len(rows) - 1 and row_chars > target:
+                        row_chars -= len(rows[start]) + 1
+                        start += 1
+                    merged[0]["_rendered"] = MaxwellBot._trim_middle(
+                        "\n".join(rows[start:]), target
+                    )
             # 2026-07-25: wrap ALL conversation history in a single user
             # message with <previous_conversation> delimiters. The old code
             # appended each turn as a separate user/assistant message with

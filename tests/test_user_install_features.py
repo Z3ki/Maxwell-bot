@@ -39,7 +39,7 @@ def test_modern_command_surface_has_modes_context_and_message_actions():
     options = {row["name"]: row for row in slash["options"]}
     assert {"prompt", "mode", "web", "detail", "language", "context", "visibility", "image", "file"} <= set(options)
     assert {c["value"] for c in options["mode"]["choices"]} >= {"research", "translate", "code"}
-    assert {c["value"] for c in options["context"]["choices"]} == {0, 10, 25, 50}
+    assert {c["value"] for c in options["context"]["choices"]} == {0, 10, 25, 50, 100, 250, 500, 1000}
     assert {c["value"] for c in options["visibility"]["choices"]} == {"private", "public"}
 
 
@@ -239,3 +239,31 @@ def test_saved_zero_context_skips_live_channel_read(tmp_path, monkeypatch):
 
     interaction.channel.history = history
     assert asyncio.run(mod._snapshot_channel_history(None, interaction)) == []
+
+
+def test_large_saved_context_fetches_all_selected_messages(tmp_path, monkeypatch):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default(1, "context", 1000)
+    monkeypatch.setattr(mod, "_USER_PREFERENCE_STORE", store)
+    interaction = _interaction()
+    requested = []
+
+    async def history(*, limit):
+        requested.append(limit)
+        for index in range(limit, 0, -1):
+            yield SimpleNamespace(id=index, content=f"message {index}",
+                                  author=SimpleNamespace(id=7, display_name="Alice", bot=False),
+                                  created_at=None)
+
+    interaction.channel.history = history
+    rows = asyncio.run(mod._snapshot_channel_history(None, interaction))
+    assert requested == [1000]
+    assert len(rows) == 1000
+    assert rows[0]["content"] == "message 1"
+    assert rows[-1]["content"] == "message 1000"
+    # A one-request override still takes priority over the large saved default.
+    interaction.data["options"] = [{"name": "context", "value": 100}]
+    assert len(asyncio.run(mod._snapshot_channel_history(None, interaction))) == 100
+    assert requested[-1] == 100

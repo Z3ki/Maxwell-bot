@@ -416,3 +416,64 @@ def test_bot_authors_and_unavailable_preference_store_do_not_break_prompts(tmp_p
     assert messages[-1]["role"] == "user"
     assert "hello" in messages[-1]["content"]
     assert all("Personal reply preferences" not in str(m["content"]) for m in messages)
+
+
+def test_app_context_selection_survives_ordinary_history_limit():
+    history = [{"message_id": str(index), "author": "alice", "author_id": "456",
+                "content": f"CTX{index:04}"} for index in range(1000)]
+    bot = _bot(FakeMemory())
+    message = _message()
+    message.id = 999999
+    message.user_install = True
+    message.user_install_history_limit = 1000
+    message.user_install_history = history
+    output = asyncio.run(MaxwellBot._build_messages(bot, message, "Read this conversation."))
+    transcript = next(row["content"] for row in output if row["role"] == "user" and str(row["content"]).startswith("<previous_conversation>"))
+    assert "CTX0000" in transcript
+    assert "CTX0999" in transcript
+    assert sum(f"CTX{index:04}" in transcript for index in range(1000)) == 1000
+    message.user_install_history_limit = 10
+    output = asyncio.run(MaxwellBot._build_messages(bot, message, "Read this conversation."))
+    transcript = next(row["content"] for row in output if row["role"] == "user" and str(row["content"]).startswith("<previous_conversation>"))
+    assert "CTX0989" not in transcript
+    assert "CTX0990" in transcript
+    assert "CTX0999" in transcript
+
+
+def test_large_app_context_keeps_recent_rows_when_model_budget_is_exceeded():
+    bot = _bot(FakeMemory())
+    message = _message()
+    message.id = 999999
+    message.user_install = True
+    message.user_install_history_limit = 1000
+    message.user_install_history = [
+        {"message_id": str(index), "author": "alice", "author_id": "456",
+         "content": f"CTX{index:04} " + "detail " * 100}
+        for index in range(1000)
+    ]
+    output = asyncio.run(MaxwellBot._build_messages(bot, message, "Summarize the most recent discussion."))
+    transcript = next(row["content"] for row in output if row["role"] == "user" and str(row["content"]).startswith("<previous_conversation>"))
+    assert "CTX0999" in transcript
+    assert "CTX0000" not in transcript
+    assert len(transcript) <= bot._control["memory_context_budget"]
+    assert "Summarize the most recent discussion." in str(output[-1]["content"])
+
+
+def test_app_context_zero_excludes_cached_and_live_channel_history():
+    class Memory(FakeMemory):
+        calls = 0
+
+        async def get_channel_memory(self, *args, **kwargs):
+            self.calls += 1
+            return [{"message_id": "43", "content": "UNREQUESTED_CACHED_CONTEXT"}]
+
+    bot = _bot(Memory())
+    message = _message()
+    message.user_install = True
+    message.user_install_history_limit = 0
+    message.user_install_history = [{"message_id": "42", "content": "UNREQUESTED_CONTEXT"}]
+    output = asyncio.run(MaxwellBot._build_messages(bot, message, "Use only this request."))
+    assert bot.memory.calls == 0
+    assert "UNREQUESTED_CONTEXT" not in str(output)
+    assert "UNREQUESTED_CACHED_CONTEXT" not in str(output)
+    assert not any(row["role"] == "user" and str(row["content"]).startswith("<previous_conversation>") for row in output)
