@@ -1877,7 +1877,7 @@ def _parse_overwrite_pairs(raw) -> dict:
 # ── Permanent public image persistence ──────────────────────────────
 # Discord CDN attachment URLs carry an `ex=` signature that expires ~24h
 # after upload. Any site that embeds one silently loses its image within a
-# day. Generated images are therefore ALSO written under the public site
+# day. Generated images are therefore written under the public site
 # dir (_images/) where the host serves them at a stable, never-expiring
 # URL that curl/wget/<img>/websites can use directly.
 

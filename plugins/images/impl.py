@@ -16,6 +16,40 @@ for _name in dir(_helpers):
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
 
+
+def _generated_image_result(bot, image_bytes: bytes, *, prefix: str, summary: str) -> str:
+    """Return model-visible media and reusable links without a Discord send."""
+    mime = _sniff_image_mime(image_bytes)
+    ext = {"image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}.get(mime, ".png")
+    local_path, perm_url = _persist_public_image(bot, image_bytes, ext=ext, prefix=prefix)
+    preview = image_bytes
+    # The tool-media dispatcher accepts base64 payloads smaller than 5 MB.
+    # Keep the full generated file; resize only an oversized model preview.
+    if len(preview) >= 3_750_000:
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(preview)) as image:
+                image = image.convert("RGB")
+                image.thumbnail((1024, 1024))
+                buffer = BytesIO()
+                image.save(buffer, format="JPEG", quality=88)
+                preview = buffer.getvalue()
+                mime = "image/jpeg"
+        except Exception as exc:
+            return f"Error: could not prepare generated image for model inspection ({exc})"
+    result = summary + "\nNot sent to chat. Inspect the attached image and decide what to do next."
+    if perm_url:
+        result += f"\nImage URL: {perm_url}\nUse send_media with this URL only if you decide to send the image."
+    if local_path:
+        result += (
+            f"\nLocal path: {local_path} "
+            f'(pass to create_site as images=[{{"path": "{local_path}"}}] to bundle it into a site)'
+        )
+    payload = base64.b64encode(preview).decode("ascii")
+    return result + f"\n__IMAGE_B64__data:{mime};base64,{payload}__END_IMAGE_B64__"
+
+
 class ImageGeneratorTool(Tool):
     """Fast image generation using Pollinations (SDXL-Lightning)."""
     tool_name = 'image_generator'
@@ -27,7 +61,8 @@ class ImageGeneratorTool(Tool):
         return (
             "Generate an AI image (~2-5s) — the DEFAULT image tool, text-to-image only. "
             "It CANNOT take an input image: to edit/modify/restyle an existing image, use hd_image. "
-            "Params: prompt (required). Posts the image to chat with a CDN URL you can reuse in sites."
+            "Params: prompt (required). Returns the image for your inspection, plus a reusable URL. "
+            "Does not send it to chat. Decide whether to send_media, use it in a site, regenerate, or reply normally."
         )
 
     async def execute(
@@ -40,56 +75,6 @@ class ImageGeneratorTool(Tool):
         # request before timing out).
         return await self._pollinations_generate(message, prompt)
 
-    async def _deliver_generated_image(
-        self, message: Message, prompt: str, image_bytes: bytes, *, prefix: str
-    ) -> str:
-        local_path, perm_url = _persist_public_image(
-            self.bot, image_bytes, prefix=prefix
-        )
-        file = File(BytesIO(image_bytes), filename="generated_image.png")
-        sent_msg = None
-        self._signal_streaming(message)
-        try:
-            sent_msg = await message.channel.send(file=file)
-            record_delivery = getattr(self.bot, "_record_delivery", None)
-            if callable(record_delivery) and sent_msg is not None:
-                record_delivery(message, sent_msg)
-        except discord.Forbidden:
-            logger.warning(
-                f"Cannot send image in {message.channel.id} — missing permissions"
-            )
-            return "Error: Cannot send image — missing permissions"
-        cdn_url = None
-        if sent_msg and sent_msg.attachments:
-            cdn_url = sent_msg.attachments[0].url
-        await self.bot.memory.add_to_channel_memory(
-            str(message.channel.id),
-            {
-                "author": "Tool",
-                "content": f"Generated image: {prompt[:200]}",
-                "is_tool": True,
-            },
-        )
-        result = f"Image sent to chat: {prompt[:100]}"
-        if cdn_url:
-            result += f"\nImage URL: {cdn_url}"
-        if perm_url:
-            result += (
-                f"\nPermanent URL: {perm_url} "
-                "(never expires — use this in websites, <img> tags, or curl)"
-            )
-        if local_path:
-            result += (
-                f"\nLocal path: {local_path} "
-                f'(pass to create_site as images=[{{"path": "{local_path}"}}] '
-                "to bundle it into a site)"
-            )
-        result += "\nLook at the image you just posted. If it looks good, mention the URL or use it for the site. "
-        result += (
-            "If it looks bad, call image_generator again with an improved prompt. "
-        )
-        result += "If you were generating this for a site, call create_site NOW (in your next response) with the URL embedded in the body — do not call create_site before image_generator returns this URL."
-        return result
 
     async def _pollinations_generate(self, message: Message, prompt: str) -> str:
         # Model comes solely from config — which reads POLLINATIONS_MODEL from
@@ -148,8 +133,8 @@ class ImageGeneratorTool(Tool):
         logger.info(
             "Pollinations image generated successfully, size: %s bytes", len(raw)
         )
-        return await self._deliver_generated_image(
-            message, prompt, raw, prefix="pollinations"
+        return _generated_image_result(
+            self.bot, raw, prefix="pollinations", summary=f"Image generated: {prompt[:100]}"
         )
 
 class HDImageGeneratorTool(Tool):
@@ -183,7 +168,8 @@ class HDImageGeneratorTool(Tool):
             "Params: prompt (required — for an edit, describe the change, not the whole scene); "
             "image (optional — an http(s) URL, a local path, or a list of up to 4 of them, to edit "
             "or use as reference). If image is omitted and the user attached images to the message, "
-            "those are used automatically. Returns a Discord CDN URL plus a permanent URL for sites."
+            "those are used automatically. Returns the image for your inspection, plus a reusable URL. "
+            "Does not send it to chat. Decide whether to send_media, use it in a site, regenerate, or reply normally."
         )
 
     def _endpoint(self) -> tuple[str, str, str]:
@@ -475,57 +461,8 @@ class HDImageGeneratorTool(Tool):
             logger.error(f"HD image base64 decode failed: {e}")
             return "Error: HD image data was not decodable"
 
-        ext = "jpg" if ext.lower() in ("jpeg", "jpg") else "png"
-        file = File(BytesIO(image_bytes), filename=f"hd_generated_image.{ext}")
-        sent_msg = None
-        # Step aside for the live progress message — the HD image is
-        # the user-visible result; the "running hd_image" status is
-        # redundant the moment the upload starts.
-        self._signal_streaming(message)
-        try:
-            sent_msg = await message.channel.send(file=file)
-            record_delivery = getattr(self.bot, "_record_delivery", None)
-            if callable(record_delivery) and sent_msg is not None:
-                record_delivery(message, sent_msg)
-        except discord.Forbidden:
-            logger.warning(
-                f"Cannot send HD image in {message.channel.id} — missing permissions"
-            )
-            return "Error: Cannot send HD image — missing permissions"
-
-        # Grab the Discord CDN URL from the attachment
-        cdn_url = None
-        if sent_msg and sent_msg.attachments:
-            cdn_url = sent_msg.attachments[0].url
-
-        # Persist a permanent public copy (Discord CDN URLs expire ~24h).
-        local_path, perm_url = _persist_public_image(
-            self.bot, image_bytes, ext=f".{ext}", prefix="hd"
-        )
-
         verb = "Edited" if loaded else "Generated"
-        await self.bot.memory.add_to_channel_memory(
-            str(message.channel.id),
-            {
-                "author": "Tool",
-                "content": f"{verb} HD image: {prompt[:200]}",
-                "is_tool": True,
-            },
-        )
-        result = f"HD image {verb.lower()} successfully: {prompt[:100]}"
+        summary = f"HD image {verb.lower()} successfully: {prompt[:100]}"
         if loaded:
-            result += f" (from {loaded} input image{'s' if loaded > 1 else ''})"
-        if cdn_url:
-            result += f"\nImage URL: {cdn_url}"
-        if perm_url:
-            result += (
-                f"\nPermanent URL: {perm_url} "
-                "(never expires — use this directly in HTML <img> tags or curl)"
-            )
-        if local_path:
-            result += (
-                f"\nLocal path: {local_path} "
-                f'(pass to create_site as images=[{{"path": "{local_path}"}}] '
-                "to bundle it into a site)"
-            )
-        return result
+            summary += f" (from {loaded} input image{'s' if loaded > 1 else ''})"
+        return _generated_image_result(self.bot, image_bytes, prefix="hd", summary=summary)

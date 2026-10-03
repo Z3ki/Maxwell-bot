@@ -3329,7 +3329,7 @@ class MaxwellBot(commands.Bot):
                 state["uncertain"] = True
             # Legacy tools can send directly, without the slowmode wrapper.
             if tool_identifier in {
-                "image_generator", "hd_image", "create_poll",
+                "create_poll",
                 "create_thread", "thread_control", "send_message", "send_file", "shell", "send_meme",
                 "send_media", "forward_message",
             }:
@@ -13078,7 +13078,7 @@ class MaxwellBot(commands.Bot):
                             "role": "user",
                             "content": "=== TOOL RESULTS ===\n"
                             + "\n".join(tool_results)
-                            + "\n=== END ===\nUse these results to continue. Tool images are attached. Don't text-reply if the user asked for an image — send_media or re-run image_generator instead.",
+                            + "\n=== END ===\nUse these results to continue. Tool images are attached for inspection, not automatically sent to chat. Decide whether to send_media, use them elsewhere, regenerate, or reply normally.",
                         }
                     )
                 # Keep the tail bounded by size as well as count, dropping

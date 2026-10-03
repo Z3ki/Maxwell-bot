@@ -1,16 +1,12 @@
 """Regression tests for plugins/maxwell_extras."""
 
 import asyncio
-import base64
-from io import BytesIO
 from types import SimpleNamespace
 
-import discord
 
 from plugins.maxwell_extras.tools import (
     RecallCrossServerMemoryTool,
     ReminderStore,
-    patch_image_generators,
 )
 
 
@@ -75,35 +71,3 @@ def test_cross_server_recall_non_admin_is_author_scoped():
     asyncio.run(run())
 
 
-def test_image_generator_patch_captures_file_instead_of_posting():
-    png = b"\x89PNG\r\n\x1a\n" + b"x" * 32
-
-    class RealChannel:
-        def __init__(self):
-            self.sent = 0
-
-        async def send(self, *args, **kwargs):
-            self.sent += 1
-            return SimpleNamespace(attachments=[])
-
-    class Generator:
-        async def execute(self, message, **kwargs):
-            file = discord.File(BytesIO(png), filename="generated.png")
-            await message.channel.send(file=file)
-            return "generated"
-
-    async def run():
-        generator = Generator()
-        channel = RealChannel()
-        bot = SimpleNamespace(tools={"image_generator": generator})
-        assert patch_image_generators(bot) == 1
-        message = SimpleNamespace(channel=channel)
-        result = await generator.execute(message, prompt="cat")
-        assert channel.sent == 0
-        assert "__IMAGE_B64__" in result
-        payload = result.split("__IMAGE_B64__", 1)[1].split(
-            "__END_IMAGE_B64__", 1
-        )[0]
-        assert base64.b64decode(payload) == png
-
-    asyncio.run(run())

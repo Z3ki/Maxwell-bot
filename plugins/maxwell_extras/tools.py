@@ -3,10 +3,6 @@
 This plugin intentionally keeps optional "power tools" out of normal prompt
 assembly. The model calls them only when it actually needs cross-server recall,
 reminders, rich Discord UI, or URL media inspection.
-
-It also patches the live image-generation tool instances so generated files are
-captured and handed back to the LLM as tool media instead of being posted to
-Discord automatically.
 """
 
 from __future__ import annotations
@@ -23,7 +19,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -790,113 +786,3 @@ class InspectMediaUrlTool(Tool):
             return f"Error inspecting {kind}: {exc}"
 
 
-def _read_discord_file(file_obj: Any) -> tuple[str, bytes] | None:
-    filename = str(getattr(file_obj, "filename", "") or "generated.png")
-    fp = getattr(file_obj, "fp", None)
-    if fp is None or not hasattr(fp, "read"):
-        return None
-    try:
-        pos = fp.tell() if hasattr(fp, "tell") else None
-    except Exception:
-        pos = None
-    try:
-        if hasattr(fp, "seek"):
-            fp.seek(0)
-        data = fp.read()
-        if not isinstance(data, (bytes, bytearray)):
-            return None
-        return filename, bytes(data)
-    except Exception:
-        return None
-    finally:
-        if pos is not None and hasattr(fp, "seek"):
-            with contextlib.suppress(Exception):
-                fp.seek(pos)
-
-
-class _CaptureChannel:
-    """Delegate a channel except generated image file sends, which are captured."""
-
-    def __init__(self, real: Any):
-        self._real = real
-        self.images: list[tuple[str, bytes]] = []
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
-
-    async def send(self, *args, **kwargs):
-        files: list[Any] = []
-        if kwargs.get("file") is not None:
-            files.append(kwargs["file"])
-        if kwargs.get("files"):
-            files.extend(list(kwargs["files"]))
-        captured = []
-        for item in files:
-            parsed = _read_discord_file(item)
-            if parsed is None:
-                continue
-            filename, data = parsed
-            ext = os.path.splitext(filename.lower())[1]
-            if ext in _IMAGE_EXTS or data.startswith(
-                (b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8")
-            ):
-                captured.append((filename, data))
-        if captured:
-            self.images.extend(captured)
-            return SimpleNamespace(id=0, attachments=[], channel=self._real)
-        return await self._real.send(*args, **kwargs)
-
-
-class _MessageProxy:
-    def __init__(self, original: Any, channel: _CaptureChannel):
-        self._original = original
-        self.channel = channel
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._original, name)
-
-
-def patch_image_generators(bot: Any, ctx: Any = None) -> int:
-    """Capture generated image sends and feed bytes back through the tool result."""
-    patched = 0
-    registry = getattr(bot, "tools", None) or {}
-
-    def _wrap(original, tool_name: str):
-        async def wrapped_execute(_self, message: Any, *args, **kwargs):
-            capture = _CaptureChannel(getattr(message, "channel", None))
-            proxy = _MessageProxy(message, capture)
-            result = await original(proxy, *args, **kwargs)
-            if not capture.images:
-                return result
-            parts = [
-                str(result or f"{tool_name} generated image for model inspection.")
-            ]
-            for filename, data in capture.images[:4]:
-                payload = base64.b64encode(data).decode("ascii")
-                if len(payload) >= 4_900_000:
-                    parts.append(
-                        f"Generated {filename}, but it is too large for inline model inspection."
-                    )
-                    continue
-                parts.append(
-                    f"Generated {filename} for internal inspection only.\n"
-                    f"__IMAGE_B64__{payload}__END_IMAGE_B64__"
-                )
-            return "\n".join(parts)
-
-        return wrapped_execute
-
-    for name in ("image_generator", "hd_image"):
-        tool = registry.get(name)
-        if tool is None or getattr(tool, "_maxwell_llm_image_capture", False):
-            continue
-        original = getattr(tool, "execute", None)
-        if not callable(original):
-            continue
-        if ctx is not None and hasattr(ctx, "wrap_tool"):
-            ctx.wrap_tool(name, lambda orig, _name=name: _wrap(orig, _name))
-        else:
-            tool.execute = MethodType(_wrap(original, name), tool)
-        tool._maxwell_llm_image_capture = True
-        patched += 1
-    return patched

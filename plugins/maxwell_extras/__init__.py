@@ -19,7 +19,6 @@ def setup(bot, ctx):
         ReminderTool,
         SendRichMessageTool,
         deliver_due_reminders,
-        patch_image_generators,
     )
     from .user_preferences import UserPreferenceStore
     from .byok import CredentialVault
@@ -42,10 +41,6 @@ def setup(bot, ctx):
     # Official-bot bio cleanup, retired `,confirm` command, plugin runtime
     # guards, style-freedom, autonomy routing, and visible-output suppression
     # live in the host. Do not wrap those methods here.
-
-    # Image tools remain the same implementations/providers, but their outgoing
-    # generated files are intercepted and returned to the model instead of posted.
-    patch_image_generators(bot, ctx)
 
     # Discord app commands keep fast answers in the deferred interaction. Tool
     # use or >10s latency promotes it to a stable "working on it…" status and

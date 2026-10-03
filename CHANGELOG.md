@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Ask Maxwell responds directly to the selected message without a popup form, using saved reply preferences. Rewrite / Translate retains its request form.
+- `image_generator` and `hd_image` return generated media to the model for inspection without posting to Discord. The model decides whether to send it, use it in a site, regenerate, or reply normally; image MIME types and full-resolution reusable files are preserved.
 
 ## 0.1.6 — 2026-10-03
 

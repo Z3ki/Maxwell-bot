@@ -1,187 +1,111 @@
-"""image_generator: Pollinations is the primary (and only) generator."""
+"""Generated images go to model inspection; delivery requires an explicit tool."""
 
 import asyncio
 import base64
 import json
+import re
+from io import BytesIO
 from types import SimpleNamespace
 
-import discord
 import pytest
+from PIL import Image
 
 from bot_tools import HDImageGeneratorTool, ImageGeneratorTool
 
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+class _Response:
+    status = 200
+
+    def __init__(self, image_bytes, mime):
+        self.image_bytes = image_bytes
+        self.mime = mime
+        self.headers = {"Content-Type": mime}
+        self.content = SimpleNamespace(iter_chunked=self._chunks)
+
+    async def _chunks(self, size):
+        yield self.image_bytes
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        pass
+
+    async def text(self):
+        image = f"data:{self.mime};base64," + base64.b64encode(self.image_bytes).decode()
+        return json.dumps({"choices": [{"message": {"content": image}}]})
 
 
-class _Posted:
-    def __init__(self):
-        self.id = 123
-        self.attachments = [SimpleNamespace(url="https://cdn.discordapp.com/gen.png")]
-
-
-class _Channel:
-    def __init__(self):
-        self.id = 42
-        self.files = []
-
-    async def send(self, content=None, file=None, **kwargs):
-        if file is not None:
-            self.files.append(file)
-        return _Posted()
-
-
-class _Message:
-    def __init__(self):
-        self.channel = _Channel()
-        self.author = SimpleNamespace(id=7)
-
-
-class _Memory:
-    async def add_to_channel_memory(self, *args, **kwargs):
-        return None
-
-
-def _tool(*, nvidia_key="nv-test"):
-    bot = SimpleNamespace(
-        config=SimpleNamespace(
-            NVIDIA_API_KEY=nvidia_key,
-            NVIDIA_IMAGE_URL="https://example.invalid/nvidia",
-            POLLINATIONS_MODEL="flux",
-        ),
-        memory=_Memory(),
-        _current_progress_by_channel={},
-    )
-    return ImageGeneratorTool(bot)
-
-
-def test_execute_always_uses_pollinations(monkeypatch):
-    """execute() calls Pollinations directly; NVIDIA is never attempted."""
-    tool = _tool()
-    message = _Message()
-    calls = []
-
-    async def nvidia_should_not_run(self, message, prompt):
-        calls.append("nvidia")
-        raise AssertionError("NVIDIA must never be called (route removed)")
-
-    async def pollinations_ok(self, message, prompt):
-        calls.append("pollinations")
-        return "Image sent to chat: a red fox"
-
-    # Even if a stale NVIDIA method were present, execute() must not call it.
-    monkeypatch.setattr(
-        ImageGeneratorTool, "_nvidia_generate", nvidia_should_not_run, raising=False
-    )
-    monkeypatch.setattr(ImageGeneratorTool, "_pollinations_generate", pollinations_ok)
-
-    result = asyncio.run(tool.execute(message, prompt="a red fox"))
-    assert calls == ["pollinations"]
-    assert result.startswith("Image sent to chat")
-
-
-def test_execute_does_not_require_nvidia_key(monkeypatch):
-    """Pollinations is keyless; execute() works with no NVIDIA key."""
-    tool = _tool(nvidia_key="")
-    message = _Message()
-    calls = []
-
-    async def pollinations_ok(self, message, prompt):
-        calls.append("pollinations")
-        return "Image sent to chat: a cat"
-
-    monkeypatch.setattr(ImageGeneratorTool, "_pollinations_generate", pollinations_ok)
-
-    result = asyncio.run(tool.execute(message, prompt="a cat"))
-    assert calls == ["pollinations"]
-    assert "Image sent to chat" in result
-
-
-def test_pollinations_posts_image_bytes(monkeypatch):
-    tool = _tool()
-    message = _Message()
-
-    class _Resp:
-        status = 200
-        headers = {"Content-Type": "image/png"}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_a):
-            return None
-
-        async def text(self):
-            return ""
-
-    class _Session:
-        def get(self, url, **kwargs):
-            assert "image.pollinations.ai/prompt/" in url
-            return _Resp()
-
-    async def fake_session():
-        return _Session()
-
-    async def fake_limited(_resp, _max_bytes):
-        return PNG
-
-    monkeypatch.setattr("bot_tools._get_shared_session", fake_session)
-    monkeypatch.setattr("bot_tools._read_response_limited", fake_limited)
-    monkeypatch.setattr(
-        "bot_tools._persist_public_image",
-        lambda *_a, **_k: ("/tmp/x.png", "https://example.com/x.png"),
-    )
-
-    result = asyncio.run(tool._pollinations_generate(message, "a red fox"))
-    assert message.channel.files
-    assert "Image sent to chat" in result
-    assert "https://cdn.discordapp.com/gen.png" in result
-
-
-@pytest.mark.parametrize("hd", [False, True])
-@pytest.mark.parametrize("forbidden", [False, True])
-def test_generated_images_record_confirmed_delivery(monkeypatch, hd, forbidden):
-    bot = _tool().bot
-    bot.config.AI_BASE_URL = "https://example.invalid/v1"
-    receipts = []
-    bot._record_delivery = lambda origin, sent: receipts.append((origin, sent.id))
-    message = _Message()
-    if forbidden:
-        async def denied(**_kwargs):
-            raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "")
-
-        message.channel.send = denied
-
-    class Response:
-        status = 200
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            pass
-
-        async def text(self):
-            image = "data:image/png;base64," + base64.b64encode(PNG).decode()
-            return json.dumps({"choices": [{"message": {"content": image}}]})
+def _generation(tmp_path, monkeypatch, hd, image_bytes, mime):
+    response = _Response(image_bytes, mime)
 
     async def session():
-        return SimpleNamespace(post=lambda *_args, **_kwargs: Response())
+        return SimpleNamespace(get=lambda *_args, **_kwargs: response,
+                               post=lambda *_args, **_kwargs: response)
 
-    monkeypatch.setattr("bot_tools._get_shared_session", session)
-    monkeypatch.setattr(
-        "bot_tools._persist_public_image",
-        lambda *_args, **_kwargs: (None, None),
+    monkeypatch.setattr("plugins.images.impl._get_shared_session", session)
+    sends = []
+
+    async def send(**kwargs):
+        sends.append(kwargs)
+        raise AssertionError("Generation must not upload to Discord")
+
+    def record_delivery(*_args):
+        raise AssertionError("Generation must not record a delivery")
+
+    bot = SimpleNamespace(
+        config=SimpleNamespace(
+            AI_BASE_URL="https://example.invalid/v1",
+            POLLINATIONS_MODEL="flux",
+            MAXWELL_SITE_DIR=str(tmp_path),
+            MAXWELL_PUBLIC_BASE_URL="https://example.com",
+        ),
+        _record_delivery=record_delivery,
     )
-    if hd:
-        result = asyncio.run(HDImageGeneratorTool(bot).execute(message, prompt="a fox"))
-    else:
-        result = asyncio.run(ImageGeneratorTool(bot)._deliver_generated_image(
-            message, "a fox", PNG, prefix="test"
-        ))
-    if forbidden:
-        assert result.startswith("Error:")
-        assert receipts == []
-    else:
-        assert not result.startswith("Error:")
-        assert receipts == [(message, 123)]
+    message = SimpleNamespace(channel=SimpleNamespace(id=42, send=send), attachments=[])
+    tool = HDImageGeneratorTool(bot) if hd else ImageGeneratorTool(bot)
+    result = asyncio.run(tool.execute(message, prompt="a red fox"))
+    assert sends == []
+    payload = re.search(r"__IMAGE_B64__data:([^;]+);base64,(.*?)__END_IMAGE_B64__", result)
+    assert payload is not None, result
+    persisted, = (tmp_path / "_images").iterdir()
+    assert persisted.read_bytes() == image_bytes
+    assert f"https://example.com/bot/_images/{persisted.name}" in result
+    return payload.group(1), payload.group(2), persisted
+
+
+@pytest.mark.parametrize("hd", [False, True], ids=["pollinations", "hd"])
+@pytest.mark.parametrize("format,mime,ext", [
+    ("PNG", "image/png", ".png"),
+    ("JPEG", "image/jpeg", ".jpg"),
+    ("WEBP", "image/webp", ".webp"),
+])
+def test_generation_returns_model_image_without_discord_delivery(tmp_path, monkeypatch, hd, format, mime, ext):
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), "red").save(buffer, format=format)
+    image_bytes = buffer.getvalue()
+    returned_mime, payload, persisted = _generation(tmp_path, monkeypatch, hd, image_bytes, mime)
+    assert returned_mime == mime
+    assert base64.b64decode(payload) == image_bytes
+    assert persisted.suffix == ext
+
+
+@pytest.mark.parametrize("hd", [False, True], ids=["pollinations", "hd"])
+def test_oversized_generation_preserves_full_file_and_attaches_bounded_preview(tmp_path, monkeypatch, hd):
+    buffer = BytesIO()
+    Image.new("RGB", (1600, 1200), "red").save(buffer, format="PNG")
+    original = buffer.getvalue()
+    # PNG readers permit trailing data; exercise the exact inline size boundary.
+    image_bytes = original + b"\0" * (3_750_000 - len(original))
+    mime, payload, _persisted = _generation(tmp_path, monkeypatch, hd, image_bytes, "image/png")
+    assert mime == "image/jpeg"
+    assert len(payload) < 5_000_000
+    with Image.open(BytesIO(base64.b64decode(payload))) as preview:
+        assert preview.size == (1024, 768)
+
+
+@pytest.mark.parametrize("tool_class", [ImageGeneratorTool, HDImageGeneratorTool])
+def test_generation_requires_a_prompt(tool_class):
+    tool = tool_class(SimpleNamespace())
+    result = asyncio.run(tool.execute(SimpleNamespace()))
+    assert result.startswith("Error:")

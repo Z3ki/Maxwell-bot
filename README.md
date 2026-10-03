@@ -179,6 +179,7 @@ Before deploying backends, run `sudo bash scripts/setup_site_host.sh` on the Doc
 - Native OpenAI-style tool calls when supported, with a compatibility fallback path.
 - Plugin-driven tools and extras: bundled features live under `plugins/`, loaded by `maxwell_core`.
 - Tools for web/search, files/media, Discord management, moderation, polls, generated sites, image generation, shell sandboxing, coding/background jobs, and more.
+- Generated and edited images go to the model for inspection, not straight to Discord. Maxwell chooses whether to send them with `send_media`, use their permanent URLs or local files in a site, regenerate them, or answer normally.
 - Fail-closed handling for destructive tools after fetched/web content has tainted the current turn.
 - Personal, server, and restricted application-owner settings through `/config`.
 - SQLite-backed RAG/vector memory plus scoped context, entity/knowledge-graph memory, and optional REM-style consolidation.
