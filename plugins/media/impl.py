@@ -390,15 +390,12 @@ class SendMemeTool(Tool):
             filename += ".png"
 
         file = File(BytesIO(img_bytes), filename=filename)
-        try:
-            sent = await message.reply(file=file)
-            record_delivery = getattr(self.bot, "_record_delivery", None)
-            if callable(record_delivery) and sent is not None:
-                record_delivery(message, sent)
-        except discord.Forbidden:
-            return "Error: no permission to send files here"
-        except discord.HTTPException as e:
-            return f"Error sending meme: {e}"
+        sent, error = await deliver_attachment(message, file, label="meme")
+        if error:
+            return error
+        record_delivery = getattr(self.bot, "_record_delivery", None)
+        if callable(record_delivery) and sent is not None:
+            record_delivery(message, sent)
 
         return f'__MEME_SENT__ Sent meme: "{title}" from r/{sub} ({ups} upvotes)'
 
@@ -447,16 +444,12 @@ class SendMediaTool(Tool):
         filename = media_attachment_filename(url, content_type, media_bytes)
 
         file = File(BytesIO(media_bytes), filename=filename)
-        sent = None
-        try:
-            sent = await message.reply(file=file)
-            record_delivery = getattr(self.bot, "_record_delivery", None)
-            if callable(record_delivery) and sent is not None:
-                record_delivery(message, sent)
-        except discord.Forbidden:
-            return "Error: no permission to send files here"
-        except discord.HTTPException as e:
-            return f"Error sending media: {e}"
+        sent, error = await deliver_attachment(message, file, label="media")
+        if error:
+            return error
+        record_delivery = getattr(self.bot, "_record_delivery", None)
+        if callable(record_delivery) and sent is not None:
+            record_delivery(message, sent)
 
         # Attach the URL of what was actually sent (source URL + the new
         # Discord CDN URL) so the model can curl/pull/reuse either one.

@@ -86,6 +86,7 @@ from tooling.helpers import (  # noqa: E402
     _mod_tools_allowed,
     _user_access_line,
     _is_youtube_url,
+    preserve_message_delivery,
     _guild_room_context,
     _get_shared_session,
     _is_private_chat,
@@ -5942,6 +5943,23 @@ class MaxwellBot(commands.Bot):
         return {}
 
     @staticmethod
+    def _prefer_sendable_channel(*candidates):
+        """First channel that can send, otherwise the first channel we have.
+
+        get_channel() returns None for a DM that is only on the live message.
+        That miss must not replace a channel that can already send.
+        """
+        fallback = None
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if fallback is None:
+                fallback = candidate
+            if callable(getattr(candidate, "send", None)):
+                return candidate
+        return fallback
+
+    @staticmethod
     def _raw_update_namespace(value):
         if isinstance(value, dict):
             return SimpleNamespace(
@@ -5996,17 +6014,34 @@ class MaxwellBot(commands.Bot):
         channel_id = str(
             getattr(payload, "channel_id", None) or data.get("channel_id") or ""
         )
-        channel = getattr(cached, "channel", None)
+        # A raw update is usually a partial object. Merge it with the last
+        # known message before resolving a channel: Discord's payload may
+        # contain only ``embeds``, and treating omitted fields as empty would
+        # erase the transcript. The in-flight turn still holds the live
+        # message when this unfurl arrives before the snapshot map is written.
+        snapshots = getattr(self, "_message_snapshots", None) or {}
+        previous = cached if cached is not None else snapshots.get(message_id)
+        if previous is None:
+            for state in self._inflight_for_message(message_id):
+                candidate = state.get("message")
+                if candidate is not None:
+                    previous = candidate
+                    break
+        resolved = None
         getter = getattr(self, "get_channel", None)
         if channel_id and callable(getter):
             with contextlib.suppress(Exception):
-                channel = getter(int(channel_id))
-            if channel is None:
+                lookup = int(channel_id) if str(channel_id).isdigit() else channel_id
+                resolved = getter(lookup)
+            if resolved is None and str(channel_id).isdigit():
                 with contextlib.suppress(Exception):
-                    channel = getter(channel_id)
-        if channel is None:
-            private_channels = getattr(self, "private_channels", None) or []
-            channel = next(
+                    resolved = getter(channel_id)
+        private_match = None
+        if channel_id:
+            private_channels = []
+            with contextlib.suppress(Exception):
+                private_channels = list(getattr(self, "private_channels", None) or [])
+            private_match = next(
                 (
                     item
                     for item in private_channels
@@ -6014,20 +6049,18 @@ class MaxwellBot(commands.Bot):
                 ),
                 None,
             )
+        channel = self._prefer_sendable_channel(
+            resolved,
+            private_match,
+            getattr(cached, "channel", None),
+            getattr(previous, "channel", None) if previous is not None else None,
+        )
         fetch = getattr(channel, "fetch_message", None)
         if cached is None and callable(fetch) and message_id:
             with contextlib.suppress(Exception):
                 fetched = await asyncio.wait_for(fetch(int(message_id)), timeout=4.0)
                 if fetched is not None:
                     return fetched
-        # A raw update is usually a partial object. This fallback is still
-        # useful for updating an existing memory row and its embed cache when
-        # the channel fetch is temporarily unavailable. Merge it with the
-        # last known snapshot; Discord's payload may contain only ``embeds``,
-        # and treating omitted fields as empty would erase the old transcript.
-        previous = cached or (getattr(self, "_message_snapshots", None) or {}).get(
-            message_id
-        )
 
         def _field(name, default=None):
             if name in data:
@@ -6053,7 +6086,7 @@ class MaxwellBot(commands.Bot):
             stickers = self._raw_update_namespace(data.get("stickers") or [])
         else:
             stickers = list(getattr(previous, "stickers", None) or [])
-        return SimpleNamespace(
+        snapshot = SimpleNamespace(
             id=message_id,
             channel=channel
             or SimpleNamespace(id=channel_id, guild=guild, name="unknown"),
@@ -6071,6 +6104,10 @@ class MaxwellBot(commands.Bot):
             poll=_field("poll"),
             message_snapshots=_field("message_snapshots") or _field("snapshots") or [],
         )
+        donors = [cached, previous]
+        for state in self._inflight_for_message(message_id):
+            donors.append(state.get("message"))
+        return preserve_message_delivery(snapshot, *donors)
 
     @classmethod
     def _message_update_fingerprint(cls, message) -> str:
@@ -6318,6 +6355,10 @@ class MaxwellBot(commands.Bot):
         if latest is None or latest_media is None:
             return message, content, media, active_media, media_summary, messages
         refresh_version = state.get("version", 0)
+        # The late edit is often a SimpleNamespace of the unfurled embed.
+        # Keep the live message's reply() so send_media and the final answer
+        # still post into the same DM or channel.
+        latest = preserve_message_delivery(latest, message, state.get("message"))
         message = latest
         content = str(getattr(latest, "content", "") or "")
         media = list(latest_media)
@@ -6464,6 +6505,7 @@ class MaxwellBot(commands.Bot):
             for key in ("latest", "latest_directed"):
                 queued = bucket.get(key)
                 if str(getattr(queued, "id", "") or "") == mid:
+                    message = preserve_message_delivery(message, queued)
                     bucket[key] = message
                     if key == "latest_directed":
                         bucket["content"] = str(getattr(message, "content", "") or "")
@@ -6474,6 +6516,7 @@ class MaxwellBot(commands.Bot):
             if is_root:
                 if media_changed and media_refresh_ok:
                     state["media"] = list(media)
+                message = preserve_message_delivery(message, state.get("message"))
                 state["message"] = message
                 state["content"] = str(getattr(message, "content", "") or "")
                 state["latest_message"] = message
@@ -10552,6 +10595,14 @@ class MaxwellBot(commands.Bot):
         kwargs.pop("file", None)
         kwargs["allowed_mentions"] = discord.AllowedMentions.none()
         stickers = kwargs.pop("stickers", None)
+        # A YouTube unfurl can replace the live message with a data snapshot
+        # that has no reply(). The answer still has to land in the channel.
+        if reply_to is not None and not callable(getattr(reply_to, "reply", None)):
+            logger.warning(
+                "reply target has no reply(); sending without a reference in channel %s",
+                getattr(channel, "id", "?"),
+            )
+            reply_to = None
         if reply_to is not None:
             # Catch Forbidden (no perms) and every flavour of "the parent
             # message is gone" so the response still reaches the user.

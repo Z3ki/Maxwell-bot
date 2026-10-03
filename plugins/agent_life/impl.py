@@ -167,11 +167,17 @@ class AgentLifeService:
         if manager.user_active_count(uid) >= manager.max_per_user:
             return False, "user already has a running background job"
         guild = getattr(channel, "guild", None); author = await self._resolve_author(uid, guild)
+        async def reply(content=None, file=None, **kwargs):
+            return await channel.send(content, file=file, **kwargs)
+
         synthetic = SimpleNamespace(
             id=0, content=str(row.get("goal") or ""), author=author, channel=channel,
             guild=guild, attachments=[], embeds=[], components=[], mentions=[], webhook_id=None,
             reference=None, created_at=None, _autonomous_life=True,
         )
+        # Life tasks are not Discord messages. send_media and send_file call
+        # reply(); without this they crash the same way a raw-update snapshot does.
+        synthetic.reply = reply
         scope = str(row.get("scope") or "general")
         target = str(row.get("target") or "").strip()
         goal = str(row.get("goal") or "").strip()

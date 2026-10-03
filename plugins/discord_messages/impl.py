@@ -58,6 +58,10 @@ class ReactTool(Tool):
         raw = str(emoji).strip()
         if not raw:
             return "Error: emoji parameter is required"
+        # Embed unfurls swap the live message for a data snapshot. Reacting
+        # to that snapshot used to raise AttributeError and crash the tool.
+        if not callable(getattr(message, "add_reaction", None)):
+            return "Error: cannot react to this message"
 
         guild = message.guild
         guild_id = str(guild.id) if guild else None
@@ -709,30 +713,12 @@ class SendFileTool(Tool):
             return f"Error: file is too large (max {self.MAX_SIZE // 1024 // 1024} MB)"
 
         file = File(BytesIO(blob), filename=safe_name)
-        sent = None
-        try:
-            try:
-                sent = await message.reply(file=file)
-            except (discord.NotFound, discord.HTTPException) as exc:
-                code = getattr(exc, "code", None)
-                parent_gone = isinstance(exc, discord.NotFound) or code in {
-                    10008,
-                    50035,
-                }
-                if code == 50035 and "message_reference" not in str(exc).lower():
-                    raise
-                if not parent_gone:
-                    raise
-                sent = await message.channel.send(file=file)
-            record_delivery = getattr(self.bot, "_record_delivery", None)
-            if callable(record_delivery) and sent is not None:
-                record_delivery(message, sent)
-        except discord.Forbidden:
-            return "Error: no permission to send files here"
-        except discord.HTTPException as e:
-            return f"Error sending file: {e}"
-        except Exception as e:
-            return f"Error sending file: {e}"
+        sent, error = await deliver_attachment(message, file, label="file")
+        if error:
+            return error
+        record_delivery = getattr(self.bot, "_record_delivery", None)
+        if callable(record_delivery) and sent is not None:
+            record_delivery(message, sent)
 
         # Every piece of media gets its URL attached: the sent Discord
         # attachment carries a CDN URL the model can curl/pull/reuse.

@@ -94,6 +94,19 @@ def test_other_invalid_form_body_errors_are_not_swallowed():
     assert _is_unknown_reference_error(exc) is False
 
 
+def test_reply_target_without_reply_falls_back_to_channel_send():
+    bot = _StubBot()
+    channel = _FakeChannel()
+    parent = SimpleNamespace(id=1556030371907244183)
+
+    sent = asyncio.run(
+        bot._send_with_slowmode(channel, content="the answer", reply_to=parent)
+    )
+
+    assert sent is not None
+    assert [m.content for m in channel.sent] == ["the answer"]
+
+
 def test_reply_to_deleted_parent_falls_back_to_channel_send():
     bot = _StubBot()
     channel = _FakeChannel()

@@ -2112,6 +2112,103 @@ def _sniff_media_extension(blob: bytes) -> str:
     return ""
 
 
+_MESSAGE_METHODS = (
+    "reply",
+    "add_reaction",
+    "remove_reaction",
+    "clear_reactions",
+    "delete",
+    "edit",
+    "pin",
+    "unpin",
+    "publish",
+)
+
+
+def preserve_message_delivery(snapshot, *donors):
+    """Keep Discord delivery methods on a raw MESSAGE_UPDATE snapshot.
+
+    Link unfurls (a YouTube preview in a DM is the usual case) arrive as a
+    partial payload. The fallback object is a SimpleNamespace of the new
+    embeds and has no reply(). Tools and the final answer still have to post
+    into that chat, so copy reply/react/send off the live message when the
+    snapshot does not already have them.
+    """
+    if snapshot is None:
+        return snapshot
+    for donor in donors:
+        if donor is None or donor is snapshot:
+            continue
+        for name in _MESSAGE_METHODS:
+            if callable(getattr(snapshot, name, None)):
+                continue
+            method = getattr(donor, name, None)
+            if callable(method):
+                setattr(snapshot, name, method)
+        snap_channel = getattr(snapshot, "channel", None)
+        donor_channel = getattr(donor, "channel", None)
+        if not callable(getattr(snap_channel, "send", None)) and callable(
+            getattr(donor_channel, "send", None)
+        ):
+            snapshot.channel = donor_channel
+        if getattr(snapshot, "guild", None) is None and getattr(donor, "guild", None) is not None:
+            snapshot.guild = donor.guild
+    return snapshot
+
+
+def _attachment_reference_gone(exc: BaseException) -> bool:
+    """True when a reply failed because its parent message is gone."""
+    if isinstance(exc, discord.NotFound):
+        return True
+    code = getattr(exc, "code", None)
+    if code == 10008:
+        return True
+    if code == 50035 and "message_reference" in str(exc).lower():
+        return True
+    return False
+
+
+async def deliver_attachment(message, file, *, label: str = "file"):
+    """Post a file into the chat this tool call came from.
+
+    Reply when the message can. A raw-update snapshot, an autonomous task
+    message, and a deleted parent all fall back to channel.send(). A
+    permission error stays an error so a denied reply is not posted again.
+    """
+    channel = getattr(message, "channel", None)
+
+    async def _send_plain():
+        send = getattr(channel, "send", None)
+        if not callable(send):
+            return None, "Error: cannot send files in this chat"
+        try:
+            return await send(file=file), None
+        except discord.Forbidden:
+            return None, "Error: no permission to send files here"
+        except discord.HTTPException as exc:
+            return None, f"Error sending {label}: {exc}"
+        except AttributeError:
+            return None, "Error: cannot send files in this chat"
+        except Exception as exc:
+            return None, f"Error sending {label}: {exc}"
+
+    reply = getattr(message, "reply", None)
+    if not callable(reply):
+        return await _send_plain()
+    try:
+        return await reply(file=file), None
+    except discord.Forbidden:
+        return None, "Error: no permission to send files here"
+    except (discord.NotFound, discord.HTTPException) as exc:
+        if _attachment_reference_gone(exc):
+            return await _send_plain()
+        return None, f"Error sending {label}: {exc}"
+    except AttributeError:
+        return await _send_plain()
+    except Exception as exc:
+        return None, f"Error sending {label}: {exc}"
+
+
 def media_attachment_filename(
     url: str,
     content_type: str = "",

@@ -218,6 +218,75 @@ def test_raw_partial_update_merges_with_cached_message():
     assert merged.author.bot is False
 
 
+def test_raw_unfurl_keeps_reply_and_the_live_channel():
+    """A YouTube preview must not swap the DM message for a dead snapshot.
+
+    Discord sends MESSAGE_UPDATE with just the new embed. get_channel() often
+    misses that DM. The turn still has to reply() and channel.send().
+    """
+    bot = _bot()
+    sent = []
+
+    class Channel:
+        id = 22
+        guild = None
+        name = "dm"
+
+        async def send(self, content=None, file=None, **kwargs):
+            sent.append(("send", file))
+            return SimpleNamespace(id=5, attachments=[])
+
+    class Live:
+        id = 303
+        content = "Grab this thumbnail https://youtu.be/tR0wNrPp2mM"
+        author = SimpleNamespace(id=11, display_name="h3", bot=False)
+        channel = Channel()
+        guild = None
+
+        async def reply(self, content=None, file=None, **kwargs):
+            sent.append(("reply", file))
+            return SimpleNamespace(id=6, attachments=[])
+
+    live = Live()
+    state = MaxwellBot._begin_inflight_context(bot, live, live.content)
+    # A cache miss must not replace the DM channel that can already send.
+    bot.get_channel = lambda *_args, **_kwargs: SimpleNamespace(id=22)
+    payload = SimpleNamespace(
+        cached_message=None,
+        message_id=303,
+        channel_id=22,
+        data={
+            "id": "303",
+            "channel_id": "22",
+            "embeds": [
+                {
+                    "title": "video",
+                    "url": "https://youtu.be/tR0wNrPp2mM",
+                    "thumbnail": {
+                        "url": "https://i.ytimg.com/vi/tR0wNrPp2mM/hqdefault.jpg"
+                    },
+                }
+            ],
+        },
+    )
+
+    merged = asyncio.run(MaxwellBot._message_from_raw_update(bot, payload))
+
+    assert merged.content == live.content
+    assert merged.embeds[0].title == "video"
+    assert merged.author.id == 11
+    assert callable(merged.reply)
+    assert callable(merged.channel.send)
+    asyncio.run(merged.reply(file=b"thumb"))
+    assert sent == [("reply", b"thumb")]
+
+    assert asyncio.run(MaxwellBot._refresh_edited_message(bot, merged)) is True
+    assert state["latest_message"].content == live.content
+    assert callable(state["message"].reply)
+    asyncio.run(state["message"].reply(file=b"again"))
+    assert sent[-1] == ("reply", b"again")
+
+
 def test_raw_author_without_bot_flag_is_human():
     bot = _bot()
     payload = SimpleNamespace(
