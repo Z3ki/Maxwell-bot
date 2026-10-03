@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Ask Maxwell responds directly to the selected message without a popup form, using saved reply preferences. Rewrite / Translate retains its request form.
+
 ## 0.1.6 — 2026-10-03
 
 Install with `--version v0.1.6`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

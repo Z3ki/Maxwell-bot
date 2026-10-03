@@ -269,7 +269,44 @@ def test_large_saved_context_fetches_all_selected_messages(tmp_path, monkeypatch
     assert requested[-1] == 100
 
 
-def test_message_modal_accepts_prompt_and_same_options_as_slash(tmp_path, monkeypatch):
+def test_ask_maxwell_starts_selected_message_without_a_form(tmp_path, monkeypatch):
+    import user_install as ui
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    from test_user_install import _interaction as transport_interaction
+
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default(1, "mode", "rewrite")
+    store.set_default(1, "detail", "deep")
+    store.set_default(1, "visibility", "private")
+    monkeypatch.setattr(mod, "_USER_PREFERENCE_STORE", store)
+    monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [(15, "message_requests", mod._handle_message_request)])
+    original = ui.build_user_install_turn
+    monkeypatch.setattr(ui, "build_user_install_turn", lambda interaction: mod._enhanced_build_turn(interaction, original))
+    received, opened = [], []
+
+    async def on_message(message):
+        received.append(message)
+
+    async def send_modal(modal):
+        opened.append(modal)
+
+    selected = SimpleNamespace(id=42, content="selected message", attachments=[], mentions=[],
+                               author=SimpleNamespace(id=7, display_name="Alice", bot=False))
+    interaction = transport_interaction(name="Ask Maxwell")
+    interaction.data.update(type=3, target_id="42", options=[], resolved={"messages": {"42": selected}})
+    interaction.response.send_modal = send_modal
+    bot = SimpleNamespace(_user_preferences=store, on_message=on_message)
+    assert asyncio.run(ui.handle_user_install_interaction(bot, interaction))
+    assert opened == []
+    message, = received
+    assert message.reference.resolved is selected
+    assert message.user_install_mode == "ask"
+    assert "thorough" in message.content
+    assert message.response_visibility == "private"
+    assert interaction.response.deferred_ephemeral
+
+
+def test_rewrite_modal_preserves_request_options_and_prevents_duplicate_submission(tmp_path, monkeypatch):
     import user_install as ui
     from plugins.maxwell_extras.user_preferences import UserPreferenceStore
     from test_user_install import _interaction as transport_interaction
@@ -292,16 +329,12 @@ def test_message_modal_accepts_prompt_and_same_options_as_slash(tmp_path, monkey
     bot = SimpleNamespace(_user_preferences=store, on_message=on_message)
     selected = SimpleNamespace(id=42, content="selected message", attachments=[], mentions=[],
                                author=SimpleNamespace(id=7, display_name="Alice", bot=False))
-    interaction = transport_interaction(name="Ask Maxwell")
+    interaction = transport_interaction(name=mod.MESSAGE_TRANSFORM)
     interaction.data.update(type=3, target_id="42", resolved={"messages": {"42": selected}})
     interaction.response.send_modal = send_modal
     assert asyncio.run(ui.handle_user_install_interaction(bot, interaction))
     assert received == []  # Opening or cancelling the form does not spend an AI request.
     modal = opened[0]
-    components = modal.to_components()
-    assert len(components) == 5
-    assert all(item["type"] == 18 for item in components)
-    assert {option.value for option in modal.mode.options} == {row["value"] for row in mod._MODE_CHOICES}
     modal.prompt._value = "Explain why this failed."
     modal.mode._values = ["explain"]
     modal.detail._values = ["deep"]

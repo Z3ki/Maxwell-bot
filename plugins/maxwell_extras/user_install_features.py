@@ -416,7 +416,6 @@ class _MessageRequestInteraction:
     def __init__(self, interaction: Any, target: Any, prompt: str, options: list[dict]):
         self._interaction = interaction
         self.type = 2
-        self._maxwell_modal_request = True
         self.data = {
             "name": ui.USER_INSTALL_MESSAGE_ASK, "type": 3,
             "target_id": str(target.id), "resolved": {"messages": {str(target.id): target}},
@@ -489,17 +488,15 @@ class _MessageRequestModal(discord.ui.Modal):
 
 
 async def _handle_message_request(bot: Any, interaction: Any) -> bool:
-    if getattr(interaction, "_maxwell_modal_request", False):
-        return False
     data = ui._interaction_data(interaction)
-    if data.get("type") != 3 or data.get("name") not in {ui.USER_INSTALL_MESSAGE_ASK, MESSAGE_TRANSFORM}:
+    if data.get("type") != 3 or data.get("name") != MESSAGE_TRANSFORM:
         return False
     target = ui.parse_target_message(interaction)
     if target is None:
         await ui._ephemeral(interaction, "Could not read the selected message. Try again on that message.")
         return True
     await interaction.response.send_modal(_MessageRequestModal(
-        bot, interaction, target, mode="rewrite" if data["name"] == MESSAGE_TRANSFORM else "ask"
+        bot, interaction, target, mode="rewrite"
     ))
     return True
 
