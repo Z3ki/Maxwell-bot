@@ -102,7 +102,12 @@ def test_legacy_database_survives_permission_repair_when_chown_is_denied(data_di
     assert path.stat().st_mode & 0o003 == 0o003
 
 
-def test_rewriting_replaces_source_but_keeps_the_database(data_dir):
+def test_rewriting_replaces_source_but_keeps_the_database(data_dir, monkeypatch):
+    # This test covers source replacement, not privileged uid remapping.
+    # Use the mapped runtime uid in rootless CI; permission repair has its
+    # own tests immediately above and in the symlink-safety cases below.
+    monkeypatch.setattr(site_server, "SITE_UID", os.getuid())
+    monkeypatch.setattr(site_server, "SITE_GID", os.getgid())
     site_server.write_code(data_dir, "demo", {"app.py": "v1", "old.py": "gone"})
     db = site_server.state_dir(data_dir, "demo") / "app.db"
     db.write_text("rows")

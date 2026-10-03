@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Recover stale Discord attachment URLs through the source message or bounded channel history; preserve signed URL parameters and resolve accessible Discord message links to their media.
+- Preserve JPEG and other image MIME types from media tools through provider follow-ups, and apply checked redirects and size limits to attachment fallback downloads.
+- Merge live history chronologically, honor current message edits, preserve all selected history slots, and bound history reads while retaining partial results.
+- Retry personal app requests with their live interaction adapter, recheck ignored users before queued execution, and keep interaction IDs out of gateway replay cursors.
+- Execute side effects and visible replies in the model's declared order; overlap only adjacent tools explicitly marked read-only.
+- Reach all configured provider routes and explain when media could not be delivered to a text-only fallback.
+- Restrict the operator mailbox to operators, include automatic mailbox context only in private operator conversations, and track announced notices separately for concurrent requests.
+
+See [the pipeline audit](docs/PIPELINE_AUDIT_2026-10-03.md) for root causes, regression coverage, and verification limits.
+
 ## 0.1.5 — 2026-10-03
 
 Install with `--version v0.1.5`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

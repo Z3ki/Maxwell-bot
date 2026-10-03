@@ -275,6 +275,44 @@ def test_retry_before_effect_is_bounded_and_bypasses_receipt_dedup(tmp_path):
     assert bot._request_state(message)["status"] == "failed"
 
 
+def test_app_retry_uses_live_interaction_instead_of_fetching_it_as_a_message(tmp_path):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    message.user_install = True
+    message.response_visibility = "private"
+    message.channel.fetch_message = AsyncMock(side_effect=LookupError("not a message ID"))
+    calls = []
+
+    async def answer(msg, _content):
+        calls.append(msg)
+        if len(calls) == 1:
+            raise TimeoutError
+        await bot._send_with_slowmode(msg.channel, "answer", reply_to=msg)
+
+    bot._handle_message = answer
+
+    async def run():
+        await bot.on_message(message)
+        await _drain(bot)
+        assert bot._request_state(message)["status"] == "deferred"
+        await bot._retry_pending_inbound()
+        await _drain(bot)
+
+    asyncio.run(run())
+    assert calls == [message, message]
+    assert bot._request_state(message)["status"] == "delivered"
+    message.channel.fetch_message.assert_not_awaited()
+    assert bot._watermarks.get(message.channel.id) is None
+
+
+def test_queued_app_rechecks_blacklist(tmp_path):
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    message.user_install = True
+    bot._blacklist.add(str(message.author.id))
+    assert bot._queued_request_policy_reason(message) == "ignored_author"
+
+
 def test_failure_after_effect_never_replays(tmp_path):
     bot = _bot(tmp_path)
     message = _message(bot)

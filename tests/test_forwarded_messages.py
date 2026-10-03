@@ -210,6 +210,7 @@ def test_extract_media_fetches_snapshot_attachment_without_read(monkeypatch):
 
     class _Resp:
         status = 200
+        headers = {"Content-Type": "image/png"}
 
         async def __aenter__(self):
             return self
@@ -232,6 +233,8 @@ def test_extract_media_fetches_snapshot_attachment_without_read(monkeypatch):
     monkeypatch.setattr("bot._read_response_limited", fake_limited)
 
     bot = _media_bot()
+    bot._MAX_MEDIA_REDIRECTS = MaxwellBot._MAX_MEDIA_REDIRECTS
+    bot._REDIRECT_STATUSES = MaxwellBot._REDIRECT_STATUSES
     att = SimpleNamespace(
         filename="cat.png",
         content_type="image/png",

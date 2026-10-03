@@ -180,7 +180,7 @@ def test_parallel_tool_progress_lasts_for_whole_batch(monkeypatch):
         previous = object()
         owner = SimpleNamespace(
             _control={},
-            tools={},
+            tools={name: SimpleNamespace(side_effects=False) for name in ("first", "second")},
             _current_progress_by_channel={"99": previous, "other": object()},
         )
         observed = []
@@ -244,6 +244,5 @@ def test_parallel_tool_error_survives_history_reconstruction(monkeypatch):
         assert owner._last_native_followup_messages[-1]["content"] == results[0]
 
     asyncio.run(run())
-
 
 

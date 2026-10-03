@@ -440,6 +440,19 @@ def test_app_context_selection_survives_ordinary_history_limit():
     assert "CTX0999" in transcript
 
 
+def test_live_request_does_not_consume_an_app_history_slot():
+    history = [{"message_id": str(index), "author": "alice", "author_id": "456",
+                "content": f"HISTORY{index:04}"} for index in range(10)]
+    message = _message()
+    message.user_install = True
+    message.user_install_history_limit = 10
+    message.user_install_history = history
+    bot = _bot(FakeMemory([{"message_id": str(message.id), "content": "live prompt"}]))
+    output = asyncio.run(MaxwellBot._build_messages(bot, message, "Read this conversation."))
+    transcript = next(row["content"] for row in output if str(row["content"]).startswith("<previous_conversation>"))
+    assert all(f"HISTORY{index:04}" in transcript for index in range(10))
+
+
 def test_large_app_context_keeps_recent_rows_when_model_budget_is_exceeded():
     bot = _bot(FakeMemory())
     message = _message()

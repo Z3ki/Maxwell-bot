@@ -52,6 +52,14 @@ def test_direct_tool_authorization_obeys_global_tools_off_switch():
     assert denied == "refused: tools are disabled"
 
 
+@pytest.mark.parametrize("name", ["inbox_list", "inbox_act", "email_read_inbox", "email_get_message", "email_search", "email_send"])
+def test_operator_mailbox_is_protected_even_with_stale_plugin_metadata(name):
+    bot = _bot()
+    bot._is_admin = lambda _uid: False
+    denied = MaxwellBot._authorize_tool_execution(bot, _message(), name, _tool(name), {})
+    assert denied and "operator" in denied
+
+
 def test_private_reminders_are_blocked_as_later_public_side_effects():
     bot = _bot()
     denied = MaxwellBot._authorize_tool_execution(

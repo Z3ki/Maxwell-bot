@@ -21,14 +21,14 @@
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "inbox_act",
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
-      "requires_admin": false
+      "requires_admin": true
     }
   ]
 }

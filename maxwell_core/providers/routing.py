@@ -124,6 +124,10 @@ class ProviderRouter(ChatProvider):
             if fast_fallback and len(order) > 1
             else self.retry_attempts
         )
+        # A media request can have vision, fallback AND primary routes. Reserve
+        # an attempt for each rather than retrying only the first two forever.
+        if len(order) > 2:
+            max_attempts = max(max_attempts, len(order) + (0 if fast_fallback else 1))
         ceiling = max_attempts + 2 * len(order) + 2 + self.empty_response_retries
         empty_recoveries = 0
         attempt = 0
@@ -132,7 +136,8 @@ class ProviderRouter(ChatProvider):
         while attempt < min(max_attempts, ceiling):
             attempt += 1
             split = 1 if fast_fallback else 2
-            natural = order[0] if attempt <= split else order[min(1, len(order) - 1)]
+            route_index = max(0, attempt - split)
+            natural = order[min(route_index, len(order) - 1)]
             candidates = [p for p in order if p.name not in dead]
             if not candidates:
                 break
@@ -178,6 +183,10 @@ class ProviderRouter(ChatProvider):
                         _strip_media_parts(messages)
                         kwargs.pop("images", None)
                         kwargs.pop("media", None)
+                        messages.append({
+                            "role": "system",
+                            "content": "Media attachments are unavailable: no configured model accepted them. No attachment pixels or audio were delivered. Do not describe unseen media; explain this limitation if the answer depends on it.",
+                        })
                         has_media = False
                         dead.clear()
                         order = self._order(False, prefer_fallback)
@@ -200,9 +209,8 @@ class ProviderRouter(ChatProvider):
                 if attempt >= max_attempts:
                     break
                 # Only back off when another attempt must use the same upstream.
-                next_natural = (
-                    order[0] if attempt + 1 <= split else order[min(1, len(order) - 1)]
-                )
+                next_index = max(0, attempt + 1 - split)
+                next_natural = order[min(next_index, len(order) - 1)]
                 next_candidates = [p for p in order if p.name not in dead]
                 next_healthy = [
                     p

@@ -145,3 +145,22 @@ def test_followups_retain_original_image_audio_and_new_tool_media():
     assert image["filename"] == "photo.jpg"
     assert merge_followup_media(original, [], []) == original
     assert merge_followup_media([], [], []) == []
+
+
+def test_tool_image_keeps_its_real_jpeg_mime_type(monkeypatch):
+    async def run():
+        owner = SimpleNamespace(_control={}, tools={})
+        message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+        raw = "Tool see_image: Loaded.\n__IMAGE_B64__data:image/jpeg;base64,/9j/AA==__END_IMAGE_B64__"
+        monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", AsyncMock(return_value=raw))
+        monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+        calls = [{"id": "image", "type": "function", "function": {"name": "see_image", "arguments": "{}"}}]
+        _, results, legacy_images = await MaxwellBot._process_native_tool_calls(
+            owner, message, "", calls, include_images=True
+        )
+        assert legacy_images == []
+        assert owner._last_native_tool_media[0]["mime_type"] == "image/jpeg"
+        assert owner._last_native_tool_media[0]["b64"] == "/9j/AA=="
+        assert "/9j/AA==" not in str(results)
+
+    asyncio.run(run())

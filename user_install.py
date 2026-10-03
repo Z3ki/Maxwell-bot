@@ -40,6 +40,7 @@ USER_INSTALL_NAMES = frozenset(
 # only user-installed (not also in that server).
 USER_INSTALL_MESSAGE_CAP = 6
 USER_INSTALL_HISTORY_LIMIT = 25
+USER_INSTALL_HISTORY_TIMEOUT = 10.0
 USER_INSTALL_CONTEXT_COUNTS = (0, 10, 25, 50, 100, 250, 500, 1000)
 
 
@@ -528,63 +529,71 @@ def _memory_row_from_message(message: Any) -> dict[str, Any]:
 def merge_user_install_history(
     memory: list[dict] | None, extra: list[dict] | None
 ) -> list[dict]:
-    """Keep stored channel memory; add snapshot rows Maxwell has not seen."""
-    memory = list(memory or [])
-    extra = list(extra or [])
-    if not extra:
-        return memory
-    have = {str(row.get("message_id") or "") for row in memory if row.get("message_id")}
-    fresh = [
-        row
-        for row in extra
-        if str(row.get("message_id") or "") and str(row.get("message_id")) not in have
-    ]
-    if not memory:
-        return extra
-    if not fresh:
-        return memory
-    return fresh + memory
+    """Merge current Discord payloads and stored metadata, oldest first.
+
+    A fresh snapshot is authoritative for edited content. Synthetic tool rows
+    keep their own timestamps; attachment IDs are never used as message IDs.
+    Copy rows so prompt assembly cannot mutate either source.
+    """
+    rows: list[dict] = []
+    positions: dict[str, int] = {}
+    for row in list(memory or []) + list(extra or []):
+        mid = str(row.get("message_id") or "")
+        if mid and mid in positions:
+            index = positions[mid]
+            rows[index] = {**rows[index], **row}
+        else:
+            if mid:
+                positions[mid] = len(rows)
+            rows.append(dict(row))
+    ordered = []
+    prior = 0.0
+    for index, row in enumerate(rows):
+        stamp = _coerce_utc_datetime(row.get("timestamp"))
+        mid = str(row.get("message_id") or "")
+        if stamp is not None:
+            prior = stamp.timestamp()
+        elif mid.isdigit():
+            prior = ((int(mid) >> 22) + 1420070400000) / 1000
+        ordered.append((prior, index, row))
+    return [row for _stamp, _index, row in sorted(ordered, key=lambda item: item[:2])]
 
 
 async def snapshot_channel_history(
     bot: Any, interaction: Any, *, limit: int | None = None
 ) -> list[dict[str, Any]]:
-    """Recent channel messages when Maxwell can actually read the channel."""
+    """Bound live history collection and retain partial results on timeout."""
     limit = resolve_context_limit(interaction) if limit is None else normalize_context_limit(limit)
     if limit <= 0:
         return []
-    cid = getattr(interaction, "channel_id", None)
-    channel = getattr(interaction, "channel", None)
-    history = getattr(channel, "history", None)
-    if not callable(history) and cid is not None and bot is not None:
-        getter = getattr(bot, "get_channel", None)
-        if callable(getter):
-            with_ch = getter(int(cid) if str(cid).isdigit() else cid)
-            if with_ch is not None:
-                channel = with_ch
-                history = getattr(channel, "history", None)
-        if not callable(history):
-            fetch = getattr(bot, "fetch_channel", None)
-            if callable(fetch):
-                try:
-                    channel = await fetch(int(cid) if str(cid).isdigit() else cid)
-                    history = getattr(channel, "history", None)
-                except Exception:
-                    history = None
-    if not callable(history):
-        return []
     rows: list[dict[str, Any]] = []
     try:
-        result = history(limit=limit)
-        if hasattr(result, "__aiter__"):
-            rows.extend(
-                [_memory_row_from_message(msg) async for msg in result]
-            )
-        else:
-            rows.extend(_memory_row_from_message(msg) for msg in result or [])
-    except Exception as e:
-        logger.info("user-install channel history unavailable: %s", e)
-        return []
+        async with asyncio.timeout(USER_INSTALL_HISTORY_TIMEOUT):
+            cid = getattr(interaction, "channel_id", None)
+            channel = getattr(interaction, "channel", None)
+            history = getattr(channel, "history", None)
+            if not callable(history) and cid is not None and bot is not None:
+                getter = getattr(bot, "get_channel", None)
+                if callable(getter):
+                    channel = getter(int(cid) if str(cid).isdigit() else cid) or channel
+                    history = getattr(channel, "history", None)
+                if not callable(history):
+                    fetch = getattr(bot, "fetch_channel", None)
+                    if callable(fetch):
+                        channel = await fetch(int(cid) if str(cid).isdigit() else cid)
+                        history = getattr(channel, "history", None)
+            if not callable(history):
+                return []
+            result = history(limit=limit)
+            if hasattr(result, "__aiter__"):
+                async for msg in result:
+                    rows.append(_memory_row_from_message(msg))
+                    if len(rows) >= limit:
+                        break
+            else:
+                rows.extend(_memory_row_from_message(msg) for msg in list(result or [])[:limit])
+    except Exception as exc:
+        logger.info("user-install history stopped with %d rows (%s)", len(rows), type(exc).__name__)
     rows.reverse()
     return rows
 

@@ -45,6 +45,7 @@ _CONTEXT_CHOICES = [
 ]
 
 _FEATURES_INSTALLED = False
+_CORE_SNAPSHOT_CHANNEL_HISTORY = ui.snapshot_channel_history
 _ORIGINAL_BUILD_TURN = None
 _USER_PREFERENCE_STORE = None
 
@@ -339,44 +340,9 @@ def _saved_visibility(interaction: Any, *, fallback: str = "public") -> str:
 async def _snapshot_channel_history(
     bot: Any, interaction: Any, *, limit: int | None = None
 ) -> list[dict[str, Any]]:
-    """Read only the amount of live channel context selected by the user."""
-
+    """Use the core bounded history reader with this request's preferences."""
     limit = _context_limit(interaction) if limit is None else ui.normalize_context_limit(limit)
-    if limit <= 0:
-        return []
-    cid = getattr(interaction, "channel_id", None)
-    channel = getattr(interaction, "channel", None)
-    history = getattr(channel, "history", None)
-    if not callable(history) and cid is not None and bot is not None:
-        getter = getattr(bot, "get_channel", None)
-        if callable(getter):
-            with_ch = getter(int(cid) if str(cid).isdigit() else cid)
-            if with_ch is not None:
-                channel = with_ch
-                history = getattr(channel, "history", None)
-        if not callable(history):
-            fetch = getattr(bot, "fetch_channel", None)
-            if callable(fetch):
-                try:
-                    channel = await fetch(int(cid) if str(cid).isdigit() else cid)
-                    history = getattr(channel, "history", None)
-                except Exception:
-                    history = None
-    if not callable(history):
-        return []
-
-    rows: list[dict[str, Any]] = []
-    try:
-        result = history(limit=limit)
-        if hasattr(result, "__aiter__"):
-            rows.extend([ui._memory_row_from_message(msg) async for msg in result])
-        else:
-            rows.extend(ui._memory_row_from_message(msg) for msg in result or [])
-    except Exception as exc:
-        ui.logger.info("user-install channel history unavailable: %s", exc)
-        return []
-    rows.reverse()
-    return rows
+    return await _CORE_SNAPSHOT_CHANNEL_HISTORY(bot, interaction, limit=limit)
 
 
 async def _modern_session_send(

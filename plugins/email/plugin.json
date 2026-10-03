@@ -23,28 +23,28 @@
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": true,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "email_read_inbox",
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": true,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "email_get_message",
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": true,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "email_search",
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": true,
-      "requires_admin": false
+      "requires_admin": true
     }
   ]
 }

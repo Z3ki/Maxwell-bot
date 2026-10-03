@@ -21,6 +21,7 @@ class EmailSendTool(Tool):
     tool_name = 'email_send'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     # Sending mail is the obvious prompt-injection target ("send my password
@@ -103,6 +104,7 @@ class EmailReadInboxTool(Tool):
     tool_name = 'email_read_inbox'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     is_destructive: bool = True
@@ -158,6 +160,7 @@ class EmailGetMessageTool(Tool):
     tool_name = 'email_get_message'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     is_destructive: bool = True
@@ -208,6 +211,7 @@ class EmailSearchTool(Tool):
     tool_name = 'email_search'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     is_destructive: bool = True

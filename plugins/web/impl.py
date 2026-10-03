@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tooling import helpers as _helpers
 from tools import Tool
+from discord_media import clean_media_url
 from rag_memory import MemoryRequester
 from web_references import record_web_search_hits
 
@@ -42,6 +43,7 @@ class WebSearchTool(Tool):
     tool_name = 'web_search'
     returns_result = True
     ends_turn = False
+    side_effects = False
 
 
     def get_description(self):
@@ -170,6 +172,7 @@ class FetchUrlTool(Tool):
     tool_name = 'fetch_url'
     returns_result = True
     ends_turn = False
+    side_effects = False
 
 
     MAX_CONTENT = 15000
@@ -195,6 +198,8 @@ class FetchUrlTool(Tool):
     ) -> str:
         if not url:
             return "Error: url is required"
+
+        url = clean_media_url(url)
 
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"

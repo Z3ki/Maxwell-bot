@@ -231,15 +231,33 @@ def test_summarize_and_user_command_prompts():
     assert turn["mentions"][0].id == 9
 
 
-def test_merge_user_install_history_prefers_unseen_snapshot():
+def test_merge_user_install_history_prefers_current_snapshot_in_message_order():
     memory = [{"message_id": "1", "content": "stored"}]
     extra = [
         {"message_id": "1", "content": "dup"},
         {"message_id": "2", "content": "live"},
     ]
     merged = merge_user_install_history(memory, extra)
-    assert [row["message_id"] for row in merged] == ["2", "1"]
+    assert [row["message_id"] for row in merged] == ["1", "2"]
+    assert merged[0]["content"] == "dup"
     assert merge_user_install_history([], extra) == extra
+
+
+def test_history_merge_keeps_tool_rows_and_snapshot_edits_in_time_order():
+    memory = [
+        {"message_id": "100", "content": "old", "timestamp": "2026-10-03T12:00:00Z"},
+        {"message_id": "tool:100", "is_tool": True, "content": "result", "timestamp": "2026-10-03T12:00:01Z"},
+        {"message_id": "300", "content": "stored new", "timestamp": "2026-10-03T12:00:03Z"},
+    ]
+    extra = [
+        {"message_id": "100", "content": "edited", "timestamp": "2026-10-03T12:00:00Z"},
+        {"message_id": "200", "content": "missing", "timestamp": "2026-10-03T12:00:02Z"},
+        {"message_id": "300", "content": "stored new", "timestamp": "2026-10-03T12:00:03Z"},
+    ]
+    merged = merge_user_install_history(memory, extra)
+    assert [row["message_id"] for row in merged] == ["100", "tool:100", "200", "300"]
+    assert merged[0]["content"] == "edited"
+    assert memory[0]["content"] == "old"
 
 
 def test_snapshot_channel_history_reads_async_history():

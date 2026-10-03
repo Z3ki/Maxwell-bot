@@ -21,6 +21,8 @@ class InboxListTool(Tool):
     tool_name = 'inbox_list'
     returns_result = True
     ends_turn = False
+    requires_admin = True
+    side_effects = False
 
 
     def get_description(self):
@@ -54,6 +56,7 @@ class InboxActTool(Tool):
     tool_name = 'inbox_act'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     def get_description(self):

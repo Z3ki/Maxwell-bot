@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tooling import helpers as _helpers
 from tools import Tool
+from discord_media import clean_media_url, discord_attachment_key, discord_message_link, resolve_discord_message
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -21,6 +22,7 @@ class SeeImageTool(Tool):
     tool_name = 'see_image'
     returns_result = True
     ends_turn = False
+    side_effects = False
 
 
     def get_description(self):
@@ -34,7 +36,7 @@ class SeeImageTool(Tool):
 
     @classmethod
     def looks_visual(cls, url: str) -> bool:
-        return is_gif_page_url(url) or is_direct_image_url(url)
+        return bool(discord_message_link(url)) or is_gif_page_url(url) or is_direct_image_url(url)
 
     async def result_from_blob(
         self,
@@ -102,12 +104,13 @@ class SeeImageTool(Tool):
         return (
             f"Attached {filename} ({mime}) for visual inspection.\n"
             f"Source: {url}\n"
-            f"__IMAGE_B64__{encoded}__END_IMAGE_B64__"
+            f"__IMAGE_B64__data:{mime};base64,{encoded}__END_IMAGE_B64__"
         )
 
     async def execute(self, message: Message, url: str | None = None, **kwargs) -> str:
         if not url:
             return "Error: url is required"
+        url = clean_media_url(url)
         if not _is_safe_url(url):
             return "Error: Cannot fetch from private/internal URLs"
         control = getattr(self.bot, "_control", None) or {}
@@ -119,10 +122,25 @@ class SeeImageTool(Tool):
         if hasattr(self.bot, "_max_media_bytes"):
             with contextlib.suppress(Exception):
                 max_size = self.bot._max_media_bytes()
+        if discord_message_link(url):
+            target = await resolve_discord_message(message, url)
+            if target is None:
+                return "Error: the linked message is not accessible in this request's source channel. Use Ask Maxwell on the message or attach the media."
+            _images, items = await self.bot._extract_media(target)
+            items.extend(await self.bot._extract_embeds(target))
+            images = [item for item in items if item.get("is_image") and item.get("b64")]
+            if not images:
+                return "Error: the linked message did not provide a supported image."
+            return "Attached images from the linked Discord message for inspection.\n" + "\n".join(
+                f"__IMAGE_B64__data:{item['mime_type']};base64,{item['b64']}__END_IMAGE_B64__"
+                for item in images[:5]
+            )
         item = await self.bot._download_embed_media(
             url, "see-image", max_size, getattr(message, "id", None)
         )
         if not item or not item.get("b64"):
+            if discord_attachment_key(url):
+                return "Error: the Discord CDN URL could not be loaded or refreshed. This does not establish that the original image was deleted. Use Ask Maxwell on its message or attach the image."
             return f"Error: could not load an image from {url}"
         mime = str(item.get("mime_type") or "")
         if mime.startswith("video/"):
@@ -144,7 +162,7 @@ class SeeImageTool(Tool):
             f"Attached {item.get('filename', 'image')} ({item.get('mime_type')}) "
             f"for visual inspection.\n"
             f"Source: {item.get('url') or url}\n"
-            f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__"
+            f"__IMAGE_B64__data:{mime};base64,{item['b64']}__END_IMAGE_B64__"
         )
 
 class SeeVideoTool(Tool):
@@ -152,6 +170,7 @@ class SeeVideoTool(Tool):
     tool_name = 'see_video'
     returns_result = True
     ends_turn = False
+    side_effects = False
 
 
     VIDEO_EXTS = frozenset({".mp4", ".webm", ".mov", ".mkv", ".avi"})
@@ -254,7 +273,7 @@ class SeeVideoTool(Tool):
             lines.append("An audio track was extracted for audio-capable input.")
         for item in derived:
             if item.get("is_image") and item.get("b64"):
-                lines.append(f"__IMAGE_B64__{item['b64']}__END_IMAGE_B64__")
+                lines.append(f"__IMAGE_B64__data:{item['mime_type']};base64,{item['b64']}__END_IMAGE_B64__")
             elif str(item.get("mime_type") or "").startswith("audio/") and item.get(
                 "b64"
             ):

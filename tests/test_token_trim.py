@@ -10,6 +10,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from bot import MaxwellBot, ToolCircuitBreaker
 from rag_memory import RAGMemoryManager
 
@@ -110,8 +112,13 @@ def _tool_names(bot, message, content, platform="discord"):
     return {item["function"]["name"] for item in payload}
 
 
-def test_every_turn_offers_every_registered_tool():
+@pytest.mark.parametrize("operator", [False, True])
+def test_every_turn_offers_every_authorized_registered_tool(operator):
     bot = _live_bot()
+    bot._is_admin = lambda _uid: operator
+    expected = set(bot.tools) - {"more_tools"}
+    if not operator:
+        expected -= {"email_send", "inbox_list", "inbox_act"}
     for content in (
         "wyd",
         "Can you run a debugger on YOUR machine?",
@@ -121,7 +128,7 @@ def test_every_turn_offers_every_registered_tool():
         "so anyway " * 40,
     ):
         names = _tool_names(bot, _msg(content, mentions=[bot.user]), content)
-        assert names == set(bot.tools) - {"more_tools"}, content
+        assert names == expected, content
         assert "more_tools" not in names
         assert "shell" in names
         assert "hd_image" in names

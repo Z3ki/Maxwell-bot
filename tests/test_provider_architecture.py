@@ -352,6 +352,59 @@ def test_router_learns_media_failure_and_degrades_only_after_all_slots_fail():
     asyncio.run(run())
 
 
+def test_media_routing_reaches_primary_after_vision_and_fallback_fail(monkeypatch):
+    async def no_wait(_seconds):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+
+    class Endpoint(ChatProvider):
+        def __init__(self, name, succeeds=False):
+            self.name = name
+            self.succeeds = succeeds
+            self.calls = 0
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, messages, **kwargs):
+            self.calls += 1
+            if not self.succeeds:
+                raise ProviderUnavailableError("temporarily unavailable")
+            assert kwargs["images"] == ["AA=="]
+            return ProviderResult("saw image", provider=self.name)
+
+    primary = Endpoint("primary", succeeds=True)
+    vision, fallback = Endpoint("vision"), Endpoint("fallback")
+    router = ProviderRouter(primary, fallback, vision, retry_attempts=3)
+    result = asyncio.run(router.generate_response(
+        [{"role": "user", "content": "inspect"}], images=["AA=="]
+    ))
+    assert result.provider == "primary"
+    assert primary.calls == 1
+
+
+def test_media_degradation_tells_the_model_the_image_was_not_delivered():
+    class Endpoint(ChatProvider):
+        name = "primary"
+
+        async def initialize(self):
+            return True
+
+        async def generate_response(self, messages, **kwargs):
+            if kwargs.get("media"):
+                raise ProviderMediaUnsupportedError("image unavailable")
+            assert "attachment" in str(messages).lower()
+            assert "unavailable" in str(messages).lower()
+            return ProviderResult("Please attach a supported image.")
+
+    router = ProviderRouter(Endpoint(), retry_attempts=1)
+    assert asyncio.run(router.generate_response(
+        [{"role": "user", "content": "what color is this?"}],
+        media=[{"b64": "AA==", "mime_type": "image/png"}],
+    )) == "Please attach a supported image."
+
+
 def test_concurrent_results_never_exchange_tool_calls_usage_models_or_timing():
     async def run():
         entered, release = asyncio.Event(), asyncio.Event()

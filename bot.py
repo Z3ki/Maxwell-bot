@@ -35,6 +35,14 @@ from media_payloads import (
     sanitize_media_memory,
     strip_media_payloads,
 )
+from discord_media import (
+    clean_media_url,
+    discord_attachment_key,
+    discord_message_link,
+    media_urls_in_text,
+    refresh_discord_media_url,
+    resolve_discord_message,
+)
 from message_quota import (
     MessageQuota,
     MessageQuotaExceeded,
@@ -246,6 +254,7 @@ if _LOG_LEVEL <= logging.DEBUG:
 logger = logging.getLogger(__name__)
 
 _current_inbound: ContextVar[Any] = ContextVar("current_inbound", default=None)
+_current_inbox_notices: ContextVar[tuple[str, ...]] = ContextVar("current_inbox_notices", default=())
 _current_request_provider: ContextVar[Any] = ContextVar(
     "current_request_provider", default=None
 )
@@ -1381,6 +1390,10 @@ FOLLOWUP_TOOL_NAMES = RESULT_TOOL_NAMES
 
 # Deny retired host-control tools at execution as well as discovery. The shell
 # is public only through its mandatory tenant-scoped gVisor backend.
+OPERATOR_MAILBOX_TOOLS = frozenset({
+    "inbox_list", "inbox_act", "email_send", "email_read_inbox", "email_get_message", "email_search",
+})
+
 PUBLIC_RUNTIME_BLOCKED_TOOLS = frozenset({
     "agent_life", "user_sandbox", "spawn_background", "github_repo",
     "plugin_workbench", "manage_plugin", "update_base_personality",
@@ -2861,8 +2874,6 @@ class MaxwellBot(commands.Bot):
         self.inbox = InboxStore(self.config.DATA_DIR)
         self.thread_store = ThreadStore(self.config.DATA_DIR)
         self.thread_store.load()
-        # Notice ids the last prompt carried, marked read once he speaks.
-        self._inbox_shown_ids: list[str] = []
         # Mail is pull-only through the email_* tools, so an unread message is
         # invisible until he thinks to look. The poller files new mail as inbox
         # notices; it stays None when no mailbox password is configured.
@@ -3238,6 +3249,8 @@ class MaxwellBot(commands.Bot):
         ):
             return
         journal.update(row["message_id"], status, reason=reason)
+        if status in _REQUEST_TERMINAL:
+            (getattr(self, "_interaction_requests", None) or {}).pop(row["message_id"], None)
         logger.info(
             "inbound mid=%s cid=%s stage=%s reason=%s attempts=%s effects=%s",
             row["message_id"],
@@ -3274,6 +3287,7 @@ class MaxwellBot(commands.Bot):
                 effects_started=True,
                 response_id=str(sent.id),
             )
+            (getattr(self, "_interaction_requests", None) or {}).pop(row["message_id"], None)
             logger.info(
                 "inbound mid=%s cid=%s stage=delivered response_id=%s",
                 row["message_id"],
@@ -3384,6 +3398,8 @@ class MaxwellBot(commands.Bot):
 
         author = getattr(message, "author", None)
         user_id = str(getattr(author, "id", "") or "").strip()
+        if canonical in OPERATOR_MAILBOX_TOOLS and not getattr(self, "_is_admin", lambda _uid: False)(user_id):
+            return "refused: the operator mailbox is restricted to Maxwell operators"
         needs_identity = bool(
             getattr(handler, "requires_admin", False)
             or getattr(handler, "required_discord_permissions", ())
@@ -3555,6 +3571,7 @@ class MaxwellBot(commands.Bot):
         if journal is not None and row:
             journal.begin(row["message_id"])
         token = _current_inbound.set(message)
+        inbox_token = _current_inbox_notices.set(())
         request_provider_token = _current_request_provider.set(None)
         byok_budget_token = _current_byok_tool_budget.set({"calls": 0})
         web_references_token = begin_web_references()
@@ -3612,6 +3629,8 @@ class MaxwellBot(commands.Bot):
                         return
                 await self._handle_message(message, content)
             row = self._request_state(message)
+            if row.get("status") == "delivered":
+                await self._mark_inbox_announced()
             if row and row["status"] not in _REQUEST_TERMINAL:
                 await self._request_failure(
                     message, "no_visible_output", retryable=True, normal_completion=True
@@ -3670,6 +3689,7 @@ class MaxwellBot(commands.Bot):
             _current_byok_tool_budget.reset(byok_budget_token)
             reset_web_references(web_references_token)
             _current_inbound.reset(token)
+            _current_inbox_notices.reset(inbox_token)
             _current_inbound_effects.reset(effects_token)
             logger.info(
                 "inbound mid=%s cid=%s stage=turn_finished duration_ms=%d",
@@ -3685,13 +3705,13 @@ class MaxwellBot(commands.Bot):
         if not control.get("bot_enabled", True):
             return "bot_disabled"
         author = message.author
-        if is_user_install_message(message):
-            return ""
         if (
             str(author.id) in (getattr(self, "_blacklist", None) or set())
             or str(author.id) in set(control.get("ignore_users", []) or [])
         ) and not self._is_admin(author.id):
             return "ignored_author"
+        if is_user_install_message(message):
+            return ""
         if cid in set(control.get("blocked_channels", []) or []):
             return "blocked_channel"
         allowed = set(control.get("allowed_channels", []) or [])
@@ -5467,9 +5487,10 @@ class MaxwellBot(commands.Bot):
             if handled >= 20 or self._reply_queue.full:
                 break
             mid, cid = row["message_id"], row["channel_id"]
+            interaction_message = (getattr(self, "_interaction_requests", None) or {}).get(mid)
             self._inbound_retry_after = (row["created_at"], mid)
             if getattr(getattr(self, "config", None), "MAXWELL_DEV_MODE", False):
-                channel = self.get_channel(int(cid)) if str(cid).isdigit() else None
+                channel = interaction_message or (self.get_channel(int(cid)) if str(cid).isdigit() else None)
                 if not MaxwellBot._dev_scope_allows(self, channel):
                     with contextlib.suppress(Exception):
                         journal.update(mid, "suppressed", reason="outside_dev_guild")
@@ -5485,14 +5506,18 @@ class MaxwellBot(commands.Bot):
             if time.time() - float(row["updated_at"]) < delay * max(1, row["attempts"]):
                 continue
             handled += 1
-            message = SimpleNamespace(id=mid, channel=SimpleNamespace(id=cid))
+            message = interaction_message or SimpleNamespace(id=mid, channel=SimpleNamespace(id=cid))
             try:
-                channel = await asyncio.wait_for(
-                    self._fetch_inbound_channel(cid), timeout=10
-                )
-                message = await asyncio.wait_for(
-                    channel.fetch_message(int(mid)), timeout=10
-                )
+                if interaction_message is None:
+                    channel = await asyncio.wait_for(
+                        self._fetch_inbound_channel(cid), timeout=10
+                    )
+                    message = await asyncio.wait_for(
+                        channel.fetch_message(int(mid)), timeout=10
+                    )
+                elif time.time() - row["created_at"] >= 900:
+                    self._record_request_outcome(message, "failed", "interaction_expired")
+                    continue
                 # Admissions run the normal policy gates but not receipt dedup.
                 await self.on_message(message)
             except Exception as exc:
@@ -5684,7 +5709,16 @@ class MaxwellBot(commands.Bot):
             "friends": friends[:8],
         }
 
-    async def _append_inbox_dynamic(self, dynamic_parts: list[str]) -> None:
+    async def _append_inbox_dynamic(self, dynamic_parts: list[str], *, message=None) -> None:
+        message = message or _current_inbound.get()
+        uid = getattr(getattr(message, "author", None), "id", None)
+        if not uid or not getattr(self, "_is_admin", lambda _uid: False)(uid):
+            return
+        private_reply = str(getattr(message, "response_visibility", "public")) == "private"
+        source_kind = getattr(message, "user_install_source_kind", "")
+        direct_dm = isinstance(getattr(message, "channel", None), discord.DMChannel) or source_kind == "DM"
+        if not private_reply and not direct_dm:
+            return
         store = getattr(self, "inbox", None)
         if store is None:
             return
@@ -5702,11 +5736,11 @@ class MaxwellBot(commands.Bot):
         # would burn a notice on a turn he stayed silent for, and *not*
         # marking them at all is what made the same email get announced on
         # every turn until someone dismissed it by hand.
-        self._inbox_shown_ids = [
+        _current_inbox_notices.set(tuple(
             str(i.get("id"))
             for i in pending
             if not inbox_needs_decision(i) and i.get("state") == "unread"
-        ]
+        ))
 
     async def _mark_inbox_announced(self) -> None:
         """Mark the notices the last prompt carried as read. Called after a send.
@@ -5716,10 +5750,10 @@ class MaxwellBot(commands.Bot):
         out by the time this runs, and failing to update the inbox is not
         worth turning a delivered message into an error.
         """
-        shown = list(getattr(self, "_inbox_shown_ids", ()) or ())
+        shown = _current_inbox_notices.get()
         if not shown:
             return
-        self._inbox_shown_ids = []
+        _current_inbox_notices.set(())
         store = getattr(self, "inbox", None)
         if store is None:
             return
@@ -6584,6 +6618,22 @@ class MaxwellBot(commands.Bot):
                     return
                 if self._reply_queue.contains(channel_id, message_id):
                     return
+                if is_user_install_message(message):
+                    requests = getattr(self, "_interaction_requests", None)
+                    if requests is None:
+                        requests = self._interaction_requests = {}
+                    # Interaction IDs are not fetchable Discord message IDs.
+                    # Retain the webhook adapter for bounded, in-process retries.
+                    for mid in list(requests):
+                        saved = journal.get(mid)
+                        if not saved or saved["status"] in _REQUEST_TERMINAL:
+                            requests.pop(mid, None)
+                        elif time.time() - saved["created_at"] >= 900:
+                            self._record_request_outcome(requests[mid], "failed", "interaction_expired")
+                    if message_id not in requests and len(requests) >= self._reply_queue.max_outstanding:
+                        await self._request_failure(message, "interaction_capacity")
+                        return
+                    requests[message_id] = message
                 # Persist the receipt, then defer an addressed request before
                 # attachment parsing, memory writes, or prompt construction.
                 # The retry loop fetches the Discord message when capacity is
@@ -6606,7 +6656,7 @@ class MaxwellBot(commands.Bot):
             acquired = True
             # Journal first. Keep an outage cursor frozen while newer live
             # receipts arrive; they are independently durable in the journal.
-            if channel_id not in (getattr(self, "_recovery_cursors", None) or {}):
+            if not is_user_install_message(message) and channel_id not in (getattr(self, "_recovery_cursors", None) or {}):
                 self._watermarks.note(
                     channel_id,
                     message_id,
@@ -10634,29 +10684,28 @@ class MaxwellBot(commands.Bot):
         """
         read = getattr(attachment, "read", None)
         if callable(read):
-            blob = read()
-            if inspect.isawaitable(blob):
-                blob = await blob
-            return blob
-        url = str(
-            getattr(attachment, "url", None)
-            or getattr(attachment, "proxy_url", None)
-            or ""
-        ).strip()
-        if not url:
+            try:
+                blob = read()
+                if inspect.isawaitable(blob):
+                    blob = await blob
+                if len(blob) > max_bytes:
+                    raise ValueError("attachment exceeds the media size limit")
+                return blob
+            except discord.HTTPException as exc:
+                if exc.status not in {403, 404}:
+                    raise
+                # An accepted request or cached reply parent can outlive its
+                # CDN signature. Reuse the checked, bounded media fetch path.
+        urls = list(dict.fromkeys(clean_media_url(getattr(attachment, name, "") or "")
+                                  for name in ("url", "proxy_url")))
+        urls = [url for url in urls if url]
+        if not urls:
             raise AttributeError(f"{type(attachment).__name__} has no read() or url")
-        session = await _get_shared_session()
-        timeout = aiohttp.ClientTimeout(total=30, connect=8)
-        async with session.get(
-            url,
-            headers={"User-Agent": _IMAGE_FETCH_UA},
-            timeout=timeout,
-        ) as resp:
-            if resp.status != 200:
-                raise RuntimeError(
-                    f"attachment fetch HTTP {resp.status} for {url[:80]}"
-                )
-            return await _read_response_limited(resp, max_bytes)
+        for url in urls:
+            fetched = await MaxwellBot._fetch_public_payload(self, url, max_bytes)
+            if fetched is not None:
+                return fetched[2]
+        raise RuntimeError("could not fetch or refresh the attachment URL")
 
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = MaxwellBot._image_input_enabled(self)
@@ -11474,10 +11523,12 @@ class MaxwellBot(commands.Bot):
         Returns (final_url, mime, blob) or None. Each hop is re-checked with
         _is_safe_url so a public page cannot bounce us onto link-local metadata.
         """
-        current = url
+        current = clean_media_url(url)
+        refreshed_once = False
+        redirects = 0
         try:
             session = await _get_shared_session()
-            for _hop in range(self._MAX_MEDIA_REDIRECTS + 1):
+            while redirects <= self._MAX_MEDIA_REDIRECTS:
                 if not _is_safe_url(current):
                     logger.warning(f"Skipping unsafe embed media URL: {current[:120]}")
                     return None
@@ -11499,7 +11550,14 @@ class MaxwellBot(commands.Bot):
                             )
                             return None
                         current = urljoin(current, loc)
+                        redirects += 1
                         continue
+                    if resp.status in {403, 404} and not refreshed_once and discord_attachment_key(current):
+                        refreshed_once = True
+                        refreshed = await refresh_discord_media_url(self, _current_inbound.get(), current)
+                        if refreshed and refreshed != current:
+                            current = refreshed
+                            continue
                     if resp.status != 200:
                         logger.warning(
                             f"Skipping embed media {current[:120]}: HTTP {resp.status}"
@@ -11522,6 +11580,7 @@ class MaxwellBot(commands.Bot):
     async def _download_embed_media(
         self, url: str, filename: str, max_size: int, message_id, *, _depth: int = 0
     ) -> dict | None:
+        url = clean_media_url(url)
         if _depth > 2:
             return None
         if not _is_safe_url(url):
@@ -11792,14 +11851,20 @@ class MaxwellBot(commands.Bot):
         """(url, ext) for every supported direct media link in message text."""
         refs: list[tuple[str, str]] = []
         seen: set[str] = set()
-        for raw in re.findall(r"https?://[^\s<>()]+", content or ""):
-            url = raw.rstrip(".,;!?)\"'").rstrip(">")
+        for url in media_urls_in_text(content or ""):
             # Do not download YouTube URLs.
             if _is_youtube_url(url):
                 continue
-            ext = Path(urlparse(url).path).suffix.lower()
+            if discord_message_link(url):
+                ext = ".discord"
+            else:
+                try:
+                    ext = Path(urlparse(url).path).suffix.lower()
+                except ValueError:
+                    continue
             if (
-                ext not in cls._LINK_IMAGE_EXTS
+                ext != ".discord"
+                and ext not in cls._LINK_IMAGE_EXTS
                 and ext not in cls._LINK_AUDIO_EXTS
                 and ext not in cls._LINK_VIDEO_EXTS
             ):
@@ -11848,7 +11913,8 @@ class MaxwellBot(commands.Bot):
             )
             if url not in skip
             and (
-                (ext in self._LINK_IMAGE_EXTS and proc_img)
+                ext == ".discord"
+                or (ext in self._LINK_IMAGE_EXTS and proc_img)
                 or (ext in self._LINK_AUDIO_EXTS and proc_aud)
                 or (
                     ext in video_exts and video_input_enabled and (proc_img or proc_aud)
@@ -11861,6 +11927,21 @@ class MaxwellBot(commands.Bot):
         media = []
         message_id = getattr(message, "id", None)
         for idx, (url, ext) in enumerate(wanted[:5], 1):
+            if ext == ".discord":
+                target = await resolve_discord_message(message, url)
+                if target is None:
+                    continue
+                _target_images, target_media = await self._extract_media(target)
+                target_media.extend(await self._extract_embeds(target))
+                caption = render_discord_context_text(target, str(getattr(target, "content", "") or ""))
+                if caption:
+                    target_media.append(self._media_item(
+                        b64="", mime_type="text/plain", filename="linked-message.txt",
+                        is_image=False, is_text=True, text=caption[:8000],
+                        message_id=getattr(target, "id", None), source="discord_link", url=url,
+                    ))
+                media.extend(target_media)
+                continue
             item = await self._download_embed_media(
                 url, f"linked-media-{idx}{ext}", max_size, message_id
             )
@@ -12962,6 +13043,7 @@ class MaxwellBot(commands.Bot):
                 all_tool_media.extend(
                     list(getattr(self, "_last_native_tool_media", None) or [])
                 )
+                all_tool_media = merge_followup_media([], all_tool_media, [])[-12:]
                 # Cap image growth across iterations (keep newest frames).
                 all_tool_images.extend(iter_images)
                 if len(all_tool_images) > 12:
@@ -13892,27 +13974,12 @@ class MaxwellBot(commands.Bot):
                 )
         history_tool_calls = elide_tool_calls_for_history(raw_for_history)
 
-        # Sequencing rules (2026-08-08):
-        # - non_terminal = pure helper tools (web_search, shell, image_gen,
-        #   etc.). They run in PARALLEL via gather because they don't depend
-        #   on each other and don't deliver user-visible output themselves.
-        # - terminal = tools that produce or space user-visible output
-        #   (send_message, no_response, wait). They run SEQUENTIALLY in the
-        #   order the model emitted them, because the model picked that
-        #   order intentionally — e.g. send_message('3') → wait(1) →
-        #   send_message('2') → send_message('1') for a countdown, or
-        #   send_message('starting...') → send_message('done!') for a staged
-        #   reveal.
-        # - no_response is special-cased: at most one per turn, and any
-        #   send_message after it is an error (you can't stay silent and
-        #   also send something). All other terminal calls are allowed to
-        #   repeat — multiple send_messages in declared order is a real
-        #   pattern now.
+        # Side effects are barriers, in the model's declared order. Shell,
+        # site edits and image generation are not independent merely because
+        # they don't end a turn. Only adjacent explicitly read-only tools may
+        # overlap; this also finishes a fetched-content taint before a write.
         non_terminal = [
             c for c in calls if c["name"] not in {"send_message", "no_response", "wait"}
-        ]
-        terminal = [
-            c for c in calls if c["name"] in {"send_message", "no_response", "wait"}
         ]
 
         result_by_id: dict[str, str] = {}
@@ -13972,55 +14039,42 @@ class MaxwellBot(commands.Bot):
                 logger.warning(f"Failed to record tool call {name} in memory: {e}")
             return line
 
+        async def run_safely(call: dict) -> str:
+            try:
+                return await run_one(call)
+            except Exception as exc:
+                line = f"Tool {call['name']}: Error - {type(exc).__name__}: {exc}"
+                result_by_id[call["id"]] = line
+                with contextlib.suppress(Exception):
+                    await MaxwellBot._remember_tool_call(
+                        self, message, call["name"], call.get("arguments") or {}, line
+                    )
+                return line
+
+        def parallel_safe(call: dict) -> bool:
+            if call["name"] in {"send_message", "no_response", "wait"}:
+                return False
+            handler = self.tools.get(call["name"])
+            if handler is None:
+                manager = getattr(self, "plugin_manager", None)
+                handler = manager.get_tool(call["name"]) if manager is not None else None
+            return handler is not None and not getattr(handler, "side_effects", True)
+
         async def run_all():
-            nonlocal tool_results
-            if non_terminal:
-                # 2026-07-21: use return_exceptions=True so a single
-                # failing sibling doesn't abort the whole batch.
-                # Without this, a raise from run_one(c2) cancels the
-                # in-flight c1/c3 and the user sees the side effects
-                # from the tools that DID run plus a generic "Sorry,
-                # please try again." Worse, the LLM never gets the
-                # success of the completed tools, so on the next turn
-                # it re-runs them (duplicate sends/files/shell cmds).
-                # With return_exceptions, the failing tool's error is
-                # appended to tool_results as a "Tool {name}: Error - {exc}"
-                # line (mirroring the single-tool path), and the LLM
-                # gets a coherent result it can act on.
-                gathered = await asyncio.gather(
-                    *[run_one(c) for c in non_terminal],
-                    return_exceptions=True,
-                )
-                for call, res in zip(non_terminal, gathered, strict=True):
-                    if isinstance(res, BaseException):
-                        # Surface the exception to the LLM context as
-                        # a tool error (NOT a "Sorry" abort).
-                        name = call.get("name", "unknown")
-                        err_line = f"Tool {name}: Error - {type(res).__name__}: {res}"
-                        result_by_id[call["id"]] = err_line
-                        with contextlib.suppress(Exception):
-                            await MaxwellBot._remember_tool_call(
-                                self,
-                                message,
-                                name,
-                                call.get("arguments") or {},
-                                err_line,
-                            )
-                        tool_results.append(err_line)
-                    else:
-                        tool_results.append(res)
-            # Terminal tools run SEQUENTIALLY in declared order. The model's
-            # emission order is the contract — we never reorder or skip
-            # send_message/wait (multi-send + countdown patterns are now
-            # first-class). no_response is the one exception: it's a
-            # "stay silent" intent, so if a send_message already fired
-            # earlier in this batch, no_response is meaningless and gets
-            # dropped with an error the model sees on its next turn.
-            # Likewise a send_message AFTER no_response is contradictory
-            # — keep the no_response, drop the later call.
+            pending: list[dict] = []
+
+            async def flush_reads():
+                if pending:
+                    tool_results.extend(await asyncio.gather(*(run_safely(c) for c in pending)))
+                    pending.clear()
+
             no_response_seen = False
             send_message_seen = False
-            for call in terminal:
+            for call in calls:
+                if not no_response_seen and parallel_safe(call):
+                    pending.append(call)
+                    continue
+                await flush_reads()
                 if call["name"] == "no_response":
                     if no_response_seen:
                         line = (
@@ -14066,7 +14120,7 @@ class MaxwellBot(commands.Bot):
                                 f"Failed to record skipped no_response after send: {e}"
                             )
                         continue
-                    line = await run_one(call)
+                    line = await run_safely(call)
                     tool_results.append(line)
                     no_response_seen = line.startswith(
                         "Tool no_response: __NO_RESPONSE__"
@@ -14100,13 +14154,14 @@ class MaxwellBot(commands.Bot):
                 # send_message, wait, any other terminal tool: run in
                 # declared order. await each one so the model sees the
                 # real result before the next call dispatches.
-                line = await run_one(call)
+                line = await run_safely(call)
                 tool_results.append(line)
                 if call["name"] == "send_message":
                     send_message_seen = (
                         "__MESSAGE_SENT__" in line
                         and not line.startswith("Tool send_message: Error")
                     )
+            await flush_reads()
 
         # Tools must run EXACTLY ONCE. The old `except Exception: await run_all()`
         # re-ran every non-idempotent tool when run_all() raised partway (e.g. a
@@ -14158,7 +14213,7 @@ class MaxwellBot(commands.Bot):
         # provider. Now: strip base64 from the LLM-facing content,
         # only attach the decoded image as vision. Also cap each
         # tool result at 32KB to keep context size bounded.
-        _IMG_RE = re.compile(r"__IMAGE_B64__([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
+        _IMG_RE = re.compile(r"__IMAGE_B64__(?:data:(image/[A-Za-z0-9.+-]+);base64,)?([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
         _AUDIO_RE = re.compile(r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__")
         _MAX_TOOL_RESULT_CHARS = 32_000
         _SITE_RESULT_TOOLS = {
@@ -14170,10 +14225,17 @@ class MaxwellBot(commands.Bot):
         seen_audio: set[str] = set()
         for tr in list(result_by_id.values()) + list(tool_results):
             for m in _IMG_RE.finditer(tr):
-                raw = m.group(1).replace("\n", "").replace(" ", "")
+                raw = m.group(2).replace("\n", "").replace(" ", "")
                 if len(raw) < 5_000_000 and raw not in seen_images:
                     seen_images.add(raw)
-                    tool_images.append(raw)
+                    if m.group(1):
+                        tool_media.append({
+                            "b64": raw, "mime_type": m.group(1),
+                            "filename": "tool-image", "is_image": True,
+                            "source": "tool", "message_id": getattr(message, "id", None),
+                        })
+                    else:
+                        tool_images.append(raw)
             for m in _AUDIO_RE.finditer(tr):
                 raw = m.group(1).replace("\n", "").replace(" ", "")
                 if len(raw) < 5_000_000 and raw not in seen_audio:
@@ -14489,6 +14551,8 @@ class MaxwellBot(commands.Bot):
 
         # Never expose prompt-edit tools from stale persisted plugin manifests.
         names.difference_update({"update_base_personality", "update_server_prompt"})
+        if not getattr(self, "_is_admin", lambda _uid: False)(author_id):
+            names.difference_update(OPERATOR_MAILBOX_TOOLS)
         if "leave_server" in names:
             author_id = (
                 getattr(getattr(message, "author", None), "id", None)
@@ -15591,7 +15655,7 @@ class MaxwellBot(commands.Bot):
             )
         append_inbox = getattr(self, "_append_inbox_dynamic", None)
         if callable(append_inbox):
-            await append_inbox(dynamic_parts)
+            await append_inbox(dynamic_parts, message=message)
         # 2026-07-21: explicit memory-scope reminder. Short-term (the
         # user/assistant turns that follow the system message) is
         # scoped to THIS channel only — you do NOT share per-channel
@@ -15643,6 +15707,11 @@ class MaxwellBot(commands.Bot):
             merge_user_install_history(memory, getattr(message, "user_install_history", None))
             if app_history_limit != 0 else []
         )
+        # Admission already stored the live request. It belongs below the
+        # history, and must not consume one of the user's selected N rows.
+        current_message_id = getattr(message, "id", None)
+        if current_message_id is not None:
+            memory = [row for row in memory if str(row.get("message_id")) != str(current_message_id)]
         if memory:
             # 2026-07-19: Discord chat does not need a 200k-char dump. Keep
             # the running thread, not every shell log from an hour ago.
