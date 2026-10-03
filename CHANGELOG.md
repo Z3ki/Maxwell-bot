@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 — 2026-10-03
+
+Install with `--version v0.1.6`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
 
 - Recover stale Discord attachment URLs through the source message or bounded channel history; preserve signed URL parameters and resolve accessible Discord message links to their media.
 - Preserve JPEG and other image MIME types from media tools through provider follow-ups, and apply checked redirects and size limits to attachment fallback downloads.
