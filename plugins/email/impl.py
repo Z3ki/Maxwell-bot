@@ -165,7 +165,8 @@ class EmailGetMessageTool(Tool):
     def get_description(self) -> str:
         return (
             "Fetch one email by id (from email_read_inbox, email_search, or "
-            "an inbox email notice — both 412 and email_412 work). "
+            "an inbox email notice — both 412 and email_412 work). Includes "
+            "authentication/transport headers where present. "
             "Params: message_id, max_chars (default 8000)."
         )
 

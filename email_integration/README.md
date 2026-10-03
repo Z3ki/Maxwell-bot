@@ -20,6 +20,20 @@ Maxwell <--IMAP-- Dovecot <---- local mailbox delivery
 
 Blocking SMTP/IMAP operations are moved off the asyncio event loop so mail server timeouts do not freeze the Discord bot.
 
+## Inspecting authentication results
+
+`email_get_message` includes selected original authentication and transport
+headers: `Authentication-Results`, `Received-SPF`, `DKIM-Signature`, ARC
+headers, `Return-Path`, and `Received`. Repeated fields are retained; the
+header section is capped at 12,000 characters. Other message headers are not
+shown, and the body has its separate `max_chars` limit.
+
+These headers help inspect a delivered message, but SPF and DMARC verdicts are
+made by receiving mail servers. Treat an `Authentication-Results` field as
+evidence only when it was added by a trusted receiver; earlier copies can be
+spoofed. A DMARC aggregate report describes mail observed by that receiver and
+does not prove every outbound route currently passes or aligns.
+
 ## Bot configuration
 
 Example `.env` values:

@@ -102,3 +102,54 @@ def test_mail_fetch_never_substitutes_sequence_number(monkeypatch):
     connection.select.assert_called_once_with("INBOX", readonly=True)
     connection.fetch.assert_not_called()
     connection.uid.assert_called_once_with("FETCH", "5", "(BODY.PEEK[])")
+
+
+def test_mail_fetch_includes_raw_authentication_headers(monkeypatch):
+    raw_message = (
+        b"From: sender@example.test\r\n"
+        b"Authentication-Results: mx.example.test; spf=pass; dkim=pass\r\n"
+        b"Received-SPF: pass (mx.example.test: domain of sender@example.test)\r\n"
+        b"DKIM-Signature: v=1; d=example.test;\r\n"
+        b"\tb=signature-value\r\n"
+        b"Received: by mx.example.test with ESMTP; id abc123\r\n"
+        b"X-Internal-Tracking: should-not-be-included\r\n"
+        b"\r\nmessage body"
+    )
+    connection = SimpleNamespace(
+        select=Mock(return_value=("OK", [])),
+        uid=Mock(return_value=("OK", [(b"1 (BODY[])", raw_message)])),
+        close=Mock(),
+        logout=Mock(),
+    )
+    monkeypatch.setattr(bot_tools, "_imap_connect_sync", lambda *_: connection)
+
+    result = bot_tools._imap_get_message_sync(
+        "localhost", 993, "u", "p", "5", 2000
+    )
+
+    assert "Authentication-Results: mx.example.test; spf=pass; dkim=pass" in result
+    assert "Received-SPF: pass" in result
+    assert "DKIM-Signature: v=1; d=example.test;" in result
+    assert "\tb=signature-value" in result
+    assert "Received: by mx.example.test" in result
+    assert "X-Internal-Tracking" not in result
+    assert result.endswith("message body")
+
+
+def test_mail_fetch_caps_raw_authentication_headers(monkeypatch):
+    raw_message = b"Received: " + (b"x" * 15_000) + b"\r\n\r\nmessage body"
+    connection = SimpleNamespace(
+        select=Mock(return_value=("OK", [])),
+        uid=Mock(return_value=("OK", [(b"1 (BODY[])", raw_message)])),
+        close=Mock(),
+        logout=Mock(),
+    )
+    monkeypatch.setattr(bot_tools, "_imap_connect_sync", lambda *_: connection)
+
+    result = bot_tools._imap_get_message_sync(
+        "localhost", 993, "u", "p", "5", 2000
+    )
+
+    assert "[truncated]" in result
+    assert len(result) < 13_000
+    assert result.endswith("message body")

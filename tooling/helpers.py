@@ -4595,10 +4595,31 @@ def _imap_safe_text_query(query: str) -> str | None:
     return s
 
 
+_IMAP_AUTH_HEADER_NAMES = frozenset(
+    {
+        "authentication-results",
+        "authentication-results-original",
+        "received-spf",
+        "dkim-signature",
+        "arc-authentication-results",
+        "arc-message-signature",
+        "arc-seal",
+        "return-path",
+        "received",
+        "x-original-to",
+        "delivered-to",
+        "x-received",
+        "x-google-dkim-signature",
+        "x-dmarc-result",
+    }
+)
+_IMAP_AUTH_HEADER_LIMIT = 12_000
+
+
 def _imap_get_message_sync(
     host: str, port: int, user: str, password: str, message_id: str, max_chars: int
 ) -> str:
-    """Fetch one message and return its headers + body, capped at max_chars."""
+    """Fetch one message and return selected raw auth headers and body."""
     seq = _imap_safe_seq(message_id)
     if seq is None:
         return "Error: message_id must be a numeric IMAP id"
@@ -4629,6 +4650,27 @@ def _imap_get_message_sync(
         if len(body) > max_chars:
             body = body[: max_chars - 1].rstrip() + "…"
 
+        auth_header_lines = []
+        header_chars = 0
+        for name, value in msg.raw_items():
+            if name.casefold() not in _IMAP_AUTH_HEADER_NAMES:
+                continue
+            line = f"{name}: {value}"
+            separator = "\n" if auth_header_lines else ""
+            remaining = _IMAP_AUTH_HEADER_LIMIT - header_chars - len(separator)
+            if remaining <= 0:
+                break
+            if len(line) > remaining:
+                marker = " [truncated]"
+                content_limit = max(0, remaining - len(marker))
+                auth_header_lines.append(
+                    line[:content_limit] + (marker if content_limit else "")
+                )
+                break
+            auth_header_lines.append(line)
+            header_chars += len(separator) + len(line)
+        auth_headers = "\n".join(auth_header_lines) or "(none found)"
+
         from_addr = msg.get("From", "?")
         to_addr = msg.get("To", "?")
         subject = msg.get("Subject", "(no subject)")
@@ -4640,6 +4682,9 @@ def _imap_get_message_sync(
             f"To: {to_addr}",
             f"Subject: {subject}",
             f"Date: {date}",
+            "",
+            "Authentication/transport headers (raw):",
+            auth_headers,
             "",
             "---",
             body,
