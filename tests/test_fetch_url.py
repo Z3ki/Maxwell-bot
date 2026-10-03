@@ -59,6 +59,12 @@ def test_is_safe_url_blocks_private_and_allows_public():
     assert _is_safe_url("http://100.64.0.1/") is False
     assert _is_safe_url("http://localhost./") is False
     assert _is_safe_url("file:///etc/passwd") is False
+    assert _is_safe_url("http://8.8.8.8/") is True
+    assert _is_safe_url("http://224.0.0.1/") is False
+    assert _is_safe_url("http://[ff02::1]/") is False
+    assert _is_safe_url("http://[fec0::1]/") is False
+    assert _is_safe_url("http://[64:ff9b::7f00:1]/") is False
+    assert _is_safe_url("http://[::ffff:127.0.0.1]/") is False
 
 
 def test_fetch_url_refuses_private_without_network():

@@ -929,7 +929,25 @@ class _PurgeConfirmationView(discord.ui.View):
                 refused += 1
                 continue
             try:
-                await target.delete(reason=_mod_reason(actor))
+                # discord.py 2.7 Message.delete only accepts delay. The audit
+                # reason still belongs on the HTTP call, which does accept it.
+                reason = _mod_reason(actor)
+                state = getattr(target, "_state", None)
+                http = getattr(state, "http", None)
+                delete_message = getattr(http, "delete_message", None)
+                channel_id = getattr(getattr(target, "channel", None), "id", None)
+                message_id = getattr(target, "id", None)
+                if (
+                    callable(delete_message)
+                    and channel_id is not None
+                    and message_id is not None
+                ):
+                    await delete_message(channel_id, message_id, reason=reason)
+                else:
+                    try:
+                        await target.delete(reason=reason)
+                    except TypeError:
+                        await target.delete()
                 deleted += 1
             except discord.NotFound:
                 missing += 1
@@ -1258,7 +1276,10 @@ class SearchMessagesTool(Tool):
             if not results:
                 if not clean_query:
                     return "No recent messages found in this channel"
-                    return f"No messages found matching '{str(query or '')[:100]}' in this channel"
+                return (
+                    f"No messages found matching '{str(query or '')[:100]}' "
+                    "in this channel"
+                )
             heading = (
                 f"Recent messages ({len(results)}):\n"
                 if not clean_query

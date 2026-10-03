@@ -443,6 +443,10 @@ class ReplyQueue:
             author = getattr(getattr(entry.message, "author", None), "id", None)
             if str(author or "") == uid:
                 dropped.append(entry)
+                # submit() counted this turn. The pump only decrements entries
+                # it pops, so a dropped queued turn must release the slot here
+                # or the process-wide cap fills with replies that will never run.
+                self._outstanding -= 1
                 self._note_drop(cid, entry, "same_user_interrupt")
                 continue
             kept.append(entry)

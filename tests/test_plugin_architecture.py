@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -244,6 +245,48 @@ def test_install_from_path_validates_then_copies(tmp_path):
     assert "Uninstalled" in gone
     assert not dest.exists()
     assert (keep / "state.json").exists()
+
+
+def test_zip_archive_name_cannot_escape_the_data_dir(tmp_path):
+    """A file named ...zip must not extract into or wipe DATA_DIR.
+
+    On Python 3.12, Path('...zip').stem is '..'. The installer used to join
+    that stem under plugin_incoming and then delete or unpack the data dir.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    sentinel = data / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    archive = tmp_path / "...zip"
+    manifest = {
+        "id": "echo_zip",
+        "version": "1.0.0",
+        "api_version": 1,
+        "enabled_by_default": True,
+        "tools": [{"name": "echo_tool", "returns_result": True}],
+    }
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("plugin.json", json.dumps(manifest))
+        zipped.writestr("__init__.py", "def setup(bot, ctx):\n    return []\n")
+    pm = PluginManager(
+        SimpleNamespace(tools={}),
+        plugins_dir=str(tmp_path / "plugins"),
+        data_dir=str(data),
+        state_file=str(data / "plugins.json"),
+        extra_plugin_dirs=[str(data / "installed_plugins")],
+    )
+    msg = pm.install_from_path(archive)
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert not (data / "plugin.json").exists()
+    assert not (data / "pwned.txt").exists()
+    # Python 3.12 treats the name as a zip. 3.14 does not, and refuses it.
+    if "Installed plugin 'echo_zip'" in msg:
+        assert (data / "installed_plugins" / "echo_zip" / "plugin.json").is_file()
+        assert not (data / "plugin_incoming").exists() or not any(
+            (data / "plugin_incoming").iterdir()
+        )
+    else:
+        assert msg.startswith("Error:")
 
 
 def test_wrap_tool_restores_on_teardown(tmp_path):

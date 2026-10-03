@@ -44,6 +44,19 @@ from maxwell_core.providers.errors import (
 
 logger = logging.getLogger(__name__)
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Same public-unicast rule as tooling.helpers._ip_is_public."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_multicast or ip.is_reserved or getattr(ip, "is_site_local", False):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64:
+        return False
+    return bool(ip.is_global)
+
 
 class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
     """Resolve only globally routable provider IPs and pin checked results."""
@@ -54,7 +67,7 @@ class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
         except ValueError:
             literal = None
         if literal is not None:
-            if not literal.is_global:
+            if not _ip_is_public(literal):
                 raise OSError("provider host resolved to a non-public address")
             addresses = [
                 (
@@ -70,7 +83,7 @@ class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
             addresses = []
             for af, _socktype, _proto, _canonname, sockaddr in infos:
                 ip = ipaddress.ip_address(sockaddr[0])
-                if not ip.is_global:
+                if not _ip_is_public(ip):
                     raise OSError("provider host resolved to a non-public address")
                 addresses.append((af, str(ip)))
         if not addresses:

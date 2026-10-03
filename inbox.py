@@ -110,7 +110,12 @@ class InboxStore:
         return out
 
     @staticmethod
-    def render_item(item: dict, *, summary_chars: int = 160) -> str:
+    def render_item(
+        item: dict,
+        *,
+        summary_chars: int = 160,
+        reveal_untrusted: bool = True,
+    ) -> str:
         iid = str(item.get("id") or "")
         kind = str(item.get("kind") or "notice")
         acts = ",".join(str(action) for action in (item.get("actions") or [])[:4])
@@ -120,12 +125,18 @@ class InboxStore:
         actor_id = str(item.get("actor_id") or "")
 
         if kind == "email":
-            who = f"{actor} <{actor_id}>" if actor_id else actor
-            subject = str(payload.get("subject") or "").strip() or "(no subject)"
-            body = f'{who} — "{subject}"'
-            snippet = " ".join(str(payload.get("snippet") or "").split())
-            if snippet:
-                body += f": {snippet[:summary_chars]}"
+            # Sender, subject, and snippet are attacker-controlled. The prompt
+            # tail and autonomy context must not carry them. inbox_list and
+            # email_get_message reveal the text and taint that turn.
+            if not reveal_untrusted:
+                body = "unread message (open with email_get_message)"
+            else:
+                who = f"{actor} <{actor_id}>" if actor_id else actor
+                subject = str(payload.get("subject") or "").strip() or "(no subject)"
+                body = f'{who} — "{subject}"'
+                snippet = " ".join(str(payload.get("snippet") or "").split())
+                if snippet:
+                    body += f": {snippet[:summary_chars]}"
         else:
             who = f"{actor}({actor_id})" if actor_id else actor
             body = f"{who}: {summary}"
@@ -136,7 +147,9 @@ class InboxStore:
         if not pending:
             return ""
         lines = ["=== INBOX (unread / actionable — you may ignore) ==="]
-        lines.extend(self.render_item(item) for item in pending[:14])
+        lines.extend(
+            self.render_item(item, reveal_untrusted=False) for item in pending[:14]
+        )
         if len(pending) > 14:
             lines.append(f"… and {len(pending) - 14} more (inbox_list to see them)")
         text = "\n".join(lines)

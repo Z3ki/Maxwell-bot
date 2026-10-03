@@ -1140,26 +1140,44 @@ class EditServerTool(Tool):
             updates["explicit_content_filter"] = value
         if afk_timeout is not None:
             try:
-                updates["afk_timeout"] = max(60, min(int(afk_timeout), 3600))
+                seconds = int(afk_timeout)
             except (TypeError, ValueError):
                 return "Error: afk_timeout must be a number of seconds"
+            # Discord rejects every other value and then drops the whole edit.
+            if seconds not in {60, 300, 900, 1800, 3600}:
+                return (
+                    "Error: afk_timeout must be 60, 300, 900, 1800, or 3600 seconds"
+                )
+            updates["afk_timeout"] = seconds
         if afk_channel_id is not None:
             raw = str(afk_channel_id).strip().lower()
             if raw in {"none", "null", "off", "0"}:
                 updates["afk_channel"] = None
             else:
-                ch, err = await _get_guild_channel(self.bot, afk_channel_id)
+                ch, err = await _get_guild_channel(
+                    self.bot,
+                    afk_channel_id,
+                    expected_guild_id=getattr(guild, "id", None),
+                )
                 if err:
                     return err
+                if not isinstance(ch, discord.VoiceChannel):
+                    return "Error: afk_channel_id must be a voice channel in this server"
                 updates["afk_channel"] = ch
         if system_channel_id is not None:
             raw = str(system_channel_id).strip().lower()
             if raw in {"none", "null", "off", "0"}:
                 updates["system_channel"] = None
             else:
-                ch, err = await _get_guild_channel(self.bot, system_channel_id)
+                ch, err = await _get_guild_channel(
+                    self.bot,
+                    system_channel_id,
+                    expected_guild_id=getattr(guild, "id", None),
+                )
                 if err:
                     return err
+                if not isinstance(ch, discord.TextChannel):
+                    return "Error: system_channel_id must be a text channel in this server"
                 updates["system_channel"] = ch
         if icon_url:
             if not _is_safe_url(icon_url):

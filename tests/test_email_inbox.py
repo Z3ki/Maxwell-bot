@@ -73,10 +73,15 @@ def test_new_mail_becomes_an_inbox_notice(tmp_path, monkeypatch):
         assert row["actor_id"] == "ada@example.com"
         assert row["payload"]["subject"] == "Invoice"
         assert row["payload"]["uid"] == "11"
-        # The planner tail leads with sender and subject, not an actor id.
+        # The prompt tail must not carry sender, subject, or body. Those
+        # strings are attacker-controlled and used to skip the taint gate.
         rendered = store.render_planner(items)
-        assert "Ada <ada@example.com>" in rendered
-        assert '"Invoice"' in rendered
+        assert "Ada" not in rendered
+        assert "Invoice" not in rendered
+        assert email_item_id(11) in rendered
+        shown = store.render_item(row)
+        assert "Ada <ada@example.com>" in shown
+        assert '"Invoice"' in shown
 
     asyncio.run(run())
 

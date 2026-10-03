@@ -1008,6 +1008,47 @@ def test_queue_global_capacity_defers_durably_without_tracking_new_channel(tmp_p
     asyncio.run(scenario())
 
 
+def test_drop_author_releases_global_capacity():
+    """Queued turns dropped for a same-user interrupt must free the global cap.
+
+    The running turn stays counted until the pump finishes it. Each dropped
+    queued turn was incremented in submit and is never popped, so leaving it
+    counted fills max_outstanding with replies that will never run.
+    """
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def handler(message, content):
+            if message.id == 1:
+                started.set()
+                await asyncio.Event().wait()
+
+        def msg(mid, author, channel="c1"):
+            message = _msg(mid, channel)
+            message.author = type("Author", (), {"id": author})()
+            return message
+
+        queue = ReplyQueue(max_outstanding=2)
+        queue.bind(handler)
+        assert queue.submit("c1", msg(1, "u1"), "running", directed=True) == "started"
+        await started.wait()
+        assert queue.submit("c1", msg(2, "u1"), "queued", directed=True) == "queued"
+        assert queue.outstanding == 2
+
+        dropped = queue.drop_author("c1", "u1")
+        assert [entry.message.id for entry in dropped] == [2]
+        assert queue.outstanding == 1
+        assert (
+            queue.submit("c2", msg(3, "u2", "c2"), "other room", directed=True)
+            == "started"
+        )
+        await queue.close()
+        assert queue.outstanding == 0
+
+    asyncio.run(scenario())
+
+
 def test_queue_global_capacity_releases_after_exception_and_cancellation():
     async def scenario():
         second_started = asyncio.Event()

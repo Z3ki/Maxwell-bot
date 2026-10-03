@@ -52,7 +52,13 @@ def test_notice_upsert_and_planner_budget(tmp_path):
         text = store.render_planner(await store.load_items())
         assert "=== INBOX" in text
         assert "email_11" in text
-        assert "Ada" in text
+        assert "Ada" not in text
+        assert "Hello" not in text
+        shown = store.render_item(
+            next(item for item in await store.load_items() if item["id"] == "email_11")
+        )
+        assert "Ada" in shown
+        assert "Hello" in shown
         assert len(text) <= 900
 
     asyncio.run(run())

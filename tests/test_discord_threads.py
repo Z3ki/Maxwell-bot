@@ -21,7 +21,17 @@ class FakeThread:
         self.name = name
         self.parent_id = "222"
         self.parent = SimpleNamespace(id="222", name="general")
-        self.guild = SimpleNamespace(id="333")
+        self.owner_id = "111"
+        self.guild = SimpleNamespace(
+            id="333",
+            name="test",
+            me=SimpleNamespace(
+                id="1",
+                guild_permissions=SimpleNamespace(
+                    administrator=True, manage_threads=True
+                ),
+            ),
+        )
         self.jump_url = "http://discord.test/t/9001"
         self.archived = False
         self.sent = []
@@ -29,6 +39,13 @@ class FakeThread:
 
     async def send(self, text):
         self.sent.append(text)
+
+    def permissions_for(self, _member):
+        return SimpleNamespace(
+            administrator=True,
+            manage_threads=True,
+            view_channel=True,
+        )
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
@@ -208,6 +225,33 @@ def test_thread_control_rename_and_archive(tmp_path):
     assert "Archived" in out
     assert thread.archived is True
     assert bot.thread_store.get("9001")["status"] == "archived"
+
+
+def test_thread_rename_requires_manage_threads_unless_owner(tmp_path):
+    bot = _bot(tmp_path)
+    thread = FakeThread()
+    thread.owner_id = "999"
+
+    def permissions_for(member):
+        is_bot = getattr(member, "id", None) == "1"
+        return SimpleNamespace(
+            administrator=is_bot,
+            manage_threads=is_bot,
+            view_channel=True,
+        )
+
+    thread.permissions_for = permissions_for
+    run(bot.thread_store.remember(thread, context="brief"))
+    bot.get_channel = lambda tid: thread if int(tid) == 9001 else None
+    msg = FakeMessage()
+    msg.author = SimpleNamespace(id="111", display_name="alice", guild=msg.guild)
+    out = run(
+        ThreadControlTool(bot).execute(
+            msg, action="rename", thread_id="9001", name="nope"
+        )
+    )
+    assert "manage_threads" in out
+    assert thread.name == "maze spec"
 
 
 def test_turn_hides_create_thread_inside_a_thread():

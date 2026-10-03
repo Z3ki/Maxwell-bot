@@ -5185,11 +5185,6 @@ class MaxwellBot(commands.Bot):
             self._spawn_detached(self._sync_slash_commands())
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
-        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
-            try:
-                await self.inbox.seed_from_bot(self)
-            except Exception as e:
-                logger.warning("Inbox seed failed: %s", e)
         await self._save_discord_state()
         if self._sleep_window_active():
             await self._apply_sleep_presence(asleep=True)
@@ -5764,29 +5759,19 @@ class MaxwellBot(commands.Bot):
     async def on_relationship_add(self, relationship):
         if getattr(self.config, "MAXWELL_DEV_MODE", False):
             return
+        # Official bots do not receive relationship events, and the inbox no
+        # longer stores them. Plugins can still observe the dispatch.
         self._dispatch_plugin_event("on_relationship_add", relationship)
-        try:
-            await self.inbox.ingest_relationship(relationship, event="add")
-        except Exception as e:
-            logger.warning("Inbox relationship_add failed: %s", e)
 
     async def on_relationship_update(self, before, after):
         if getattr(self.config, "MAXWELL_DEV_MODE", False):
             return
         self._dispatch_plugin_event("on_relationship_update", before, after)
-        try:
-            await self.inbox.ingest_relationship(after, event="update", before=before)
-        except Exception as e:
-            logger.warning("Inbox relationship_update failed: %s", e)
 
     async def on_relationship_remove(self, relationship):
         if getattr(self.config, "MAXWELL_DEV_MODE", False):
             return
         self._dispatch_plugin_event("on_relationship_remove", relationship)
-        try:
-            await self.inbox.ingest_relationship(relationship, event="remove")
-        except Exception as e:
-            logger.warning("Inbox relationship_remove failed: %s", e)
 
     async def on_group_join(self, channel, user):
         if getattr(self.config, "MAXWELL_DEV_MODE", False):

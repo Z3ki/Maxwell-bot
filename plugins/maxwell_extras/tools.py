@@ -265,9 +265,18 @@ class ReminderTool(Tool):
 
 
 # A deleted channel used to be fetched on every 5s tick, which spammed the
-# log and stalled the event loop. Back off that channel instead of retrying.
+# log and stalled the event loop. Back off that channel instead of retrying,
+# and drop the reminder once the channel is gone or delivery keeps failing.
 _UNAVAILABLE_CHANNEL_UNTIL: dict[str, float] = {}
+_REMINDER_FAILURES: dict[str, int] = {}
 _UNAVAILABLE_CHANNEL_BACKOFF_SECONDS = 900.0
+_MAX_REMINDER_FAILURES = 8
+
+
+async def _drop_reminder(store: ReminderStore, rid: str, channel_id: str, why: str) -> None:
+    logger.warning("Dropping reminder %s for channel %s: %s", rid, channel_id, why)
+    await store.remove(rid)
+    _REMINDER_FAILURES.pop(rid, None)
 
 
 async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
@@ -284,9 +293,24 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
         with contextlib.suppress(Exception):
             channel = bot.get_channel(int(channel_id))
         if channel is None:
-            with contextlib.suppress(Exception):
+            try:
                 channel = await bot.fetch_channel(int(channel_id))
+            except discord.NotFound:
+                await _drop_reminder(store, rid, channel_id, "channel no longer exists")
+                continue
+            except discord.Forbidden:
+                channel = None
+            except Exception:
+                logger.exception("Reminder %s channel lookup failed", rid)
+                channel = None
         if channel is None:
+            failures = _REMINDER_FAILURES.get(rid, 0) + 1
+            _REMINDER_FAILURES[rid] = failures
+            if failures >= _MAX_REMINDER_FAILURES:
+                await _drop_reminder(
+                    store, rid, channel_id, f"unavailable after {failures} tries"
+                )
+                continue
             _UNAVAILABLE_CHANNEL_UNTIL[channel_id] = (
                 now + _UNAVAILABLE_CHANNEL_BACKOFF_SECONDS
             )
@@ -301,9 +325,23 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
                     everyone=False, roles=False, users=True, replied_user=False
                 ),
             )
+        except discord.Forbidden:
+            await _drop_reminder(store, rid, channel_id, "missing permission to send")
+            continue
         except Exception:
+            failures = _REMINDER_FAILURES.get(rid, 0) + 1
+            _REMINDER_FAILURES[rid] = failures
+            if failures >= _MAX_REMINDER_FAILURES:
+                await _drop_reminder(
+                    store, rid, channel_id, f"send failed {failures} times"
+                )
+                continue
+            _UNAVAILABLE_CHANNEL_UNTIL[channel_id] = (
+                now + _UNAVAILABLE_CHANNEL_BACKOFF_SECONDS
+            )
             logger.exception("Failed delivering reminder %s", rid)
             continue
+        _REMINDER_FAILURES.pop(rid, None)
         await store.remove(rid)
 
 

@@ -966,6 +966,28 @@ _SITE_PROXY_HOP_HEADERS = {
     "host",
     "content-length",
 }
+# A generated site shares the public origin with every other site. Do not let
+# its backend set a cookie Domain or Path that covers the operator host.
+_SITE_PROXY_DROP_RESPONSE_HEADERS = _SITE_PROXY_HOP_HEADERS | {"clear-site-data"}
+
+
+def _scope_site_cookie(value: str, slug: str) -> str | None:
+    """Force a proxied Set-Cookie onto /bot/<slug>/ and drop Domain."""
+    parts = [part.strip() for part in str(value or "").split(";") if part.strip()]
+    if not parts or "=" not in parts[0]:
+        return None
+    name, _, cookie_value = parts[0].partition("=")
+    name = name.strip()
+    if not name or any(char in name for char in "=;, \t\r\n"):
+        return None
+    kept = [f"{name}={cookie_value}"]
+    for attr in parts[1:]:
+        key, _, _attr_value = attr.partition("=")
+        if key.strip().lower() in {"domain", "path"}:
+            continue
+        kept.append(attr)
+    kept.append(f"Path=/bot/{slug}/")
+    return "; ".join(kept)
 # Uploads are bounded by the /bot sub-app's client_max_size, not by holding the
 # body in memory here. sock_read is a per-chunk idle limit, not a total: an SSE
 # stream that sends a heartbeat every 20s stays open forever, as it should.
@@ -1199,7 +1221,13 @@ async def _site_proxy_request(request, slug: str):
         # arrive once the stream ended) and would hold a big download in RAM.
         out = web.StreamResponse(status=upstream.status)
         for key, value in upstream.headers.items():
-            if key.lower() in _SITE_PROXY_HOP_HEADERS:
+            lowered = key.lower()
+            if lowered in _SITE_PROXY_DROP_RESPONSE_HEADERS:
+                continue
+            if lowered == "set-cookie":
+                scoped = _scope_site_cookie(value, slug)
+                if scoped:
+                    out.headers.add("Set-Cookie", scoped)
                 continue
             out.headers[key] = value
         out.headers["Access-Control-Allow-Origin"] = "*"

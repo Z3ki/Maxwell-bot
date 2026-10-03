@@ -109,6 +109,34 @@ def test_kick_member_blocks_equal_or_higher_role():
     assert "Alice" in result
 
 
+def test_kick_member_refuses_when_asker_does_not_outrank_target():
+    """The bot's rank is not enough. The person asking must outrank the target."""
+    me = _member(uid=1, name="Max", position=10, perms=_perms(kick_members=True))
+    target = _member(uid=99, name="Alice", position=5, perms=_perms())
+    asker = _member(uid=5, name="Mod", position=2, perms=_perms(kick_members=True))
+    kicked = []
+
+    async def kick(**_kwargs):
+        kicked.append(True)
+
+    target.kick = kick
+    guild = SimpleNamespace(
+        id=10,
+        name="Villa",
+        me=me,
+        owner_id=9,
+        get_member=lambda uid: target if int(uid) == 99 else None,
+    )
+    asker.guild = guild
+    bot = SimpleNamespace(get_guild=lambda _gid: None)
+    msg = SimpleNamespace(guild=guild, author=asker)
+    result = asyncio.run(KickMemberTool(bot).execute(msg, user_id="99"))
+    assert "Mod" in result
+    assert "Alice" in result
+    assert "hierarchy" in result.lower()
+    assert kicked == []
+
+
 def test_kick_member_refuses_when_asker_lacks_permission():
     me = _member(uid=1, name="Max", position=2, perms=_perms(kick_members=True))
     asker = _member(uid=5, name="Ada", position=1, perms=_perms(kick_members=False))

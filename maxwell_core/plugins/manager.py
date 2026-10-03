@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 import time
 from importlib import import_module, reload
 from pathlib import Path
@@ -1332,52 +1333,68 @@ class PluginManager:
             src = src.resolve()
         except OSError as exc:
             return f"Error: cannot resolve {source}: {exc}"
+        extract_root: Path | None = None
         if src.is_file() and src.suffix.lower() == ".zip":
-            extract = self.data_dir / "plugin_incoming" / src.stem
-            if extract.exists():
-                shutil.rmtree(extract)
-            extract.mkdir(parents=True, exist_ok=True)
-            shutil.unpack_archive(str(src), str(extract))
-            nested = [p for p in extract.iterdir() if p.is_dir() and (p / "plugin.json").is_file()]
-            src = nested[0] if len(nested) == 1 else extract
-        if not src.is_dir() or not (src / "plugin.json").is_file():
-            return "Error: plugin source must be a directory (or zip) containing plugin.json"
+            # Never use the archive stem as a directory name. On Python 3.12,
+            # Path("...zip").stem is "..", so the old path extracted into
+            # DATA_DIR and could wipe bot state before plugin.json was read.
+            incoming = (self.data_dir / "plugin_incoming").resolve()
+            incoming.mkdir(parents=True, exist_ok=True)
+            extract_root = Path(tempfile.mkdtemp(prefix="zip-", dir=incoming)).resolve()
+            if incoming not in extract_root.parents:
+                shutil.rmtree(extract_root, ignore_errors=True)
+                return "Error: refusing to extract a plugin archive outside plugin_incoming"
+            try:
+                shutil.unpack_archive(str(src), str(extract_root))
+            except Exception as exc:
+                shutil.rmtree(extract_root, ignore_errors=True)
+                return f"Error: could not unpack plugin archive: {exc}"
+            nested = [
+                p
+                for p in extract_root.iterdir()
+                if p.is_dir() and (p / "plugin.json").is_file()
+            ]
+            src = nested[0] if len(nested) == 1 else extract_root
         try:
-            manifest = load_manifest_file(src / "plugin.json", directory_name=src.name)
-        except ManifestError as exc:
-            return f"Error: invalid plugin.json: {exc}"
-        if manifest.bundled or manifest.protected:
-            return f"Error: cannot overwrite bundled/protected plugin {manifest.id!r}"
-        dest = self.installed_plugins_dir() / manifest.id
-        if dest.exists() and not replace:
+            if not src.is_dir() or not (src / "plugin.json").is_file():
+                return "Error: plugin source must be a directory (or zip) containing plugin.json"
+            try:
+                manifest = load_manifest_file(src / "plugin.json", directory_name=src.name)
+            except ManifestError as exc:
+                return f"Error: invalid plugin.json: {exc}"
+            if manifest.bundled or manifest.protected:
+                return f"Error: cannot overwrite bundled/protected plugin {manifest.id!r}"
+            dest = self.installed_plugins_dir() / manifest.id
+            if dest.exists() and not replace:
+                return (
+                    f"Error: plugin {manifest.id!r} is already installed. "
+                    "Pass replace=true to update it."
+                )
+            staging = dest.with_name(dest.name + ".incoming")
+            if staging.exists():
+                shutil.rmtree(staging)
+            shutil.copytree(src, staging)
+            backup = None
+            if dest.exists():
+                backup = dest.with_name(dest.name + ".bak")
+                if backup.exists():
+                    shutil.rmtree(backup)
+                dest.replace(backup)
+            try:
+                staging.replace(dest)
+            except Exception as exc:
+                if backup is not None and backup.exists() and not dest.exists():
+                    backup.replace(dest)
+                return f"Error installing plugin: {exc}"
+            if backup is not None and backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
             return (
-                f"Error: plugin {manifest.id!r} is already installed. "
-                "Pass replace=true to update it."
+                f"Installed plugin '{manifest.id}' v{manifest.version} to {dest}. "
+                "Reload plugins to activate it."
             )
-        staging = dest.with_name(dest.name + ".incoming")
-        if staging.exists():
-            shutil.rmtree(staging)
-        shutil.copytree(src, staging)
-        backup = None
-        if dest.exists():
-            backup = dest.with_name(dest.name + ".bak")
-            if backup.exists():
-                shutil.rmtree(backup)
-            dest.replace(backup)
-        try:
-            staging.replace(dest)
-        except Exception as exc:
-            if backup is not None and backup.exists() and not dest.exists():
-                backup.replace(dest)
-            return f"Error installing plugin: {exc}"
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup, ignore_errors=True)
-        if src.parent.name == "plugin_incoming":
-            shutil.rmtree(src.parent, ignore_errors=True)
-        return (
-            f"Installed plugin '{manifest.id}' v{manifest.version} to {dest}. "
-            "Reload plugins to activate it."
-        )
+        finally:
+            if extract_root is not None:
+                shutil.rmtree(extract_root, ignore_errors=True)
 
     def uninstall_plugin(self, plugin_name: str) -> str:
         """Remove an independently installed plugin's code. Data is kept."""

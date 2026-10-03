@@ -44,7 +44,10 @@ class KickMemberTool(Tool):
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
-        blocked = _moderation_block(guild, _guild_me(guild), member, action="kick")
+        blocked = _moderation_block(
+            guild, _guild_me(guild), member, action="kick",
+            actor=_resolve_requester_member(guild, message),
+        )
         if blocked:
             return blocked
         try:
@@ -87,7 +90,10 @@ class BanMemberTool(Tool):
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
-        blocked = _moderation_block(guild, _guild_me(guild), member, action="ban")
+        blocked = _moderation_block(
+            guild, _guild_me(guild), member, action="ban",
+            actor=_resolve_requester_member(guild, message),
+        )
         if blocked:
             return blocked
         try:
@@ -194,7 +200,10 @@ class SoftbanMemberTool(Tool):
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
-        blocked = _moderation_block(guild, _guild_me(guild), member, action="ban")
+        blocked = _moderation_block(
+            guild, _guild_me(guild), member, action="ban",
+            actor=_resolve_requester_member(guild, message),
+        )
         if blocked:
             return blocked
         try:
@@ -205,6 +214,7 @@ class SoftbanMemberTool(Tool):
         except (TypeError, ValueError):
             seconds = 86400
         why = _mod_reason(message) if not reason else f"softban: {str(reason)[:480]}"
+        banned = False
         try:
             try:
                 await guild.ban(member, reason=why, delete_message_seconds=seconds)
@@ -212,15 +222,29 @@ class SoftbanMemberTool(Tool):
                 await guild.ban(
                     member, reason=why, delete_message_days=min(7, seconds // 86400)
                 )
+            banned = True
             await guild.unban(discord.Object(id=member.id), reason=why)
             return (
                 f"Softbanned {member} ({member.id}) in {guild.name} "
                 f"(deleted up to {seconds}s of messages, not banned)"
             )
         except discord.Forbidden:
-            return f"Error: Discord denied softbanning {member}"
-        except Exception as e:
-            return f"Error softbanning member: {e}"
+            if not banned:
+                return f"Error: Discord denied softbanning {member}"
+        except Exception as exc:
+            if not banned:
+                return f"Error softbanning member: {exc}"
+        try:
+            await guild.unban(discord.Object(id=member.id), reason=why)
+        except Exception as unban_exc:
+            return (
+                f"Error: {member} was banned in {guild.name} but the unban failed "
+                f"({unban_exc}). They are still banned."
+            )
+        return (
+            f"Softbanned {member} ({member.id}) in {guild.name} "
+            f"(deleted up to {seconds}s of messages, not banned)"
+        )
 
 class ListBansTool(Tool):
     tool_name = 'list_bans'
@@ -296,7 +320,10 @@ class TimeoutMemberTool(Tool):
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
-        blocked = _moderation_block(guild, _guild_me(guild), member, action="timeout")
+        blocked = _moderation_block(
+            guild, _guild_me(guild), member, action="timeout",
+            actor=_resolve_requester_member(guild, message),
+        )
         if blocked:
             return blocked
         seconds = _parse_duration_seconds(duration, None)
@@ -427,6 +454,9 @@ class ManageRoleTool(Tool):
                 kwargs_create["colour"] = colour
             perms = _permissions_from_names(permissions)
             if perms is not None:
+                refused = _refuse_permissions_above_actor(guild, message, perms)
+                if refused:
+                    return refused
                 kwargs_create["permissions"] = perms
             if hoist is not None:
                 kwargs_create["hoist"] = parse_bool(hoist, False)
@@ -445,6 +475,10 @@ class ManageRoleTool(Tool):
         blocked = _role_blocked(me, role)
         if blocked and act != "list":
             return blocked
+        actor = _resolve_requester_member(guild, message)
+        actor_blocked = _actor_role_block(guild, actor, role)
+        if actor_blocked and act != "list":
+            return actor_blocked
         kind, _value, place_err = None, None, ""
         if act in {"move", "reorder", "edit"}:
             kind, _value, place_err = _parse_role_placement(
@@ -462,6 +496,7 @@ class ManageRoleTool(Tool):
                 above=above,
                 below=below,
                 reason=why,
+                actor=actor,
             )
         if act == "edit":
             updates = {}
@@ -475,6 +510,9 @@ class ManageRoleTool(Tool):
                 updates["colour"] = colour
             perms = _permissions_from_names(permissions)
             if perms is not None:
+                refused = _refuse_permissions_above_actor(guild, message, perms)
+                if refused:
+                    return refused
                 updates["permissions"] = perms
             if hoist is not None:
                 updates["hoist"] = parse_bool(hoist, False)
@@ -507,6 +545,7 @@ class ManageRoleTool(Tool):
                         above=above,
                         below=below,
                         reason=why,
+                        actor=actor,
                     )
                 )
             return "\n".join(notes)
@@ -526,7 +565,9 @@ class ManageRoleTool(Tool):
             member, error = await _resolve_member(guild, user_id)
             if error:
                 return error
-            blocked = _moderation_block(guild, me, member, action="role")
+            blocked = _moderation_block(
+                guild, me, member, action="role", actor=actor
+            )
             if blocked:
                 return blocked
             try:
@@ -584,7 +625,10 @@ class VoiceModTool(Tool):
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
-        blocked = _moderation_block(guild, _guild_me(guild), member, action="voice")
+        blocked = _moderation_block(
+            guild, _guild_me(guild), member, action="voice",
+            actor=_resolve_requester_member(guild, message),
+        )
         if blocked:
             return blocked
         why = _mod_reason(message)
@@ -604,11 +648,13 @@ class VoiceModTool(Tool):
             if act == "disconnect":
                 await member.edit(voice_channel=None, reason=why)
                 return f"Disconnected {member} from voice"
-            dest, error = await _get_guild_channel(self.bot, channel_id)
+            dest, error = await _get_guild_channel(
+                self.bot, channel_id, expected_guild_id=getattr(guild, "id", None)
+            )
             if error:
                 return error
             if not isinstance(dest, discord.VoiceChannel):
-                return "Error: move requires a voice channel_id"
+                return "Error: move requires a voice channel_id in this server"
             await member.edit(voice_channel=dest, reason=why)
             return f"Moved {member} to {_channel_label(dest)}"
         except discord.Forbidden:
@@ -773,11 +819,14 @@ class SetChannelPermissionsTool(Tool):
     ) -> str:
         if not channel_id or not target:
             return "Error: channel_id and target are required"
-        channel, error = await _get_guild_channel(self.bot, channel_id)
+        request_guild_id = getattr(getattr(message, "guild", None), "id", None)
+        channel, error = await _get_guild_channel(
+            self.bot, channel_id, expected_guild_id=request_guild_id
+        )
         if error:
             return error
         guild = channel.guild
-        missing = _missing_cap(guild, "manage_roles", message)
+        missing = _missing_cap(guild, "manage_roles", message, channel=channel)
         if missing:
             return missing
         spec = str(target).strip().lower()
@@ -786,6 +835,11 @@ class SetChannelPermissionsTool(Tool):
             subject = guild.default_role
         if subject is None:
             subject, _err = _find_role(guild, target)
+            if subject is not None and not _role_is_everyone(subject, guild):
+                actor = _resolve_requester_member(guild, message)
+                role_block = _actor_role_block(guild, actor, subject)
+                if role_block:
+                    return role_block
         if subject is None:
             subject, error = await _resolve_member(guild, target)
             if error and subject is None:
@@ -798,6 +852,22 @@ class SetChannelPermissionsTool(Tool):
             pairs = _parse_overwrite_pairs(allow)
             if not pairs:
                 return "Error: provide allow like send_messages=false,view_channel=true"
+            actor = _resolve_requester_member(guild, message)
+            if not _is_guild_owner(guild, actor):
+                actor_perms = _member_channel_perms(actor, channel)
+                if not getattr(actor_perms, "administrator", False):
+                    if actor_perms is None:
+                        return "Error: your channel permissions could not be checked"
+                    denied = [
+                        name
+                        for name, value in pairs.items()
+                        if value is True and not getattr(actor_perms, name, False)
+                    ]
+                    if denied:
+                        return (
+                            "Error: you cannot grant channel permissions you do not have: "
+                            + ", ".join(denied)
+                        )
             await channel.set_permissions(subject, reason=why, **pairs)
             return (
                 f"Updated overwrites for {target} on {_channel_label(channel)}: {pairs}"
@@ -839,7 +909,10 @@ class SetMemberNicknameTool(Tool):
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
-        blocked = _moderation_block(guild, _guild_me(guild), member, action="nick")
+        blocked = _moderation_block(
+            guild, _guild_me(guild), member, action="nick",
+            actor=_resolve_requester_member(guild, message),
+        )
         if blocked:
             return blocked
         nick = None if str(nickname).strip().lower() == "reset" else str(nickname)[:32]

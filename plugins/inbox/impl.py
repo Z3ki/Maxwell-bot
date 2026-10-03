@@ -49,6 +49,11 @@ class InboxListTool(Tool):
         )
         if len(items) > len(ordered):
             lines.append(f"… {len(items) - len(ordered)} more not shown")
+        shown = ordered[:20]
+        if any(str(item.get("kind") or "") == "email" for item in shown):
+            marker = getattr(self.bot, "mark_message_tainted", None)
+            if callable(marker):
+                marker(message)
         return "\n".join(lines)
 
 class InboxActTool(Tool):

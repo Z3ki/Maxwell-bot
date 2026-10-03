@@ -136,15 +136,30 @@ _SHARED_SESSION: aiohttp.ClientSession | None = None
 _SESSION_LOCK = asyncio.Lock()
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True only for ordinary global unicast.
+
+    ``is_global`` is true for multicast, deprecated site-local, and the NAT64
+    prefix ``64:ff9b::/96``, which can embed loopback and private IPv4.
+    """
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_multicast or ip.is_reserved or getattr(ip, "is_site_local", False):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64:
+        return False
+    return bool(ip.is_global)
+
+
 def _is_safe_ip(value: str) -> bool:
     try:
         ip = ipaddress.ip_address(value)
     except ValueError:
         return False
-    # Unwrap IPv4-mapped IPv6 (::ffff:127.0.0.1) so loopback/private checks apply.
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return bool(getattr(ip, "is_global", False))
+    return _ip_is_public(ip)
 
 
 class _SafeResolver:
@@ -882,6 +897,23 @@ def _member_top_position(member) -> int:
     return max(int(getattr(role, "position", 0) or 0) for role in roles)
 
 
+def _guild_owner_id(guild):
+    return getattr(guild, "owner_id", None) or getattr(
+        getattr(guild, "owner", None), "id", None
+    )
+
+
+def _is_guild_owner(guild, member) -> bool:
+    owner_id = _guild_owner_id(guild)
+    member_id = getattr(member, "id", None)
+    return owner_id is not None and member_id is not None and owner_id == member_id
+
+
+def _actor_outranks(actor, other) -> bool:
+    """Discord hierarchy: a member can manage only roles and people below them."""
+    return _member_top_position(actor) > _member_top_position(other)
+
+
 def _named_roles(me, guild) -> list:
     roles = list(getattr(me, "roles", None) or [])
     roles.sort(key=lambda role: int(getattr(role, "position", 0) or 0), reverse=True)
@@ -1032,7 +1064,7 @@ def _guild_access_detail(guild) -> str:
     return "\n".join(lines)
 
 
-def _moderation_block(guild, me, target, *, action: str) -> str:
+def _moderation_block(guild, me, target, *, action: str, actor=None) -> str:
     if target is None or me is None:
         return "Error: member is unavailable"
     my_id = getattr(me, "id", None)
@@ -1050,9 +1082,7 @@ def _moderation_block(guild, me, target, *, action: str) -> str:
         }
     ):
         return f"Error: I cannot {action} myself"
-    owner_id = getattr(guild, "owner_id", None) or getattr(
-        getattr(guild, "owner", None), "id", None
-    )
+    owner_id = _guild_owner_id(guild)
     if owner_id is not None and their_id == owner_id:
         return f"Error: I cannot {action} the server owner"
     if _member_top_position(target) >= _member_top_position(me):
@@ -1060,6 +1090,67 @@ def _moderation_block(guild, me, target, *, action: str) -> str:
         return (
             f"Error: {shown}'s top role is equal or higher than mine "
             f"(role hierarchy). I cannot {action} them."
+        )
+    # Discord enforces hierarchy for the bot account. The person who asked
+    # must also outrank the target, or a lower role with the permission bit
+    # can kick, ban, or time out people above them.
+    if actor is None:
+        return "Error: the person asking could not be verified in this server"
+    if _is_guild_owner(guild, actor):
+        return ""
+    if not _actor_outranks(actor, target):
+        shown = getattr(target, "display_name", None) or their_id
+        who = getattr(actor, "display_name", None) or "you"
+        return (
+            f"Error: {shown}'s top role is equal or higher than {who}'s "
+            f"(role hierarchy). I cannot {action} them."
+        )
+    return ""
+
+
+def _actor_role_block(guild, actor, role) -> str:
+    """Refuse role edits the asker could not perform themselves."""
+    if role is None:
+        return "Error: role is unavailable"
+    if actor is None:
+        return "Error: the person asking could not be verified in this server"
+    if _is_guild_owner(guild, actor):
+        return ""
+    if int(getattr(role, "position", 0) or 0) >= _member_top_position(actor):
+        return (
+            f"Error: role {getattr(role, 'name', role)} is equal or higher than "
+            "your top role (hierarchy)"
+        )
+    return ""
+
+
+def _refuse_permissions_above_actor(guild, message, perms) -> str:
+    """A manage_roles member cannot grant bits they do not hold."""
+    if perms is None:
+        return ""
+    actor = _resolve_requester_member(guild, message)
+    if _is_guild_owner(guild, actor):
+        return ""
+    actor_perms = getattr(actor, "guild_permissions", None)
+    if getattr(actor_perms, "administrator", False):
+        return ""
+    if actor_perms is None:
+        return "Error: your permissions could not be checked"
+    denied = []
+    try:
+        pairs = list(perms)
+    except TypeError:
+        pairs = []
+    for item in pairs:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        name, value = item
+        if value and not getattr(actor_perms, name, False):
+            denied.append(str(name))
+    if denied:
+        return (
+            "Error: you cannot grant permissions you do not have: "
+            + ", ".join(denied)
         )
     return ""
 
@@ -2298,6 +2389,7 @@ def _plan_role_move(
     position=None,
     above=None,
     below=None,
+    actor=None,
 ):
     """Compute new positions for roles below the bot's top role.
 
@@ -2315,9 +2407,20 @@ def _plan_role_move(
         )
     if _role_is_everyone(moving, guild):
         return [], "", "Error: the @everyone role cannot be moved"
-    ceiling = _member_top_position(me)
+    bot_ceiling = _member_top_position(me)
+    ceiling = bot_ceiling
+    # The asker's own top role is a second ceiling. Otherwise someone with
+    # manage_roles can drag a lower role above themselves when the bot sits higher.
+    if actor is not None and not _is_guild_owner(guild, actor):
+        ceiling = min(ceiling, _member_top_position(actor))
+    whose = "your" if ceiling < bot_ceiling else "my"
     moving_pos = int(getattr(moving, "position", 0) or 0)
     if moving_pos >= ceiling:
+        if whose == "your":
+            return [], "", (
+                f"Error: role {getattr(moving, 'name', moving)} is equal or higher "
+                "than your top role (hierarchy)"
+            )
         blocked = _role_blocked(me, moving)
         return [], "", blocked or (
             "Error: role is equal/higher than my top role (hierarchy)"
@@ -2351,7 +2454,7 @@ def _plan_role_move(
             )
         if pos >= ceiling:
             return [], "", (
-                f"Error: position {pos} is equal/higher than my top role "
+                f"Error: position {pos} is equal/higher than {whose} top role "
                 f"(pos {ceiling}); I can only move roles to 1-{max(1, ceiling - 1)}"
             )
         max_pos = len(rest) + 1
@@ -2377,7 +2480,7 @@ def _plan_role_move(
                 relation = "immediately above @everyone"
             elif target_pos >= ceiling:
                 return [], "", (
-                    f"Error: {_role_ref(target)} is equal/higher than my top "
+                    f"Error: {_role_ref(target)} is equal/higher than {whose} top "
                     "role; I cannot place a role above it"
                 )
             else:
@@ -2404,7 +2507,7 @@ def _plan_role_move(
                 relation = f"immediately below {_role_ref(target)}"
             else:
                 return [], "", (
-                    f"Error: {_role_ref(target)} is above my top role; "
+                    f"Error: {_role_ref(target)} is above {whose} top role; "
                     "I cannot place a role immediately below it"
                 )
         else:
@@ -2454,6 +2557,7 @@ async def _move_role_hierarchy(
     above=None,
     below=None,
     reason: str = "",
+    actor=None,
 ) -> str:
     changes, summary, err = _plan_role_move(
         guild,
@@ -2462,6 +2566,7 @@ async def _move_role_hierarchy(
         position=position,
         above=above,
         below=below,
+        actor=actor,
     )
     if err:
         return err

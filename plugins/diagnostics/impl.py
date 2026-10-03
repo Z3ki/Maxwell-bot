@@ -21,16 +21,15 @@ class UsageTool(Tool):
     tool_name = 'usage'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     def get_description(self):
-        url = self._url()
-        where = f" ({url})" if url else " (MAXWELL_USAGE_URL)"
         return (
             "Fetch current API usage and remaining quota from the configured "
-            f"usage endpoint{where} using the API key already configured in env. "
+            "usage endpoint using the API key already configured in env. "
             "Returns usage percentages, reset times, and account counts so you "
-            "can report how much budget is left."
+            "can report how much budget is left. Operator only."
         )
 
     def _url(self) -> str:
@@ -66,20 +65,20 @@ class UsageTool(Tool):
             ) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    return f"Error: usage endpoint returned HTTP {resp.status}: {body[:400]}"
+                    return f"Error: usage endpoint returned HTTP {resp.status}"
         except asyncio.TimeoutError:
             return "Error: usage endpoint timed out."
         except Exception as exc:
             return f"Error: could not reach usage endpoint: {exc}"
 
-        # Condense to a concise summary the model can read at a glance, with
-        # the raw payload appended (truncated) only if the shape is unfamiliar.
+        # Summarize quota fields only. The upstream body can carry account
+        # identifiers, so it is not appended.
         try:
             data = json.loads(body)
         except ValueError:
-            return f"API usage from {url}:\n{body[:4000]}"
+            return "Error: usage endpoint returned a non-JSON body"
 
-        lines: list[str] = [f"API usage from {url}:"]
+        lines: list[str] = ["API usage:"]
         accounts = data.get("accounts")
         if accounts is not None:
             lines.append(f"Accounts: {accounts}")
@@ -182,25 +181,6 @@ class UsageTool(Tool):
             if len(per_account) > 5:
                 lines.append(f"  … +{len(per_account) - 5} more")
 
-        # Build a sanitized copy for the raw payload fallback — strip every email field recursively
-        def _sanitize(obj):
-            if isinstance(obj, dict):
-                out = {}
-                for k, v in obj.items():
-                    if k.lower() == "email":
-                        out[k] = f"redacted_{hash(str(v)) % 10000:04d}@redacted.local"
-                    else:
-                        out[k] = _sanitize(v)
-                return out
-            if isinstance(obj, list):
-                return [_sanitize(x) for x in obj]
-            return obj
-
-        sanitized = _sanitize(data)
-        rendered = json.dumps(sanitized, indent=2, ensure_ascii=False)
-        if len(rendered) > 2500:
-            rendered = rendered[:2500] + "\n… [truncated, emails redacted]"
-        lines.append("\nSanitized payload (emails redacted):" + rendered)
         return "\n".join(lines)
 
 class ReportTool(Tool):

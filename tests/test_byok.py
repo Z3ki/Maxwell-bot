@@ -126,7 +126,17 @@ def test_public_resolver_rejects_private_literals_and_pins_public_dns(monkeypatc
     resolver = _PublicOnlyResolver()
 
     async def check_literals():
-        for address in ("127.0.0.1", "169.254.169.254", "::1", "fc00::1", "::ffff:127.0.0.1"):
+        for address in (
+            "127.0.0.1",
+            "169.254.169.254",
+            "::1",
+            "fc00::1",
+            "::ffff:127.0.0.1",
+            "224.0.0.1",
+            "ff02::1",
+            "fec0::1",
+            "64:ff9b::7f00:1",
+        ):
             with pytest.raises(OSError):
                 await resolver.resolve(address, 443)
         result = await resolver.resolve("1.1.1.1", 443)

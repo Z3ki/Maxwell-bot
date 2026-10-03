@@ -285,6 +285,18 @@ def test_execute_reorder_alias_and_below_bot_role():
     assert by_id[11] == 4
 
 
+def test_execute_create_refuses_permissions_the_asker_lacks():
+    fx = _guild()
+    result = asyncio.run(
+        ManageRoleTool(SimpleNamespace()).execute(
+            fx.msg, action="create", name="Ops", permissions="administrator"
+        )
+    )
+    assert "cannot grant" in result
+    assert "administrator" in result
+    fx.guild.create_role.assert_not_called()
+
+
 def test_execute_refuses_without_manage_roles():
     fx = _guild()
     fx.me.guild_permissions = _perms(manage_roles=False)

@@ -151,6 +151,40 @@ def test_purge_confirmation_rechecks_permissions_after_role_revocation():
     assert "permissions no longer allow it" in interaction.followups[0][0]
 
 
+def test_purge_confirm_deletes_when_message_delete_rejects_reason():
+    """discord.py 2.7 Message.delete(reason=) raises TypeError and used to abort."""
+    guild, channel, _targets, bot, message = _setup()
+    reasons = []
+
+    class _LibraryMessage(_Target):
+        def __init__(self, mid, author_id):
+            super().__init__(mid, author_id)
+            self.channel = SimpleNamespace(id=channel.id)
+
+            async def delete_message(channel_id, message_id, *, reason=None):
+                assert channel_id == channel.id
+                assert message_id == mid
+                reasons.append(reason)
+                self.deleted = True
+
+            self._state = SimpleNamespace(
+                http=SimpleNamespace(delete_message=delete_message)
+            )
+
+        async def delete(self, *, delay=None):
+            raise TypeError("unexpected keyword reason")
+
+    target = _LibraryMessage(101, 7)
+    channel.targets = {"101": target}
+    tool = PurgeMessagesTool(bot)
+    asyncio.run(tool.execute(message, limit="1", user_id="7"))
+    confirmer = _Interaction(guild, channel, 7)
+    asyncio.run(channel.preview.view.children[0].callback(confirmer))
+    assert target.deleted is True
+    assert reasons and reasons[0]
+    assert "finished" in confirmer.followups[0][0].lower() or "deleted" in confirmer.followups[0][0].lower()
+
+
 def test_invalid_user_filter_cannot_turn_into_an_unfiltered_purge():
     guild, channel, targets, bot, message = _setup()
     result = asyncio.run(

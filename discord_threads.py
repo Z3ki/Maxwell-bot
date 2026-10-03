@@ -424,6 +424,27 @@ async def resolve_thread_channel(bot: Any, message: Any, thread_id: str | None) 
     return None
 
 
+def _thread_edit_allowed(message: Any, channel: Any) -> str:
+    """Rename and archive need manage_threads for the bot and the asker.
+
+    The thread owner may still rename or archive their own thread when the
+    bot has manage_threads. Anyone who can merely view the thread cannot.
+    """
+    from tooling.helpers import _missing_cap
+
+    guild = getattr(channel, "guild", None)
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    owner_id = getattr(channel, "owner_id", None)
+    owns = (
+        owner_id is not None
+        and author_id is not None
+        and str(owner_id) == str(author_id)
+    )
+    if owns:
+        return _missing_cap(guild, "manage_threads", None, channel=channel)
+    return _missing_cap(guild, "manage_threads", message, channel=channel)
+
+
 def can_access_thread(message: Any, channel: Any) -> bool:
     if not is_discord_thread(channel):
         return False
@@ -708,6 +729,9 @@ class ThreadControlTool(Tool):
         channel = await resolve_thread_channel(self.bot, message, thread_id)
         if channel is None or not is_discord_thread(channel):
             return "Error: pass thread_id of a live Discord thread, or run this inside it"
+        denied = _thread_edit_allowed(message, channel)
+        if denied:
+            return denied
         clean = sanitize_thread_name(new_name)
         try:
             await channel.edit(name=clean)
@@ -725,6 +749,9 @@ class ThreadControlTool(Tool):
         channel = await resolve_thread_channel(self.bot, message, thread_id)
         if channel is None or not is_discord_thread(channel):
             return "Error: pass thread_id of a live Discord thread, or run this inside it"
+        denied = _thread_edit_allowed(message, channel)
+        if denied:
+            return denied
         try:
             await channel.edit(archived=archived)
         except discord.Forbidden:
