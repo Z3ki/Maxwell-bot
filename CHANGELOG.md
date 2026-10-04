@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.8 — 2026-10-04
+
+Install with `--version v0.1.8`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
+
+- The model still decides when to search. Prompts now cover changing facts, the current date, reading the source, and treating older web memories as historical.
+- `web_search` tries SearXNG when `SEARXNG_URL` is set, then Tavily when `TAVILY_API_KEY` is set, then the keyless ddgs fallback. ddgs ships with the core install. A failed or empty provider falls back inside the same deadline, and useful partial results return without filling every slot.
+- Identical in-flight queries share one retrieval. Workers, queues, and caches are bounded, and shutdown does not abandon a search that is already running.
+- The model can request `freshness` of live, recent (two minutes), or stable (thirty minutes), and a publication `time_range` of day, week, month, or year.
+- `fetch_url` keeps the requested HTML section, bounds redirect and fallback time, and strips credentials on cross-origin redirects.
+- Optional SearXNG is `docker compose -f docker-compose.search.yml up -d` after `SEARXNG_SECRET` and `SEARXNG_URL` are set. See [web search configuration](docs/WEB_SEARCH.md).
+- A link unfurl that replaces the live message no longer drops `reply()`. `send_media`, `send_file`, `send_meme`, and the final text reply post through the channel when reply is missing.
+
 ## 0.1.7 — 2026-10-03
 
 Install with `--version v0.1.7`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
