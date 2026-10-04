@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Move prompt construction, output cleanup, provider protocols, and scoped memory
+  policy into shared modules with explicit interfaces and compatible imports.
+- Preserve async cleanup during repeated cancellation, keep admission bounded,
+  and isolate unrelated requests during interruption and shutdown.
+- Make plugin setup and reload transactional, retaining core registries and
+  removing registrations and resources belonging to failed or retired plugins.
+- Deduplicate memory by provenance and migrate stored hashes atomically while
+  preserving row IDs, metadata, and embeddings.
+- Expand regression coverage for malformed provider streams, lifecycle failures,
+  scoped memory, prompt construction, and visible output. Add `make check` and
+  an 80% shared-core line/branch coverage gate to CI.
+
 ## 0.1.8 — 2026-10-04
 
 Install with `--version v0.1.8`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.

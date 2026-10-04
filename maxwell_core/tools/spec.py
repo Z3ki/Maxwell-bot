@@ -6,6 +6,7 @@ permissions, and dispatch. Static catalogs are derived from this.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,7 +58,7 @@ class ToolSpec:
         return "any" in allowed or platform in allowed
 
     def schema(self) -> dict[str, Any]:
-        params = dict(self.parameters or {})
+        params = deepcopy(self.parameters or {})
         if params.get("type") != "object":
             params = {
                 "type": "object",

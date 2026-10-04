@@ -8,6 +8,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import os
 import shutil
 import sys
@@ -20,6 +21,12 @@ from typing import Any, Callable, Dict, List, Optional
 from maxwell_core.hooks import HookBus
 from maxwell_core.plugins.catalog import iter_plugin_dirs
 from maxwell_core.plugins.context import PluginContext
+from maxwell_core.plugins.lifecycle import (
+    PendingSetup,
+    ToolWrapper,
+    discard_awaitable,
+    invoke_hook,
+)
 from maxwell_core.plugins.manifest import (
     ManifestError,
     PluginManifest,
@@ -29,6 +36,7 @@ from maxwell_core.plugins.manifest import (
 from maxwell_core.prompts.manager import PromptManager
 from maxwell_core.services import ServiceContainer
 from maxwell_core.tools.registry import ToolRegistry, set_global_registry
+from maxwell_core.tools.publication import publish_plugin_tools
 
 logger = logging.getLogger("maxwell.plugins")
 
@@ -45,6 +53,8 @@ _RETIRED_PUBLIC_RUNTIME_PLUGINS = frozenset({
 _EVENT_TIMEOUT = max(1.0, float(os.getenv("MAXWELL_PLUGIN_EVENT_TIMEOUT", "15") or 15))
 _JOB_TIMEOUT = max(5.0, float(os.getenv("MAXWELL_PLUGIN_JOB_TIMEOUT", "120") or 120))
 _MAX_TRACKED_TASKS_PER_PLUGIN = 32
+_SETUP_TIMEOUT = 120.0
+_TEARDOWN_TIMEOUT = 15.0
 
 
 def _topo_sort(nodes: dict[str, list[str]]) -> list[str]:
@@ -119,8 +129,11 @@ class PluginManager:
         self._maxwell_runtime_stats: Dict[str, dict[str, Any]] = {}
         self._maxwell_plugin_views: Dict[str, set[Any]] = {}
         self._maxwell_dynamic_items: Dict[str, set[Any]] = {}
-        self._pending_async_setup: list[Any] = []
-        self._tool_wraps: Dict[str, list[tuple[Any, Any]]] = {}
+        self._pending_async_setup: list[PendingSetup] = []
+        self._pending_teardown: list[tuple[str, Any, PluginContext | None]] = []
+        self._event_tasks: Dict[str, set[asyncio.Task]] = {}
+        self._tool_wraps: Dict[str, list[ToolWrapper]] = {}
+        self._lifecycle_lock = asyncio.Lock()
 
         self.hooks = HookBus()
         self.prompts = PromptManager()
@@ -289,17 +302,26 @@ class PluginManager:
         original = getattr(tool, "execute", None)
         if not callable(original):
             raise TypeError(f"tool {name!r} has no execute()")
-        replacement = wrapper(original)
+        link = ToolWrapper(tool=tool, original=original)
+        replacement = wrapper(link.delegate())
         if not callable(replacement):
             raise TypeError("wrap_tool factory must return a callable execute")
         tool.execute = replacement
-        self._tool_wraps.setdefault(str(plugin), []).append((tool, original))
+        link.replacement = replacement
+        self._tool_wraps.setdefault(str(plugin), []).append(link)
         return tool
 
     def _unwrap_tools(self, plugin: str) -> None:
-        for tool, original in self._tool_wraps.pop(str(plugin), []):
+        removed = self._tool_wraps.pop(str(plugin), [])
+        for link in reversed(removed):
+            # Bypass this link in wrappers owned by other still-loaded plugins.
+            for entries in self._tool_wraps.values():
+                for other in entries:
+                    if other.original is link.replacement:
+                        other.original = link.original
             with contextlib.suppress(Exception):
-                tool.execute = original
+                if link.tool.execute is link.replacement:
+                    link.tool.execute = link.original
 
     def register_context_tool(
         self, plugin_name: str, tool: Any, *, name: str | None = None
@@ -323,23 +345,28 @@ class PluginManager:
             )
         tool_name = tool_name.strip()
         if tool_name in self.all_plugin_tools:
-            owner, _existing = self.all_plugin_tools[tool_name]
+            owner, existing = self.all_plugin_tools[tool_name]
             if owner != plugin_name:
                 raise ValueError(
                     f"tool {tool_name!r} is already registered by plugin "
                     f"{owner!r}; {plugin_name!r} cannot shadow it"
                 )
+            if existing is tool and self.tool_registry.tool(tool_name) is tool:
+                return
+        data = self.loaded_plugins.get(plugin_name) or {}
+        manifest: PluginManifest | None = data.get("typed_manifest")
+        protected = bool(manifest.protected) if manifest is not None else False
+        self.tool_registry.register_tool(
+            tool, name=tool_name, plugin=plugin_name, protected=protected
+        )
+        # The canonical registry can reject a conflict. Publish secondary
+        # dispatch views only after that operation succeeds.
         data = self.loaded_plugins.setdefault(
             plugin_name,
             {"manifest": {}, "module": None, "tools": {}, "context": None},
         )
         data.setdefault("tools", {})[tool_name] = tool
         self.all_plugin_tools[tool_name] = (plugin_name, tool)
-        manifest: PluginManifest | None = data.get("typed_manifest")
-        protected = bool(manifest.protected) if manifest is not None else False
-        self.tool_registry.register_tool(
-            tool, name=tool_name, plugin=plugin_name, protected=protected
-        )
 
     def _track_view(self, plugin: str, view: Any) -> None:
         self._maxwell_plugin_views.setdefault(plugin, set()).add(view)
@@ -379,7 +406,7 @@ class PluginManager:
     def spawn_task(
         self, plugin: str, awaitable: Any, *, name: str | None = None
     ) -> asyncio.Task:
-        if not hasattr(awaitable, "__await__"):
+        if not inspect.isawaitable(awaitable):
             raise TypeError("ctx.spawn() expects a coroutine/awaitable")
         try:
             loop = asyncio.get_running_loop()
@@ -390,8 +417,8 @@ class PluginManager:
             raise RuntimeError(
                 "ctx.spawn() needs a running event loop; call it from an event/job callback"
             ) from exc
-        group = {t for t in self._maxwell_managed_tasks.get(plugin, set()) if not t.done()}
-        self._maxwell_managed_tasks[plugin] = group
+        group = self._maxwell_managed_tasks.setdefault(plugin, set())
+        group.difference_update(task for task in tuple(group) if task.done())
         if len(group) >= _MAX_TRACKED_TASKS_PER_PLUGIN:
             close = getattr(awaitable, "close", None)
             if callable(close):
@@ -399,14 +426,20 @@ class PluginManager:
             raise RuntimeError(
                 f"plugin {plugin!r} already has {_MAX_TRACKED_TASKS_PER_PLUGIN} managed background tasks"
             )
-        task = loop.create_task(awaitable, name=name or f"plugin-bg-{plugin}")
+        async def run() -> Any:
+            return await awaitable
+
+        task = loop.create_task(run(), name=name or f"plugin-bg-{plugin}")
         group.add(task)
         row = self._stats(plugin)
         row["background_started"] += 1
 
         def done(t: asyncio.Task) -> None:
             group.discard(t)
+            # If cancelled before run() begins, the supplied coroutine has
+            # never been awaited. Dispose of it rather than leaking warnings.
             if t.cancelled():
+                discard_awaitable(awaitable)
                 return
             try:
                 exc = t.exception()
@@ -432,7 +465,7 @@ class PluginManager:
         if not callable(callback):
             raise TypeError("callback must be callable")
         delay = float(seconds)
-        if delay < 0 or delay > 31_536_000:
+        if not math.isfinite(delay) or delay < 0 or delay > 31_536_000:
             raise ValueError("seconds must be between 0 and 31536000")
 
         async def delayed() -> None:
@@ -447,34 +480,36 @@ class PluginManager:
             plugin, delayed(), name=name or f"plugin-after-{plugin}"
         )
 
-    def _cancel_managed(self) -> list[asyncio.Task]:
+    def _cancel_managed(self, plugin: str | None = None) -> list[asyncio.Task]:
+        groups = self._maxwell_managed_tasks
+        selected = list(groups) if plugin is None else [plugin]
         tasks = [
             task
-            for values in self._maxwell_managed_tasks.values()
-            for task in values
+            for name in selected
+            for task in groups.pop(name, set())
             if isinstance(task, asyncio.Task)
         ]
-        self._maxwell_managed_tasks.clear()
         for task in tasks:
             if not task.done():
                 task.cancel()
         return tasks
 
-    def _cleanup_ui(self) -> None:
-        for views in self._maxwell_plugin_views.values():
+    def _cleanup_ui(self, plugin: str | None = None) -> None:
+        names = list(self._maxwell_plugin_views) if plugin is None else [plugin]
+        for name in names:
+            views = self._maxwell_plugin_views.pop(name, set())
             for view in list(views):
                 stop = getattr(view, "stop", None)
                 if callable(stop):
                     with contextlib.suppress(Exception):
                         stop()
-        self._maxwell_plugin_views.clear()
         remove = getattr(self.bot, "remove_dynamic_items", None)
-        if callable(remove):
-            for items in self._maxwell_dynamic_items.values():
-                if items:
-                    with contextlib.suppress(Exception):
-                        remove(*tuple(items))
-        self._maxwell_dynamic_items.clear()
+        names = list(self._maxwell_dynamic_items) if plugin is None else [plugin]
+        for name in names:
+            items = self._maxwell_dynamic_items.pop(name, set())
+            if items and callable(remove):
+                with contextlib.suppress(Exception):
+                    remove(*tuple(items))
 
     # ------------------------------------------------------------------ #
     # events + jobs
@@ -525,9 +560,14 @@ class PluginManager:
                 row["last_error_at"] = time.time()
                 logger.exception("Plugin %r failed handling %s", plugin_name, event)
 
-        await asyncio.gather(
-            *(_run(name, cb) for name, cb in filtered), return_exceptions=True
-        )
+        tasks = []
+        for name, callback in filtered:
+            task = asyncio.create_task(_run(name, callback), name=f"plugin-event-{name}-{event}")
+            group = self._event_tasks.setdefault(name, set())
+            group.add(task)
+            task.add_done_callback(group.discard)
+            tasks.append(task)
+        await asyncio.gather(*tasks, return_exceptions=True)
         return len(filtered)
 
     @staticmethod
@@ -562,6 +602,11 @@ class PluginManager:
 
     def start_jobs(self) -> int:
         if self._jobs_started:
+            return 0
+        if self._pending_async_setup or any(
+            data.get("setup_complete") is False for data in self.loaded_plugins.values()
+        ):
+            logger.warning("Plugin jobs wait for complete_pending_setups()")
             return 0
         try:
             loop = asyncio.get_running_loop()
@@ -622,40 +667,120 @@ class PluginManager:
         for task in tasks:
             if not task.done():
                 task.cancel()
-        for task in tasks:
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await task
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def teardown(self) -> None:
-        await self.stop_jobs()
-        managed = self._cancel_managed()
-        for task in managed:
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await task
-        self._cleanup_ui()
-        for plugin_name, data in list(self.loaded_plugins.items()):
-            hook = getattr((data or {}).get("module"), "teardown", None)
-            if not callable(hook):
+        """Stop runtime work and remove every plugin, in reverse load order."""
+        async with self._lifecycle_lock:
+            await self._teardown_plugins()
+
+    async def _invoke_teardown(self, plugin: str, module: Any, ctx: PluginContext | None) -> None:
+        hook = getattr(module, "teardown", None)
+        if not callable(hook):
+            return
+        try:
+            result = invoke_hook(hook, self.bot, ctx)
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=_TEARDOWN_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Plugin %r teardown failed", plugin)
+
+    async def _drain_teardowns(self) -> None:
+        while self._pending_teardown:
+            plugin, module, ctx = self._pending_teardown.pop(0)
+            await self._invoke_teardown(plugin, module, ctx)
+
+    async def _teardown_plugins(self) -> None:
+        plugins = list(self.loaded_plugins)
+        self._discard_pending_setups()
+        # Retire contexts before cancellation: a task's finally block cannot
+        # register new jobs or hooks into a generation being unloaded.
+        for data in self.loaded_plugins.values():
+            ctx = data.get("context")
+            if ctx is not None:
+                ctx._retire()
+        try:
+            await self.stop_jobs()
+            tasks = self._cancel_managed()
+            for group in self._event_tasks.values():
+                tasks.extend(group)
+            self._event_tasks.clear()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._cleanup_ui()
+            await self._drain_teardowns()
+            for plugin in reversed(plugins):
+                data = self.loaded_plugins.get(plugin) or {}
+                try:
+                    await self._invoke_teardown(plugin, data.get("module"), data.get("context"))
+                finally:
+                    self._clear_plugin_registrations(plugin)
+        finally:
+            # A missing hook, hook failure, or caller cancellation must never
+            # leave dispatch pointing at an unloaded plugin.
+            for plugin in plugins:
+                self._clear_plugin_registrations(plugin)
+            self.loaded_plugins.clear()
+            self.all_plugin_tools.clear()
+            self._listeners.clear()
+            self._job_specs.clear()
+            self._extensions.clear()
+            self._cleanup_ui()
+            self.sync_bot_tools()
+            self._publish_result_tools()
+
+    def _discard_pending_setups(self, plugin: str | None = None) -> None:
+        kept = []
+        for pending in self._pending_async_setup:
+            if plugin is not None and pending.plugin != plugin:
+                kept.append(pending)
                 continue
-            try:
-                result = hook(self.bot)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                logger.exception("Plugin %r teardown failed", plugin_name)
-            self._clear_plugin_registrations(plugin_name)
-        self._listeners.clear()
-        self._job_specs.clear()
-        self._extensions.clear()
+            if pending.awaitable is not None:
+                discard_awaitable(pending.awaitable)
+        self._pending_async_setup = kept
 
     def _clear_plugin_registrations(self, plugin_name: str) -> None:
+        data = self.loaded_plugins.get(plugin_name) or {}
+        ctx = data.get("context")
+        if ctx is not None:
+            ctx._retire()
+        self._discard_pending_setups(plugin_name)
+        self._cancel_managed(plugin_name)
+        for task in self._job_tasks.pop(plugin_name, []):
+            task.cancel()
+        for task in self._event_tasks.pop(plugin_name, set()):
+            task.cancel()
+        self._cleanup_ui(plugin_name)
         self._unwrap_tools(plugin_name)
         self._drop_registrations(plugin_name)
         self.hooks.unregister_plugin(plugin_name)
         self.prompts.unregister_plugin(plugin_name)
         self.services.unregister_owner(plugin_name)
-        self.tool_registry.unregister_plugin(plugin_name)
+        self.tool_registry.unregister_plugin(plugin_name, force=True)
         self._extensions.pop(plugin_name, None)
+
+    def _forget_plugin_modules(self, plugin_name: str) -> None:
+        module_name = f"plugins.{plugin_name}"
+        for loaded_name in list(sys.modules):
+            if loaded_name == module_name or loaded_name.startswith(module_name + "."):
+                sys.modules.pop(loaded_name, None)
+
+    def _rollback_plugin(self, plugin_name: str, error: BaseException) -> None:
+        """Remove partial registrations; schedule resource cleanup for the host."""
+        data = self.loaded_plugins.get(plugin_name) or {}
+        module = data.get("module")
+        if callable(getattr(module, "teardown", None)):
+            self._pending_teardown.append((plugin_name, module, data.get("context")))
+        self._clear_plugin_registrations(plugin_name)
+        self.loaded_plugins.pop(plugin_name, None)
+        self._forget_plugin_modules(plugin_name)
+        self.load_errors[plugin_name] = str(error) or type(error).__name__
+        logger.error("Error loading plugin %r: %s", plugin_name, error)
 
     # ------------------------------------------------------------------ #
     # loading
@@ -681,6 +806,16 @@ class PluginManager:
         return iter_plugin_dirs(extra)
 
     def load_plugins(self) -> Dict[str, Any]:
+        """Discover and invoke setup; async hosts must complete pending setups.
+
+        Use ``reload_plugins_async`` when replacing an active runtime so its
+        async resource cleanup completes before a new generation is loaded.
+        """
+        self._discard_pending_setups()
+        self._cancel_managed()
+        self._cleanup_ui()
+        for plugin_name in list(self.loaded_plugins):
+            self._clear_plugin_registrations(plugin_name)
         for plugin_name in list(self._tool_wraps):
             self._unwrap_tools(plugin_name)
         self.loaded_plugins.clear()
@@ -689,10 +824,9 @@ class PluginManager:
         self._listeners.clear()
         self._job_specs.clear()
         self._extensions.clear()
-        self.hooks = HookBus()
-        self.prompts = PromptManager()
-        self.services = ServiceContainer()
-        self.tool_registry = ToolRegistry()
+        # Keep host aliases and core-owned registrations alive. Plugins may
+        # require a core provider/memory service during their setup, including
+        # reload setup before the host has an opportunity to republish them.
         set_global_registry(self.tool_registry)
 
         root_str = str(self.root_dir)
@@ -721,50 +855,60 @@ class PluginManager:
 
         order = self._resolve_load_order(discovered)
         for plugin_name in order:
-            entry, _manifest = discovered[plugin_name]
+            entry, manifest = discovered[plugin_name]
+            pending_names = {pending.plugin for pending in self._pending_async_setup}
+            failed = [dep for dep in manifest.dependencies if dep in self.load_errors]
+            if failed:
+                self.load_errors[plugin_name] = (
+                    f"required plugin dependencies failed: {', '.join(failed)}"
+                )
+                continue
+            if any(dep in pending_names for dep in manifest.dependencies):
+                self._pending_async_setup.append(PendingSetup(plugin_name, entry, manifest))
+                continue
             try:
-                self._load_one(entry, plugin_name)
+                pending = self._load_one(entry, plugin_name)
+                if pending is not None:
+                    self._pending_async_setup.append(PendingSetup(plugin_name, entry, manifest, pending))
             except Exception as e:
-                for loaded_name in list(sys.modules):
-                    if loaded_name == f"plugins.{plugin_name}" or (
-                        loaded_name.startswith(f"plugins.{plugin_name}.")
-                    ):
-                        sys.modules.pop(loaded_name, None)
-                self._clear_plugin_registrations(plugin_name)
-                self.loaded_plugins.pop(plugin_name, None)
-                self.load_errors[plugin_name] = str(e)
-                logger.exception(f"Error loading plugin '{plugin_name}': {e}")
+                self._rollback_plugin(plugin_name, e)
 
         self._publish_result_tools()
         self.sync_bot_tools()
+        if self._pending_teardown:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self._drain_teardowns())
         return self.loaded_plugins
 
     def _resolve_load_order(
         self, discovered: dict[str, tuple[Path, PluginManifest]]
     ) -> list[str]:
-        graph: dict[str, list[str]] = {}
-        for name, (_path, manifest) in discovered.items():
-            missing = [dep for dep in manifest.dependencies if dep not in discovered]
-            if missing:
-                self.load_errors[name] = (
-                    f"missing required plugin dependencies: {', '.join(missing)}"
-                )
-                logger.error("Skipping plugin %r: %s", name, self.load_errors[name])
-                continue
-            graph[name] = list(manifest.dependencies)
-        try:
-            return _topo_sort(graph)
-        except ValueError as exc:
-            logger.error("%s", exc)
-            # Fall back to protected-first alphabetical so a cycle cannot
-            # take down the whole host.
-            protected = sorted(
-                n
-                for n, (_p, m) in discovered.items()
-                if n in graph and m.protected
-            )
-            rest = sorted(n for n in graph if n not in protected)
-            return protected + rest
+        graph = {name: list(manifest.dependencies) for name, (_path, manifest) in discovered.items()}
+        # Missing dependencies propagate through every downstream plugin.
+        # Merely ignoring missing graph nodes would run dependent setup code
+        # without the service/tool it explicitly requires.
+        while True:
+            blocked = {name: [dep for dep in deps if dep not in graph] for name, deps in graph.items()}
+            blocked = {name: deps for name, deps in blocked.items() if deps}
+            if not blocked:
+                break
+            for name, missing in blocked.items():
+                self.load_errors[name] = f"missing required plugin dependencies: {', '.join(missing)}"
+                graph.pop(name)
+        order = []
+        while graph:
+            ready = sorted(name for name, deps in graph.items() if not any(dep in graph for dep in deps))
+            if not ready:
+                members = ", ".join(sorted(graph))
+                for name in graph:
+                    self.load_errors[name] = f"dependency cycle or blocked by cycle: {members}"
+                break
+            for name in ready:
+                order.append(name)
+                graph.pop(name)
+        return order
 
     def _drop_registrations(self, plugin_name: str) -> None:
         for event in list(self._listeners):
@@ -780,7 +924,7 @@ class PluginManager:
             if owner == plugin_name:
                 self.all_plugin_tools.pop(tname, None)
 
-    def _load_one(self, entry: Path, plugin_name: str) -> None:
+    def _load_one(self, entry: Path, plugin_name: str) -> Any:
         manifest = self._load_typed_manifest(entry, plugin_name)
         module_name = f"plugins.{plugin_name}"
         init_py = entry / "__init__.py"
@@ -789,10 +933,7 @@ class PluginManager:
             init_py if init_py.exists() else (tools_py if tools_py.exists() else None)
         )
         if not target_file:
-            logger.warning(
-                f"No __init__.py or tools.py found in plugin '{plugin_name}'"
-            )
-            return
+            raise ValueError(f"No __init__.py or tools.py found in plugin {plugin_name!r}")
 
         for loaded_name in list(sys.modules):
             if loaded_name == module_name or loaded_name.startswith(module_name + "."):
@@ -825,10 +966,28 @@ class PluginManager:
             "tools": {},
             "context": ctx,
             "path": str(entry),
+            "setup_complete": False,
         }
         tools_list = self._call_setup(mod, ctx)
+        if inspect.isawaitable(tools_list):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                tools_list = asyncio.run(self._await_setup(tools_list))
+            else:
+                return tools_list
+        self._finalize_plugin_setup(plugin_name, tools_list)
 
-        tool_dict = self.loaded_plugins[plugin_name]["tools"]
+    @staticmethod
+    async def _await_setup(awaitable: Any) -> Any:
+        return await asyncio.wait_for(awaitable, timeout=_SETUP_TIMEOUT)
+
+    def _finalize_plugin_setup(self, plugin_name: str, tools_list: Any) -> None:
+        data = self.loaded_plugins[plugin_name]
+        manifest = data["typed_manifest"]
+        tools_list = tools_list if isinstance(tools_list, list) else []
+
+        tool_dict = data["tools"]
         for t in tools_list:
             name = getattr(t, "tool_name", None) or getattr(t, "name", None)
             if not name and hasattr(t, "get_name") and callable(t.get_name):
@@ -871,6 +1030,7 @@ class PluginManager:
             except ValueError as exc:
                 logger.warning("plugin %s prompt rejected: %s", plugin_name, exc)
 
+        data["setup_complete"] = True
         events = self.plugin_events(plugin_name)
         jobs = len(self._job_specs.get(plugin_name) or [])
         logger.info(
@@ -880,6 +1040,49 @@ class PluginManager:
             f", events: {', '.join(events)}" if events else "",
             f", {jobs} job(s)" if jobs else "",
         )
+
+    async def complete_pending_setups(self) -> Dict[str, Any]:
+        """Finish async setup in dependency order and publish successful tools.
+
+        A failed or cancelled setup is rolled back together with its dependent
+        plugins. Concurrent startup/reload/shutdown calls serialize here.
+        """
+        async with self._lifecycle_lock:
+            await self._complete_pending_setups()
+        return self.loaded_plugins
+
+    async def _complete_pending_setups(self) -> None:
+        await self._drain_teardowns()
+        try:
+            while self._pending_async_setup:
+                pending = self._pending_async_setup.pop(0)
+                failed = [dep for dep in pending.manifest.dependencies if dep not in self.loaded_plugins or dep in self.load_errors]
+                if failed:
+                    if pending.awaitable is not None:
+                        discard_awaitable(pending.awaitable)
+                    self._rollback_plugin(pending.plugin, ValueError(f"required plugin dependencies failed: {', '.join(failed)}"))
+                    continue
+                try:
+                    awaitable = pending.awaitable
+                    if awaitable is None:
+                        awaitable = self._load_one(pending.entry, pending.plugin)
+                    if awaitable is not None:
+                        tools_list = await self._await_setup(awaitable)
+                        self._finalize_plugin_setup(pending.plugin, tools_list)
+                except asyncio.CancelledError as exc:
+                    self._rollback_plugin(pending.plugin, exc)
+                    # Do not retain unawaited coroutines from a cancelled
+                    # startup. The host can retry with a fresh load later.
+                    for item in list(self._pending_async_setup):
+                        self._rollback_plugin(item.plugin, exc)
+                    await self._drain_teardowns()
+                    raise
+                except Exception as exc:
+                    self._rollback_plugin(pending.plugin, exc)
+                await self._drain_teardowns()
+        finally:
+            self._publish_result_tools()
+            self.sync_bot_tools()
 
     def plugin_events(self, plugin_name: str) -> list[str]:
         return sorted(
@@ -904,53 +1107,21 @@ class PluginManager:
         return grouped
 
     @staticmethod
-    def _call_setup(mod: Any, ctx: PluginContext) -> list:
+    def _call_setup(mod: Any, ctx: PluginContext) -> Any:
         for attr in ("setup", "get_tools"):
             hook = getattr(mod, attr, None)
             if not callable(hook):
                 continue
-            try:
-                signature = inspect.signature(hook)
-            except (TypeError, ValueError):
-                res = hook(ctx.bot)
-            else:
-                try:
-                    signature.bind(ctx.bot, ctx)
-                except TypeError:
-                    try:
-                        signature.bind(ctx.bot, ctx=ctx)
-                    except TypeError:
-                        res = hook(ctx.bot)
-                    else:
-                        res = hook(ctx.bot, ctx=ctx)
-                else:
-                    res = hook(ctx.bot, ctx)
-            if inspect.isawaitable(res):
-                try:
-                    asyncio.get_running_loop()
-                except RuntimeError:
-                    res = asyncio.run(res)
-                else:
-                    ctx._manager._pending_async_setup.append(res)
-                    return []
-            return res if isinstance(res, list) else []
+            return invoke_hook(hook, ctx.bot, ctx)
         return []
 
     def _publish_result_tools(self) -> None:
-        names = set()
-        for data in self.loaded_plugins.values():
-            for tool_name, tool in (data.get("tools") or {}).items():
-                if getattr(tool, "returns_result", False):
-                    names.add(tool_name)
-        names.update(self.tool_registry.result_names())
         try:
-            import tool_schemas
-
-            tool_schemas.set_plugin_result_tools(names)
-            for spec in self.tool_registry.specs():
-                schema = spec.schema()
-                if spec.name not in tool_schemas.TOOL_PARAMETERS:
-                    tool_schemas.TOOL_PARAMETERS[spec.name] = schema
+            publish_plugin_tools(
+                self,
+                (spec for spec in self.tool_registry.specs()
+                 if (self.loaded_plugins.get(spec.plugin) or {}).get("setup_complete") is not False),
+            )
         except Exception as exc:  # pragma: no cover - import-order safety
             logger.debug("Could not publish plugin result contracts: %s", exc)
 
@@ -972,6 +1143,21 @@ class PluginManager:
         self._published_tool_names = published
 
     def reload_plugins(self) -> str:
+        """Compatibility reload; async host code should await reload_plugins_async.
+
+        Outside an event loop the complete lifecycle is run synchronously.
+        Inside a loop, resource cleanup and async setup remain pending until
+        ``complete_pending_setups`` is awaited by the caller.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.reload_plugins_async())
+        if self._lifecycle_lock.locked():
+            return "Error reloading plugins: another lifecycle operation is running; await reload_plugins_async()."
+        for plugin, data in self.loaded_plugins.items():
+            if callable(getattr(data.get("module"), "teardown", None)):
+                self._pending_teardown.append((plugin, data.get("module"), data.get("context")))
         for tasks in list(self._job_tasks.values()):
             for task in tasks:
                 if not task.done():
@@ -981,7 +1167,7 @@ class PluginManager:
         self._cancel_managed()
         self._cleanup_ui()
         try:
-            loaded = self.load_plugins()
+            self.load_plugins()
         except Exception as exc:
             logger.exception("Failed to reload plugins")
             return f"Error reloading plugins: {exc}"
@@ -989,6 +1175,27 @@ class PluginManager:
             self.start_jobs()
         except Exception:
             pass
+        return self._reload_summary()
+
+    async def reload_plugins_async(self) -> str:
+        """Complete resource cleanup, load/setup, and job startup atomically."""
+        async with self._lifecycle_lock:
+            await self._teardown_plugins()
+            try:
+                self.load_plugins()
+                await self._complete_pending_setups()
+            except asyncio.CancelledError:
+                await self._teardown_plugins()
+                raise
+            except Exception as exc:
+                logger.exception("Failed to reload plugins")
+                await self._teardown_plugins()
+                return f"Error reloading plugins: {exc}"
+            self.start_jobs()
+            return self._reload_summary()
+
+    def _reload_summary(self) -> str:
+        loaded = self.loaded_plugins
         tool_count = sum(
             len(data.get("tools") or {})
             for data in loaded.values()
@@ -1049,6 +1256,10 @@ class PluginManager:
         user_id: str | int | None,
         guild_id: str | int | None = None,
     ) -> bool:
+        if (self.loaded_plugins.get(plugin_name) or {}).get("setup_complete") is False:
+            return False
+        if any(pending.plugin == plugin_name for pending in self._pending_async_setup):
+            return False
         cfg = (self.state.get("plugins") or {}).get(plugin_name)
         if not isinstance(cfg, dict):
             cfg = {}
@@ -1434,6 +1645,7 @@ class PluginManager:
             return f"Error moving plugin code aside: {exc}"
         self._clear_plugin_registrations(plugin_name)
         self.loaded_plugins.pop(plugin_name, None)
+        self._publish_result_tools()
         self.sync_bot_tools()
         return (
             f"Uninstalled plugin '{plugin_name}'. Code moved to {trash}. "

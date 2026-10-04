@@ -17,20 +17,29 @@ class ServiceContainer:
         self._factories: dict[str, Callable[[], Any]] = {}
         self._owners: dict[str, str] = {}
 
-    def register(self, name: str, service: Any, *, owner: str = "core") -> None:
+    def _check_registration(self, name: str, owner: str) -> tuple[str, str]:
         key = str(name).strip()
+        owner = str(owner).strip()
         if not key:
             raise ValueError("service name is required")
+        if not owner:
+            raise ValueError("service owner is required")
         existing = self._owners.get(key)
-        if existing and existing != owner and key in self._services:
-            raise ValueError(
-                f"service {key!r} is already owned by plugin {existing!r}"
-            )
+        if existing is not None and existing != owner:
+            raise ValueError(f"service {key!r} is already owned by plugin {existing!r}")
+        return key, owner
+
+    def register(self, name: str, service: Any, *, owner: str = "core") -> None:
+        key, owner = self._check_registration(name, owner)
+        self._factories.pop(key, None)
         self._services[key] = service
         self._owners[key] = owner
 
     def factory(self, name: str, factory: Callable[[], Any], *, owner: str = "core") -> None:
-        key = str(name).strip()
+        key, owner = self._check_registration(name, owner)
+        if not callable(factory):
+            raise TypeError("service factory must be callable")
+        self._services.pop(key, None)
         self._factories[key] = factory
         self._owners[key] = owner
 
@@ -62,3 +71,7 @@ class ServiceContainer:
 
     def names(self) -> list[str]:
         return sorted(set(self._services) | set(self._factories))
+
+    def snapshot(self) -> dict[str, Any]:
+        """Existing instances for teardown, without instantiating lazy services."""
+        return dict(self._services)

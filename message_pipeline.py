@@ -45,6 +45,8 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from concurrency_safety import cancel_once
+
 logger = logging.getLogger(__name__)
 
 
@@ -158,6 +160,7 @@ class ReplyQueue:
         self._handler: Callable[[Any, str], Awaitable[Any]] | None = None
         self._task_factory: Callable[[Any], Any] = lambda task: task
         self._closing = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def bind(
         self,
@@ -317,7 +320,10 @@ class ReplyQueue:
         state.queue = kept
 
     def _make_room(self, cid: str, state: _ChannelState) -> bool:
-        if len(state.queue) < self.max_directed:
+        if (
+            len(state.queue) < self.max_directed
+            and self._outstanding < self.max_outstanding
+        ):
             return True
         for index, entry in enumerate(state.queue):
             if not entry.directed:
@@ -371,10 +377,14 @@ class ReplyQueue:
                         cid, entry, "deferred" if entry.directed else "queue full"
                     )
                     return
-                task = asyncio.ensure_future(handler(entry.message, entry.content))
-                state.running = task
                 state.running_entry = entry
+                task = None
                 try:
+                    # Handler invocation itself can fail before an awaitable
+                    # exists. It still owns an outstanding slot and must
+                    # follow the same accounting and recovery as await errors.
+                    task = asyncio.ensure_future(handler(entry.message, entry.content))
+                    state.running = task
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
                     # Two very different cancellations arrive here:
@@ -388,10 +398,10 @@ class ReplyQueue:
                     #    reply task is still running and we must re-raise.
                     pump = asyncio.current_task()
                     if self._closing or (pump is not None and pump.cancelling()):
-                        if not task.done():
-                            task.cancel()
-                        with contextlib.suppress(Exception, asyncio.CancelledError):
-                            await task
+                        if task is not None and not task.done():
+                            cancel_once(task)
+                            with contextlib.suppress(Exception, asyncio.CancelledError):
+                                await task
                         raise
                     logger.info("Reply cancelled in %s; continuing queue", cid)
                 except Exception:
@@ -426,11 +436,11 @@ class ReplyQueue:
             state.queue.clear()
         running = state.running
         if running is not None and not running.done():
-            running.cancel()
+            cancel_once(running)
             return True
         return False
 
-    def drop_author(self, channel_id: Any, user_id: Any) -> list[Any]:
+    def drop_author(self, channel_id: Any, user_id: Any) -> list[_Pending]:
         """Drop queued turns from one author. The running turn is left alone."""
         cid = str(channel_id or "")
         uid = str(user_id or "")
@@ -476,17 +486,26 @@ class ReplyQueue:
         return dropped
 
     async def close(self) -> None:
-        """Stop all channels before awaiting cancellation; never restart pumps."""
+        """Stop all channels and share one cancellation-safe shutdown task."""
         self._closing = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._shutdown(), name="reply-queue-close"
+            )
+        await asyncio.shield(self._close_task)
+
+    async def _shutdown(self) -> None:
         tasks = set()
         for state in self._channels.values():
             self._outstanding -= len(state.queue)
             state.queue.clear()
-            for task in (state.running, state.pump):
-                if task is not None:
-                    tasks.add(task)
-                    if not task.done():
-                        task.cancel()
+            # The pump owns cancellation and awaiting of its reply. Cancelling
+            # both independently can interrupt the reply's async cleanup with
+            # a second CancelledError and leak its resources.
+            if state.pump is not None:
+                tasks.add(state.pump)
+                if not state.pump.done():
+                    cancel_once(state.pump)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._channels.clear()
@@ -649,7 +668,8 @@ class RequestJournal:
     def get(self, message_id: Any) -> dict[str, Any] | None:
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM requests WHERE message_id = ?", (str(message_id).strip(),)
+                "SELECT * FROM requests WHERE message_id = ?",
+                (str(message_id).strip(),),
             ).fetchone()
             return self._record(row) if row is not None else None
 
@@ -833,11 +853,13 @@ class Watermarks:
         marks = raw.get("channels") if isinstance(raw, dict) else None
         if not isinstance(marks, dict):
             return
+        was_dirty = self._dirty
         for cid, value in marks.items():
-            try:
-                self._marks[str(cid)] = int(value)
-            except (TypeError, ValueError):
-                continue
+            # Disk data obeys the same validation, size bound and monotonic
+            # high-water rule as new receipts. Reloads cannot move a live
+            # channel backwards or restore an unbounded channel dictionary.
+            self.note(cid, value)
+        self._dirty = was_dirty
 
     def save(self) -> None:
         if not self._dirty:
@@ -856,10 +878,10 @@ class Watermarks:
                 os.unlink(tmp)
 
     def note(self, channel_id: Any, message_id: Any) -> None:
-        cid = str(channel_id or "")
+        cid = str(channel_id or "").strip()
         try:
             mid = int(message_id)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return
         if not cid or mid <= 0:
             return

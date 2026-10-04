@@ -1,16 +1,11 @@
 """OpenAI-compatible chat transport and compatibility helpers for Maxwell."""
 
 import asyncio
-import contextlib
 import copy
-import ipaddress
 from functools import wraps
-import json
+import ipaddress
 import logging
-import math
 import os
-import re
-import socket
 import time
 from collections import deque
 from typing import Any
@@ -42,1154 +37,65 @@ from maxwell_core.providers.errors import (
     ProviderUsageExhaustedError,
 )
 
+# Compatibility exports. New code may import cohesive helpers from maxwell_core.providers.
+from maxwell_core.providers.http import (
+    _ip_is_public as _ip_is_public,
+    _PublicOnlyResolver as _PublicOnlyResolver,
+    _read_response_text_limited as _read_response_text_limited,
+    _read_json_response_limited as _read_json_response_limited,
+    normalize_base_url as normalize_base_url,
+)
+from maxwell_core.providers.custom_tools import (
+    _CustomToolCallBuffer as _CustomToolCallBuffer,
+    _find_balanced_json_end as _find_balanced_json_end,
+    _repair_unescaped_html_quotes as _repair_unescaped_html_quotes,
+    _body_terminator_candidates as _body_terminator_candidates,
+    _escape_body_slice as _escape_body_slice,
+    _safe_parse_tool_call_candidate as _safe_parse_tool_call_candidate,
+)
+from maxwell_core.providers.tool_calls import (
+    _keep_tool_call_provider_fields as _keep_tool_call_provider_fields,
+    _append_tool_call_arguments as _append_tool_call_arguments,
+    _extract_partial_reasoning as _extract_partial_reasoning,
+)
+from maxwell_core.providers.streaming import (
+    _safe_call as _safe_call,
+    _read_sse_response as _read_sse_response,
+    _nonempty_output_value as _nonempty_output_value,
+    _sse_delta_has_output as _sse_delta_has_output,
+)
+from maxwell_core.providers.usage import (
+    _coerce_token_count as _coerce_token_count,
+    _first_present_token_count as _first_present_token_count,
+    _reported_cost_usd as _reported_cost_usd,
+    _normalize_llm_usage as _normalize_llm_usage,
+    _estimate_completion_tokens as _estimate_completion_tokens,
+)
+from maxwell_core.providers.timing import (
+    compute_llm_timing as compute_llm_timing,
+    format_timing_debug as format_timing_debug,
+    _decode_tps as _decode_tps,
+    _weighted_tps as _weighted_tps,
+    format_timing_reply_line as format_timing_reply_line,
+    append_timing_to_reply as append_timing_to_reply,
+    _format_timing_row as _format_timing_row,
+)
+from maxwell_core.providers.error_rules import (
+    _is_usage_exhausted_error as _is_usage_exhausted_error,
+    _is_policy_block_text as _is_policy_block_text,
+    _is_content_policy_block as _is_content_policy_block,
+    _is_media_unsupported_error as _is_media_unsupported_error,
+    _required_temperature as _required_temperature,
+    _is_stream_options_rejected as _is_stream_options_rejected,
+    context_output_limit,
+    maximum_output_limit,
+)
+from maxwell_core.providers.protocol import (
+    CompletionResponse,
+    normalize_completion_message,
+)
+
 logger = logging.getLogger(__name__)
-
-_NAT64 = ipaddress.ip_network("64:ff9b::/96")
-
-
-def _ip_is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Same public-unicast rule as tooling.helpers._ip_is_public."""
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    if ip.is_multicast or ip.is_reserved or getattr(ip, "is_site_local", False):
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64:
-        return False
-    return bool(ip.is_global)
-
-
-class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
-    """Resolve only globally routable provider IPs and pin checked results."""
-
-    async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
-        try:
-            literal = ipaddress.ip_address(str(host).strip("[]"))
-        except ValueError:
-            literal = None
-        if literal is not None:
-            if not _ip_is_public(literal):
-                raise OSError("provider host resolved to a non-public address")
-            addresses = [
-                (
-                    socket.AF_INET6 if literal.version == 6 else socket.AF_INET,
-                    str(literal),
-                )
-            ]
-        else:
-            loop = asyncio.get_running_loop()
-            infos = await loop.getaddrinfo(
-                host, port, family=family, type=socket.SOCK_STREAM
-            )
-            addresses = []
-            for af, _socktype, _proto, _canonname, sockaddr in infos:
-                ip = ipaddress.ip_address(sockaddr[0])
-                if not _ip_is_public(ip):
-                    raise OSError("provider host resolved to a non-public address")
-                addresses.append((af, str(ip)))
-        if not addresses:
-            raise OSError("provider host did not resolve")
-        return [
-            {
-                "hostname": host,
-                "host": address,
-                "port": port,
-                "family": af,
-                "proto": socket.IPPROTO_TCP,
-                "flags": socket.AI_NUMERICHOST,
-            }
-            for af, address in addresses
-        ]
-
-    async def close(self):
-        return None
-
-
-async def _read_response_text_limited(resp, limit: int = 64 * 1024) -> str:
-    """Bound untrusted provider error bodies before decoding/logging."""
-    content = getattr(resp, "content", None)
-    if content is None or not hasattr(content, "iter_chunked"):
-        try:
-            return (await resp.text())[:limit]
-        except Exception:
-            return ""
-    body = bytearray()
-    async for chunk in content.iter_chunked(8192):
-        remaining = limit + 1 - len(body)
-        if remaining > 0:
-            body.extend(chunk[:remaining])
-        if len(body) > limit:
-            body = body[:limit]
-            break
-    return bytes(body).decode("utf-8", errors="replace")
-
-
-async def _read_json_response_limited(resp, limit: int) -> Any:
-    """Read and parse a bounded JSON response from an untrusted BYOK host."""
-    content = getattr(resp, "content", None)
-    if content is None or not hasattr(content, "read"):
-        # Small test doubles and compatible response adapters may only expose
-        # aiohttp's json() convenience method.
-        return await resp.json()
-    raw = bytearray()
-    while True:
-        chunk = await content.read(min(64 * 1024, limit + 1 - len(raw)))
-        if not chunk:
-            break
-        raw.extend(chunk)
-        if len(raw) > limit:
-            raise RuntimeError("Provider response exceeded the configured size limit")
-    charset = getattr(resp, "charset", None) or "utf-8"
-    try:
-        return json.loads(raw.decode(charset))
-    except (UnicodeError, LookupError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Provider returned invalid JSON") from exc
-
-
-# asyncio holds only a weak reference to a running task, so a bare
-# `create_task(...)` whose result nobody keeps can be garbage-collected
-# mid-flight and silently cancel the work. Keep a strong ref until it's done.
-from utils import _spawn_background as _fire_and_forget  # noqa: E402
-
-
-# Matches the `reasoning` string value inside a (possibly partial) tool-call
-# arguments JSON. Models emit reasoning as the FIRST field, well before any
-# huge field like create_site's `body`, so once this regex matches the value's
-# closing quote is in hand and we can surface the reasoning to the live
-# progress message without waiting for the rest of the stream.
-_PARTIAL_REASONING_RE = re.compile(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"')
-
-
-# ---------------------------------------------------------------------------
-# Custom streaming tool-call protocol
-# ---------------------------------------------------------------------------
-#
-# Native OpenAI-style tool_calls= doesn't stream incrementally on
-# minimax-m3:cloud (or similar Ollama-cloud chat completion models): the
-# entire {name, arguments} block arrives in ONE final delta at 88-100% of
-# stream time, leaving the bot's "working on it…" progress message silent
-# for the full 10-30s of generation.
-#
-# The "bare JSON on its own line" protocol sidesteps this: the model emits
-# the tool call as part of the normal text stream (not the API's tool_calls
-# field), and our SSE reader incrementally extracts it AS IT STREAMS. The
-# model already knows raw JSON (no new syntax to learn) and the marker
-# lands at ~12% of stream time vs ~88% for native — a real per-token
-# progress signal for the user.
-#
-# Protocol shape (one JSON object on its own line, no fence, no tag):
-#
-#     {"name": "<tool>", "arguments": {<JSON object>}}
-#
-# The text around the JSON (the model's reply to the user) is preserved
-# as normal assistant content. The JSON object is stripped from the
-# visible reply so the user doesn't see raw JSON, but is captured into
-# the ProviderResult.tool_calls so the rest of the dispatch flow treats
-# it exactly like a native tool call.
-#
-# Streaming extraction (custom_tool_call_buffer below) does this:
-#   1. Accumulates text deltas into a single buffer.
-#   2. As soon as a `{"name": "..."` substring is visible, fires a
-#      ``on_partial_name`` callback so the progress message can switch
-#      from "thinking: …" to "<tool>: …" — even if the args haven't
-#      finished streaming.
-#   3. As soon as the outer JSON's closing brace is matched (counting
-#      braces + tracking strings/escapes), parses it and returns a
-#      native-format tool call list.
-#   4. Continues looking for more tool calls (the model can chain
-#      several in one response).
-#
-# The parser is conservative: if braces don't balance, the buffer is
-# retained (we haven't hit the closing brace yet, just keep streaming).
-# If JSON.parse fails on what we thought was complete, we rewind by one
-# character and try again — handles the edge case where a brace inside
-# a string fooled the counter.
-
-# Matches the opening of a tool call — `{"name": "<tool>"`. We use this to
-# find the start position even before we know the full JSON will parse.
-_CUSTOM_TOOL_OPEN_RE = re.compile(r'\{\s*"name"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"')
-
-# Opener-match failure recovery threshold. If the brace counter can't find
-# a balanced close inside this many characters after a `{"name":` match,
-# we give up on this opener and look for the next one. Prevents a single
-# pathological opener (think: create_site's HTML body with embedded
-# unbalanced `'{"name": "...' substrings from a prior tool's args, or
-# a stray `"` inside CSS that strands the string-state counter) from
-# silently disabling extraction for the rest of the stream.
-_GIVE_UP_BYTES = 65536
-
-# When no opener regex match is found in the unreleased buffer, how many
-# bytes of recent text we hold back before emitting everything else as
-# visible. The opener `{"name": "<value>"` can be up to ~50 chars depending
-# on the tool name; 256 chars is comfortably larger and keeps a near-zero
-# memory footprint. This is what lets the buffer find a tool call whose
-# opener arrives split across many small SSE deltas — without it, the
-# leading chunk would be released as visible and the partial opener lost
-# forever.
-_HOLD_BACK = 256
-
-# Conservative upper bound on the length of one opener match
-# (e.g. `{"name": "<30-char tool name>"}`). If the unreleased tail is
-# no longer than this, no future chunk can still split an opener
-# across a boundary — release it all as visible. Keeping a separate
-# constant from _HOLD_BACK (which is the "ambiguous" window for chunks
-# still arriving) makes the intent obvious at the call site.
-_CUSTOM_TOOL_OPEN_RE_MAX_LEN = 64
-
-
-class _CustomToolCallBuffer:
-    """Incrementally extracts bare-JSON tool calls from a streaming text delta.
-
-    Constructed per-SSE-response. The SSE loop calls .feed(delta) for every
-    text delta, then .drain() at the end to catch any final parse.
-
-    For each tool call found:
-      - ``on_partial_name(name)`` fires the moment ``{"name": "<tool>"`` is
-        visible (mid-stream, even if args are still streaming) so the
-        progress message can switch its UI prefix.
-      - The completed tool call is appended to ``completed`` as a dict in
-        the SAME shape as the provider's native tool_calls: ``{"id", "type",
-        "function": {"name", "arguments"}}``. Callers can splice it
-        straight into the existing dispatch flow.
-
-    Anything in the stream that isn't a tool call JSON is preserved as
-    ``text`` — the model's reply to the user, minus the JSON objects we
-    stripped out.
-    """
-
-    def __init__(self, on_partial_name=None):
-        self._buf = ""
-        self.text_parts: list[str] = []
-        self.completed: list[dict] = []
-        self._on_partial_name = on_partial_name
-        self._announced_names: set[str] = set()
-
-    @property
-    def has_pending_json(self) -> bool:
-        """True when the buffer holds a bare-JSON tool call that's still
-        being parsed (opener seen, close not yet). The progress UI can
-        use this to show 'still writing…' instead of 'frozen' when the
-        visible-content delta is empty for several frames.
-        """
-        return self._buf.rfind("{") > self._buf.rfind("}")
-
-    def feed(self, delta: str) -> str:
-        """Accumulate a new text delta. Extracts any complete bare-JSON
-        tool calls and returns the newly-revealed VISIBLE text for this
-        delta.
-
-        Design: ``_buf`` is the running buffer. ``_released_len`` is the
-        byte offset up to which text has been emitted as visible. On
-        each feed:
-          1. Append delta to _buf.
-          2. Search _buf for the first opener past _released_len.
-          3. If found, the text from _released_len to the opener is
-             plain visible — emit it now and advance _released_len to
-             the opener position. Then try to find a balanced end for
-             the opener.
-          4. If balanced end found, parse the candidate. Real tool
-             call → append to completed, advance _released_len past
-             the closer, and loop. Parse fail / wrong shape → advance
-             past opener's first char (false-positive recovery) and
-             loop.
-          5. If no balanced end (opener mid-JSON): hold; the prefix
-             already released covers everything safe. Any text after
-             the opener (still buffering) is hidden.
-          6. If no opener at all in the buffer: emit everything up to
-             ``len(_buf) - _HOLD_BACK`` as visible. The trailing
-             _HOLD_BACK window is held back so a chunk boundary can't
-             split a fresh opener (max opener length is ~50 chars;
-             _HOLD_BACK is comfortably larger).
-
-        Works regardless of chunk size: we always search the full _buf
-        from _released_len onward, so a tool call spanning 100 tiny
-        deltas is found the moment the closing brace arrives. Text
-        before the opener is released immediately, so the caller sees
-        "All done!" the moment it streams in (not at drain time).
-        """
-        if not delta:
-            return ""
-        if not hasattr(self, "_released_len"):
-            self._released_len = 0
-        self._buf += delta
-        newly_visible_total = ""
-        while True:
-            m = _CUSTOM_TOOL_OPEN_RE.search(self._buf, self._released_len)
-            if not m:
-                # No opener in the unreleased region. The only thing
-                # that could be a "starter" for a future opener is a
-                # bare `{` that's not yet followed by enough text. Find
-                # the last `{` in the unreleased region and hold back
-                # from there — anything before that `{` cannot grow
-                # into an opener, so it's safe to release as visible.
-                # If there's no `{` at all, release the whole thing.
-                unreleased = self._buf[self._released_len :]
-                last_open = unreleased.rfind("{")
-                if last_open == -1:
-                    # No possible opener prefix. Release all.
-                    release_to = len(self._buf)
-                else:
-                    # Hold back from the last `{` onward; release
-                    # everything before it as visible.
-                    release_to = self._released_len + last_open
-                if release_to > self._released_len:
-                    nv = self._buf[self._released_len : release_to]
-                    self.text_parts.append(nv)
-                    self._released_len = release_to
-                    newly_visible_total += nv
-                break
-            # Opener found. Text BEFORE the opener is plain visible.
-            if m.start() > self._released_len:
-                prefix = self._buf[self._released_len : m.start()]
-                self.text_parts.append(prefix)
-                self._released_len = m.start()
-                newly_visible_total += prefix
-            # Fire partial-name callback (idempotent).
-            opener_name = m.group(1)
-            if (
-                self._on_partial_name is not None
-                and opener_name not in self._announced_names
-            ):
-                self._announced_names.add(opener_name)
-                with contextlib.suppress(Exception):
-                    self._on_partial_name(str(opener_name))
-            # Try to find a balanced end for this opener.
-            end = _find_balanced_json_end(self._buf, m.start())
-            if end is None:
-                # Opener mid-JSON. Hold unless the held region is huge (unescaped
-                # quotes in create_site HTML, CSS `{`, etc.) — then skip the
-                # false opener so a later valid tool call can still parse.
-                if len(self._buf) - m.start() > _GIVE_UP_BYTES:
-                    self._released_len = m.start() + 1
-                    continue
-                break
-            # Validate by parsing. Must go through
-            # _safe_parse_tool_call_candidate, NOT bare json.loads: that
-            # is where the unescaped-HTML-quote repair lives. With plain
-            # json.loads here, a create_site whose body contains
-            # `href="..."` failed to parse, the opener was skipped as a
-            # "false positive", and the whole malformed blob shipped to
-            # the channel as raw visible text while the tool never ran —
-            # the exact 2026-08-02 incident the repair pass was written
-            # for. The repair was only ever reachable from a dead code
-            # path, so the live streaming path never benefited from it.
-            candidate = self._buf[m.start() : end]
-            obj = _safe_parse_tool_call_candidate(candidate)
-            if obj is None:
-                # Balanced but not valid JSON even after repair — false
-                # positive. Skip past the opener's first char and keep
-                # searching.
-                self._released_len = m.start() + 1
-                continue
-            if not isinstance(obj, dict) or not obj.get("name"):
-                # Not a tool-call shape. Advance past the opener.
-                self._released_len = m.start() + 1
-                continue
-            # Real tool call. Append to completed and advance past
-            # the closer; loop continues for any further text/calls.
-            tool_name = str(obj.get("name", ""))
-            args = obj.get("arguments", {})
-            if not isinstance(args, dict):
-                args = {}
-            self.completed.append(
-                {
-                    "id": f"call_custom_{len(self.completed) + 1}",
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": json.dumps(args, ensure_ascii=False),
-                    },
-                }
-            )
-            self._released_len = end
-        return newly_visible_total
-
-    def drain(self) -> None:
-        """Final call after the stream ends. Emit any remaining unreleased
-        text as visible. If there's a partial tool call still in flight
-        (opener received but no closing brace), it can't have been a real
-        tool call — the stream is over — so emit the held opener region as
-        visible text too.
-        """
-        if not hasattr(self, "_released_len"):
-            return
-        held = self._buf[self._released_len :]
-        if held:
-            self.text_parts.append(held)
-            self._released_len = len(self._buf)
-        # If _buf grew unreasonably large pointing at a never-closed
-        # opener, that opener was a false positive (e.g. it appeared
-        # mid-string); drop the held region so we don't carry junk.
-        # (We only get here after the loop above stopped finding a
-        # balanced end for the opener.)
-
-
-def _find_balanced_json_end(text: str, start: int) -> int | None:
-    """Find the index just past the closing brace of the JSON object that
-    starts at ``text[start]``. Returns None if the braces don't balance
-    (i.e. the stream hasn't delivered the closing brace yet).
-
-    Counts ``{``/``}`` while correctly ignoring braces that appear inside
-    JSON string literals (which can happen for things like ``"body": "{...}"``
-    in a create_site body that contains CSS with braces).
-    """
-    depth = 0
-    in_str = False
-    escape = False
-    i = start
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-        else:
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return i + 1
-        i += 1
-    return None
-
-
-# Failure recovery for tool-call candidates whose ``body`` field
-# contains unescaped ``"`` characters from HTML attribute syntax
-# (e.g. ``target="_blank"``, ``href="..."``). Without the repair
-# pass, ``json.loads`` raises ``JSONDecodeError`` because the
-# balancer thinks the body string terminated early; the parser then
-# ships the entire malformed JSON blob as raw visible text to the
-# channel instead of executing the tool. See Z3ki's 2026-08-02
-# "old-cartographers" create_site in #boing — the LLM emitted
-# ~14 KB of partially-quoted HTML, the parser walked to EOF looking
-# for a balanced close, the tool call never ran, and the user got a
-# wall of broken text in 4 chunked Discord messages instead of a
-# working site.
-
-
-def _repair_unescaped_html_quotes(candidate: str) -> str | None:
-    """Repair tool-call candidate JSON whose ``body`` field contains
-    unescaped ``"`` characters from HTML attribute syntax (e.g.
-    ``target="_blank"``, ``href="..."``).
-
-    Returns the repaired candidate string, or ``None`` if no repair
-    was applicable.
-
-    Strategy:
-      1. Locate the ``"body": "`` opener.
-      2. Walk forward, tracking JSON escape state, until we hit an
-         UNESCAPED ``"`` followed by ``}}`` — that's the body string
-         terminator followed by the close of the ``arguments`` object
-         and the close of the outer object. (LLMs that emit malformed
-         HTML bodies almost always structure the close this way.)
-      3. Re-encode the raw body slice with ``json.dumps`` (which
-         properly escapes ``"`` and ``\\``), strip the outer quotes,
-         and splice it back into the candidate.
-
-    This is intentionally narrow — it only fires when a raw
-    ``json.loads(candidate)`` already failed AND a ``"body": "`` field
-    exists in the candidate. Clean JSON never reaches this path.
-    """
-    m = re.search(r'"body"\s*:\s*"', candidate)
-    if not m:
-        return None
-    body_value_start = m.end()
-    # Try each plausible terminator, cheapest-first, and keep the first
-    # one that actually reparses into an object.
-    for body_value_end in _body_terminator_candidates(candidate, body_value_start):
-        body_escaped, repaired_any = _escape_body_slice(
-            candidate, body_value_start, body_value_end
-        )
-        if not repaired_any:
-            continue
-        repaired = (
-            candidate[:body_value_start] + body_escaped + candidate[body_value_end:]
-        )
-        try:
-            obj, _end = json.JSONDecoder().raw_decode(repaired)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(obj, dict):
-            return repaired
-    return None
-
-
-def _body_terminator_candidates(candidate: str, body_value_start: int) -> list[int]:
-    """Positions of every unescaped ``"`` in the body that could be the
-    string's closing quote — i.e. one followed (modulo whitespace) by
-    ``,`` or ``}``.
-
-    The old code hardcoded a single terminator: an unescaped ``"``
-    immediately followed by ``}}``. That only holds when ``body`` is the
-    LAST key in ``arguments``. With ``{"body": "...", "title": "T"}`` the
-    scan blew straight past the real terminator to the ``"}}`` at the end
-    of the object, so ``title`` (and every other trailing key) was
-    swallowed into the body string and silently lost.
-
-    Quotes inside HTML attributes (``href="x"``) are followed by ``>``,
-    ``/``, letters, etc. — never ``,`` or ``}`` — so they are not
-    candidates. A body containing a literal ``",`` (e.g. ``said "hi",``)
-    can still produce a false candidate, which is why the caller
-    validates each one by reparsing and moves on if it does not hold.
-    """
-    out: list[int] = []
-    i = body_value_start
-    escape = False
-    while i < len(candidate):
-        ch = candidate[i]
-        if escape:
-            escape = False
-            i += 1
-            continue
-        if ch == "\\":
-            escape = True
-            i += 1
-            continue
-        if ch == '"':
-            j = i + 1
-            while j < len(candidate) and candidate[j] in " \t\r\n":
-                j += 1
-            if j < len(candidate) and candidate[j] in ",}":
-                out.append(i)
-        i += 1
-    return out
-
-
-def _escape_body_slice(
-    candidate: str, body_value_start: int, body_value_end: int
-) -> tuple[str, bool]:
-    r"""Re-escape the raw body slice. Returns ``(escaped, repaired_any)``.
-
-    The body has a mix of already JSON-escaped sequences (``\\"``,
-    ``\\\\``, ``\\n``) and bare ``"`` from HTML attributes that the LLM
-    forgot to escape. Some bodies also contain bare newlines (the LLM
-    emitted real newline chars instead of ``\\n`` escape sequences),
-    which JSON forbids inside string literals. Walk the slice and:
-      - preserve only sequences ``\\X`` where X is a real JSON escape
-        char (``"``, ``\\``, ``/``, ``b``, ``f``, ``n``, ``r``, ``t``,
-        ``u``) — these are the LLM's correct JSON escape attempts,
-      - escape bare ``"``,
-      - escape bare ``\\`` that is NOT followed by a JSON escape char
-        (the LLM typo'd ``</div>`` as ``</div\\`` etc.),
-      - escape bare control characters (literal newline, tab, CR).
-    """
-    body_chars: list[str] = []
-    repaired_any = False
-    i = body_value_start
-    JSON_ESCAPE_CHARS = set('"\\/bfnrtu')
-    while i < body_value_end:
-        ch = candidate[i]
-        if ch == "\\" and i + 1 < body_value_end:
-            nxt = candidate[i + 1]
-            if nxt in JSON_ESCAPE_CHARS:
-                # Already-escaped JSON sequence; pass through as-is.
-                body_chars.append(ch)
-                body_chars.append(nxt)
-                i += 2
-                continue
-            # Literal backslash not followed by a valid JSON escape char.
-            # Escape it so the reparsed JSON keeps the backslash.
-            body_chars.append("\\\\")
-            repaired_any = True
-            i += 1
-            continue
-        if ch == "\\":
-            # Lone trailing backslash immediately before the terminator.
-            # Left bare it would escape the closing quote and break the
-            # reparse, so escape it too.
-            body_chars.append("\\\\")
-            repaired_any = True
-            i += 1
-            continue
-        if ch == '"':
-            body_chars.append('\\"')
-            repaired_any = True
-            i += 1
-            continue
-        if ch == "\n":
-            body_chars.append("\\n")
-            repaired_any = True
-            i += 1
-            continue
-        if ch == "\r":
-            body_chars.append("\\r")
-            repaired_any = True
-            i += 1
-            continue
-        if ch == "\t":
-            body_chars.append("\\t")
-            repaired_any = True
-            i += 1
-            continue
-        body_chars.append(ch)
-        i += 1
-    return "".join(body_chars), repaired_any
-
-
-def _safe_parse_tool_call_candidate(candidate: str):
-    """Parse a candidate tool-call JSON, with one repair pass for the
-    common failure mode of unescaped ``"`` characters in embedded HTML
-    (``create_site`` body fields with ``target="_blank"``, ``href="..."``,
-    etc).
-
-    Returns the parsed dict on success, ``None`` if it cannot be parsed
-    even after the repair attempt. Caller treats ``None`` as a
-    false-positive opener and keeps searching.
-
-    Three attempts:
-      1. ``json.loads`` — clean JSON.
-      2. ``json.JSONDecoder().raw_decode`` — tolerates trailing garbage
-         (the LLM sometimes appends a hallucinated ``<parameter>`` tag
-         after the JSON close, which we should ignore).
-      3. ``_repair_unescaped_html_quotes`` + ``raw_decode`` — escapes
-         unescaped ``"``, bare newlines, and bare backslashes inside
-         a ``"body": "..."`` field, then parses.
-    """
-    try:
-        return json.loads(candidate)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    try:
-        obj, _end = json.JSONDecoder().raw_decode(candidate)
-        return obj
-    except (json.JSONDecodeError, ValueError):
-        pass
-    repaired = _repair_unescaped_html_quotes(candidate)
-    if repaired is None:
-        return None
-    try:
-        obj, _end = json.JSONDecoder().raw_decode(repaired)
-        return obj
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-
-async def _safe_call(cb, *args, **kwargs):
-    """Await an SSE callback, swallowing any exception. Used for fire-and-forget
-    callbacks (``_fire_and_forget(_safe_call(...))``) so a buggy callback
-    never crashes the streaming read loop."""
-    try:
-        await cb(*args, **kwargs)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("SSE callback raised: %s", e)
-
-
-def _keep_tool_call_provider_fields(slot: dict, tc_delta: dict) -> None:
-    """Keep provider fields the next request must echo.
-
-    Gemini rejects a follow-up tool turn when ``thought_signature`` (often
-    under ``extra_content.google``) was present on the function call and
-    then dropped. Streaming only used to copy id, type, and function.
-    """
-    if not isinstance(tc_delta, dict):
-        return
-    for key, value in tc_delta.items():
-        if key in {"index", "id", "type", "function"} or str(key).startswith("_"):
-            continue
-        if value in (None, "", {}, []):
-            continue
-        if not slot.get(key):
-            slot[key] = value
-    fn = tc_delta.get("function")
-    if not isinstance(fn, dict):
-        return
-    slot_fn = slot.setdefault("function", {})
-    for key, value in fn.items():
-        if key in {"name", "arguments"} or str(key).startswith("_"):
-            continue
-        if value in (None, "", {}, []):
-            continue
-        if not slot_fn.get(key):
-            slot_fn[key] = value
-
-
-def _append_tool_call_arguments(slot: dict, incoming) -> None:
-    """Accumulate streaming tool-call arguments onto ``slot``.
-
-    OpenAI streams ``function.arguments`` as JSON *strings* that must be
-    concatenated. Some OpenAI-compatible providers (GLM-5.x on OpenCode
-    Zen Go) send a finished object in one delta instead — concatenating
-    that with ``""`` raises TypeError and kills the turn.
-    """
-    fn = slot.setdefault("function", {})
-    existing = fn.get("arguments") or ""
-    if isinstance(existing, dict):
-        existing = json.dumps(existing, ensure_ascii=False)
-    if isinstance(incoming, dict):
-        fn["arguments"] = json.dumps(incoming, ensure_ascii=False)
-        return
-    if incoming is None:
-        fn["arguments"] = existing
-        return
-    fn["arguments"] = existing + (
-        incoming if isinstance(incoming, str) else str(incoming)
-    )
-
-
-def _extract_partial_reasoning(arguments: str) -> str:
-    """Best-effort pull of the `reasoning` string from a PARTIAL arguments JSON.
-
-    Returns '' until the reasoning value's closing quote has arrived (i.e. the
-    model is still emitting it). Once complete, returns the decoded string.
-    Used to update the in-channel progress message with the model's real intent
-    mid-stream, instead of a static "generating…" for the whole generation.
-    """
-    if not arguments:
-        return ""
-    if isinstance(arguments, dict):
-        r = arguments.get("reasoning")
-        return r if isinstance(r, str) else ""
-    if not isinstance(arguments, str):
-        arguments = str(arguments)
-    # Fast path: the whole arguments object already parses.
-    try:
-        parsed = json.loads(arguments)
-        if isinstance(parsed, dict):
-            r = parsed.get("reasoning")
-            if isinstance(r, str):
-                return r
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
-    # Partial JSON: grab the reasoning value once its closing quote landed.
-    m = _PARTIAL_REASONING_RE.search(arguments)
-    if not m:
-        return ""
-    raw = m.group(1)
-    try:
-        return json.loads('"' + raw + '"')  # decode \n, \", etc.
-    except (json.JSONDecodeError, ValueError):
-        return raw
-
-
-async def _read_sse_response(
-    resp: aiohttp.ClientResponse,
-    on_tool_call_name=None,
-    on_token=None,
-    custom_tool_calls: bool = False,
-    max_bytes: int | None = None,
-) -> dict:
-    """Read an OpenAI-style SSE chat-completions stream and reassemble it into
-    the same dict shape a non-streamed `await resp.json()` would return.
-
-    If ``on_tool_call_name`` is provided, it's awaited the first time a
-    tool_call delta arrives with a function name. This lets the caller
-    update a live progress message mid-stream — e.g. show
-    "create_site: …" while the model is still generating the tool arguments
-    (the HTML body), instead of waiting for the entire response to finish.
-
-    If ``on_token`` is provided, it's called (fire-and-forget, NEVER awaited
-    inline) on every content and reasoning delta so the caller can show a
-    live progress message with a rolling preview of the model's own words.
-    Inline awaiting would back-pressure the SSE read on a slow Discord edit
-    and stall the upstream. The callback gets a small dict with the new
-    delta (NOT an accumulator) plus a flag distinguishing reasoning from
-    visible content::
-
-        {"reasoning": str, "content": str, "tool_name": str|None}
-
-    ``tool_name`` is set only on the delta that first introduces a tool call
-    name (so the callback can switch the progress UI from "model is
-    thinking" to "tool_name: …" the moment the model decides).
-
-    The OpenAI streaming protocol sends one JSON object per ``data:`` line, each
-    with the same frame structure but only the *delta* of what changed since
-    the previous frame:
-
-        data: {"choices": [{"delta": {"role": "assistant"}, "index": 0}]}
-        data: {"choices": [{"delta": {"content": "hello"}, "index": 0}]}
-        data: {"choices": [{"delta": {"content": " world"}, "index": 0}]}
-        data: {"choices": [{"delta": {"tool_calls": [...]}, "index": 0}]}
-        data: {"choices": [{"finish_reason": "stop", "index": 0}]}
-        data: [DONE]
-
-    We accumulate content strings, tool_calls (pinned by ``index``), and any
-    usage payload that streams in at the end, then return a dict that matches
-    the non-streamed response shape so the rest of the request handler does
-    not need to care which mode produced the response.
-
-    Returns the merged dict plus sentinels popped by the caller:
-    ``__first_token_s__`` / ``__last_token_s__`` are ``perf_counter`` times of
-    the first and last frames that carried generated output (content,
-    reasoning, or a tool-call delta) — not the role-only opener or a trailing
-    usage/[DONE] frame.
-
-    Raises RuntimeError if the stream is malformed (no choices ever arrive) so
-    the upstream retry logic can take over.
-    """
-    merged: dict = {"choices": [{}]}
-    tool_calls_by_index: dict[int, dict] = {}
-    content_parts: list[str] = []
-    role: str | None = None
-    finish_reason: str | None = None
-    reasoning_parts: list[str] = []
-    first_token_s: float | None = None
-    last_token_s: float | None = None
-    done = False
-    # When custom_tool_calls=True, we route text deltas through this buffer
-    # which incrementally extracts bare-JSON tool calls ({"name": "...",
-    # "arguments": {...}}) and synthesizes native-format tool_calls. This
-    # is the workaround for providers (Ollama cloud's minimax-m3) that
-    # bundle the entire tool_call into one final delta and never stream
-    # it incrementally. With this on, the tool name lands in the
-    # progress UI at ~12% of stream time vs ~88% with native tools=.
-    # See _CustomToolCallBuffer for the protocol details.
-    custom_buffer: _CustomToolCallBuffer | None = (
-        _CustomToolCallBuffer(
-            on_partial_name=lambda nm: (
-                # 2026-07-21: fire BOTH callbacks when the JSON
-                # opener is seen mid-stream. The old code only fired
-                # on_token (so the progress UI could switch its
-                # 'thinking:' → 'using <tool>…' transition) but
-                # skipped on_tool_call_name. That meant the bot's
-                # _on_tool_call_name callback (which sets
-                # _current_tool on the progress and triggers
-                # progress.update() with the tool's reasoning once
-                # run_one() dispatches) was never invoked — and the
-                # progress buffer kept the raw streaming JSON
-                # content instead of the natural-language reasoning
-                # the model wrote. Now both fire on opener, so the
-                # progress UI immediately shows the tool name AND
-                # the subsequent update() replaces the buffer with
-                # the actual reasoning sentence.
-                on_token({"content": "", "reasoning": "", "tool_name": nm})
-                if on_token is not None
-                else None
-            )
-        )
-        if custom_tool_calls
-        else None
-    )
-
-    # Bridge: the custom protocol's on_partial_name callback can't
-    # directly invoke the bot's async on_tool_call_name (it's sync
-    # from inside the brace-balancer). Wire it through a fire-and-
-    # forget task so the bot's _on_tool_call_name fires as soon as
-    # the tool name is parsed, not only when run_one() reaches it.
-    if custom_tool_calls and on_tool_call_name is not None:
-        # Patch the on_partial_name to also schedule on_tool_call_name
-        original = custom_buffer._on_partial_name
-
-        def _bridge(nm, _orig=original, _cb=on_tool_call_name):
-            if _orig is not None:
-                _orig(nm)
-            try:
-                _fire_and_forget(_safe_call(_cb, nm, ""))
-            except RuntimeError:
-                pass
-
-        custom_buffer._on_partial_name = _bridge
-
-    buf = b""
-    received_bytes = 0
-    async for raw_chunk in resp.content.iter_any():
-        if done:
-            break
-        received_bytes += len(raw_chunk)
-        if max_bytes is not None and received_bytes > max_bytes:
-            raise RuntimeError("Provider response exceeded the configured size limit")
-        buf += raw_chunk
-        while b"\n" in buf and not done:
-            line, buf = buf.split(b"\n", 1)
-            line = line.strip()
-            if not line:
-                continue
-            # SSE comments / non-data lines start with ":" — ignore.
-            if not line.startswith(b"data:"):
-                continue
-            payload = line[5:].lstrip()
-            if payload == b"[DONE]":
-                done = True
-                break
-            if not payload:
-                continue
-            try:
-                obj = json.loads(payload)
-            except ValueError as exc:
-                raise RuntimeError("Provider stream returned invalid JSON") from exc
-            if not isinstance(obj, dict):
-                raise TypeError("Provider stream returned an invalid frame")
-            if obj.get("error") is not None:
-                raise RuntimeError("Provider stream returned an upstream error")
-            choices = obj.get("choices") or []
-            if not isinstance(choices, list) or any(
-                not isinstance(choice, dict)
-                or not isinstance(choice.get("delta") or {}, dict)
-                for choice in choices
-            ):
-                raise RuntimeError("Provider stream returned invalid choices")
-            # This request asks for one completion. Never merge an unsolicited
-            # second choice into its text or tool calls, or allocate by an
-            # untrusted choice index.
-            choices = [choice for choice in choices if choice.get("index", 0) == 0]
-            # TTFT is time-to-first-generated-output, not time-to-first-SSE
-            # frame. Role-only openers, empty deltas, finish_reason, and the
-            # trailing usage chunk would otherwise make TTFT ~= TTFB and
-            # stretch the decode window through post-generation drain.
-            if any(
-                _sse_delta_has_output((choice or {}).get("delta") or {})
-                for choice in choices
-            ):
-                now = time.perf_counter()
-                if first_token_s is None:
-                    first_token_s = now
-                last_token_s = now
-            for choice in choices:
-                delta = choice.get("delta") or {}
-                if delta.get("role"):
-                    role = delta["role"]
-                visible_content_delta = ""
-                if "content" in delta and delta["content"] is not None:
-                    content_parts.append(delta["content"])
-                    # Custom tool-call protocol: pipe text deltas through
-                    # the extractor so tool calls embedded as bare JSON
-                    # in the text stream get parsed incrementally and
-                    # stripped from the visible content. Native path:
-                    # leave content_parts alone.
-                    #
-                    # feed() returns the VISIBLE portion of this delta
-                    # (JSON already stripped, or "" while a tool-call
-                    # opener is still balancing). That return value — not
-                    # the raw delta — is what the on_token progress
-                    # preview below must use. Using the raw delta here
-                    # used to leak the model's literal bare-JSON tool
-                    # call (e.g. '{"name": "shell", "arguments": {...')
-                    # into the "thinking: …" status line character by
-                    # character, since native tool_name detection for the
-                    # custom protocol only fires once the opener is fully
-                    # parsed, not as raw text streams in.
-                    if custom_buffer is not None:
-                        visible_content_delta = custom_buffer.feed(delta["content"])
-                    else:
-                        visible_content_delta = delta["content"]
-                # Reasoning deltas: OpenAI/DeepSeek-style models use
-                # `reasoning_content`; Ollama cloud's minimax-m3 emits a
-                # `reasoning` field on the same delta. Treat both the same
-                # way so the bot's existing reasoning handler picks them up.
-                for rkey in ("reasoning_content", "reasoning"):
-                    rval = delta.get(rkey)
-                    if rval is not None:
-                        reasoning_parts.append(rval)
-                # Per-token progress callback (fire-and-forget, NEVER awaited
-                # inline). A slow Discord edit must not back-pressure the SSE
-                # read — that would stall the upstream provider and add visible
-                # latency to the stream. We hand the caller a small dict with
-                # the NEW deltas from this frame plus an empty tool_name that
-                # the tool_call block below may fill in.
-                #
-                # 2026-07-21: in the custom tool-call protocol, the model
-                # often emits the entire reasoning + tool call as a single
-                # huge JSON object — so the visible-content delta is empty
-                # for most frames and the progress UI just sits on
-                # "working on it…". Pass a short HEAD of the raw content
-                # as a "still streaming" preview so the user sees the
-                # model is alive and writing. The bot's tick() rate-limits
-                # this anyway (3s between edits), so the volume is
-                # harmless.
-                if on_token is not None:
-                    tok_content = visible_content_delta
-                    tok_reason = ""
-                    for rkey in ("reasoning_content", "reasoning"):
-                        rv = delta.get(rkey)
-                        if rv:
-                            tok_reason = rv
-                            break
-                    # 2026-07-21: when the custom buffer is mid-JSON
-                    # (model is emitting a bare-JSON tool call), DON'T
-                    # surface the raw content as a progress preview.
-                    # The raw text is JSON like 'name create_site ,
-                    # arguments reason ing ...' which fills the
-                    # progress buffer with unreadable fragments. The
-                    # bot's _on_tool_call_name callback (bridged from
-                    # on_partial_name) sets the tool name so the line
-                    # shows 'using <tool>…' until run_one() lands with
-                    # the actual natural-language reasoning via
-                    # progress.update(name, tool_reasoning).
-                    if (
-                        not tok_content
-                        and not tok_reason
-                        and custom_buffer is not None
-                        and custom_buffer.has_pending_json
-                    ):
-                        # Skip the on_token callback only — do NOT continue the
-                        # choice loop or we drop native tool_calls on this delta.
-                        pass
-                    elif tok_content or tok_reason:
-                        try:
-                            on_token(
-                                {
-                                    "content": tok_content,
-                                    "reasoning": tok_reason,
-                                    "tool_name": None,
-                                }
-                            )
-                        except Exception as e:
-                            # Same as above: never break the stream for a
-                            # progress-callback error.
-                            logger.debug("on_token callback failed: %s", e)
-                if delta.get("tool_calls"):
-                    for tc_delta in delta["tool_calls"]:
-                        tc_idx = tc_delta.get("index", 0)
-                        slot = tool_calls_by_index.get(tc_idx)
-                        if slot is None:
-                            slot = {
-                                "id": tc_delta.get("id"),
-                                "type": tc_delta.get("type", "function"),
-                                "function": {"name": "", "arguments": ""},
-                            }
-                            tool_calls_by_index[tc_idx] = slot
-                        if tc_delta.get("id"):
-                            slot["id"] = tc_delta["id"]
-                        if tc_delta.get("type"):
-                            slot["type"] = tc_delta["type"]
-                        _keep_tool_call_provider_fields(slot, tc_delta)
-                        fn = tc_delta.get("function") or {}
-                        if fn.get("name"):
-                            slot["function"]["name"] = (
-                                slot["function"].get("name", "") + fn["name"]
-                            )
-                            # Fire the tool-name callback the first time we
-                            # see it. This is the *old* path kept for
-                            # backwards-compat (legacy callers still use it).
-                            # The new ``on_token`` path below also surfaces
-                            # the tool name to the per-token progress callback
-                            # so the UI can switch from "model is thinking"
-                            # to "<tool_name>: …" the moment the model
-                            # commits to a tool.
-                            if on_tool_call_name is not None and not slot.get(
-                                "_name_sent"
-                            ):
-                                slot["_name_sent"] = True
-                                cb = on_tool_call_name
-                                args = (slot["function"]["name"], "")
-                                try:
-                                    _fire_and_forget(_safe_call(cb, *args))
-                                except RuntimeError:
-                                    with contextlib.suppress(Exception):
-                                        await cb(*args)
-                            # Same signal on the new per-token path. The
-                            # token callback is fire-and-forget so a slow
-                            # Discord edit doesn't stall the SSE read.
-                            if on_token is not None and not slot.get(
-                                "_token_name_sent"
-                            ):
-                                slot["_token_name_sent"] = True
-                                try:
-                                    on_token(
-                                        {
-                                            "content": "",
-                                            "reasoning": "",
-                                            "tool_name": slot["function"]["name"],
-                                        }
-                                    )
-                                except Exception as e:
-                                    # A broken UI callback must never kill the
-                                    # token stream mid-generation.
-                                    logger.debug("on_token callback failed: %s", e)
-                        if fn.get("arguments"):
-                            _append_tool_call_arguments(slot, fn["arguments"])
-                            # Surface the model's reasoning mid-stream so the
-                            # progress message shows intent (not a static
-                            # "generating…") during long argument generation
-                            # (e.g. create_site's HTML body). Reasoning is
-                            # usually the first field emitted, so it completes
-                            # well before the big fields. Fires once per call.
-                            if on_tool_call_name is not None and not slot.get(
-                                "_reasoning_sent"
-                            ):
-                                reason = _extract_partial_reasoning(
-                                    slot["function"]["arguments"]
-                                )
-                                if reason:
-                                    slot["_reasoning_sent"] = True
-                                    cb = on_tool_call_name
-                                    args = (slot["function"]["name"], reason)
-                                    try:
-                                        _fire_and_forget(_safe_call(cb, *args))
-                                    except RuntimeError:
-                                        with contextlib.suppress(Exception):
-                                            await cb(*args)
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-            # Some providers stream usage in the final frame (Anthropic-style
-            # models on OpenRouter do this; OpenAI does it when
-            # stream_options.include_usage=true).
-            if obj.get("usage"):
-                merged["usage"] = obj["usage"]
-        else:
-            # No inner break — keep iterating. Outer loop continues.
-            continue
-        # Inner break hit [DONE]; stop reading.
-        break
-
-    if not done and finish_reason is None:
-        raise RuntimeError("Provider stream ended before completion")
-
-    if (
-        not tool_calls_by_index
-        and not content_parts
-        and not role
-        and finish_reason is None
-        and (custom_buffer is None or not custom_buffer.completed)
-    ):
-        raise RuntimeError("Provider stream produced no choices")
-
-    # Custom tool-call protocol: drain any final tail and merge results.
-    # The extracted tool calls use the same native shape (id, type, function)
-    # so the rest of the dispatch path treats them identically to native
-    # tool_calls=. The visible content has any bare-JSON tool calls already
-    # stripped out (the model wrote them as a single line; the user sees
-    # the surrounding reply without the raw JSON).
-    if custom_buffer is not None:
-        custom_buffer.drain()
-        if custom_buffer.completed:
-            # Append custom-extracted calls to any native ones. Native
-            # tool_calls (if any) are already accumulated; this just
-            # adds the bare-JSON ones we parsed out of the text.
-            for tc in custom_buffer.completed:
-                tool_calls_by_index[len(tool_calls_by_index)] = tc
-            # Rebuild visible content from the buffer's text_parts (with
-            # JSON objects stripped), overriding the raw content_parts
-            # we accumulated.
-            # Always rebuild from the buffer, including when text_parts is
-            # empty (JSON-only tool turn). Gating on truthiness left the raw
-            # JSON in content_parts for the instructed "JSON line first" shape.
-            content_parts = ["".join(custom_buffer.text_parts)]
-
-    # Sort tool calls by their index so the order matches the model's intent.
-    # Strip the internal callback-tracking flags ("_name_sent"/"_reasoning_sent")
-    # so they never leak into the tool_calls we hand back to the provider.
-    tool_calls_list = [
-        {
-            k: v
-            for k, v in tool_calls_by_index[idx].items()
-            if not str(k).startswith("_")
-        }
-        for idx in sorted(tool_calls_by_index)
-    ]
-    message: dict = {"role": role or "assistant"}
-    if content_parts:
-        message["content"] = "".join(content_parts)
-    if reasoning_parts:
-        message["reasoning_content"] = "".join(reasoning_parts)
-    if tool_calls_list:
-        message["tool_calls"] = tool_calls_list
-
-    # The first (and typically only) choice carries the finished message.
-    merged["choices"][0] = {
-        "index": 0,
-        "message": message,
-        "finish_reason": finish_reason,
-    }
-    merged["__first_token_s__"] = first_token_s
-    merged["__last_token_s__"] = last_token_s
-    return merged
-
 
 # When an endpoint returns a 429 (rate-limited / usage-exhausted), we temporarily
 # steer traffic away from it for this long instead of retrying it in the same
@@ -1202,413 +108,6 @@ DEFAULT_ENDPOINT_COOLDOWN_SECONDS = 60.0
 # specific transient response a separate, bounded recovery round.
 DEFAULT_EMPTY_RESPONSE_RETRIES = 2
 TIMING_HISTORY_MAX = 24
-
-
-def _coerce_token_count(value) -> int:
-    if value is None or value is False:
-        return 0
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError, OverflowError):
-        try:
-            return max(0, int(float(value)))
-        except (TypeError, ValueError, OverflowError):
-            return 0
-
-
-def _first_present_token_count(raw: dict, *keys: str) -> int:
-    for key in keys:
-        if key in raw and raw[key] is not None:
-            return _coerce_token_count(raw[key])
-    return 0
-
-
-def _reported_cost_usd(raw) -> float:
-    if not isinstance(raw, dict):
-        return 0.0
-    details = raw.get("cost_details")
-    candidates = [raw.get("cost"), raw.get("total_cost")]
-    if isinstance(details, dict):
-        candidates.extend(
-            (details.get("upstream_inference_cost"), details.get("total"))
-        )
-    for value in candidates:
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            continue
-        try:
-            cost = float(value)
-        except OverflowError:
-            continue
-        if math.isfinite(cost):
-            return max(0.0, cost)
-    return 0.0
-
-
-def _normalize_llm_usage(raw) -> dict:
-    """Map OpenAI / OpenRouter / Ollama usage blobs onto one shape."""
-    if not isinstance(raw, dict):
-        return {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cost_usd": 0.0,
-        }
-    prompt = _first_present_token_count(
-        raw, "prompt_tokens", "input_tokens", "prompt_eval_count"
-    )
-    completion = _first_present_token_count(
-        raw, "completion_tokens", "output_tokens", "eval_count"
-    )
-    total = _first_present_token_count(raw, "total_tokens") or (prompt + completion)
-    return {
-        "prompt_tokens": prompt,
-        "completion_tokens": completion,
-        "total_tokens": total,
-        "cost_usd": _reported_cost_usd(raw),
-    }
-
-
-def _estimate_completion_tokens(
-    content: str = "",
-    reasoning: str = "",
-    tool_calls=None,
-) -> int:
-    """Fallback output-token count when the provider omitted usage (~4 chars/tok)."""
-    chunks = [str(content or ""), str(reasoning or "")]
-    for tc in tool_calls or []:
-        if not isinstance(tc, dict):
-            continue
-        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-        chunks.append(str((fn or {}).get("name") or ""))
-        args = (fn or {}).get("arguments")
-        if isinstance(args, dict):
-            try:
-                chunks.append(json.dumps(args, ensure_ascii=False))
-            except (TypeError, ValueError):
-                chunks.append(str(args))
-        elif args:
-            chunks.append(str(args))
-    n = sum(len(part) for part in chunks)
-    if n <= 0:
-        return 0
-    return max(1, (n + 3) // 4)
-
-
-def _nonempty_output_value(val) -> bool:
-    if val is None or val is False:
-        return False
-    if isinstance(val, str):
-        return bool(val)
-    if isinstance(val, (list, dict, tuple, set)):
-        return bool(val)
-    return True
-
-
-# SSE delta keys that are protocol chrome, not generated tokens.
-_SSE_PROTOCOL_DELTA_KEYS = {"role", "index"}
-
-
-def _sse_delta_has_output(delta) -> bool:
-    """True when this SSE delta carries generated output, not protocol chrome.
-
-    Gemini/OpenRouter often stream thinking as ``reasoning_details`` / ``thought``
-    rather than ``content``. Counting only content/tool_calls made last-token
-    equal first-token, so TPS became n/a on every bursty call.
-    """
-    if not isinstance(delta, dict) or not delta:
-        return False
-    if _nonempty_output_value(delta.get("content")):
-        return True
-    for key in (
-        "reasoning_content",
-        "reasoning",
-        "reasoning_details",
-        "thought",
-        "thinking",
-        "thoughts",
-        "extra_content",
-        "function_call",
-        "refusal",
-    ):
-        if _nonempty_output_value(delta.get(key)):
-            return True
-    for tc in delta.get("tool_calls") or []:
-        if not isinstance(tc, dict):
-            continue
-        if tc.get("id") or tc.get("type"):
-            return True
-        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-        if fn and (fn.get("name") or fn.get("arguments")):
-            return True
-    for key, val in delta.items():
-        if key in _SSE_PROTOCOL_DELTA_KEYS or key == "tool_calls":
-            continue
-        if _nonempty_output_value(val):
-            return True
-    return False
-
-
-def _is_stream_options_rejected(status: int, error_text: str) -> bool:
-    if status not in (400, 422):
-        return False
-    text = (error_text or "").lower()
-    return "stream_options" in text or "include_usage" in text
-
-
-def compute_llm_timing(
-    *,
-    request_start: float,
-    first_token_s: float | None,
-    last_token_s: float | None = None,
-    ended_at: float | None = None,
-    headers_ms: float = 0.0,
-    usage: dict | None = None,
-    endpoint: str = "",
-    model: str = "",
-    stream: bool = False,
-    content_chars: int = 0,
-    tool_calls: int = 0,
-    content: str = "",
-    reasoning: str = "",
-    tool_call_payloads=None,
-) -> dict:
-    """TTFT, generation window, and tokens/sec for one provider call.
-
-    Streaming TTFT is time-to-first-generated-output (content, reasoning, or a
-    tool-call delta), not the role-only SSE opener.
-
-    TPS formulas:
-    * Single turn (non-stream, or one SSE burst):
-      ``generation_time = (duration_ms - ttft_ms) / 1000``;
-      ``tps = output_tokens / generation_time``.
-      When TTFT equals duration (no visible first token), generation_time
-      falls back to the full request so TPS is still defined.
-    * Chunk streams (last chunk after first):
-      ``(output_tokens - 1) / (t_last_chunk - t_first_chunk)``.
-
-    When the provider omits usage, completion tokens are estimated from the
-    output text (~4 chars/token) and marked as such.
-    """
-    ended = float(ended_at) if ended_at is not None else time.perf_counter()
-    total_ms = max(0.0, (ended - float(request_start)) * 1000.0)
-    if first_token_s is not None:
-        ttft_ms = max(0.0, (float(first_token_s) - float(request_start)) * 1000.0)
-    else:
-        ttft_ms = total_ms
-    tail_ms = max(0.0, total_ms - ttft_ms)
-    chunk_stream = False
-    if stream and last_token_s is not None and first_token_s is not None:
-        decode_span_ms = max(0.0, (float(last_token_s) - float(first_token_s)) * 1000.0)
-        chunk_stream = decode_span_ms > 0
-    else:
-        decode_span_ms = 0.0
-    # Chunk streams: last-first (excludes the usage-chunk drain).
-    # Single turn / one-shot burst: duration - TTFT.
-    gen_ms = decode_span_ms if chunk_stream else tail_ms
-    normalized = _normalize_llm_usage(usage)
-    prompt = normalized["prompt_tokens"]
-    completion = normalized["completion_tokens"]
-    total_tok = normalized["total_tokens"]
-    tokens_estimated = False
-    if completion <= 0:
-        estimated = _estimate_completion_tokens(
-            content or "",
-            reasoning or "",
-            tool_call_payloads,
-        )
-        if estimated <= 0 and content_chars:
-            estimated = max(1, (int(content_chars) + 3) // 4)
-        if estimated > 0:
-            completion = estimated
-            total_tok = prompt + completion
-            tokens_estimated = True
-    if chunk_stream:
-        tps = _decode_tps(completion, gen_ms, exclude_first=True)
-    else:
-        window_ms = gen_ms if gen_ms > 0 else total_ms
-        tps = _decode_tps(completion, window_ms, exclude_first=False)
-    try:
-        headers_val = float(headers_ms or 0.0)
-    except (TypeError, ValueError):
-        headers_val = 0.0
-    return {
-        "ts": time.time(),
-        "endpoint": str(endpoint or ""),
-        "model": str(model or ""),
-        "stream": bool(stream),
-        "ttft_ms": round(ttft_ms, 1),
-        "total_ms": round(total_ms, 1),
-        "headers_ms": round(headers_val, 1),
-        "gen_ms": round(gen_ms, 1),
-        "prompt_tokens": prompt,
-        "completion_tokens": completion,
-        "total_tokens": total_tok,
-        "tokens_estimated": tokens_estimated,
-        "tps": tps,
-        "content_chars": int(content_chars or 0),
-        "tool_calls": int(tool_calls or 0),
-    }
-
-
-def format_timing_debug(
-    records,
-    *,
-    extra: list[str] | None = None,
-) -> str:
-    """Human-readable TTFT / TPS dump for `/debug` and the debug tool."""
-    rows = [r for r in (records or []) if isinstance(r, dict)]
-    lines = ["llm debug"]
-    if not rows:
-        lines.append("no calls recorded yet this process")
-    else:
-        last = rows[-1]
-        lines.append("last call")
-        lines.extend(_format_timing_row(last, indent="  "))
-        window = rows[-8:]
-        if len(window) > 1:
-            ttfts = [float(r.get("ttft_ms") or 0) for r in window]
-            tpss = [float(r["tps"]) for r in window if r.get("tps") is not None]
-            lines.append(f"recent {len(window)}")
-            if ttfts:
-                lines.append(
-                    f"  avg ttft {sum(ttfts) / len(ttfts):.0f}ms  "
-                    f"(min {min(ttfts):.0f} / max {max(ttfts):.0f})"
-                )
-            if tpss:
-                weighted = _weighted_tps(window)
-                if weighted is not None:
-                    lines.append(
-                        f"  tps {weighted:.1f}  "
-                        f"(min {min(tpss):.1f} / max {max(tpss):.1f})"
-                    )
-                else:
-                    lines.append(
-                        f"  tps n/a  (min {min(tpss):.1f} / max {max(tpss):.1f})"
-                    )
-            for rec in reversed(window[:-1][:5]):
-                tps = rec.get("tps")
-                tps_s = f"{tps} tps" if tps is not None else "tps n/a"
-                lines.append(
-                    f"  {float(rec.get('ttft_ms') or 0):.0f}ms ttft  "
-                    f"{float(rec.get('total_ms') or 0):.0f}ms  {tps_s}  "
-                    f"{rec.get('endpoint') or '?'}"
-                )
-    if extra:
-        lines.extend(str(item) for item in extra if item)
-    return "\n".join(lines)
-
-
-def _decode_tps(
-    completion: int, window_ms: float, *, exclude_first: bool
-) -> float | None:
-    """Tokens/sec over ``window_ms``.
-
-    Chunk streams pass ``exclude_first=True`` so TPS is
-    ``(output_tokens - 1) / generation_time``. Single-turn uses the full
-    output-token count over ``(duration - TTFT)``.
-    """
-    if completion <= 0:
-        return None
-    try:
-        window = float(window_ms or 0.0)
-    except (TypeError, ValueError):
-        return None
-    if window <= 0:
-        return 0.0 if exclude_first else None
-    tokens = float(completion - 1) if exclude_first else float(completion)
-    if tokens <= 0:
-        return 0.0
-    return round(tokens / (window / 1000.0), 1)
-
-
-def _weighted_tps(records) -> float | None:
-    """Aggregate TPS: sum(output_tokens) / sum(generation_time).
-
-    Do not average per-call TPS figures — a 10-token burst and a 90-token
-    decode must weight by tokens and generation seconds.
-    """
-    tokens = 0.0
-    seconds = 0.0
-    for rec in records or []:
-        if not isinstance(rec, dict) or rec.get("tps") is None:
-            continue
-        try:
-            out = float(rec.get("completion_tokens") or 0)
-            gen_ms = float(rec.get("gen_ms") or 0)
-        except (TypeError, ValueError):
-            continue
-        if gen_ms <= 0:
-            try:
-                gen_ms = max(
-                    0.0,
-                    float(rec.get("total_ms") or 0) - float(rec.get("ttft_ms") or 0),
-                )
-            except (TypeError, ValueError):
-                continue
-        if gen_ms <= 0:
-            try:
-                gen_ms = float(rec.get("total_ms") or 0)
-            except (TypeError, ValueError):
-                continue
-        if out <= 0 or gen_ms <= 0:
-            continue
-        tokens += out
-        seconds += gen_ms / 1000.0
-    if tokens <= 0 or seconds <= 0:
-        return None
-    return tokens / seconds
-
-
-def format_timing_reply_line(rec: dict | None) -> str:
-    """Compact Discord subtext: ``-# ttft 200ms · 49.0 tps``."""
-    if not isinstance(rec, dict) or not rec:
-        return ""
-    parts: list[str] = []
-    try:
-        ttft = rec.get("ttft_ms")
-        if ttft is not None:
-            parts.append(f"ttft {float(ttft):.0f}ms")
-    except (TypeError, ValueError):
-        pass
-    tps = rec.get("tps")
-    if tps is not None:
-        parts.append(f"{tps} tps")
-    if not parts:
-        return ""
-    return "-# " + " · ".join(parts)
-
-
-def append_timing_to_reply(text: str, rec: dict | None, *, limit: int = 1900) -> str:
-    """User-facing replies no longer get a TTFT/TPS footer. `/debug` still has it."""
-    return str(text or "")
-
-
-def _format_timing_row(rec: dict, indent: str = "") -> list[str]:
-    tps = rec.get("tps")
-    tps_s = f"{tps}" if tps is not None else "n/a"
-    if rec.get("tokens_estimated") and tps is not None:
-        tps_s = f"{tps_s} est"
-    ep = rec.get("endpoint") or "?"
-    model = rec.get("model") or "?"
-    try:
-        headers_val = float(rec.get("headers_ms") or 0)
-    except (TypeError, ValueError):
-        headers_val = 0.0
-    ttft_s = f"ttft {float(rec.get('ttft_ms') or 0):.0f}ms"
-    if headers_val >= 1.0:
-        ttft_s += f" (headers {headers_val:.0f}ms)"
-    return [
-        f"{indent}{ep}  {model}",
-        (
-            f"{indent}{ttft_s}  "
-            f"total {float(rec.get('total_ms') or 0):.0f}ms  "
-            f"gen {float(rec.get('gen_ms') or 0):.0f}ms"
-        ),
-        (
-            f"{indent}tokens {rec.get('prompt_tokens', 0)} in / "
-            f"{rec.get('completion_tokens', 0)} out  tps {tps_s}"
-        ),
-    ]
 
 
 USAGE_EXHAUSTED_MESSAGE = (
@@ -1661,223 +160,6 @@ MIME_MAP = {
 }
 
 
-def _is_usage_exhausted_error(status: int, error_text: str) -> bool:
-    """Detect true quota/credit exhaustion — not ordinary rate limits.
-
-    Transient 429 rate limits must still get normal retry/backoff. Only treat as
-    exhausted when the body clearly indicates cooldown, quota, or credits.
-
-    2026-08-30 fix for Google Antigravity pooled false positive:
-    - Antigravity-manager pools 5 Google accounts; a single 429 with
-      reason=QuotaExhausted for gemini-3-flash on ONE account is NOT global
-      exhaustion — combined quota may still be 70% (observed 2026-08-30).
-      The manager still serves other accounts/models, so the provider must
-      treat this as transient and fall back, not raise USAGE_EXHAUSTED.
-    - Google's error is "QuotaExhausted" (no space) not "quota exceeded",
-      so the old marker list missed it (false negative) while also flagging
-      single-model hits as global (false positive). Both are fixed here.
-    """
-    text = (error_text or "").lower()
-    # Explicit exhaustion / cooldown markers (avoid bare "usage" / "rate limit").
-    markers = (
-        "model_cooldown",
-        "cooling down",
-        "insufficient_quota",
-        "insufficient credits",
-        "credit balance",
-        "quota exceeded",
-        "quotaexhausted",  # Google Antigravity: QuotaExhausted (no space)
-        "quota_exhausted",
-        "resource_exhausted",
-        "resource exhausted",
-        "out of credits",
-        "out of quota",
-        "billing hard limit",
-        "spend limit",
-    )
-    if status != 429:
-        return False
-    is_rate_limit = (
-        "rate limit" in text or "rate_limit" in text or "too many requests" in text
-    )
-    is_quota_marker = any(m in text for m in markers)
-    if is_rate_limit and not is_quota_marker:
-        return False
-    # Antigravity pooled false-positive guard: single-model QuotaExhausted
-    # (e.g. gemini-3-flash, gemini-2.5-pro) on one pooled account should be
-    # transient, not global. Only treat as global exhausted if the error
-    # carries a stronger billing/credit signal or no specific model is named.
-    if is_quota_marker:
-        # If the text names a specific Gemini/Claude model, it's likely per-model
-        # cooldown from the pool, not the whole API being drained.
-        has_model = any(
-            tok in text
-            for tok in (
-                "gemini",
-                "claude",
-                "flash",
-                "pro",
-                "quotaexhausted",
-                "quota_exhausted",
-            )
-        )
-        has_global = any(
-            g in text
-            for g in (
-                "billing",
-                "credit",
-                "insufficient",
-                "out of",
-                "spend limit",
-                "model_cooldown",
-                "cooling down",
-            )
-        )
-        if has_model and not has_global and not is_rate_limit:
-            # Single entry like 'QuotaExhausted for gemini-3-flash' — transient, fall back to Grok/other model
-            # unless the payload explicitly says combined/global is exhausted.
-            # Check for combined/global hint: if manager said so, it would mention billing or multiple accounts
-            return False
-        if has_model and is_rate_limit:
-            # "rate limited ... QuotaExhausted ... gemini-3-flash" — also transient pooled case
-            # Only global if billing/credit is mentioned
-            if not has_global:
-                return False
-    return is_quota_marker
-
-
-def _is_policy_block_text(text: str) -> bool:
-    """True when a 200-OK *reply body* is actually Gemini's prompt-block notice.
-
-    z3ki (and Google's OpenAI-compat surface) do not return an HTTP error for a
-    blocked prompt — they hand back a normal 200 whose message content is:
-
-        The prompt could not be submitted. The prompt contains sensitive words
-        that violate Google's (...use-policy). Try rephrasing the prompt. ...
-
-    Nothing upstream flags it, so Maxwell relayed it into the channel verbatim
-    (logged 2026-08-21, #villa-31 and #poketwo-spawns). These markers are the
-    provider's own boilerplate; a genuine reply does not contain them. A false
-    positive only costs us one turn answered by the fallback model, so this is
-    deliberately eager.
-    """
-    t = (text or "").lower()
-    return any(
-        m in t
-        for m in (
-            "the prompt could not be submitted",
-            "contains sensitive words",
-            "policies.google.com/terms/generative-ai/use-policy",
-            "ai.google.dev/gemini-api/docs/troubleshooting",
-        )
-    )
-
-
-def _is_content_policy_block(status: int, error_text: str) -> bool:
-    """True when the provider refused the *prompt* on content-policy grounds.
-
-    Gemini (and OpenAI-compatible proxies in front of it) reject the request
-    outright rather than returning a completion, e.g.
-
-        The prompt could not be submitted. The prompt contains sensitive words
-        that violate Google's use policy. Try rephrasing the prompt.
-
-    The native API signals the same thing as promptFeedback.blockReason
-    (PROHIBITED_CONTENT / BLOCKLIST / SPII / SAFETY). None of it is transient:
-    retrying the identical payload against the same endpoint always loses, so
-    this cools the endpoint and fails straight over to the fallback model.
-    """
-    text = (error_text or "").lower()
-    if status not in (400, 403, 422, 451, 200):
-        return False
-    markers = (
-        "sensitive words",
-        "could not be submitted",
-        "generative-ai/use-policy",
-        "prohibited_content",
-        "blocked_reason",
-        "blockreason",
-        "safety_ratings",
-        "content policy",
-        "content_policy",
-        "content_filter",
-        "responsibleaipolicyviolation",
-    )
-    return any(m in text for m in markers)
-
-
-def _is_media_unsupported_error(status: int, error_text: str) -> bool:
-    """True when the endpoint rejected image/video/audio content parts."""
-    text = (error_text or "").lower()
-    if status == 404 and "support input audio" in text:
-        return True
-    if status in (400, 404) and (
-        "unknown variant `image_url`" in text
-        or "unknown variant `video_url`" in text
-        or "unknown variant `input_audio`" in text
-        or ("expected `text`" in text and "image_url" in text)
-    ):
-        return True
-    # OpenRouter phrases a text-only routing failure as a bare 404:
-    #   {"error":{"message":"No endpoints found that support image input"}}
-    # This has no `image_url` token in it, so the checks above missed it and
-    # every image turn hard-failed instead of falling back (logged 2026-08-12).
-    if status in (400, 404) and "no endpoints found that support" in text:
-        return True
-    # Generic provider phrasings: "model does not support image input",
-    # "does not support images", "image input is not supported".
-    if status in (400, 404, 415, 422):
-        for media_word in ("image", "images", "audio", "video", "multimodal"):
-            if (
-                f"not support {media_word}" in text
-                or f"{media_word} input is not supported" in text
-                or f"{media_word} input not supported" in text
-            ):
-                return True
-    return False
-
-
-# "invalid temperature: only 0.6 is allowed for this model" (Console Go via
-# OpenRouter). Deterministic — retrying the same payload burns every attempt
-# and then falls back for no reason, so parse the demanded value and resend.
-_TEMPERATURE_CONSTRAINT_RE = re.compile(
-    r"temperature[^.]{0,80}?only\s+([0-9]*\.?[0-9]+)\s+is\s+allowed",
-    re.IGNORECASE,
-)
-_TEMPERATURE_RANGE_RE = re.compile(
-    r"temperature[^.]{0,80}?(?:must be|should be)[^.]{0,40}?"
-    r"(?:between|in)\s+\[?\s*([0-9]*\.?[0-9]+)\s*(?:,|and|-)\s*([0-9]*\.?[0-9]+)",
-    re.IGNORECASE,
-)
-
-
-def _required_temperature(status: int, error_text: str) -> float | None:
-    """Extract the temperature an endpoint demands from a 400 body."""
-    if status != 400:
-        return None
-    text = error_text or ""
-    if "temperature" not in text.lower():
-        return None
-    match = _TEMPERATURE_CONSTRAINT_RE.search(text)
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return None
-    match = _TEMPERATURE_RANGE_RE.search(text)
-    if match:
-        try:
-            low, high = float(match.group(1)), float(match.group(2))
-        except ValueError:
-            return None
-        if low > high:
-            low, high = high, low
-        # Aim at the middle of the accepted band rather than an endpoint,
-        # which providers sometimes treat as exclusive.
-        return round((low + high) / 2, 3)
-    return None
-
-
 def _strip_media_parts(chat_messages: list[dict]) -> bool:
     """Flatten multimodal content back to plain text. True if anything changed.
 
@@ -1904,27 +186,6 @@ def _strip_media_parts(chat_messages: list[dict]) -> bool:
         msg["content"] = merged
         changed = True
     return changed
-
-
-def normalize_base_url(base_url: str) -> str:
-    """Normalize an OpenAI-compatible base URL to the API root.
-
-    Requests are built as ``{base_url}/chat/completions``, so the base has
-    to include the API path segment. Everyone pastes the bare host
-    ("http://localhost:11434", "https://api.openai.com"), which then 404s in
-    a way that looks like a broken bot rather than a missing "/v1". If the
-    URL carries no path at all we add the conventional one; a URL that
-    already has a path (/v1, /v2, /api/v1, ...) is left exactly as given.
-    """
-    base = (base_url or "").strip().rstrip("/")
-    if not base:
-        return base
-    _, _, rest = base.partition("://")
-    if not rest:  # no scheme: treat the whole thing as a host
-        rest = base
-    if "/" in rest:  # already carries a path — the operator's business
-        return base
-    return f"{base}/v1"
 
 
 def _bounded_provider_request(method):
@@ -2571,6 +832,107 @@ class OpenAICompatibleProvider(ChatProvider):
             timing=getattr(message, "timing", {}),
         )
 
+    async def _read_completion_response(
+        self,
+        resp,
+        *,
+        stream: bool,
+        byok_request: bool,
+        credential_secrets: tuple[str, ...],
+        on_tool_call_name=None,
+        on_token=None,
+        custom_tool_calls=False,
+    ) -> CompletionResponse:
+        """Read one successful response within its policy, preserving clocks."""
+        first_token_s = last_token_s = None
+        bounded = byok_request or self.policy.max_response_bytes is not None
+        if stream:
+            merged = await _read_sse_response(
+                resp,
+                on_tool_call_name=on_tool_call_name,
+                on_token=on_token,
+                custom_tool_calls=custom_tool_calls,
+                max_bytes=self._response_limit() if bounded else None,
+            )
+            ended_at = time.perf_counter()
+            result = {
+                key: value for key, value in merged.items() if not key.startswith("__")
+            }
+            first_token_s = merged.get("__first_token_s__")
+            last_token_s = merged.get("__last_token_s__")
+        else:
+            result = (
+                await _read_json_response_limited(resp, self._response_limit())
+                if bounded
+                else await resp.json()
+            )
+            ended_at = time.perf_counter()
+        if byok_request:
+            result = self._redact_provider_payload(result, credential_secrets)
+        return CompletionResponse(result, ended_at, first_token_s, last_token_s)
+
+    def _completion_result(
+        self,
+        message: dict,
+        response: CompletionResponse,
+        *,
+        endpoint: ProviderEndpoint,
+        model: str,
+        stream: bool,
+        request_start: float,
+        headers_ms: float,
+        request_id: str,
+        status: int,
+    ) -> _CompletionMessage:
+        """Attach per-request metadata and update compatibility diagnostics."""
+        usage = _normalize_llm_usage(response.payload.get("usage", {}))
+        request_usage = {
+            key: usage[key]
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+        content = message.get("content") or ""
+        tool_calls = message.get("tool_calls") or []
+        provider = endpoint.name if len(self._endpoints) > 1 else self.name
+        timing = compute_llm_timing(
+            request_start=request_start,
+            first_token_s=response.first_token_s,
+            last_token_s=response.last_token_s,
+            ended_at=response.ended_at,
+            headers_ms=headers_ms,
+            usage=request_usage,
+            endpoint=provider,
+            model=model,
+            stream=stream,
+            content_chars=len(content),
+            tool_calls=len(tool_calls),
+            content=content,
+            reasoning=message.get("reasoning_content")
+            or message.get("reasoning")
+            or "",
+            tool_call_payloads=tool_calls,
+        )
+        self._last_usage = request_usage  # deprecated diagnostics only
+        self._last_timing = timing  # deprecated diagnostics only
+        self._timing_history.append(timing)
+        self._endpoint_cooldown.pop(endpoint.name, None)
+        logger.info(
+            "Provider timing done request_id=%s endpoint=%s model=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s",
+            request_id,
+            endpoint.name,
+            model,
+            status,
+            headers_ms,
+            timing["ttft_ms"],
+            timing["total_ms"],
+            timing["tps"],
+            len(content),
+            len(tool_calls),
+            request_usage["total_tokens"],
+        )
+        return _CompletionMessage(
+            message, usage, model=model, provider=provider, timing=timing
+        )
+
     @_bounded_provider_request
     async def generate_chat_completion(
         self,
@@ -2768,6 +1130,7 @@ class OpenAICompatibleProvider(ChatProvider):
         # addition to the bounded deterministic failover extensions below.
         attempt_ceiling = max_attempts + 2 * len(self._endpoints) + 2 + empty_budget
         recovery_endpoint: ProviderEndpoint | None = None
+        context_output_limits: dict[tuple[str, str], int] = {}
         while attempt < min(max_attempts, attempt_ceiling):
             attempt += 1
             if recovery_endpoint is not None:
@@ -2805,6 +1168,9 @@ class OpenAICompatibleProvider(ChatProvider):
                 data["stream"] = bool(stream)
                 if not stream:
                     data.pop("stream_options", None)
+            context_limit = context_output_limits.get((endpoint.name, data["model"]))
+            if context_limit is not None:
+                data["max_tokens"] = min(data["max_tokens"], context_limit)
             if byok_request:
                 # Avoid showing any response fragment in progress UI before
                 # the complete body has passed the credential scrubber.
@@ -3062,93 +1428,46 @@ class OpenAICompatibleProvider(ChatProvider):
                                 f"policy and no fallback endpoint was available",
                                 cooldown=True,
                             )
-                        # Auto-clamp max_tokens on context overflow (OpenRouter returns 400)
-                        if (
-                            resp.status == 400
-                            and "maximum context length" in error_text.lower()
-                            and max_tokens is None
-                        ):
-                            import re as _re
-
-                            ctx_match = _re.search(
-                                r"maximum context length is (\d+) tokens", error_text
+                        current_output = int(data.get("max_tokens", self.max_tokens))
+                        safe_context_output = (
+                            context_output_limit(
+                                resp.status, error_text, current_output
                             )
-                            req_match = _re.search(
-                                r"you requested about (\d+) tokens", error_text
+                            if max_tokens is None
+                            else None
+                        )
+                        if safe_context_output is not None:
+                            logger.warning(
+                                "Clamping max_tokens from %s to %s for endpoint %s after context overflow",
+                                current_output,
+                                safe_context_output,
+                                endpoint.name,
                             )
-                            if ctx_match and req_match:
-                                ctx_limit = int(ctx_match.group(1))
-                                requested = int(req_match.group(1))
-                                estimated_input = requested - int(
-                                    data.get("max_tokens", self.max_tokens)
-                                )
-                                safe_output = max(
-                                    4096, ctx_limit - estimated_input - 512
-                                )
-                                if safe_output < int(
-                                    data.get("max_tokens", self.max_tokens)
-                                ):
-                                    logger.warning(
-                                        "Clamping max_tokens from %s to %s due to context limit %s",
-                                        data.get("max_tokens"),
-                                        safe_output,
-                                        ctx_limit,
-                                    )
-                                    # The loop rebuilds payloads every attempt. Mutating only
-                                    # data["max_tokens"] here is a fake fix; keep the clamp in
-                                    # loop state or we retry the same busted request like idiots.
-                                    max_tokens = safe_output
-                                    data["max_tokens"] = safe_output
-                                    if await self._retry_after_attempt(
-                                        attempt,
-                                        endpoint,
-                                        f"Context overflow, clamped max_tokens to {safe_output}",
-                                        max_attempts=max_attempts,
-                                        fast_fallback=fast_fallback,
-                                        has_media=has_media,
-                                        prefer_fallback=prefer_fallback,
-                                    ):
-                                        continue
-                        # max_tokens is *output* length, not context. Models like
-                        # minimax-m3 can have 1M context but only e.g. 131072 max output.
-                        if resp.status == 400 and (
-                            "maximum output tokens" in error_text.lower()
-                            or "exceeds model's maximum output" in error_text.lower()
-                        ):
-                            import re as _re
-
-                            out_match = _re.search(
-                                r"maximum output tokens\s*\(?\s*(\d+)\s*\)?",
-                                error_text,
-                                _re.IGNORECASE,
+                            context_output_limits[(endpoint.name, data["model"])] = (
+                                safe_context_output
                             )
-                            if not out_match:
-                                out_match = _re.search(
-                                    r"maximum output tokens \((\d+)\)",
-                                    error_text,
-                                    _re.IGNORECASE,
-                                )
-                            if out_match:
-                                out_cap = int(out_match.group(1))
-                                # Leave headroom under the hard cap.
-                                safe_output = max(1, out_cap - 64)
-                                current = int(data.get("max_tokens", self.max_tokens))
-                                if out_cap > 0 and safe_output < current:
-                                    logger.warning(
-                                        "Clamping max_tokens from %s to %s (model max output %s)",
-                                        current,
-                                        safe_output,
-                                        out_cap,
-                                    )
-                                    self._endpoint_output_caps[
-                                        (endpoint.name, data["model"])
-                                    ] = safe_output
-                                    # Resend to the same model without mutating
-                                    # the caller's limit for a later fallback.
-                                    if attempt >= max_attempts:
-                                        max_attempts = attempt + 1
-                                    recovery_endpoint = endpoint
-                                    continue
+                            if attempt >= max_attempts:
+                                max_attempts = attempt + 1
+                            recovery_endpoint = endpoint
+                            continue
+                        safe_output = maximum_output_limit(
+                            resp.status, error_text, current_output
+                        )
+                        if safe_output is not None:
+                            logger.warning(
+                                "Clamping max_tokens from %s to %s for endpoint %s model %s",
+                                current_output,
+                                safe_output,
+                                endpoint.name,
+                                data["model"],
+                            )
+                            self._endpoint_output_caps[
+                                (endpoint.name, data["model"])
+                            ] = safe_output
+                            if attempt >= max_attempts:
+                                max_attempts = attempt + 1
+                            recovery_endpoint = endpoint
+                            continue
                         # Some models accept exactly one temperature and 400 on
                         # anything else. Learn it and resend to the SAME endpoint
                         # rather than burning retries / falling back needlessly.
@@ -3223,45 +1542,16 @@ class OpenAICompatibleProvider(ChatProvider):
                             f"Provider API error: {resp.status} - {error_text}"
                         )
 
-                    json_ms = 0.0
-                    first_token_s = None
-                    last_token_s = None
-                    ended_at = None
-                    if data.get("stream"):
-                        merged = await _read_sse_response(
-                            resp,
-                            on_tool_call_name=on_tool_call_name,
-                            on_token=on_token,
-                            custom_tool_calls=custom_tool_calls,
-                            max_bytes=self._response_limit()
-                            if self.policy.max_response_bytes
-                            else None,
-                        )
-                        ended_at = time.perf_counter()
-                        result = {
-                            k: v for k, v in merged.items() if not k.startswith("__")
-                        }
-                        first_token_s = merged.get("__first_token_s__")
-                        last_token_s = merged.get("__last_token_s__")
-                        # Streaming has no JSON-parse step; report the
-                        # time-to-first-token so the latency log stays useful
-                        # instead of fabricating a json_ms value.
-                        if first_token_s is not None:
-                            json_ms = (first_token_s - request_start) * 1000
-                    else:
-                        result = (
-                            await _read_json_response_limited(
-                                resp, self._response_limit()
-                            )
-                            if byok_request or self.policy.max_response_bytes
-                            else await resp.json()
-                        )
-                        ended_at = time.perf_counter()
-                        json_ms = (ended_at - request_start) * 1000
-                    if byok_request:
-                        result = self._redact_provider_payload(
-                            result, credential_secrets
-                        )
+                    response = await self._read_completion_response(
+                        resp,
+                        stream=bool(data.get("stream")),
+                        byok_request=byok_request,
+                        credential_secrets=credential_secrets,
+                        on_tool_call_name=on_tool_call_name,
+                        on_token=on_token,
+                        custom_tool_calls=custom_tool_calls,
+                    )
+                    result = response.payload
                     if not isinstance(result, dict):
                         result_preview = (
                             "[redacted]"
@@ -3326,15 +1616,8 @@ class OpenAICompatibleProvider(ChatProvider):
                             )
                         raise RuntimeError("No response from provider")
 
-                    message = choices[0].get("message", {})
-                    content = message.get("content") or ""
-                    if isinstance(content, list):
-                        content = "".join(
-                            str(p.get("text") or "")
-                            if isinstance(p, dict)
-                            else (p if isinstance(p, str) else "")
-                            for p in content
-                        )
+                    message = normalize_completion_message(choices)
+                    content = message["content"]
                     # Reasoning-to-content promotion.
                     #
                     # Some reasoning models (notably DeepSeek) have a quirk
@@ -3462,59 +1745,16 @@ class OpenAICompatibleProvider(ChatProvider):
                             continue
                         raise ProviderEmptyResponseError("Empty response from provider")
 
-                    usage = _normalize_llm_usage(result.get("usage", {}))
-                    request_usage = {
-                        "prompt_tokens": usage["prompt_tokens"],
-                        "completion_tokens": usage["completion_tokens"],
-                        "total_tokens": usage["total_tokens"],
-                    }
-                    timing = compute_llm_timing(
-                        request_start=request_start,
-                        first_token_s=first_token_s,
-                        last_token_s=last_token_s,
-                        ended_at=ended_at,
-                        headers_ms=headers_ms,
-                        usage=request_usage,
-                        endpoint=(endpoint.name if len(self._endpoints) > 1 else self.name),
+                    return self._completion_result(
+                        message,
+                        response,
+                        endpoint=endpoint,
                         model=str(data.get("model") or ""),
                         stream=bool(data.get("stream")),
-                        content_chars=len(content or ""),
-                        tool_calls=len(message.get("tool_calls") or []),
-                        content=content or "",
-                        reasoning=str(
-                            message.get("reasoning_content")
-                            or message.get("reasoning")
-                            or ""
-                        ),
-                        tool_call_payloads=message.get("tool_calls") or [],
-                    )
-                    self._last_usage = request_usage  # deprecated diagnostics only
-                    self._last_timing = timing  # deprecated diagnostics only
-                    self._timing_history.append(timing)
-                    # Healthy response: this endpoint is no longer rate-limited.
-                    self._endpoint_cooldown.pop(endpoint.name, None)
-                    logger.info(
-                        "Provider timing done request_id=%s endpoint=%s model=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s",
-                        request_id,
-                        endpoint.name,
-                        data.get("model"),
-                        resp.status,
-                        headers_ms,
-                        timing.get("ttft_ms", json_ms),
-                        timing.get("total_ms", json_ms),
-                        timing.get("tps"),
-                        len(content or ""),
-                        len(message.get("tool_calls") or []),
-                        request_usage.get("total_tokens", 0),
-                    )
-                    return _CompletionMessage(
-                        message,
-                        usage,
-                        model=str(data.get("model") or ""),
-                        provider=endpoint.name
-                        if len(self._endpoints) > 1
-                        else self.name,
-                        timing=timing,
+                        request_start=request_start,
+                        headers_ms=headers_ms,
+                        request_id=request_id,
+                        status=resp.status,
                     )
             except asyncio.TimeoutError:
                 logger.warning(

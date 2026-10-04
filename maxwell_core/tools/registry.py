@@ -56,6 +56,9 @@ class ToolRegistry:
         name = str(spec.name or "").strip()
         if not name:
             raise ValueError("tool name is required")
+        plugin = str(spec.plugin).strip()
+        if not plugin:
+            raise ValueError("tool plugin is required")
         existing = self._specs.get(name)
         if existing is not None:
             if name in self._protected and not allow_override:
@@ -70,6 +73,8 @@ class ToolRegistry:
                     "without override=true"
                 )
             self._plugin_tools.get(existing.plugin, set()).discard(name)
+        spec.name = name
+        spec.plugin = plugin
         self._specs[name] = spec
         self._plugin_tools.setdefault(spec.plugin, set()).add(name)
         if protected:
@@ -94,20 +99,32 @@ class ToolRegistry:
         self.register(spec, protected=protected, allow_override=allow_override)
         return spec
 
-    def unregister_plugin(self, plugin: str) -> list[str]:
-        names = list(self._plugin_tools.pop(str(plugin), set()))
+    def unregister_plugin(self, plugin: str, *, force: bool = False) -> list[str]:
+        """Remove an owner's tools, retaining protected tools unless unloading.
+
+        ``force`` is for host lifecycle cleanup. Protection prevents ordinary
+        replacement/removal; it must not retain a tool from a failed setup.
+        """
+        plugin = str(plugin)
+        names = list(self._plugin_tools.get(plugin, set()))
         removed: list[str] = []
+        retained: set[str] = set()
         for name in names:
             spec = self._specs.get(name)
             if spec is None or spec.plugin != plugin:
                 continue
-            if name in self._protected:
+            if name in self._protected and not force:
                 # Protected tools stay until a replacement is registered.
+                retained.add(name)
                 continue
             self._specs.pop(name, None)
             self._protected.discard(name)
             removed.append(name)
-        return removed
+        if retained:
+            self._plugin_tools[plugin] = retained
+        else:
+            self._plugin_tools.pop(plugin, None)
+        return sorted(removed)
 
     def plugin_tools(self, plugin: str) -> list[str]:
         return sorted(self._plugin_tools.get(str(plugin), set()))

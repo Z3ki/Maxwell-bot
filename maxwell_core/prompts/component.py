@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+
+def _discard_awaitable(value: Any) -> None:
+    """Close an accidental coroutine without starting work during composition."""
+    close = getattr(value, "close", None)
+    if callable(close):
+        close()
 
 # Where a component is inserted in the assembled prompt.
 POSITIONS = (
@@ -79,7 +90,12 @@ class PromptComponent:
                 return False
         if self.when is not None:
             try:
-                return bool(self.when(request))
+                result = self.when(request)
+                if inspect.isawaitable(result):
+                    _discard_awaitable(result)
+                    logger.warning("Prompt component %s predicate returned an awaitable", self.id)
+                    return False
+                return bool(result)
             except Exception:
                 return False
         return True
@@ -88,6 +104,10 @@ class PromptComponent:
         if self.render is not None:
             try:
                 text = self.render(request)
+                if inspect.isawaitable(text):
+                    _discard_awaitable(text)
+                    logger.warning("Prompt component %s renderer returned an awaitable", self.id)
+                    text = self.text
             except Exception:
                 text = self.text
         else:

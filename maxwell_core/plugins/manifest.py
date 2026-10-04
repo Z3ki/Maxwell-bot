@@ -174,6 +174,8 @@ def _parse_tools(raw: Any) -> list[ToolDeclaration]:
         transports = item.get("transports") or item.get("platforms") or ["any"]
         if isinstance(transports, str):
             transports = [transports]
+        if not isinstance(transports, (list, tuple, set)):
+            raise ManifestError(f"tool {name!r} transports must be a list or string")
         out.append(
             ToolDeclaration(
                 name=name,
@@ -225,7 +227,17 @@ def validate_manifest(
     except (TypeError, ValueError):
         spec_version_i = MANIFEST_SPEC_VERSION
 
-    tools = _parse_tools(data.get("tools"))
+    try:
+        tools = _parse_tools(data.get("tools"))
+    except ManifestError as exc:
+        exc.path = path
+        raise
+    try:
+        data_version = int(data.get("data_version", 1))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ManifestError("data_version must be a positive integer", path=path) from exc
+    if data_version < 1:
+        raise ManifestError("data_version must be a positive integer", path=path)
     dual = [t.name for t in tools if t.returns_result and t.ends_turn]
     if dual:
         raise ManifestError(
@@ -270,7 +282,7 @@ def validate_manifest(
         uninstallable=_as_bool(data.get("uninstallable"), True),
         bundled=_as_bool(data.get("bundled"), False),
         requires_restart=_as_bool(data.get("requires_restart"), False),
-        data_version=int(data.get("data_version") or 1),
+        data_version=data_version,
         raw=dict(data),
         allowed_users=_as_str_list(data.get("allowed_users")),
         denied_users=_as_str_list(data.get("denied_users")),

@@ -19,13 +19,13 @@ minimal — same method names, same return shapes.
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,6 +33,21 @@ import aiohttp
 import numpy as np
 
 from media_payloads import sanitize_media_memory, strip_media_payloads
+from maxwell_core.memory.embeddings import (
+    extract_embeddings as _extract_embeddings,
+    normalized_vector,
+)
+from maxwell_core.memory.identity import (
+    fact_content_hash,
+    migrate_scoped_hashes,
+    web_result_hash,
+)
+from maxwell_core.memory.scope import (
+    MemoryRequester as MemoryRequester,
+    _decode_metadata,
+    _has_requester,
+    _memory_row_visible as _memory_row_visible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,29 +100,6 @@ EMBED_URL = _embed_endpoint(EMBED_BASE_URL)
 EMBED_HEADERS = {"Authorization": f"Bearer {EMBED_API_KEY}"} if EMBED_API_KEY else {}
 # Kept as an alias: older code (and a few tests) referenced this name.
 OLLAMA_EMBED_URL = EMBED_URL
-
-
-def _extract_embeddings(data: dict) -> list[list[float]]:
-    """Pull vectors out of an Ollama or OpenAI embeddings response."""
-    if not isinstance(data, dict):
-        return []
-    vectors = data.get("embeddings")
-    if isinstance(vectors, list) and vectors:
-        return vectors
-    single = data.get("embedding")
-    if isinstance(single, list) and single:
-        return [single]
-    # OpenAI: {"data": [{"embedding": [...], "index": 0}, ...]}
-    items = data.get("data")
-    if isinstance(items, list) and items:
-        out = [
-            item["embedding"]
-            for item in items
-            if isinstance(item, dict) and isinstance(item.get("embedding"), list)
-        ]
-        if out:
-            return out
-    return []
 
 
 def _float_env(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -183,178 +175,6 @@ MAX_ENTITY_FACTS_PER_USER = 200
 MAX_ENTITY_ALIASES = 8
 # Guilds recorded per person. Only used to describe where we know them from.
 MAX_ENTITY_GUILDS = 32
-
-
-@dataclass(frozen=True)
-class MemoryRequester:
-    """Validated, Discord-independent authorization context for memory access."""
-
-    user_id: str
-    channel_id: str
-    guild_id: str = ""
-    is_dm: bool = False
-    is_admin: bool = False
-    channel_is_public: bool = False
-
-    def __post_init__(self):
-        for name in ("user_id", "channel_id", "guild_id"):
-            value = str(getattr(self, name) or "").strip()
-            object.__setattr__(self, name, value if len(value) <= 128 else "")
-        for name in ("is_dm", "is_admin", "channel_is_public"):
-            object.__setattr__(self, name, getattr(self, name) is True)
-
-    @property
-    def valid(self) -> bool:
-        return bool(self.user_id and self.channel_id and
-                    (not self.guild_id if self.is_dm else self.guild_id))
-
-    @classmethod
-    def from_message(cls, message, *, is_admin: bool = False):
-        author = getattr(message, "author", None)
-        channel = getattr(message, "channel", None)
-        guild = getattr(message, "guild", None)
-        public = False
-        if guild is not None and channel is not None:
-            try:
-                public = bool(channel.permissions_for(guild.default_role).view_channel)
-            except Exception:
-                public = False
-        return cls(
-            user_id=str(getattr(author, "id", "") or ""),
-            channel_id=str(getattr(channel, "id", "") or ""),
-            guild_id=str(getattr(guild, "id", "") or ""),
-            is_dm=guild is None,
-            is_admin=is_admin is True,
-            channel_is_public=public,
-        )
-
-
-def _has_requester(requester: MemoryRequester | None) -> bool:
-    return isinstance(requester, MemoryRequester) and requester.valid
-
-
-def _decode_metadata(raw) -> dict:
-    try:
-        result = json.loads(raw or "{}")
-        return result if isinstance(result, dict) else {}
-    except (TypeError, ValueError):
-        return {}
-
-
-def _memory_row_visible(row: dict, requester: MemoryRequester | None) -> bool:
-    """Fail closed unless source provenance fits the requester's current scope."""
-    if not _has_requester(requester):
-        return False
-    metadata = row.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = _decode_metadata(metadata)
-    kind = str(row.get("kind") or "")
-    channel_id = str(row.get("channel_id") or "")
-    guild_id = str(row.get("guild_id") or "")
-
-    # Administrator status never widens ordinary transcript retrieval.
-    if kind in {"message", "bot_output"}:
-        return channel_id == requester.channel_id and (
-            guild_id == "" if requester.is_dm else guild_id == requester.guild_id
-        )
-
-    if kind == WEB_RESULT_KIND:
-        source_user = str(metadata.get("source_user_id") or "")
-        source_channel = str(metadata.get("source_channel_id") or "")
-        source_guild = str(metadata.get("source_guild_id") or "")
-        scope = str(row.get("scope") or "")
-        if metadata.get("source_is_dm") is True:
-            return bool(
-                requester.is_dm
-                and source_user == requester.user_id
-                and source_channel == requester.channel_id
-                and not guild_id
-                and scope == f"dm:{requester.user_id}"
-            )
-        if requester.is_dm or not requester.guild_id:
-            return False
-        if (
-            guild_id != requester.guild_id
-            or source_guild != requester.guild_id
-            or not source_channel
-        ):
-            return False
-        if scope == "guild":
-            return metadata.get("source_channel_public") is True
-        return bool(
-            scope == f"channel:{requester.channel_id}"
-            and source_channel == requester.channel_id
-        )
-
-    source_user = str(metadata.get("source_user_id") or row.get("author_id") or "")
-    source_channel = str(metadata.get("source_channel_id") or channel_id or "")
-    source_guild = str(metadata.get("source_guild_id") or guild_id or "")
-    if not source_user or not source_channel:
-        return False
-    expires = str(metadata.get("expires_at") or "").strip()
-    if expires:
-        expiry = _parse_iso(expires)
-        if expiry is None or expiry < _utcnow():
-            return False
-
-    scope = str(row.get("scope") or "")
-    scope_kind, _, scope_id = scope.partition(":")
-    visibility = str(metadata.get("visibility") or "private").strip().lower()
-    source_is_dm = metadata.get("source_is_dm") is True
-    if source_is_dm:
-        return bool(
-            requester.is_dm
-            and source_user == requester.user_id
-            and source_channel == requester.channel_id
-            and scope_kind == "dm"
-            and scope_id == requester.user_id
-        )
-
-    # Only explicitly approved operator facts are cross-community.
-    if scope == "global":
-        return bool(
-            metadata.get("public_approved") is True
-            and metadata.get("source_kind") == "operator_public"
-            and (
-                visibility in {"public", "shared"}
-                or (visibility == "admin_only" and requester.is_admin)
-            )
-        )
-    if requester.is_dm or not requester.guild_id or source_guild != requester.guild_id:
-        return False
-
-    same_channel = source_channel == requester.channel_id
-    source_public = metadata.get("source_channel_public") is True
-    if scope_kind == "channel":
-        in_scope = scope_id == requester.channel_id and same_channel
-    elif scope_kind == "guild":
-        in_scope = scope_id == requester.guild_id and (same_channel or source_public)
-    elif scope_kind == "user":
-        in_scope = (
-            scope_id == requester.user_id == source_user
-            and (same_channel or source_public)
-        )
-    else:
-        in_scope = False
-
-    if visibility == "private":
-        return bool(
-            source_user == requester.user_id
-            and same_channel
-            and scope_kind in {"channel", "user"}
-            and scope_id in {requester.channel_id, requester.user_id}
-        )
-    if visibility == "restricted":
-        return bool(requester.is_admin and same_channel and in_scope)
-    if visibility == "admin_only":
-        return bool(
-            requester.is_admin
-            and in_scope
-            and (scope_kind != "user" or source_user == requester.user_id)
-        )
-    if visibility not in {"shared", "public_hint", "public"}:
-        return False
-    return in_scope
 
 
 # Cosine similarity threshold for RAG retrieval. Below this, results are
@@ -456,14 +276,13 @@ def _parse_iso(ts: str) -> datetime | None:
 
 
 def _normalize_ltm_line(content: str) -> str:
-    return " ".join(str(content).split())[:MAX_MEMORY_CHARS]
+    return " ".join(strip_media_payloads(str(content)).split())[:MAX_MEMORY_CHARS]
 
 
-def _shared_context_hash(scope: str, content: str) -> str:
-    import hashlib
-
-    normalized = _strip_for_embedding(content)
-    return hashlib.sha256(f"shared:{scope}\x00{normalized}".encode("utf-8")).hexdigest()
+def _shared_context_hash(scope: str, content: str, metadata=None) -> str:
+    return fact_content_hash(
+        "shared_context", scope, _strip_for_embedding(content), metadata
+    )
 
 
 def _strip_reasoning_text(content: str) -> str:
@@ -661,6 +480,7 @@ class RemEventLog:
         for raw in events:
             if not isinstance(raw, dict):
                 continue
+            raw = sanitize_media_memory(raw)
             role = str(raw.get("role") or "")
             if role not in {"user", "assistant"}:
                 # Also accept events with kind/timestamp format (used by bot.py)
@@ -669,7 +489,8 @@ class RemEventLog:
                 # Convert kind-based events to the expected format
                 role = str(raw.get("kind") or "user")
             mentions = []
-            for row in list(raw.get("mentions") or [])[:10]:
+            raw_mentions = raw.get("mentions")
+            for row in raw_mentions[:10] if isinstance(raw_mentions, list) else []:
                 if not isinstance(row, dict):
                     continue
                 mid = str(row.get("id") or "")
@@ -723,6 +544,8 @@ class RemEventLog:
                 await self._do_save()
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                logger.warning("REM event save failed: %s", type(exc).__name__)
 
         self._save_task = loop.create_task(_debounced())
 
@@ -730,8 +553,12 @@ class RemEventLog:
         self._save_task = None
         if self._dirty:
             self._dirty = False
-            snapshot = list(self.events)
-            await self._atomic_save(snapshot)
+            snapshot = copy.deepcopy(self.events)
+            try:
+                await self._atomic_save(snapshot)
+            except BaseException:
+                self._dirty = True
+                raise
 
     async def record(self, event: dict):
         async with self._lock:
@@ -748,12 +575,12 @@ class RemEventLog:
         since = _parse_iso(since_ts or "")
         async with self._lock:
             if since is None:
-                return [dict(e) for e in self.events]
+                return copy.deepcopy(self.events)
             out = []
             for event in self.events:
                 ts = _parse_iso(event.get("ts", event.get("timestamp", "")))
                 if ts and ts > since:
-                    out.append(dict(event))
+                    out.append(copy.deepcopy(event))
             return out
 
     async def size(self) -> int:
@@ -801,7 +628,7 @@ class RAGMemoryManager:
 
     def __init__(self, data_dir: str, max_messages: int = 10000):
         self.data_dir = Path(data_dir)
-        self.max_messages = min(max_messages, 10000)
+        self.max_messages = max(1, min(int(max_messages), 10000))
         self.db_path = self.data_dir / "maxwell_rag.db"
         self._db: sqlite3.Connection  # always set by _init_db() in __init__
         self._lock = asyncio.Lock()
@@ -965,7 +792,8 @@ class RAGMemoryManager:
         import hashlib as _hashlib
 
         for r in self._db.execute(
-            "SELECT id, content FROM vectors WHERE content_hash='' OR content_hash IS NULL"
+            "SELECT id, content FROM vectors WHERE (content_hash='' OR content_hash IS NULL) "
+            "AND kind NOT IN ('ltm', 'shared_context', 'entity', 'web_result')"
         ).fetchall():
             normalized = _strip_for_embedding(r["content"])
             h = _hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -992,13 +820,10 @@ class RAGMemoryManager:
         # Backfill source for existing rows using the same heuristic
         # the new insert path uses.
         for r in self._db.execute(
-            "SELECT id, kind, content, metadata FROM vectors "
+            "SELECT id, kind, content, metadata, source FROM vectors "
             "WHERE source='user' OR source IS NULL OR source=''"
         ).fetchall():
-            try:
-                meta = json.loads(r["metadata"] or "{}")
-            except Exception:
-                meta = {}
+            meta = _decode_metadata(r["metadata"])
             author_is_bot = meta.get("author_is_bot")
             content = r["content"]
             # Bot rows were inserted with a row.id prefix 'bot_*'
@@ -1014,9 +839,10 @@ class RAGMemoryManager:
                     if marker in content:
                         new_src = "bot"
                         break
-            self._db.execute(
-                "UPDATE vectors SET source=? WHERE id=?", (new_src, r["id"])
-            )
+            if new_src != r["source"]:
+                self._db.execute(
+                    "UPDATE vectors SET source=? WHERE id=?", (new_src, r["id"])
+                )
 
         # Pending rows are the durable embedding backlog. The rowid is carried
         # implicitly by this rowid-table index, keeping backlog scans bounded
@@ -1050,30 +876,9 @@ class RAGMemoryManager:
             "CREATE INDEX IF NOT EXISTS idx_content_hash ON vectors(content_hash)"
         )
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_parent ON vectors(parent_id)")
-        # Unique per kind so LTM / shared_context / web_result rows that
-        # share channel_id='' cannot INSERT OR REPLACE each other away.
-        with contextlib.suppress(Exception):
-            self._db.execute("DROP INDEX IF EXISTS idx_unique_content")
-        # Shared facts deduplicate within a scope, not across different people
-        # or rooms. Upgrade old unsalted hashes before duplicate cleanup.
-        for row in self._db.execute(
-            "SELECT id, scope, content, content_hash FROM vectors WHERE kind='shared_context'"
-        ).fetchall():
-            digest = _shared_context_hash(row["scope"], row["content"])
-            if digest != row["content_hash"]:
-                self._db.execute(
-                    "UPDATE vectors SET content_hash=? WHERE id=?", (digest, row["id"])
-                )
-        # Message identity is the Discord ID, not content. Drop the legacy
-        # uniqueness rule and never discard rows during startup migration.
-        with contextlib.suppress(Exception):
-            self._db.execute("DROP INDEX IF EXISTS idx_unique_content")
-        with contextlib.suppress(sqlite3.IntegrityError):
-            self._db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_fact_content "
-                "ON vectors(kind, channel_id, content_hash) "
-                "WHERE content_hash != '' AND kind NOT IN ('message','bot_output')"
-            )
+        # Deduplication must use the same provenance as retrieval. Upgrade
+        # hashes atomically while retaining every row's ID, text and metadata.
+        migrate_scoped_hashes(self._db, _strip_for_embedding)
 
         # ─── persistent embedding cache ────────────────────────────────
         # Survives restart. Indexed on (key, dim) for O(log n) point lookups.
@@ -1219,8 +1024,6 @@ class RAGMemoryManager:
         try:
             lines = ltm_file.read_text(encoding="utf-8").strip().splitlines()
             migrated = 0
-            import hashlib as _hashlib
-
             for line in lines:
                 line = line.strip()
                 if not line:
@@ -1232,7 +1035,7 @@ class RAGMemoryManager:
                 mid = parts[2].strip() if len(parts) > 2 else uuid.uuid4().hex
 
                 norm = _strip_for_embedding(content)
-                ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
+                ch = fact_content_hash("ltm", "global", norm, {})
 
                 # Insert without embedding first (will be embedded lazily on search)
                 self._db.execute(
@@ -1292,7 +1095,7 @@ class RAGMemoryManager:
                 )
                 self._db.execute(
                     "INSERT OR IGNORE INTO vectors (id, kind, channel_id, author, author_id, content, content_hash, embedding, metadata, scope, importance, timestamp, created_at) VALUES (?, 'shared_context', '', '', '', ?, ?, NULL, ?, ?, ?, ?, ?)",
-                    (cid, content, _shared_context_hash(scope, content), metadata, scope, importance, ts, time.time()),
+                    (cid, content, _shared_context_hash(scope, content, metadata), metadata, scope, importance, ts, time.time()),
                 )
                 migrated += 1
             if migrated:
@@ -1412,8 +1215,10 @@ class RAGMemoryManager:
                 (cache_key, EMBED_DIM),
             ).fetchone()
             if cached and cached["embedding"]:
-                vec = _blob_to_embedding(cached["embedding"])
-                if len(vec) == EMBED_DIM:
+                vec = normalized_vector(
+                    _blob_to_embedding(cached["embedding"]), EMBED_DIM
+                )
+                if vec is not None:
                     # Bump last_used_at + hits so LRU keeps useful entries.
                     with contextlib.suppress(Exception):
                         self._db.execute(
@@ -1467,19 +1272,13 @@ class RAGMemoryManager:
                                 f"(chunk {ci}/{len(chunks_to_embed)})"
                             )
                             return None
-                        cv = np.array(embeddings[0], dtype=np.float32)
-                        if len(cv) != EMBED_DIM:
+                        cv = normalized_vector(embeddings[0], EMBED_DIM)
+                        if cv is None:
                             logger.warning(
-                                f"Embedding dimension mismatch on chunk "
-                                f"{ci}: {len(cv)} != {EMBED_DIM}"
+                                "Invalid embedding vector on chunk %s; expected "
+                                "%s finite nonzero values", ci, EMBED_DIM,
                             )
                             return None
-                        # L2-normalize each chunk before pooling so the
-                        # mean isn't dominated by whichever chunk happened
-                        # to land at a larger norm.
-                        n = np.linalg.norm(cv)
-                        if n > 1e-8:
-                            cv = cv / n
                         chunk_vecs.append(cv)
 
             if not chunk_vecs:
@@ -1489,10 +1288,9 @@ class RAGMemoryManager:
             else:
                 # Mean-pool L2-normalized chunk vectors, re-normalize.
                 stacked = np.stack(chunk_vecs)
-                vec = stacked.mean(axis=0)
-                n = np.linalg.norm(vec)
-                if n > 1e-8:
-                    vec = vec / n
+                vec = normalized_vector(stacked.mean(axis=0), EMBED_DIM)
+                if vec is None:
+                    return None
                 logger.debug(
                     f"_embed mean-pooled {len(chunk_vecs)} chunks "
                     f"(text len={len(text)})"
@@ -1761,24 +1559,25 @@ class RAGMemoryManager:
                                 else:
                                     data = await resp.json()
                                     embeddings = _extract_embeddings(data)
-                                    if not embeddings:
+                                    if len(embeddings) != len(short_rows):
                                         logger.warning(
-                                            "Batch embed returned no embeddings"
+                                            "Batch embed returned %s vectors for %s rows",
+                                            len(embeddings), len(short_rows),
                                         )
+                                        fallback_rows = short_rows
                                     else:
                                         for i, row in enumerate(short_rows):
-                                            if i < len(embeddings):
-                                                vec = np.array(
-                                                    embeddings[i], dtype=np.float32
-                                                )
-                                                if len(vec) == EMBED_DIM:
-                                                    blob = _embedding_to_blob(vec)
-                                                    cursor = self._db.execute(
-                                                        "UPDATE vectors SET embedding=? "
-                                                        "WHERE id=? AND content=?",
-                                                        (blob, row["id"], row["content"]),
-                                                    )
-                                                    total_embedded += cursor.rowcount
+                                            vec = normalized_vector(
+                                                embeddings[i], EMBED_DIM
+                                            )
+                                            if vec is None:
+                                                continue
+                                            cursor = self._db.execute(
+                                                "UPDATE vectors SET embedding=? "
+                                                "WHERE id=? AND content=?",
+                                                (_embedding_to_blob(vec), row["id"], row["content"]),
+                                            )
+                                            total_embedded += cursor.rowcount
                         if fallback_rows:
                             for row in fallback_rows:
                                 if self._embed_endpoint_paused():
@@ -1861,7 +1660,7 @@ class RAGMemoryManager:
                 "message_id": row["id"],
                 "timestamp": row["timestamp"],
             }
-            entry.update(_decode_metadata(row["metadata"]))
+            entry = _decode_metadata(row["metadata"]) | entry
             # Older rows may contain a payload cut off by the storage cap.
             # Sanitize before transcript clipping, including result metadata.
             result.append(sanitize_media_memory(entry))
@@ -2008,16 +1807,18 @@ class RAGMemoryManager:
 
         # Prune old messages for this channel
         count_row = self._db.execute(
-            "SELECT COUNT(*) as c FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=?",
-            (channel_id,),
+            "SELECT COUNT(*) as c FROM vectors WHERE kind IN ('message','bot_output') "
+            "AND channel_id=? AND guild_id=?",
+            (channel_id, guild_id),
         ).fetchone()
         if count_row and count_row["c"] > self.max_messages:
             excess = count_row["c"] - self.max_messages
             self._db.execute(
                 "DELETE FROM vectors WHERE id IN ("
-                "SELECT id FROM vectors WHERE kind IN ('message','bot_output') AND channel_id=? "
+                "SELECT id FROM vectors WHERE kind IN ('message','bot_output') "
+                "AND channel_id=? AND guild_id=? "
                 "ORDER BY timestamp ASC, created_at ASC LIMIT ?)",
-                (channel_id, excess),
+                (channel_id, guild_id, excess),
             )
 
         # Embed the whole message in background. qwen3-embedding:0.6b's
@@ -2089,9 +1890,7 @@ class RAGMemoryManager:
         content = _normalize_ltm_line(content)
         mid = uuid.uuid4().hex
         ts = _utcnow_iso()
-        import hashlib as _hashlib
         norm = _strip_for_embedding(content)
-        ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
         if _has_requester(requester):
             channel_id = requester.channel_id
             guild_id = requester.guild_id
@@ -2114,6 +1913,10 @@ class RAGMemoryManager:
             channel_id = guild_id = author_id = ""
             scope = "global"
             metadata = {"source_kind": "unscoped_legacy"}
+        ch = fact_content_hash(
+            "ltm", scope, norm, metadata, channel_id=channel_id,
+            guild_id=guild_id, author_id=author_id,
+        )
         existing = self._db.execute(
             "SELECT id FROM vectors WHERE kind='ltm' AND channel_id=? "
             "AND content_hash=? LIMIT 1",
@@ -2147,15 +1950,25 @@ class RAGMemoryManager:
 
     async def edit_long_term_memory(self, memory_id: str, content: str) -> bool:
         content = _normalize_ltm_line(content)
-        import hashlib as _hashlib
-
-        norm = _strip_for_embedding(content)
-        ch = _hashlib.sha256(norm.encode("utf-8")).hexdigest()
-        cursor = self._db.execute(
-            "UPDATE vectors SET content=?, content_hash=?, embedding=NULL "
-            "WHERE id=? AND kind='ltm'",
-            (content, ch, str(memory_id)),
+        row = self._db.execute(
+            "SELECT scope, metadata, channel_id, guild_id, author_id FROM vectors "
+            "WHERE id=? AND kind='ltm'", (str(memory_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        ch = fact_content_hash(
+            "ltm", row["scope"], _strip_for_embedding(content), row["metadata"],
+            channel_id=row["channel_id"], guild_id=row["guild_id"],
+            author_id=row["author_id"],
         )
+        try:
+            cursor = self._db.execute(
+                "UPDATE vectors SET content=?, content_hash=?, embedding=NULL "
+                "WHERE id=? AND kind='ltm'",
+                (content, ch, str(memory_id)),
+            )
+        except sqlite3.IntegrityError:
+            return False
         if cursor.rowcount > 0:
             self._spawn(self._embed_and_store(str(memory_id), content))
             return True
@@ -2179,6 +1992,14 @@ class RAGMemoryManager:
         for op in ops:
             try:
                 kind = str(op.get("kind") or op.get("op") or "")
+                if kind in {"edit", "delete"} and requester is not None:
+                    row = self._db.execute(
+                        "SELECT * FROM vectors WHERE id=? AND kind='ltm'",
+                        (str(op.get("id") or ""),),
+                    ).fetchone()
+                    if row is None or not _memory_row_visible(dict(row), requester):
+                        errors += 1
+                        continue
                 if kind == "add":
                     content = str(op.get("content") or "")
                     if content:
@@ -2218,32 +2039,16 @@ class RAGMemoryManager:
             "errors": errors,
         }
 
-    # ─── global user entity memory ────────────────────────────────
-    #
-    # "Who is this person" answered from one place, whatever guild or DM the
-    # question arrives in. Everything below keys on the Discord user id and
-    # never filters on guild_id — that is the whole point. A fact learned in
-    # a DM is available in a server and vice versa; if a fact should NOT
-    # travel, it belongs in shared_context with a channel/guild scope, not
-    # here.
+    # ─── scoped user facts and admin-only aggregate identities ──────
 
     @staticmethod
-    def _entity_hash(user_id: str, content: str) -> str:
-        """Content hash for an entity fact, salted with the user id.
-
-        The unique index is (kind, channel_id, content_hash) and every entity
-        row has channel_id=''. Hashing the bare text would therefore make
-        "works night shifts" collide across *different people* — the second
-        person to say it would silently lose the fact. Folding the user id
-        into the hash keeps dedup per-person, which is what write-time dedup
-        means for this tier, without touching the shared index.
-        """
-        import hashlib as _hashlib
-
-        norm = _strip_for_embedding(str(content))
-        return _hashlib.sha256(
-            f"entity:{user_id}\x00{norm}".encode("utf-8")
-        ).hexdigest()
+    def _entity_hash(
+        user_id: str, content: str, scope: str = "", metadata=None
+    ) -> str:
+        return fact_content_hash(
+            "entity", scope or f"user:{user_id}",
+            _strip_for_embedding(str(content)), metadata, author_id=user_id,
+        )
 
     async def observe_user(
         self,
@@ -2333,7 +2138,7 @@ class RAGMemoryManager:
         fact it had already stored.
         """
         uid = str(user_id or "").strip()
-        text = " ".join(str(content or "").split())[:1200]
+        text = " ".join(strip_media_payloads(str(content or "")).split())[:1200]
         if not uid or not text:
             return "", False
         if requester is not None and (
@@ -2341,7 +2146,22 @@ class RAGMemoryManager:
             or (requester.user_id != uid and not requester.is_admin)
         ):
             return "", False
-        digest = self._entity_hash(uid, text)
+        fact_scope = (
+            f"dm:{uid}" if _has_requester(requester) and requester.is_dm
+            else f"user:{uid}"
+        )
+        metadata = {
+            "source": str(source or "extract")[:32],
+            "source_guild_id": str(
+                requester.guild_id if _has_requester(requester) else source_guild_id or ""
+            ),
+            "source_user_id": uid,
+            "source_channel_id": requester.channel_id if _has_requester(requester) else "",
+            "source_is_dm": requester.is_dm if _has_requester(requester) else False,
+            "source_channel_public": requester.channel_is_public if _has_requester(requester) else False,
+            "visibility": str(visibility or "private").strip().lower(),
+        }
+        digest = self._entity_hash(uid, text, fact_scope, metadata)
         existing = self._db.execute(
             "SELECT id FROM vectors WHERE kind='entity' AND content_hash=? LIMIT 1",
             (digest,),
@@ -2367,23 +2187,7 @@ class RAGMemoryManager:
         )
         fid = uuid.uuid4().hex
         ts = _utcnow_iso()
-        fact_scope = (
-            f"dm:{uid}" if _has_requester(requester) and requester.is_dm
-            else f"user:{uid}"
-        )
-        meta = json.dumps(
-            {
-                "source": str(source or "extract")[:32],
-                "source_guild_id": str(
-                    requester.guild_id if _has_requester(requester) else source_guild_id or ""
-                ),
-                "source_user_id": uid,
-                "source_channel_id": requester.channel_id if _has_requester(requester) else "",
-                "source_is_dm": requester.is_dm if _has_requester(requester) else False,
-                "source_channel_public": requester.channel_is_public if _has_requester(requester) else False,
-                "visibility": str(visibility or "private"),
-            }
-        )
+        meta = json.dumps(metadata)
         try:
             self._db.execute(
                 "INSERT INTO vectors (id, kind, channel_id, guild_id, author, "
@@ -2628,6 +2432,7 @@ class RAGMemoryManager:
     ) -> str:
         if not _has_requester(requester) or not isinstance(entry, dict):
             return ""
+        entry = sanitize_media_memory(entry)
         scope = str(entry.get("scope") or f"user:{requester.user_id}")
         scope_kind, _, scope_id = scope.partition(":")
         visibility = str(entry.get("visibility") or "private").strip().lower()
@@ -2656,6 +2461,21 @@ class RAGMemoryManager:
         else:
             return ""
         cid = str(entry.get("id") or uuid.uuid4().hex)
+        previous = self._db.execute(
+            "SELECT * FROM vectors WHERE id=?", (cid,)
+        ).fetchone()
+        if previous is not None:
+            previous_meta = _decode_metadata(previous["metadata"])
+            owns_source = (
+                previous_meta.get("source_user_id") == requester.user_id
+                and previous_meta.get("source_channel_id") == requester.channel_id
+                and previous_meta.get("source_guild_id") == requester.guild_id
+                and (previous_meta.get("source_is_dm") is True) == requester.is_dm
+            )
+            if previous["kind"] != "shared_context" or not (
+                owns_source or requester.is_admin
+            ):
+                return ""
         content = str(entry.get("content") or "")[:1200]
         if not content:
             return ""
@@ -2681,7 +2501,13 @@ class RAGMemoryManager:
             metadata["source_kind"] = "operator_public"
         else:
             metadata.pop("public_approved", None)
-        ch = _shared_context_hash(scope, content)
+        ch = _shared_context_hash(scope, content, metadata)
+        duplicate = self._db.execute(
+            "SELECT id FROM vectors WHERE kind='shared_context' "
+            "AND content_hash=? LIMIT 1", (ch,),
+        ).fetchone()
+        if duplicate is not None:
+            cid = str(duplicate["id"])
         self._db.execute(
             "INSERT OR REPLACE INTO vectors (id, kind, channel_id, guild_id, author, "
             "author_id, source, content, content_hash, embedding, metadata, scope, "
@@ -2714,7 +2540,8 @@ class RAGMemoryManager:
             return False
         async with self._lock:
             row = self._db.execute(
-                "SELECT metadata FROM vectors WHERE id=?",
+                "SELECT metadata FROM vectors WHERE id=? "
+                "AND kind IN ('message', 'bot_output')",
                 (mid,),
             ).fetchone()
             if row is None:
@@ -2725,7 +2552,7 @@ class RAGMemoryManager:
                 meta = {}
             if not isinstance(meta, dict):
                 meta = {}
-            meta.update(patch)
+            meta.update(sanitize_media_memory(patch))
             self._db.execute(
                 "UPDATE vectors SET metadata=? WHERE id=?",
                 (json.dumps(meta, ensure_ascii=False, default=str), mid),
@@ -2736,21 +2563,20 @@ class RAGMemoryManager:
         self, context_id: str, updates: dict,
         *, requester: MemoryRequester | None = None,
     ) -> bool:
-        if not _has_requester(requester) or not requester.is_admin:
+        """Apply one validated edit while keeping provenance and its hash aligned."""
+        if (
+            not _has_requester(requester) or not requester.is_admin
+            or not isinstance(updates, dict)
+        ):
             return False
-        sets = []
-        params = []
-        for key in ("content", "scope", "importance"):
-            if key in updates:
-                sets.append(f"{key}=?")
-                params.append(updates[key])
-        # Metadata-only updates (visibility/tags/expires_at) live in the
-        # metadata JSON column, not a dedicated column. Callers (bot.py
-        # `/context arguments:private|global`, api, context_cleanup) pass them as
-        # top-level keys; previously they were silently ignored and
-        # update_shared_context returned False for a visibility-only edit,
-        # making the bot report "Context fact not found." for an existing
-        # fact. Merge them into the existing metadata payload.
+        row = self._db.execute(
+            "SELECT * FROM vectors WHERE id=? AND kind='shared_context'",
+            (str(context_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        updates = sanitize_media_memory(updates)
+        metadata = _decode_metadata(row["metadata"])
         metadata_updates = {
             key: updates[key]
             for key in (
@@ -2760,54 +2586,42 @@ class RAGMemoryManager:
             )
             if key in updates
         }
-        if metadata_updates:
-            row = self._db.execute(
-                "SELECT metadata FROM vectors WHERE id=? AND kind='shared_context'",
-                (str(context_id),),
-            ).fetchone()
-            if row is None:
-                return False
-            try:
-                meta = json.loads(row["metadata"] or "{}")
-            except (ValueError, TypeError):
-                meta = {}
-            if not isinstance(meta, dict):
-                meta = {}
-            meta.update(metadata_updates)
-            sets.append("metadata=?")
-            params.append(json.dumps(meta))
-        if not sets:
-            return False
-        # Only force a re-embed when content actually changed. Nulling the
-        # embedding on a scope/visibility-only edit would silently drop the
-        # entry from rag_search (which filters embedding IS NOT NULL) without
-        # any re-embed to restore it — the fact vanishes from retrieval.
+        metadata.update(metadata_updates)
+        content = str(updates.get("content", row["content"]) or "")[:1200]
+        scope = str(updates.get("scope", row["scope"]) or "")
+        values = {}
         if "content" in updates:
-            sets.append("embedding=NULL")
-        if "content" in updates or "scope" in updates:
-            row = self._db.execute(
-                "SELECT scope, content FROM vectors WHERE id=? AND kind='shared_context'",
-                (str(context_id),),
-            ).fetchone()
-            if row is None:
+            values["content"] = content
+        if "scope" in updates:
+            values["scope"] = scope
+        if "importance" in updates:
+            try:
+                values["importance"] = max(1, min(int(updates["importance"] or 5), 10))
+            except (TypeError, ValueError, OverflowError):
                 return False
-            sets.append("content_hash=?")
-            params.append(_shared_context_hash(
-                str(updates.get("scope", row["scope"])),
-                str(updates.get("content", row["content"]) or ""),
-            ))
-        params.append(str(context_id))
-        cursor = self._db.execute(
-            f"UPDATE vectors SET {', '.join(sets)} WHERE id=? AND kind='shared_context'",
-            params,
+        if metadata_updates:
+            values["metadata"] = json.dumps(metadata)
+        if not values:
+            return False
+        content_changed = content != row["content"]
+        if content_changed:
+            values["embedding"] = None
+        values["content_hash"] = fact_content_hash(
+            "shared_context", scope, _strip_for_embedding(content), metadata,
+            channel_id=row["channel_id"], guild_id=row["guild_id"],
+            author_id=row["author_id"],
         )
-        if cursor.rowcount > 0:
-            if "content" in updates:
-                self._spawn(
-                    self._embed_and_store(str(context_id), str(updates["content"]))
-                )
-            return True
-        return False
+        assignments = ", ".join(f"{key}=?" for key in values)
+        try:
+            cursor = self._db.execute(
+                f"UPDATE vectors SET {assignments} WHERE id=? AND kind='shared_context'",
+                (*values.values(), str(context_id)),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        if cursor.rowcount > 0 and content_changed:
+            self._spawn(self._embed_and_store(str(context_id), content))
+        return cursor.rowcount > 0
 
     async def list_shared_context(
         self, limit: int = 200, *, requester: MemoryRequester | None = None
@@ -2823,7 +2637,7 @@ class RAGMemoryManager:
         result = []
         for row in rows:
             entry = dict(row)
-            entry.update(_decode_metadata(row["metadata"]))
+            entry = _decode_metadata(row["metadata"]) | entry
             result.append(entry)
         return result
 
@@ -2879,7 +2693,7 @@ class RAGMemoryManager:
                 "importance": row["importance"],
                 "timestamp": row["timestamp"],
             }
-            entry.update(_decode_metadata(row["metadata"]))
+            entry = _decode_metadata(row["metadata"]) | entry
             result.append(entry)
             if len(result) >= max(1, int(max_items)):
                 break
@@ -3222,8 +3036,6 @@ class RAGMemoryManager:
                 # Prune stale rows first so we don't bloat the index.
                 self._prune_web_results_locked(ttl_days=ttl_days)
 
-                import hashlib
-
                 now_iso = _utcnow_iso()
                 now_ts = time.time()
                 for r, vec, stored_content in embedded:
@@ -3231,9 +3043,9 @@ class RAGMemoryManager:
                         continue
                     title = str(r.get("title") or "").strip()
                     href = str(r.get("href") or "").strip()
-                    content_hash = hashlib.sha256(
-                        f"{storage_scope}\0{href}".encode("utf-8")
-                    ).hexdigest()
+                    content_hash = web_result_hash(
+                        storage_scope, storage_guild_id, storage_channel_id, href
+                    )
                     metadata = {
                         "url": href,
                         "title": title,
@@ -3385,8 +3197,9 @@ class RAGMemoryManager:
         query_vec = await self._embed_for_query(query)
         if query_vec is None:
             return []
-        query_norm = np.asarray(query_vec, dtype=np.float32)
-        query_norm /= np.linalg.norm(query_norm) + 1e-8
+        query_norm = normalized_vector(query_vec, EMBED_DIM)
+        if query_norm is None:
+            return []
         top_k = max(1, min(int(top_k or 10), 100))
         over_fetch = max(1, min(int(over_fetch or 1), 20))
         requested_kinds = list(kinds or [
@@ -3477,13 +3290,12 @@ class RAGMemoryManager:
         valid_rows = []
         for row in visible_rows:
             try:
-                vec = _blob_to_embedding(row["embedding"])
-                if len(vec) != EMBED_DIM:
+                vec = normalized_vector(
+                    _blob_to_embedding(row["embedding"]), EMBED_DIM
+                )
+                if vec is None:
                     continue
-                norm = float(np.linalg.norm(vec))
-                if norm <= 1e-8:
-                    continue
-                vectors.append(np.asarray(vec, dtype=np.float32) / norm)
+                vectors.append(vec)
                 valid_rows.append(row)
             except Exception as exc:
                 logger.debug("Skipping unreadable search vector: %s", exc)
@@ -3512,7 +3324,7 @@ class RAGMemoryManager:
                 "timestamp": row["timestamp"], "similarity": sim,
                 "score": score, "downvotes": row["downvotes"],
             }
-            entry.update(_decode_metadata(row["metadata"]))
+            entry = _decode_metadata(row["metadata"]) | entry
             results.append((entry, row, vectors[vector_index]))
         results.sort(key=lambda item: item[0]["score"], reverse=True)
         candidates = results[:top_k * over_fetch]
@@ -3525,11 +3337,11 @@ class RAGMemoryManager:
                 ).fetchall()
                 neg_vecs = []
                 for neg in neg_rows:
-                    vec = _blob_to_embedding(neg["embedding"])
-                    if len(vec) == EMBED_DIM:
-                        norm = float(np.linalg.norm(vec))
-                        if norm > 1e-8:
-                            neg_vecs.append(np.asarray(vec, dtype=np.float32) / norm)
+                    vec = normalized_vector(
+                        _blob_to_embedding(neg["embedding"]), EMBED_DIM
+                    )
+                    if vec is not None:
+                        neg_vecs.append(vec)
                 if neg_vecs:
                     negative_similarities = np.stack(neg_vecs) @ np.stack(
                         [item[2] for item in candidates]

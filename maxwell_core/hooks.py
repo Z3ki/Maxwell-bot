@@ -9,8 +9,10 @@ see the call. A handler that mutates arguments cannot set a forged
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -102,12 +104,15 @@ class HookBus:
             )
         if not callable(callback):
             raise TypeError("hook callback must be callable")
+        timeout_value = float(timeout if timeout is not None else DEFAULT_HOOK_TIMEOUT)
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            raise ValueError("hook timeout must be a finite positive number")
         entry = HookRegistration(
             plugin=str(plugin),
             name=name,
             callback=callback,
             priority=int(priority),
-            timeout=float(timeout if timeout is not None else DEFAULT_HOOK_TIMEOUT),
+            timeout=timeout_value,
         )
         bucket = self._hooks.setdefault(name, [])
         bucket.append(entry)
@@ -138,6 +143,28 @@ class HookBus:
             if any(item.plugin == name for item in entries)
         )
 
+    def _is_registered(self, entry: HookRegistration) -> bool:
+        # An earlier handler can unload another plugin while an emit is
+        # awaiting it. Do not invoke stale entries from the initial snapshot.
+        return any(item is entry for item in self._hooks.get(entry.name, ()))
+
+    @staticmethod
+    def _apply_result(bag: HookPayload, entry: HookRegistration, result: Any) -> bool:
+        """Apply one callback's result consistently for async and sync emits."""
+        if isinstance(result, HookResult):
+            if isinstance(result.value, dict):
+                bag.data.update(result.value)
+            stopped = result.stop or result.skip
+        elif isinstance(result, dict):
+            bag.data.update(result)
+            stopped = result.get("stop") or result.get("skip")
+        else:
+            stopped = False
+        if stopped:
+            bag["stop"] = True
+            bag["skipped_by"] = entry.plugin
+        return bool(stopped)
+
     async def emit(
         self,
         name: str,
@@ -151,28 +178,19 @@ class HookBus:
         """
         bag = payload if isinstance(payload, HookPayload) else HookPayload(dict(payload or {}))
         for entry in self.handlers(name, plugins=plugins):
+            if not self._is_registered(entry):
+                continue
             try:
                 result = entry.callback(bag)
                 if inspect.isawaitable(result):
-                    result = await asyncio.wait_for(result, timeout=max(0.1, entry.timeout))
+                    result = await asyncio.wait_for(result, timeout=entry.timeout)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Plugin %r hook %s failed", entry.plugin, name)
                 continue
-            if isinstance(result, HookResult):
-                if result.value is not None:
-                    bag.data.update(result.value if isinstance(result.value, dict) else {})
-                if result.stop or result.skip:
-                    bag["stop"] = True
-                    bag["skipped_by"] = entry.plugin
-                    return bag
-            elif isinstance(result, dict):
-                bag.data.update(result)
-                if result.get("stop") or result.get("skip"):
-                    bag["stop"] = True
-                    bag["skipped_by"] = entry.plugin
-                    return bag
+            if self._apply_result(bag, entry, result):
+                return bag
         return bag
 
     def emit_sync(
@@ -188,6 +206,8 @@ class HookBus:
         """
         bag = payload if isinstance(payload, HookPayload) else HookPayload(dict(payload or {}))
         for entry in self.handlers(name, plugins=plugins):
+            if not self._is_registered(entry):
+                continue
             if inspect.iscoroutinefunction(entry.callback):
                 logger.warning(
                     "Plugin %r registered async callback on sync hook %s; skipped",
@@ -201,22 +221,17 @@ class HookBus:
                 logger.exception("Plugin %r hook %s failed", entry.plugin, name)
                 continue
             if inspect.isawaitable(result):
-                getattr(result, "close", lambda: None)()
+                with contextlib.suppress(Exception):
+                    if isinstance(result, asyncio.Future):
+                        result.cancel()
+                    else:
+                        getattr(result, "close", lambda: None)()
                 logger.warning(
                     "Plugin %r hook %s returned awaitable on sync emit; skipped",
                     entry.plugin,
                     name,
                 )
                 continue
-            if isinstance(result, HookResult):
-                if result.value is not None and isinstance(result.value, dict):
-                    bag.data.update(result.value)
-                if result.stop or result.skip:
-                    bag["stop"] = True
-                    return bag
-            elif isinstance(result, dict):
-                bag.data.update(result)
-                if result.get("stop"):
-                    bag["stop"] = True
-                    return bag
+            if self._apply_result(bag, entry, result):
+                return bag
         return bag

@@ -12,11 +12,19 @@ import contextlib
 import logging
 import os
 import time
+import weakref
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def cancel_once(task: asyncio.Future[Any]) -> None:
+    """Request a stop without interrupting cleanup of an earlier cancellation."""
+    if not task.done() and not (isinstance(task, asyncio.Task) and task.cancelling()):
+        task.cancel()
 
 
 async def offload(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -26,124 +34,137 @@ async def offload(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     return await asyncio.to_thread(func, *args)
 
 
-@dataclass
+@dataclass(eq=False)
 class _Work:
     callback: Callable[[], Awaitable[Any]]
     result: asyncio.Future[Any]
+    task: asyncio.Future[Any] | None = None
+
+
+@dataclass(eq=False, frozen=True)
+class _Admission:
+    key: str
+    priority: str
+    sequence: int
 
 
 class ChannelWorkQueues:
-    """Bounded FIFO workers, one independent queue per (guild, channel)."""
+    """Bounded FIFO workers, one independent queue per (guild, channel).
+
+    Cancelling a submitter cancels only its own work and immediately frees a
+    waiting slot. Callbacks run in child tasks, so a callback that cancels
+    itself cannot take unrelated queued work down with the worker. All queue
+    mutations are synchronous on the owning event loop.
+    """
 
     def __init__(self, max_pending: int = 8) -> None:
         if max_pending < 1:
             raise ValueError("max_pending must be positive")
         self.max_pending = max_pending
-        self._queues: dict[tuple[int, int], asyncio.Queue[_Work | None]] = {}
+        self._queues: dict[tuple[int, int], deque[_Work]] = {}
         self._workers: dict[tuple[int, int], asyncio.Task[None]] = {}
-        self._lock = asyncio.Lock()
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     async def submit(
         self, guild_id: int, channel_id: int, callback: Callable[[], Awaitable[Any]]
     ) -> Any:
         key = (int(guild_id), int(channel_id))
+        if self._closed:
+            raise RuntimeError("channel work queues are closed")
+        queue = self._queues.setdefault(key, deque())
+        if len(queue) >= self.max_pending:
+            raise RuntimeError("channel queue is full; try again shortly")
         result: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-        async with self._lock:
-            if self._closed:
-                result.cancel()
-                raise RuntimeError("channel work queues are closed")
-            queue = self._queues.setdefault(key, asyncio.Queue(self.max_pending))
-            worker = self._workers.get(key)
-            if worker is None or worker.done():
-                worker = asyncio.create_task(
-                    self._run(key, queue), name=f"channel-worker-{key[0]}-{key[1]}"
-                )
-                self._workers[key] = worker
-            try:
-                queue.put_nowait(_Work(callback, result))
-            except asyncio.QueueFull:
-                result.cancel()
-                raise RuntimeError("channel queue is full; try again shortly") from None
-        return await result
+        work = _Work(callback, result)
+        queue.append(work)
+        worker = self._workers.get(key)
+        if worker is None or worker.done():
+            self._workers[key] = asyncio.create_task(
+                self._run(key, queue), name=f"channel-worker-{key[0]}-{key[1]}"
+            )
+        try:
+            return await result
+        except asyncio.CancelledError:
+            if work.task is not None and not work.task.done():
+                cancel_once(work.task)
+            # Identity-based removal releases capacity even while another
+            # user's callback is blocked at the front of this channel.
+            with contextlib.suppress(ValueError):
+                queue.remove(work)
+            if result.done() and not result.cancelled():
+                result.exception()
+            raise
 
-    async def _run(
-        self, key: tuple[int, int], queue: asyncio.Queue[_Work | None]
-    ) -> None:
+    async def _run(self, key: tuple[int, int], queue: deque[_Work]) -> None:
         current = asyncio.current_task()
         try:
-            while True:
-                work = await queue.get()
+            while queue and not self._closed:
+                work = queue.popleft()
+                if work.result.cancelled():
+                    continue
                 try:
-                    if work is None:
-                        return
-                    if not work.result.cancelled():
-                        try:
-                            value = await work.callback()
-                            if not work.result.done():
-                                work.result.set_result(value)
-                        except asyncio.CancelledError:
-                            if not work.result.done():
-                                work.result.cancel()
-                            raise
-                        except Exception as exc:
-                            if not work.result.done():
-                                work.result.set_exception(exc)
+                    work.task = asyncio.ensure_future(work.callback())
+                    value = await asyncio.shield(work.task)
+                    if not work.result.done():
+                        work.result.set_result(value)
+                except asyncio.CancelledError:
+                    if not work.result.done():
+                        work.result.cancel()
+                    if self._closed or (current is not None and current.cancelling()):
+                        if work.task is not None and not work.task.done():
+                            cancel_once(work.task)
+                            with contextlib.suppress(Exception, asyncio.CancelledError):
+                                await work.task
+                        raise
+                    # Only this callback was stopped. Other users retain
+                    # their original FIFO positions in the room.
+                except Exception as exc:
+                    if not work.result.done():
+                        work.result.set_exception(exc)
                 finally:
-                    queue.task_done()
-                # Workers are demand-driven. Removing an idle worker bounds
-                # memory for channels that are used once, while taking the
-                # same lock as submit prevents a new item from being lost
-                # between the empty check and worker teardown.
-                async with self._lock:
-                    if self._workers.get(key) is current and queue.empty():
-                        self._workers.pop(key, None)
-                        if self._queues.get(key) is queue:
-                            self._queues.pop(key, None)
-                        return
+                    work.task = None
         finally:
-            # Cancellation (including close()) must wake every submitter whose
-            # work was still queued. Otherwise their Future hangs forever.
-            while True:
-                try:
-                    pending = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if pending is not None and not pending.result.done():
+            for pending in queue:
+                if not pending.result.done():
                     pending.result.cancel()
-                queue.task_done()
-            async with self._lock:
-                if self._workers.get(key) is current:
-                    self._workers.pop(key, None)
-                if self._queues.get(key) is queue:
-                    self._queues.pop(key, None)
+            queue.clear()
+            if self._workers.get(key) is current:
+                self._workers.pop(key, None)
+            if self._queues.get(key) is queue:
+                self._queues.pop(key, None)
 
     async def close(self) -> None:
-        async with self._lock:
-            self._closed = True
-            workers = list(self._workers.values())
-            queues = list(self._queues.values())
-            self._workers.clear()
-            self._queues.clear()
+        """Finish shutdown even if a close caller is itself cancelled."""
+        self._closed = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._shutdown(), name="channel-queues-close"
+            )
+        await asyncio.shield(self._close_task)
+
+    async def _shutdown(self) -> None:
+        workers = list(self._workers.values())
+        queues = list(self._queues.values())
         for worker in workers:
-            worker.cancel()
+            cancel_once(worker)
         await asyncio.gather(*workers, return_exceptions=True)
         # A task cancelled before its first step never enters _run's finally.
         for queue in queues:
-            while not queue.empty():
-                pending = queue.get_nowait()
-                if pending is not None and not pending.result.done():
+            for pending in queue:
+                if not pending.result.done():
                     pending.result.cancel()
-                queue.task_done()
+            queue.clear()
+        self._workers.clear()
+        self._queues.clear()
 
 
 class FairSemaphore:
     """Admission control for a small pool of slots, shared by many rooms.
 
-    A plain semaphore under load is a scramble: every waiter is woken, and
-    whoever the loop happens to schedule first wins. With two slots and a
-    dozen busy servers that means one chatty room can take slot after slot
-    while a quiet server waits minutes for its single question.
+    A plain semaphore does not account for rooms or priorities. One chatty
+    room can queue many calls ahead of a quiet server's single question,
+    or background work can get ahead of a live user's reply.
 
     Admission here is decided, not raced. Among the current waiters the
     winner is the one with
@@ -173,7 +194,7 @@ class FairSemaphore:
         self._history = max(16, int(history))
         self._active = 0
         self._seq = 0
-        self._waiters: list[dict[str, Any]] = []
+        self._waiters: list[_Admission] = []
         # key -> monotonic time it was last admitted. Bounded; see _mark_served.
         self._last_served: dict[str, float] = {}
         self._cond = asyncio.Condition()
@@ -210,16 +231,16 @@ class FairSemaphore:
             ]
             self._last_served = dict(keep)
 
-    def _next_waiter(self) -> dict[str, Any] | None:
+    def _next_waiter(self) -> _Admission | None:
         if not self._waiters:
             return None
         return min(self._waiters, key=self._waiter_rank)
 
-    def _waiter_rank(self, waiter: dict[str, Any]) -> tuple:
-        rank = self._rank.get(waiter["priority"], self._default_rank)
+    def _waiter_rank(self, waiter: _Admission) -> tuple[int, float, int]:
+        rank = self._rank.get(waiter.priority, self._default_rank)
         # A key never served sorts as 0.0 — a room's first turn jumps ahead of
         # rooms that have already had one. That is the fairness we want.
-        return (rank, self._last_served.get(waiter["key"], 0.0), waiter["seq"])
+        return (rank, self._last_served.get(waiter.key, 0.0), waiter.sequence)
 
     async def acquire(
         self, timeout: float, *, key: str = "", priority: str = "background"
@@ -227,11 +248,7 @@ class FairSemaphore:
         """Take a slot or raise asyncio.TimeoutError. Pair with release()."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + float(timeout)
-        waiter = {
-            "key": str(key or ""),
-            "priority": str(priority),
-            "seq": self._seq,
-        }
+        waiter = _Admission(str(key or ""), str(priority), self._seq)
         self._seq += 1
         async with self._cond:
             self._waiters.append(waiter)
@@ -239,19 +256,16 @@ class FairSemaphore:
                 while True:
                     if self._active < self._capacity and self._next_waiter() is waiter:
                         self._active += 1
-                        self._mark_served(waiter["key"], loop.time())
+                        self._mark_served(waiter.key, loop.time())
                         return
                     remaining = deadline - loop.time()
                     if remaining <= 0:
                         raise asyncio.TimeoutError()
                     await asyncio.wait_for(self._cond.wait(), timeout=remaining)
             finally:
-                # Removed by identity: `list.remove` would compare dicts by
-                # value, and this must take out exactly our own entry.
-                for index, queued in enumerate(self._waiters):
-                    if queued is waiter:
-                        del self._waiters[index]
-                        break
+                # Admission records compare by identity, so departures remove
+                # exactly the request that acquired, timed out or cancelled.
+                self._waiters.remove(waiter)
                 # Whether we won, timed out, or were cancelled, the queue just
                 # changed shape — somebody behind us may now be next.
                 self._cond.notify_all()
@@ -270,7 +284,7 @@ class FairSemaphore:
     def stats(self) -> dict[str, Any]:
         by_priority: dict[str, int] = {}
         for waiter in self._waiters:
-            by_priority[waiter["priority"]] = by_priority.get(waiter["priority"], 0) + 1
+            by_priority[waiter.priority] = by_priority.get(waiter.priority, 0) + 1
         return {
             "capacity": self._capacity,
             "active": self._active,
@@ -292,14 +306,21 @@ class KeyedLocks:
     def __init__(self, max_idle: int = 256) -> None:
         self.max_idle = max(16, int(max_idle))
         self._locks: dict[str, asyncio.Lock] = {}
+        # A caller may be holding a lock reference before acquire() runs,
+        # especially when acquire is wrapped in wait_for. Cache eviction
+        # must not hand another caller a different lock for that same key.
+        self._live: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._used: dict[str, float] = {}
 
     def get(self, key: str) -> asyncio.Lock:
         k = str(key)
-        lock = self._locks.get(k)
+        lock = self._locks.get(k) or self._live.get(k)
         if lock is None:
             lock = asyncio.Lock()
-            self._locks[k] = lock
+            self._live[k] = lock
+        self._locks[k] = lock
         self._used[k] = time.monotonic()
         if len(self._locks) > self.max_idle:
             self.prune(keep={k})
@@ -450,25 +471,24 @@ class ToolConcurrency:
                 self._waiting[name] = max(0, self._waiting.get(name, 1) - 1)
 
     async def run(self, name: str, operation: Awaitable[Any], timeout: float) -> Any:
-        gate = self.gate(name)
-        acquired = False
+        """Apply one deadline to admission and execution, releasing the slot.
+
+        The operation has not started while it waits for admission. An expired
+        or cancelled wait must dispose of it, rather than leaving an unawaited
+        coroutine or independently running future behind.
+        """
+        started = False
         try:
-            await gate.acquire()
-            acquired = True
-            return await asyncio.wait_for(operation, timeout=timeout)
-        except asyncio.CancelledError:
-            # The caller can cancel while queued on the semaphore, before
-            # asyncio.wait_for has a chance to consume the coroutine it was
-            # handed. Close bare coroutine objects in that case so they do
-            # not emit "never awaited" warnings or retain captured state.
-            if not acquired:
+            async with asyncio.timeout(timeout), self.slot(name):
+                started = True
+                return await operation
+        finally:
+            if not started:
                 close = getattr(operation, "close", None)
                 if callable(close):
                     close()
-            raise
-        finally:
-            if acquired:
-                gate.release()
+                elif isinstance(operation, asyncio.Future):
+                    operation.cancel()
 
     def stats(self) -> dict[str, Any]:
         return {

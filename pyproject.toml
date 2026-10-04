@@ -86,3 +86,15 @@ warn_redundant_casts = true
 warn_unused_ignores = false
 check_untyped_defs = false
 exclude = "(bot\\.py\\.bak|shelldocker|\\.pi-lens|\\.pi-subagents|temp)"
+
+[tool.coverage.run]
+branch = true
+source = ["maxwell_core", "message_pipeline", "concurrency_safety"]
+
+[tool.coverage.report]
+# Shared services and request admission have a measured regression gate.
+# This scope does not claim coverage of every Discord/plugin integration.
+fail_under = 80
+precision = 2
+show_missing = true
+skip_covered = true

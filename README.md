@@ -224,6 +224,7 @@ docs/PLUGINS.md         Plugin development API
 - [Installation](docs/INSTALL.md)
 - [Configuration](docs/CONFIGURATION.md)
 - [Architecture overview](docs/OVERVIEW.md)
+- [Shared services and quality checks](docs/MAINTAINABILITY.md)
 - [Plugin development](docs/PLUGINS.md)
 - [Security](SECURITY.md)
 - [Discord persona](docs/MAXWELL_PERSONA.md)
@@ -234,6 +235,21 @@ docs/PLUGINS.md         Plugin development API
 - [Email integration](email_integration/README.md)
 
 `CONTEXT_MEMORY_ANALYSIS.md` and `RELIABILITY_RESEARCH.md` are retained as historical/research entry points, but their current-status sections replace obsolete architecture claims and point back to the live implementation/docs.
+
+## Development checks
+
+Install the runtime and test dependencies, then run the dependency, lint, shell
+syntax, regression, and shared-core coverage checks:
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+make check
+```
+
+Use `make check PYTHON=.venv/bin/python` for a virtual environment, or `make test`
+for the regression suite without coverage. CI runs on Python 3.11 and 3.12. See
+[the maintenance guide](docs/MAINTAINABILITY.md) for the coverage scope and
+optional integration tests.
 
 ## Security notes
 

@@ -8,10 +8,12 @@ instructions are included only when that tool is actually offered.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
+import inspect
 import logging
 from typing import Iterable
 
-from .component import POSITIONS, PromptComponent, PromptRequest
+from .component import POSITIONS, SCOPES, PromptComponent, PromptRequest
 
 _CHARS_PER_TOKEN = 4
 _POSITION_ORDER = {position: index for index, position in enumerate(POSITIONS)}
@@ -32,6 +34,21 @@ class PromptManager:
                 f"unknown prompt position {component.position!r}. "
                 f"Known: {', '.join(POSITIONS)}"
             )
+        if component.scope not in SCOPES:
+            raise ValueError(f"unknown prompt scope {component.scope!r}")
+        for callback in (component.when, component.render):
+            if callback is not None and (
+                not callable(callback) or inspect.iscoroutinefunction(callback)
+            ):
+                raise TypeError("prompt predicates and renderers must be synchronous callables")
+        component = replace(
+            component,
+            id=cid,
+            plugin=str(component.plugin).strip(),
+            priority=int(component.priority),
+            requires_tools=tuple(component.requires_tools),
+            requires_plugins=tuple(component.requires_plugins),
+        )
         existing = self._components.get(cid)
         if existing is not None and existing.plugin != component.plugin:
             raise ValueError(
@@ -51,7 +68,7 @@ class PromptManager:
         return sorted(self._by_plugin.get(str(plugin), set()))
 
     def components(self) -> list[PromptComponent]:
-        return list(self._components.values())
+        return [replace(component) for component in self._components.values()]
 
     def assemble(
         self,
@@ -74,7 +91,7 @@ class PromptManager:
         allowed = None if enabled_plugins is None else set(enabled_plugins)
         excluded = set(exclude_ids)
         selected: list[PromptComponent] = []
-        for component in self._components.values():
+        for component in list(self._components.values()):
             if component.id in excluded:
                 continue
             if rendered is not None and (component.render is not None) != rendered:
@@ -114,7 +131,7 @@ class PromptManager:
         if base.strip():
             chunks.append(base.strip())
         style: list[PromptComponent] = []
-        for component in self._components.values():
+        for component in list(self._components.values()):
             if component.position not in {"personality", "style"}:
                 continue
             if allowed is not None and component.plugin not in allowed and component.plugin != "core":

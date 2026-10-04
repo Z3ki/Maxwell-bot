@@ -6,6 +6,7 @@ import inspect
 import logging
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -56,6 +57,19 @@ class PluginContext:
         self.name = plugin_name
         self.bot = manager.bot
         self.log = logging.getLogger(f"maxwell.plugins.{plugin_name}")
+        self._active = True
+        self._retired_services: dict[str, Any] = {}
+        self._retired_tools: dict[str, Any] = {}
+
+    def _retire(self) -> None:
+        if self._active:
+            self._retired_services = self._manager.services.snapshot()
+            self._retired_tools = self._manager.tool_registry.snapshot_as_dict()
+            self._active = False
+
+    def _require_active(self) -> None:
+        if not self._active:
+            raise RuntimeError(f"plugin {self.name!r} context has been unloaded")
 
     # -- storage ----------------------------------------------------------- #
     @property
@@ -88,6 +102,7 @@ class PluginContext:
 
     # -- events + jobs ----------------------------------------------------- #
     def on_event(self, event: str, callback: Callable[..., Any]) -> None:
+        self._require_active()
         if event not in ALLOWED_EVENTS:
             raise ValueError(
                 f"{event!r} is not a subscribable event. "
@@ -109,6 +124,7 @@ class PluginContext:
         *,
         run_immediately: bool = False,
     ) -> None:
+        self._require_active()
         if not callable(callback):
             raise TypeError("callback must be callable")
         if not inspect.iscoroutinefunction(callback):
@@ -127,6 +143,11 @@ class PluginContext:
         )
 
     def spawn(self, awaitable: Any, *, name: str | None = None) -> Any:
+        if not self._active:
+            from .lifecycle import discard_awaitable
+
+            discard_awaitable(awaitable)
+            self._require_active()
         return self._manager.spawn_task(self.name, awaitable, name=name)
 
     def after(
@@ -136,10 +157,12 @@ class PluginContext:
         *,
         name: str | None = None,
     ) -> Any:
+        self._require_active()
         return self._manager.spawn_after(self.name, seconds, callback, name=name)
 
     # -- extensions -------------------------------------------------------- #
     def register_tool(self, tool: Any, *, name: str | None = None) -> None:
+        self._require_active()
         self._manager.register_context_tool(self.name, tool, name=name)
 
     def wrap_tool(self, name: str, wrapper: Callable[..., Any]) -> Any:
@@ -147,6 +170,7 @@ class PluginContext:
 
         ``wrapper`` is ``(original_execute) -> new_execute``.
         """
+        self._require_active()
         return self._manager.wrap_tool(self.name, name, wrapper)
 
     def register_hook(
@@ -156,6 +180,7 @@ class PluginContext:
         *,
         priority: int = 100,
     ) -> None:
+        self._require_active()
         if hook not in HOOK_NAMES:
             raise ValueError(
                 f"Unknown hook {hook!r}. Known: {', '.join(sorted(HOOK_NAMES))}"
@@ -163,14 +188,15 @@ class PluginContext:
         self._manager.hooks.register(self.name, hook, callback, priority=priority)
 
     def register_prompt(self, component: PromptComponent) -> None:
-        if component.plugin != self.name:
-            component.plugin = self.name
-        self._manager.prompts.register(component)
+        self._require_active()
+        self._manager.prompts.register(replace(component, plugin=self.name))
 
     def register_service(self, name: str, service: Any) -> None:
+        self._require_active()
         self._manager.services.register(name, service, owner=self.name)
 
     def register_provider(self, provider: Any, *, name: str | None = None) -> None:
+        self._require_active()
         key = str(name or getattr(provider, "name", "") or "").strip()
         if not key:
             raise ValueError("provider name is required")
@@ -178,11 +204,13 @@ class PluginContext:
         self._manager._register_extension(self.name, "provider", key, provider)
 
     def register_memory(self, backend: Any, *, name: str | None = None) -> None:
+        self._require_active()
         key = str(name or getattr(backend, "name", "memory") or "memory")
         self._manager.services.register(f"memory:{key}", backend, owner=self.name)
         self._manager._register_extension(self.name, "memory", key, backend)
 
     def register_command(self, command: Any, *, name: str | None = None) -> None:
+        self._require_active()
         key = str(name or getattr(command, "name", "") or "").strip()
         if not key:
             raise ValueError("command name is required")
@@ -196,6 +224,7 @@ class PluginContext:
         *,
         owner_only: bool = True,
     ) -> None:
+        self._require_active()
         method_u = str(method or "GET").upper()
         route = str(path or "").strip()
         if not route.startswith("/api/plugin/"):
@@ -216,12 +245,14 @@ class PluginContext:
         )
 
     def register_dashboard_panel(self, panel: dict[str, Any]) -> None:
+        self._require_active()
         title = str((panel or {}).get("id") or (panel or {}).get("title") or "").strip()
         if not title:
             raise ValueError("dashboard panel needs an id or title")
         self._manager._register_extension(self.name, "dashboard_panel", title, dict(panel))
 
     def add_view(self, view: Any, *, message_id: int | None = None) -> Any:
+        self._require_active()
         register = getattr(self.bot, "add_view", None)
         if not callable(register):
             raise TypeError("bot client does not support persistent views")
@@ -230,6 +261,7 @@ class PluginContext:
         return view
 
     def add_dynamic_items(self, *items: Any) -> None:
+        self._require_active()
         register = getattr(self.bot, "add_dynamic_items", None)
         if not callable(register):
             raise TypeError("installed discord.py does not support dynamic items")
@@ -238,6 +270,8 @@ class PluginContext:
 
     # -- reaching the rest of the bot -------------------------------------- #
     def tool(self, name: str) -> Any:
+        if not self._active:
+            return self._retired_tools.get(str(name))
         registry = getattr(self._manager, "tool_registry", None)
         if registry is not None:
             found = registry.tool(str(name))
@@ -246,6 +280,8 @@ class PluginContext:
         return (getattr(self.bot, "tools", None) or {}).get(str(name))
 
     def service(self, name: str, default: Any = None) -> Any:
+        if not self._active:
+            return self._retired_services.get(str(name), default)
         return self._manager.services.get(name, default)
 
     def is_admin(self, user_id: Any) -> bool:
