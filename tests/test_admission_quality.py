@@ -67,6 +67,20 @@ def test_fair_admission_load_survives_cancellations_and_capacity_shrink():
             await gate.acquire(1, key=f"holder-{index}", priority="user")
         order = []
         running = peak = 0
+        all_waiting = asyncio.Event()
+
+        # Python 3.11's wait_for schedules Condition.wait in a child task.
+        # One event-loop turn does not guarantee that every caller has
+        # entered the admission queue. Observe real condition waits instead
+        # of depending on a particular interpreter's scheduling order.
+        condition_wait = gate._cond.wait
+
+        async def observe_condition_wait():
+            if gate.waiting == len(tasks):
+                all_waiting.set()
+            return await condition_wait()
+
+        gate._cond.wait = observe_condition_wait
 
         async def caller(room):
             nonlocal running, peak
@@ -83,8 +97,9 @@ def test_fair_admission_load_survives_cancellations_and_capacity_shrink():
         tasks = [
             asyncio.create_task(caller(room)) for room in range(32) for _ in range(6)
         ]
-        await asyncio.sleep(0)
+        await all_waiting.wait()
         assert gate.waiting == len(tasks)
+        gate._cond.wait = condition_wait
         cancelled = tasks[::7]
         for task in cancelled:
             task.cancel()
