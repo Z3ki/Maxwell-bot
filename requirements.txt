@@ -11,3 +11,4 @@ numpy>=2.3.5,<2.4; python_version < "3.12"
 numpy>=2.5.1; python_version >= "3.12"  # RAG vector math (cosine search)
 python-chess>=1.999        # chess_* tools: board state, legal moves, engine
 pillow>=10.0.0             # chess board PNG rendering (also used by HD image)
+ddgs>=9.16.0               # keyless live web search fallback

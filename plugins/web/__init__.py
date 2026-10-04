@@ -30,3 +30,10 @@ def setup(bot, ctx=None):
         inst.tool_name = runtime_name
         tools.append(inst)
     return tools
+
+
+async def teardown(bot):
+    tool = (getattr(bot, "tools", None) or {}).get("web_search")
+    close = getattr(tool, "close", None)
+    if callable(close):
+        await close()

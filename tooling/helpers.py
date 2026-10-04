@@ -3647,7 +3647,7 @@ _WEB_SEARCH_BACKENDS = (
     "yahoo",
     "wikipedia",
 )
-_WEB_SEARCH_BUDGET_SEC = 28.0
+_WEB_SEARCH_BUDGET_SEC = 12.0
 
 
 def _sanitize_web_query(query: str | None) -> str:
@@ -3678,7 +3678,9 @@ def _format_web_hits(hits: list[dict[str, str]]) -> str:
         title = r.get("title") or "No title"
         href = r.get("href") or ""
         body = (r.get("body") or "")[:_WEB_SNIPPET_CHARS]
-        lines.append(f"{i}. {title}\n   {href}\n   {body}".rstrip())
+        published = r.get("published_at")
+        stamp = f"\n   Published (provider supplied): {published}" if published else ""
+        lines.append(f"{i}. {title}\n   {href}\n   {body}{stamp}".rstrip())
     return "\n\n".join(lines)
 
 
@@ -3689,7 +3691,7 @@ def _web_search_backends(engine: str | None) -> list[str]:
         return list(_WEB_SEARCH_BACKENDS)
     if not re.fullmatch(r"[a-z0-9_.,-]+", requested, flags=re.I):
         return list(_WEB_SEARCH_BACKENDS)
-    backends = [b.strip().lower() for b in requested.split(",") if b.strip()]
+    backends = list(dict.fromkeys(b.strip().lower() for b in requested.split(",") if b.strip()))[:2]
     for fallback in _WEB_SEARCH_BACKENDS:
         if fallback not in backends:
             backends.append(fallback)
@@ -3699,52 +3701,15 @@ def _web_search_backends(engine: str | None) -> list[str]:
 async def _web_search_collect(
     ddgs_cls: Any, query: str, limit: int, backends: list[str]
 ) -> tuple[list[dict[str, str]], list[str]]:
-    """Query backends in order until we have `limit` unique hits or time runs out."""
-    loop = asyncio.get_running_loop()
-    seen: set[str] = set()
-    hits: list[dict[str, str]] = []
-    errors: list[str] = []
-    deadline = time.monotonic() + _WEB_SEARCH_BUDGET_SEC
-    for backend in backends:
-        if len(hits) >= limit:
-            break
-        remaining = deadline - time.monotonic()
-        if remaining < 3:
-            break
-        want = max(1, limit - len(hits))
-        timeout = min(18.0, remaining)
+    """Compatibility entry point; runtime tools reuse their SearchService."""
+    from web_search import SearchService
 
-        def _run(b=backend, n=want, wait=timeout):
-            return list(
-                ddgs_cls(timeout=min(20, max(5, int(wait)))).text(
-                    query, max_results=n, backend=b
-                )
-            )
-
-        try:
-            raw = await asyncio.wait_for(
-                loop.run_in_executor(None, _run),
-                timeout=timeout,
-            )
-        except Exception as exc:
-            err = str(exc).strip() or type(exc).__name__
-            if re.search(r"no results", err, re.I):
-                continue
-            errors.append(f"{backend}: {err}")
-            logger.info("web_search backend %s failed: %s", backend, err)
-            continue
-        for row in raw or []:
-            hit = _normalize_web_hit(row)
-            if not (hit["href"] or hit["body"]):
-                continue
-            key = hit["href"] or hit["title"]
-            if key in seen:
-                continue
-            seen.add(key)
-            hits.append(hit)
-            if len(hits) >= limit:
-                break
-    return hits, errors
+    service = SearchService(budget=_WEB_SEARCH_BUDGET_SEC)
+    try:
+        result = await service.search(query, limit, backends, ddgs_cls)
+        return list(result.hits), list(result.errors)
+    finally:
+        await service.close()
 
 
 # class WebSearchTool(Tool):  — moved to a plugin
@@ -4250,25 +4215,38 @@ async def _fetch_public_url(
     user-facing message on refusal, HTTP errors, or timeout.
     """
     current = url
+    deadline = time.monotonic() + timeout
     headers = dict(_FETCH_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     try:
         session = await _get_shared_session()
         for _hop in range(_MAX_FETCH_REDIRECTS + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError(f"timed out fetching {url}")
             if not _is_safe_url(current):
                 raise ValueError("Cannot fetch from private/internal URLs")
             async with session.get(
                 current,
-                timeout=aiohttp.ClientTimeout(total=timeout),
+                timeout=aiohttp.ClientTimeout(total=remaining),
                 allow_redirects=False,
-                headers=headers,
+                headers=dict(headers),
             ) as resp:
                 if resp.status in _FETCH_REDIRECT_STATUSES:
                     loc = resp.headers.get("Location")
                     if not loc:
                         raise ValueError(f"HTTP {resp.status}")
-                    current = urljoin(current, loc)
+                    redirected = urljoin(current, loc)
+                    old_origin = urlparse(current)
+                    new_origin = urlparse(redirected)
+                    if (old_origin.scheme, old_origin.hostname, old_origin.port) != (
+                        new_origin.scheme, new_origin.hostname, new_origin.port
+                    ):
+                        for header in list(headers):
+                            if header.lower() in {"authorization", "cookie", "proxy-authorization"}:
+                                headers.pop(header, None)
+                    current = redirected
                     continue
                 if resp.status != 200:
                     raise ValueError(f"HTTP {resp.status}")

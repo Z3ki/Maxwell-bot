@@ -5,5 +5,4 @@
 #   pip install -r requirements-optional.txt   # all of it
 #   pip install ddgs                           # or just the one you want
 
-# --- web search (ENABLE_WEB_SEARCH) ------------------------------------------
-ddgs>=9.16.0
+# Web search's keyless ddgs fallback is included in requirements.txt.

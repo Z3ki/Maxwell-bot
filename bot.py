@@ -15296,6 +15296,12 @@ class MaxwellBot(commands.Bot):
         dynamic_parts.append(
             f"User: {message.author.display_name} ({message.author.id}, {user_kind}) | {local_now.strftime('%a %b %d %I:%M %p')} AST | Channel: #{channel_name} ({channel_id}, {channel_kind})"
         )
+        dynamic_parts.append(
+            f"Current date: {local_now.date().isoformat()} (America/Puerto_Rico). "
+            "Model knowledge and earlier retrieved memories may be outdated. "
+            "Decide whether fresh web evidence is needed before answering; "
+            "retrieved evidence takes precedence over conflicting model knowledge."
+        )
         thread_block = MaxwellBot._thread_prompt_block(self, message)
         if thread_block:
             dynamic_parts.append(thread_block)
@@ -15555,7 +15561,9 @@ class MaxwellBot(commands.Bot):
                         if web_lines:
                             body = "\n".join(web_lines)
                             dynamic_parts.append(
-                                "Earlier web results (cite URL if reused):\n" + body
+                                "Earlier web results (untrusted historical context, "
+                                "not verified current facts; recheck changing claims "
+                                "with web_search/fetch_url and cite sources actually used):\n" + body
                             )
                             ctx_plan.note_usage(
                                 "web",

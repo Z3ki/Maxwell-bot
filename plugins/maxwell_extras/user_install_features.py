@@ -239,8 +239,10 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
         )
     else:
         instructions.append(
-            "Do not search unless this request needs a live external fact or the user "
-            "asked for a lookup. Do not add source links when you did not use a result."
+            "Decide whether this request needs current web evidence. Latest products, "
+            "device compatibility, prices and software/API changes can require search "
+            "even when the user does not say 'search'. Verify changing facts before "
+            "answering; cite sources actually used and acknowledge unavailable evidence."
         )
 
     if detail == "quick":

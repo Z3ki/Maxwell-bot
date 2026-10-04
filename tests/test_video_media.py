@@ -46,7 +46,8 @@ def test_fetch_url_delegates_direct_video_without_decoding_it(monkeypatch):
 
 
 def test_fetch_url_rejects_audio_payload_as_text(monkeypatch):
-    async def fetch(_url, *, max_bytes):
+    async def fetch(_url, *, max_bytes, timeout):
+        assert timeout == 12.0
         return "https://cdn.example/clip.mp3", "audio/mpeg", b"\xff\xfe\x00\x01"
 
     monkeypatch.setattr("bot_tools._fetch_public_url", fetch)

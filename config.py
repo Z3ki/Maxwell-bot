@@ -334,8 +334,17 @@ class Config:
     ENABLE_VIDEO_INPUT = _feature_env(
         "ENABLE_VIDEO_INPUT", lambda: _has_binary("ffmpeg"), needs="ffmpeg"
     )
+    SEARXNG_URL = os.getenv("SEARXNG_URL", "").strip()
+    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+    WEB_SEARCH_TIMEOUT = _float_env("WEB_SEARCH_TIMEOUT", 12.0, 2.0, 30.0)
+    WEB_SEARCH_CONCURRENCY = _int_env("WEB_SEARCH_CONCURRENCY", 4, 1, 16)
+    WEB_SEARCH_MAX_PENDING = _int_env("WEB_SEARCH_MAX_PENDING", 32, 1, 256)
+    WEB_SEARCH_CACHE_SIZE = _int_env("WEB_SEARCH_CACHE_SIZE", 256, 0, 2048)
+    WEB_FETCH_TIMEOUT = _float_env("WEB_FETCH_TIMEOUT", 12.0, 2.0, 30.0)
     ENABLE_WEB_SEARCH = _feature_env(
-        "ENABLE_WEB_SEARCH", lambda: _has_module("ddgs"), needs="the ddgs package"
+        "ENABLE_WEB_SEARCH",
+        lambda: _has_module("ddgs") or bool(os.getenv("SEARXNG_URL", "").strip() or os.getenv("TAVILY_API_KEY", "").strip()),
+        needs="ddgs or a configured SearXNG/Tavily provider",
     )
     # Optional Discord ID of this bot's user account. Empty on a fresh clone
     # so no one else's snowflake is inherited.

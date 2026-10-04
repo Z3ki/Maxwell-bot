@@ -651,7 +651,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         {
             "query": _str("Search query"),
             "max_results": _int("Optional result limit"),
-            "engine": _str("Optional search engine hint"),
+            "engine": _str("Optional ddgs search engine hint; configured HTTP providers are tried first"),
+            "time_range": _str("Optional publication recency filter; omit for maintained official pages", enum=["day", "week", "month", "year"]),
+            "freshness": _str("Cache policy: live bypasses completed cache, recent allows 2 minutes (default), stable allows 30 minutes", enum=["live", "recent", "stable"]),
         },
         ["query"],
     ),

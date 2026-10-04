@@ -265,3 +265,71 @@ def test_jina_reader_keeps_ssrf_on_original_url():
         raise AssertionError("expected private-url refusal")
     except ValueError as exc:
         assert "private/internal" in str(exc)
+
+
+def test_fetch_fragment_preserves_deep_source_section(monkeypatch):
+    page = "https://example.org/faq#supported-devices"
+    body = ("<html><nav>menus</nav><script>bad instructions</script><p>" + "intro " * 4000 + "</p><h2 id='supported-devices'>Supported devices</h2><p>New phone &amp; support</p></html>").encode()
+    session = FakeSession({page: FakeResp(200, headers={"Content-Type": "text/html"}, body=body)})
+
+    async def shared():
+        return session
+
+    monkeypatch.setattr("bot_tools._get_shared_session", shared)
+    result = _run(FetchUrlTool(SimpleNamespace()).execute(None, url=page, max_length="1000"))
+    assert result.startswith("Supported devices")
+    assert "New phone & support" in result
+    assert "intro" not in result
+    assert "bad instructions" not in result
+
+
+def test_fetch_redirect_removes_reader_credentials_on_changed_origin(monkeypatch):
+    session = FakeSession({
+        "https://r.jina.ai/a": FakeResp(302, headers={"Location": "https://example.org/page"}),
+        "https://example.org/page": FakeResp(200, body=b"content"),
+    })
+
+    async def shared():
+        return session
+
+    monkeypatch.setattr("bot_tools._get_shared_session", shared)
+    _run(_fetch_public_url("https://r.jina.ai/a", max_bytes=100, extra_headers={"Authorization": "Bearer secret", "Cookie": "private"}))
+    assert "Authorization" in session.calls[0][1]["headers"]
+    assert "Authorization" not in session.calls[1][1]["headers"]
+    assert "Cookie" not in session.calls[1][1]["headers"]
+
+
+def test_blocked_source_uses_jina_without_weakening_ssrf_checks(monkeypatch):
+    page = "https://example.org/blocked"
+    session = FakeSession({
+        page: FakeResp(403),
+        _jina_reader_url(page): FakeResp(200, headers={"Content-Type": "text/plain"}, body=b"readable source"),
+    })
+
+    async def shared():
+        return session
+
+    monkeypatch.setattr("bot_tools._get_shared_session", shared)
+    result = _run(FetchUrlTool(SimpleNamespace()).execute(None, url=page))
+    assert result == "readable source"
+    assert len(session.calls) == 2
+
+
+def test_fetch_redirects_share_one_deadline(monkeypatch):
+    import tooling.helpers as helpers
+
+    session = FakeSession({
+        "https://example.org/old": FakeResp(302, headers={"Location": "/new"}),
+        "https://example.org/new": FakeResp(200, body=b"content"),
+    })
+    clocks = iter([100.0, 101.0, 103.0])
+
+    async def shared():
+        return session
+
+    monkeypatch.setattr("bot_tools._get_shared_session", shared)
+    # Patch only the helper module's time binding, not asyncio's global clock.
+    monkeypatch.setattr(helpers, "time", SimpleNamespace(monotonic=lambda: next(clocks)))
+    _run(_fetch_public_url("https://example.org/old", max_bytes=100, timeout=5))
+    assert session.calls[0][1]["timeout"].total == 4
+    assert session.calls[1][1]["timeout"].total == 2

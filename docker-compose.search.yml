@@ -1,0 +1,26 @@
+# Optional SearXNG for Maxwell's Linux host-network deployment. This service
+# has no public port. Set SEARXNG_SECRET in .env before starting it.
+services:
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    user: "977:977"
+    environment:
+      SEARXNG_SECRET: "${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env}"
+      FORCE_OWNERSHIP: "false"
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
