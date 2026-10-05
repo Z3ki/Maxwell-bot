@@ -29,6 +29,10 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+      - name: Install repository inspection dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git ripgrep
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pip check
       - run: ruff check .

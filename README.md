@@ -242,9 +242,14 @@ Install the runtime and test dependencies, then run the dependency, lint, shell
 syntax, regression, and shared-core coverage checks:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends git ripgrep
 python -m pip install -r requirements.txt -r requirements-dev.txt
 make check
 ```
+
+The standalone repository inspection tests use `/usr/bin/git` and `/usr/bin/rg`
+on Linux, matching the tools installed in the GitHub workspace image.
 
 Use `make check PYTHON=.venv/bin/python` for a virtual environment, or `make test`
 for the regression suite without coverage. CI runs on Python 3.11 and 3.12. See
