@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.9 — 2026-10-04
+
+Install with `--version v0.1.9`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
 
 - Serialize GitHub token logout with OAuth writes across processes. Require
   explicit repository opt-in for custom commands and Git operations that can run
