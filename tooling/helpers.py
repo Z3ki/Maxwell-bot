@@ -2177,11 +2177,15 @@ async def deliver_attachment(message, file, *, label: str = "file"):
     """
     channel = getattr(message, "channel", None)
 
-    async def _send_plain():
+    async def _send_plain(*, reset: bool = False):
         send = getattr(channel, "send", None)
         if not callable(send):
             return None, "Error: cannot send files in this chat"
         try:
+            if reset:
+                # HTTP upload construction consumes fp even when Discord rejects
+                # the reply. Reset to File's recorded start, not necessarily 0.
+                file.reset()
             return await send(file=file), None
         except discord.Forbidden:
             return None, "Error: no permission to send files here"
@@ -2201,10 +2205,10 @@ async def deliver_attachment(message, file, *, label: str = "file"):
         return None, "Error: no permission to send files here"
     except (discord.NotFound, discord.HTTPException) as exc:
         if _attachment_reference_gone(exc):
-            return await _send_plain()
+            return await _send_plain(reset=True)
         return None, f"Error sending {label}: {exc}"
     except AttributeError:
-        return await _send_plain()
+        return await _send_plain(reset=True)
     except Exception as exc:
         return None, f"Error sending {label}: {exc}"
 

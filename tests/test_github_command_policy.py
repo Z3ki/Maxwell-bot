@@ -194,7 +194,7 @@ def test_git_operations_cannot_execute_repository_helpers_without_opt_in(
         policy = {"allow_security_testing": True, "mode": "admin"}
         with pytest.raises(PermissionError, match="repo policy"):
             if operation == "git":
-                await service.git("1", "acme/app", policy, "git status")
+                await service.git("1", "acme/app", policy, [["status", "--short", "--branch"]])
             elif operation == "checkout":
                 await service.checkout("1", "acme/app", policy)
             else:

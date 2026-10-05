@@ -13,6 +13,7 @@ import aiohttp
 from tools import Tool
 from utils import FileLock, _atomic_json_write_sync
 from plugins.github_projects.inspection import INSPECTION_SCRIPT
+from plugins.github_projects.credential_git import GIT_SCRIPT, validate_git_commands
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/@+-]{1,180}$")
@@ -326,9 +327,9 @@ class GitHubProjectService:
         if self.user_root(uid) not in root.parents: raise ValueError("workspace escaped user root")
         return root
 
-    async def _proc(self,*args:str,timeout:int=120,env:dict[str,str]|None=None)->ExecResult:
-        proc=await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,env=env)
-        try: out,err=await asyncio.wait_for(proc.communicate(),timeout=timeout)
+    async def _proc(self,*args:str,timeout:int=120,env:dict[str,str]|None=None,input:bytes|None=None)->ExecResult:
+        proc=await asyncio.create_subprocess_exec(*args,stdin=asyncio.subprocess.PIPE if input is not None else None,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,env=env)
+        try: out,err=await asyncio.wait_for(proc.communicate(input=input),timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill();
             with contextlib.suppress(Exception): await proc.wait()
@@ -362,8 +363,8 @@ class GitHubProjectService:
             raise PermissionError(
                 "repository code execution is disabled by repo policy; "
                 "set allow_security_testing=true for this repository to enable "
-                "custom commands and Git checkout/commit/push, including "
-                "repository hooks and security testing"
+                "custom commands, security testing, and Git checkout/commit/push. "
+                "Service Git ignores repository hooks and executable configuration"
             )
 
     async def run(self,uid:str,repo:str,command:str,*,timeout:int=900,env:dict[str,str]|None=None)->ExecResult:
@@ -411,41 +412,64 @@ class GitHubProjectService:
         ]
         return await self._proc(*args, timeout=max(1, min(int(timeout), 180)))
 
-    async def git(self,uid:str,repo:str,policy:dict[str,Any],command:str,*,timeout:int=300)->ExecResult:
+    async def git(self,uid:str,repo:str,policy:dict[str,Any],commands:list[list[str]],*,timeout:int=300)->ExecResult:
         repo=_repo(repo)
-        # Git can execute checkout filters, hooks, transports, and helpers.
-        # This is the same code-execution boundary as a custom shell request.
         await self._require_command_permission(uid, repo)
+        validate_git_commands(commands)
         target=self.repo_root(uid,repo)
         if not target.exists(): raise FileNotFoundError("repo is not checked out yet")
-        await self._ensure_image(); token=self.token(uid,str(policy.get("identity") or "user"))
-        if not token: raise PermissionError("GitHub credential is not configured")
-        owner,name=repo.split("/",1); root=str(self.user_root(uid))
-        args=["docker","run","--rm","--init","--network","bridge","--memory","2g","--memory-swap","2g","--cpus","1.5","--pids-limit","384","--security-opt","no-new-privileges","--cap-drop","ALL","-v",f"{root}:/workspace:rw","-w",f"/workspace/repos/{owner}/{name}","-e","GIT_CONFIG_COUNT=1","-e","GIT_CONFIG_KEY_0=http.extraHeader","-e",f"GIT_CONFIG_VALUE_0=AUTHORIZATION: bearer {token}","-e","GIT_TERMINAL_PROMPT=0",_IMAGE,"bash","-lc",command]
-        return await self._proc(*args,timeout=max(1,min(int(timeout),1800)))
+        return await self._trusted_git(uid, repo, policy, commands, timeout=timeout)
+
+    async def _trusted_git(
+        self, uid: str, repo: str, policy: dict[str, Any],
+        commands: list[list[str]], *, checkout: bool = False, timeout: int = 300,
+    ) -> ExecResult:
+        """Execute only trusted Git with a private snapshot and stdin credential."""
+        validate_git_commands(commands)
+        await self._ensure_image()
+        token = self.token(uid, str(policy.get("identity") or "user"))
+        if not token:
+            raise PermissionError("GitHub credential is not configured")
+        target = self.repo_root(uid, repo)
+        args = [
+            "docker", "run", "--rm", "--init", "--interactive", "--read-only",
+            "--network", "bridge", "--memory", "2g", "--memory-swap", "2g",
+            "--cpus", "1.5", "--pids-limit", "384",
+            "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=5g",
+            "-v", f"{target}:/repository:rw", "--workdir", "/tmp", _IMAGE,
+            "python3", "-I", "-c", GIT_SCRIPT, "/repository",
+        ]
+        payload = json.dumps({
+            "repo": repo, "commands": commands, "checkout": checkout, "token": token,
+        }).encode()
+        result = await self._proc(*args, input=payload, timeout=max(1, min(int(timeout), 1800)))
+        return ExecResult(result.code, result.stdout.replace(token, "[redacted]"), result.stderr.replace(token, "[redacted]"))
 
     async def checkout(self,uid:str,repo:str,policy:dict[str,Any],ref:str="")->str:
         repo=_repo(repo)
         await self._require_command_permission(uid, repo)
-        target=self.repo_root(uid,repo); await self._ensure_image(); token=self.token(uid,str(policy.get("identity") or "user"))
-        if not token: raise PermissionError("GitHub credential is not configured")
-        owner,name=repo.split("/",1); root=str(self.user_root(uid)); remote=f"https://github.com/{repo}.git"
-        if target.exists() and (target/".git").exists(): res=await self.git(uid,repo,policy,"git fetch --prune origin && git status --short --branch",timeout=300)
-        else:
-            clone=f"mkdir -p {shlex.quote('/workspace/repos/'+owner)} && git clone {shlex.quote(remote)} {shlex.quote('/workspace/repos/'+owner+'/'+name)}"
-            args=["docker","run","--rm","--init","--network","bridge","--memory","2g","--memory-swap","2g","--cpus","1.5","--pids-limit","384","--security-opt","no-new-privileges","--cap-drop","ALL","-v",f"{root}:/workspace:rw","-e","GIT_CONFIG_COUNT=1","-e","GIT_CONFIG_KEY_0=http.extraHeader","-e",f"GIT_CONFIG_VALUE_0=AUTHORIZATION: bearer {token}","-e","GIT_TERMINAL_PROMPT=0",_IMAGE,"bash","-lc",clone]
-            res=await self._proc(*args,timeout=600)
-        if res.code!=0: raise RuntimeError(res.render())
+        ref = _ref(ref)
+        target=self.repo_root(uid,repo)
+        target.mkdir(exist_ok=True)
+        commands = [["fetch", "--prune", "origin"]]
         if ref:
-            sw=await self.git(uid,repo,policy,f"git checkout {shlex.quote(_ref(ref))}",timeout=180)
-            if sw.code!=0: raise RuntimeError(sw.render())
+            commands.append(["checkout", ref])
+        commands.append(["status", "--short", "--branch"])
+        res = await self._trusted_git(uid, repo, policy, commands, checkout=True, timeout=600)
+        if res.code!=0: raise RuntimeError(res.render())
         head=await self.inspect_repository(uid,repo,"checkout_head",timeout=60)
         await self.knowledge.update(uid,repo,event="checkout/sync",workspace=str(target),head=head.stdout[:1000]); return _clip(head.render(),8000)
 
     async def checkout_pr(self,uid:str,repo:str,policy:dict[str,Any],number:int)->str:
         if number<=0: raise ValueError("PR number must be positive")
-        branch=f"maxwell/pr-{number}"; cmd=f"git fetch origin pull/{number}/head:refs/remotes/origin/pr/{number} && git checkout -B {shlex.quote(branch)} refs/remotes/origin/pr/{number} && git status --short --branch"
-        out=await self.git(uid,repo,policy,cmd,timeout=300)
+        branch=f"maxwell/pr-{number}"
+        commands = [
+            ["fetch", "origin", f"pull/{number}/head:refs/remotes/origin/pr/{number}"],
+            ["checkout", "-B", branch, f"refs/remotes/origin/pr/{number}"],
+            ["status", "--short", "--branch"],
+        ]
+        out=await self.git(uid,repo,policy,commands,timeout=300)
         if out.code==0: await self.knowledge.update(uid,repo,event=f"checked out PR #{number}")
         return out.render()
 
@@ -565,7 +589,7 @@ class GitHubRepoTool(Tool):
     required_capabilities=("network","files.read","files.write","shell","secrets.read"); timeout_seconds=3600
     parameters: ClassVar[dict[str, Any]] = {"type":"object","properties":{
         "action":{"type":"string","enum":["auth","auth_set","auth_clear","policy_get","policy_set","list","checkout","sync","status","run","diff","verify","commit","push","pr_create","pr_get","pr_diff","pr_checkout","review","merge","issue_get","issue_reply","schedule_set","knowledge"]},
-        "repo":{"type":"string"},"ref":{"type":"string"},"command":{"type":"string"},"message":{"type":"string"},"title":{"type":"string"},"body":{"type":"string"},"token":{"type":"string"},"scopes":{"type":"string"},"permissions":{"type":"string"},"number":{"type":"integer"},"event":{"type":"string","enum":["COMMENT","APPROVE","REQUEST_CHANGES"]},"mode":{"type":"string","enum":["read","write","admin"]},"identity":{"type":"string","enum":["user","bot"]},"auto_review":{"type":"boolean"},"auto_merge":{"type":"boolean"},"auto_issue_reply":{"type":"boolean"},"allow_security_testing":{"type":"boolean","description":"Explicitly enable project code execution for this user and repository: custom run/verify commands and Git checkout/sync/PR checkout/commit/push (including hooks, filters, and security testing). Disabled by default; read-only inspection remains available."},"merge_method":{"type":"string","enum":["merge","squash","rebase"]},"base":{"type":"string"},"head":{"type":"string"},"schedule_enabled":{"type":"boolean"},"schedule_minutes":{"type":"integer","minimum":5},"schedule_goal":{"type":"string"}},"required":["action"],"additionalProperties":True}
+        "repo":{"type":"string"},"ref":{"type":"string"},"command":{"type":"string"},"commit_message":{"type":"string","description":"Required commit text for action=commit."},"title":{"type":"string"},"body":{"type":"string"},"token":{"type":"string"},"scopes":{"type":"string"},"permissions":{"type":"string"},"number":{"type":"integer"},"event":{"type":"string","enum":["COMMENT","APPROVE","REQUEST_CHANGES"]},"mode":{"type":"string","enum":["read","write","admin"]},"identity":{"type":"string","enum":["user","bot"]},"auto_review":{"type":"boolean"},"auto_merge":{"type":"boolean"},"auto_issue_reply":{"type":"boolean"},"allow_security_testing":{"type":"boolean","description":"Explicitly enable custom run/verify commands and Git checkout/sync/PR checkout/commit/push for this user and repository. Disabled by default; read-only inspection remains available. Service Git ignores repository hooks and configuration."},"merge_method":{"type":"string","enum":["merge","squash","rebase"]},"base":{"type":"string"},"head":{"type":"string"},"schedule_enabled":{"type":"boolean"},"schedule_minutes":{"type":"integer","minimum":5},"schedule_goal":{"type":"string"}},"required":["action"],"additionalProperties":True}
     def __init__(self,bot,service): super().__init__(bot); self.service=service
     def get_description(self):
         return (
@@ -576,9 +600,10 @@ class GitHubRepoTool(Tool):
             "reply, schedule_set, knowledge. Repo policy controls write/admin. "
             "Custom run/verify commands and Git checkout/sync/PR checkout/commit/"
             "push require explicit allow_security_testing=true for this user "
-            "and repository, since Git hooks and filters can execute project "
-            "code too. Built-in status/diff/verify inspection remains available "
-            "without the opt-in. Normal shell commands never receive GitHub tokens."
+            "and repository. Service Git ignores repository hooks and configuration. "
+            "Built-in status/diff/verify inspection remains available without the "
+            "opt-in. Normal shell commands never receive GitHub tokens. "
+            "action=commit requires commit_message; review/issue_reply use body."
         )
 
     async def execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:
@@ -604,7 +629,7 @@ class GitHubRepoTool(Tool):
                 "Ask for different permissions by passing scopes= (repo, public_repo, workflow, gist, read:org, user, notifications, …)."
             )
         if action=="auth_set":
-            raw=str(kw.get("token") or kw.get("body") or kw.get("message") or "").strip()
+            raw=str(kw.get("token") or kw.get("body") or "").strip()
             if not _PAT_RE.fullmatch(raw):
                 return "Error: token must be a GitHub PAT starting with ghp_ or github_pat_. Create one at https://github.com/settings/tokens"
             await self.service.user_tokens.set(uid, raw)
@@ -653,13 +678,13 @@ class GitHubRepoTool(Tool):
                 ref=_ref(kw.get("ref")); return _clip((await self.service.inspect_repository(uid,r,"diff",ref=ref,timeout=120)).render(),_MAX_DIFF)
             if action=="verify":return await self.service.verify(uid,r,str(kw.get("command") or ""))
             if action=="commit":
-                self.service.require_mode(pol,"write"); msg=str(kw.get("message") or "").strip()
-                if not msg:return "Error: commit message is required"
-                out=await self.service.git(uid,r,pol,f"git add -A && git diff --cached --check && git commit -m {shlex.quote(msg)}",timeout=180)
+                self.service.require_mode(pol,"write"); msg=str(kw.get("commit_message") or "").strip()
+                if not msg:return "Error: commit_message is required"
+                out=await self.service.git(uid,r,pol,[["add","-A"],["diff","--cached","--check"],["commit","-m",msg]],timeout=180)
                 if out.code==0:await self.service.knowledge.update(uid,r,event=f"commit: {msg[:140]}")
                 return out.render()
             if action=="push":
-                self.service.require_mode(pol,"write"); ref=_ref(kw.get("ref")); out=await self.service.git(uid,r,pol,"git push origin "+(shlex.quote(ref) if ref else "HEAD"),timeout=600)
+                self.service.require_mode(pol,"write"); ref=_ref(kw.get("ref")); out=await self.service.git(uid,r,pol,[["push","origin",ref or "HEAD"]],timeout=600)
                 if out.code==0:await self.service.knowledge.update(uid,r,event=f"push {ref or 'HEAD'}")
                 return out.render()
             if action=="pr_create":
@@ -676,7 +701,7 @@ class GitHubRepoTool(Tool):
                 n=int(kw.get("number") or 0); status,text,_=await self.service._api(uid,pol,"GET",f"/repos/{r}/pulls/{n}",accept="application/vnd.github.v3.diff"); return _clip(text,_MAX_DIFF) if status==200 else f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
             if action=="pr_checkout":return await self.service.checkout_pr(uid,r,pol,int(kw.get("number") or 0))
             if action=="review":
-                self.service.require_mode(pol,"write"); n=int(kw.get("number") or 0); event=str(kw.get("event") or "COMMENT").upper(); body=str(kw.get("body") or kw.get("message") or "").strip()
+                self.service.require_mode(pol,"write"); n=int(kw.get("number") or 0); event=str(kw.get("event") or "COMMENT").upper(); body=str(kw.get("body") or "").strip()
                 if event not in {"COMMENT","APPROVE","REQUEST_CHANGES"}:return "Error: invalid review event"
                 status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/pulls/{n}/reviews",json_body={"event":event,"body":body}); return f"Review submitted: {event} {data.get('html_url','')}" if status in {200,201} else f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
             if action=="merge":
@@ -689,7 +714,7 @@ class GitHubRepoTool(Tool):
                 if status!=200 or not isinstance(data,dict):return f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
                 keep={k:data.get(k) for k in ("number","title","body","state","html_url","updated_at","comments")}; keep["user"]=(data.get("user") or {}).get("login"); keep["labels"]=[x.get("name") for x in (data.get("labels") or []) if isinstance(x,dict)]; return _clip(json.dumps(keep,indent=2,ensure_ascii=False),25000)
             if action=="issue_reply":
-                self.service.require_mode(pol,"write"); n=int(kw.get("number") or 0); body=str(kw.get("body") or kw.get("message") or "").strip()
+                self.service.require_mode(pol,"write"); n=int(kw.get("number") or 0); body=str(kw.get("body") or "").strip()
                 if not body:return "Error: body is required"
                 status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/issues/{n}/comments",json_body={"body":body}); return f"Issue reply posted: {data.get('html_url','')}" if status in {200,201} else f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
             if action=="schedule_set":

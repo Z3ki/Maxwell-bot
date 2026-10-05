@@ -6,13 +6,16 @@ import asyncio
 import hashlib
 import hmac
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import api.api_server as api
+from maxwell_core.tools.dispatch import _prepare_tool_params
 from plugins.github_projects.impl import (
+    ExecResult,
     GitHubProjectService,
     GitHubRepoTool,
     PolicyStore,
@@ -228,3 +231,63 @@ def test_auth_returns_login_link(tmp_path, monkeypatch):
         assert "s3cret" not in out
 
     asyncio.run(run())
+
+
+def test_dispatched_commit_preserves_text_and_rejects_blank(tmp_path, monkeypatch):
+    """The model's commit text must become an actual commit, not a context kwarg."""
+    svc = GitHubProjectService(Bot(), Ctx(tmp_path))
+    root = svc.repo_root("1", "acme/app")
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    (root / "file.txt").write_text("committed contents\n")
+    text = "Fix 'quoted' text; $(touch injected)\n\nKeep the full commit body."
+
+    async def local_git(uid, repo, policy, commands, *, timeout):
+        # Exercise real Git; credential isolation has its own service coverage.
+        for command in commands:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(root), *command,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout)
+            result = ExecResult(proc.returncode, out.decode(), err.decode())
+            if result.code:
+                return result
+        return result
+
+    monkeypatch.setattr(svc, "git", local_git)
+
+    async def scenario():
+        await svc.policy.set("1", "acme/app", {"mode": "write"})
+        tool = GitHubRepoTool(Bot(), svc)
+        message = SimpleNamespace(author=SimpleNamespace(id="1"))
+        params = _prepare_tool_params(
+            "github_repo",
+            {"action": "commit", "repo": "acme/app", "commit_message": text},
+        )
+        result = await tool.execute(message, **params)
+        assert result.startswith("exit=0"), result
+        committed = subprocess.check_output(
+            ["git", "-C", str(root), "log", "-1", "--format=%B"], text=True,
+        ).strip()
+        assert committed == text
+        assert subprocess.check_output(
+            ["git", "-C", str(root), "show", "HEAD:file.txt"], text=True,
+        ) == "committed contents\n"
+        assert not (root / "injected").exists()
+        before = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"])
+        for missing in ({}, {"commit_message": " \n "}):
+            result = await tool.execute(
+                message, action="commit", repo="acme/app", **missing,
+            )
+            assert result.startswith("Error:")
+            assert subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+            ) == before
+
+    asyncio.run(scenario())

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from io import BytesIO
 from types import SimpleNamespace
 
 import discord
@@ -272,6 +273,82 @@ def test_media_delivery_only_records_confirmed_sends(monkeypatch, tool_class, fo
     else:
         assert "_SENT__" in result
         assert receipts == [(message, message.channel.sent[0])]
+
+
+@pytest.mark.parametrize("failure", ["not_found", "invalid_reference", "attribute"])
+@pytest.mark.parametrize("start", [0, 7])
+def test_attachment_fallback_rewinds_consumed_upload(failure, start):
+    from discord.http import handle_message_parameters
+    from tooling.helpers import deliver_attachment
+
+    payload = b"\x00original attachment\xff\n"
+    stream = BytesIO(b"prefix!"[:start] + payload)
+    stream.seek(start)
+    file = discord.File(stream, filename="payload.bin")
+    response = SimpleNamespace(status=404, reason="Not Found")
+    failures = {
+        "not_found": discord.NotFound(response, {"code": 10008, "message": "Unknown Message"}),
+        "invalid_reference": discord.HTTPException(
+            SimpleNamespace(status=400, reason="Bad Request"),
+            {"code": 50035, "message": "Invalid message_reference"},
+        ),
+        "attribute": AttributeError("reply snapshot lost its state"),
+    }
+    uploaded = []
+    posted = SimpleNamespace(id=4, attachments=[])
+
+    async def reply(*, file):
+        # Exercise Discord's real parameter cleanup as well as consumption:
+        # a failed HTTP request still closes its File wrapper.
+        with handle_message_parameters(file=file):
+            assert file.fp.read() == payload
+            raise failures[failure]
+
+    async def send(*, file):
+        with handle_message_parameters(file=file):
+            uploaded.append(file.fp.read())
+            return posted
+
+    message = SimpleNamespace(reply=reply, channel=SimpleNamespace(send=send))
+    try:
+        sent, error = asyncio.run(deliver_attachment(message, file))
+        assert error is None
+        assert sent is posted
+        assert uploaded == [payload]
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("status,code", [(403, 50013), (400, 50035)])
+def test_attachment_reply_denials_do_not_resend(status, code):
+    from discord.http import handle_message_parameters
+    from tooling.helpers import deliver_attachment
+
+    stream = BytesIO(b"private attachment")
+    file = discord.File(stream, filename="private.txt")
+    response = SimpleNamespace(status=status, reason="Denied")
+    exception = discord.Forbidden if status == 403 else discord.HTTPException
+    failure = exception(response, {"code": code, "message": "Upload denied"})
+
+    async def reply(*, file):
+        with handle_message_parameters(file=file):
+            file.fp.read()
+            raise failure
+
+    async def send(*, file):
+        pytest.fail("A reply permission/upload denial must not resend")
+
+    try:
+        sent, error = asyncio.run(deliver_attachment(
+            SimpleNamespace(reply=reply, channel=SimpleNamespace(send=send)), file,
+        ))
+        assert sent is None
+        if status == 403:
+            assert error == "Error: no permission to send files here"
+        else:
+            assert error.startswith("Error sending file:")
+    finally:
+        stream.close()
 
 
 def test_shell_tool_runs_without_author_gate():

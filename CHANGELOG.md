@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — 2026-10-05
+
+- Rewind consumed Discord attachments before fallback channel delivery, preserving
+  the complete upload when a reply's parent disappears or reply state is missing
+  (#54).
+- Use `commit_message` for GitHub commits so tool dispatch preserves commit text
+  instead of colliding with the Discord message context (#55).
+- Isolate credentialed Git in a private metadata snapshot, ignore workspace
+  hooks/configuration/helpers, pin GitHub remotes, and pass authentication over
+  stdin rather than Docker arguments or environment (#56). Use Git-compatible
+  HTTP Basic authentication for checkout, fetch, and push.
+
 ## 0.1.9 — 2026-10-04
 
 Install with `--version v0.1.9`. `main` remains a development snapshot. Release assets include source, installers, checksums, and the versioned container image digest.
