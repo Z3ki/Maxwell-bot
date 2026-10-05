@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Serialize GitHub token logout with OAuth writes across processes. Require
+  explicit repository opt-in for custom commands and Git operations that can run
+  hooks or filters; built-in inspection uses an isolated read-only snapshot.
 - Move prompt construction, output cleanup, provider protocols, and scoped memory
   policy into shared modules with explicit interfaces and compatible imports.
 - Preserve async cleanup during repeated cancellation, keep admission bounded,
