@@ -11498,7 +11498,10 @@ class MaxwellBot(commands.Bot):
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
                     continue
-                if sleep_seen or (send_message_seen and call["name"] != "no_response"):
+                if sleep_seen or (
+                    send_message_seen
+                    and call["name"] not in {"send_message", "no_response"}
+                ):
                     line = f"Tool {call['name']}: Skipped — the turn already ended"
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
@@ -11584,15 +11587,27 @@ class MaxwellBot(commands.Bot):
                         )
                     continue
                 # send_message, wait, any other terminal tool: run in
-                # declared order. await each one so the model sees the
-                # real result before the next call dispatches.
-                line = await run_safely(call)
+                # declared order. Consecutive send_message calls are the one
+                # exception to the usual terminal rule: Maxwell may emit a
+                # small message burst in one model response. The first
+                # successfully delivered send honors reply=True by default;
+                # every later send in this same batch is forced standalone so
+                # Discord does not show several replies to the same parent.
+                dispatch_call = call
+                if call["name"] == "send_message" and send_message_seen:
+                    dispatch_call = dict(call)
+                    dispatch_args = dict(call.get("arguments") or {})
+                    dispatch_args["reply"] = False
+                    dispatch_args.pop("reply_to", None)
+                    dispatch_call["arguments"] = dispatch_args
+                line = await run_safely(dispatch_call)
                 tool_results.append(line)
                 if call["name"] == "send_message":
-                    send_message_seen = (
+                    delivered = (
                         "__MESSAGE_SENT__" in line
                         and not line.startswith("Tool send_message: Error")
                     )
+                    send_message_seen = send_message_seen or delivered
                 elif call["name"] == "sleep":
                     sleep_seen = not _tool_results_need_followup([line])
             await flush_reads()

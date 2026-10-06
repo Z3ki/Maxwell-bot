@@ -81,3 +81,96 @@ def test_fetched_content_finishes_tainting_the_turn_before_shell(monkeypatch):
         assert "AssertionError" not in summary
 
     asyncio.run(run())
+
+def test_multiple_send_messages_run_in_same_batch_and_only_first_can_reply(monkeypatch):
+    async def run():
+        executed = []
+        owner = SimpleNamespace(_control={}, tools={})
+        message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+
+        async def execute(self, message, name, params, *_args, **_kwargs):
+            executed.append((name, dict(params)))
+            return "__MESSAGE_SENT__\n" + str(params.get("content") or "")
+
+        monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+        monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+        calls = [
+            {
+                "id": "first",
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "arguments": '{"content":"first"}',
+                },
+            },
+            {
+                "id": "second",
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "arguments": '{"content":"second","reply":true,"reply_to":"same parent"}',
+                },
+            },
+        ]
+
+        _cleaned, results = await MaxwellBot._process_native_tool_calls(
+            owner, message, "", calls
+        )
+
+        assert [name for name, _params in executed] == [
+            "send_message",
+            "send_message",
+        ]
+        # The first call keeps the tool's normal reply=True default by leaving
+        # the argument absent. The second is normalized by the runtime.
+        assert executed[0][1] == {"content": "first"}
+        assert executed[1][1]["content"] == "second"
+        assert executed[1][1]["reply"] is False
+        assert "reply_to" not in executed[1][1]
+        assert sum("__MESSAGE_SENT__" in line for line in results) == 2
+
+    asyncio.run(run())
+
+
+def test_failed_first_send_does_not_consume_the_reply_slot(monkeypatch):
+    async def run():
+        executed = []
+        owner = SimpleNamespace(_control={}, tools={})
+        message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+
+        async def execute(self, message, name, params, *_args, **_kwargs):
+            executed.append(dict(params))
+            if len(executed) == 1:
+                return "Tool send_message: Error - send failed"
+            return "__MESSAGE_SENT__\nsecond"
+
+        monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+        monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+        calls = [
+            {
+                "id": "first",
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "arguments": '{"content":"first"}',
+                },
+            },
+            {
+                "id": "second",
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "arguments": '{"content":"second"}',
+                },
+            },
+        ]
+
+        await MaxwellBot._process_native_tool_calls(owner, message, "", calls)
+
+        assert executed[0] == {"content": "first"}
+        # Because nothing was delivered yet, the second call keeps the default
+        # reply behavior instead of being forced standalone.
+        assert executed[1] == {"content": "second"}
+
+    asyncio.run(run())
+

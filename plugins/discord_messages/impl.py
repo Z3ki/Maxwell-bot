@@ -438,8 +438,10 @@ class SendMessageTool(Tool):
 
     def get_description(self):
         return (
-            "Send a message to the current chat. Default: one call per turn with the full reply. "
-            "You can call this more than once if you actually want separate Discord messages; do not split a normal reply. "
+            "Send a message to the current chat. reply defaults to true. Usually send one complete message, "
+            "but you may emit 2-3 send_message calls in the same model response when a short conversational burst reads more naturally. "
+            "The first successfully delivered call may quote-reply; later calls in that same response are posted standalone automatically. "
+            "Do not split a normal informational answer just to create more messages. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
             "Params: content (required), reply (optional bool, default true — Discord "
             "quote-reply is on; pass false only for a standalone line with no quote), "

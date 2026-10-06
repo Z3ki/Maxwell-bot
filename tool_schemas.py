@@ -656,9 +656,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "content": _str("Message text (Discord markdown OK)"),
             "reply": _bool(
                 "Discord quote-reply (the quoted-parent UI). Default true. "
-                "Pass false only for a standalone line with no quote. Keep it "
-                "on when the room has moved on, several people are talking, "
-                "or you are answering an older line."
+                "Pass false only when you explicitly want a standalone first line. "
+                "If this model response emits multiple send_message calls, the runtime "
+                "keeps this behavior for the first delivered call and automatically "
+                "posts later calls standalone. Keep reply on when the room has moved on, "
+                "several people are talking, or you are answering an older line."
             ),
             "reply_to": _str(
                 "Optional short quote or who said it, like nah or alice. Not an id."
