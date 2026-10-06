@@ -513,30 +513,14 @@ def install_user_install_features(bot: Any) -> None:
 
     ui.USER_INSTALL_MESSAGE_EXPLAIN = MESSAGE_EXPLAIN
     ui.USER_INSTALL_MESSAGE_FACT_CHECK = MESSAGE_FACT_CHECK
-    # This plugin replaces the base user-install list. Preserve discovery
-    # commands registered earlier by install_usage_commands().
-    from usage_commands import HELP_COMMAND, PREMIUM_COMMAND, USAGE_COMMAND
-
-    ui.USER_INSTALL_COMMANDS[:] = [
-        *modern_user_install_commands(),
-        dict(HELP_COMMAND),
-        dict(USAGE_COMMAND),
-        dict(PREMIUM_COMMAND),
-    ]
-    ui.USER_INSTALL_NAMES = frozenset(
-        {
-            ui.USER_INSTALL_COMMAND_NAME,
-            ui.USER_INSTALL_MESSAGE_ASK,
-            ui.USER_INSTALL_MESSAGE_SUMMARIZE,
-            ui.USER_INSTALL_USER_ASK,
-            MESSAGE_EXPLAIN,
-            MESSAGE_FACT_CHECK,
-            MESSAGE_TRANSFORM,
-            "help",
-            "usage",
-            "premium",
-        }
-    )
+    # Upgrade our own commands without replacing commands registered by
+    # other plugins or resurrecting disabled discovery commands.
+    modern = modern_user_install_commands()
+    replaced = {(cmd["name"], cmd.get("type", 1)) for cmd in modern}
+    preserved = [cmd for cmd in ui.USER_INSTALL_COMMANDS
+                 if (cmd["name"], cmd.get("type", 1)) not in replaced]
+    ui.USER_INSTALL_COMMANDS[:] = [*modern, *preserved]
+    ui.USER_INSTALL_NAMES = frozenset(cmd["name"] for cmd in ui.USER_INSTALL_COMMANDS)
 
     _ORIGINAL_BUILD_TURN = ui.build_user_install_turn
 

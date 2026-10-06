@@ -37,9 +37,12 @@ A new plugin:
 | `id` / `name` | Unique identifier |
 | `version` | Plugin version |
 | `api_version` | Must be `1` |
+| `manifest_version` | Must be `1` when specified |
+| `entry` | Relative Python entry file inside the plugin; defaults to `__init__.py`, then `tools.py` |
 | `description`, `author` | Plugin metadata shown by Discord controls and the operator API |
 | `dependencies` | Other plugin ids that must load first |
 | `optional_dependencies` | Python packages; missing ones disable *this* plugin, not Maxwell |
+| `required_features` | Config flags that must be on before importing this plugin; missing/off flags omit it |
 | `permissions` | Declared capabilities (`network`, `shell`, …) |
 | `tools` | Tool names + contracts (`returns_result`, `ends_turn`, `is_destructive`) |
 | `prompt` | Optional prompt slice, included only when its tools are on the turn |
@@ -49,6 +52,12 @@ A new plugin:
 | `requires_restart` | Restart requirement reported by the operator API |
 
 Legacy manifests (`name`, `enabled_globally`, `allowed_users`, `denied_users`) still load.
+
+Bundled tool-only plugins share `maxwell_core.plugins.bundled.build_tools`.
+Its declarations contain a runtime name, implementation class name, and
+optional config flag (or tuple of flags). Disabled tools are omitted and a
+fully disabled plugin never imports its implementation. This also keeps
+disabled integrations out of the model's tool catalog and prompt slices.
 
 ## PluginContext
 

@@ -20,10 +20,11 @@ RELEASE_REF="${MAXWELL_REF:-}"
 RESOLVED_COMMIT=""
 NONINTERACTIVE="${MAXWELL_NONINTERACTIVE:-0}"
 CONFIGURE_ONLY=0
+WITH_SHELL="${MAXWELL_WITH_SHELL:-0}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h)
-      printf '%s\n' "Usage: bash easy-install.sh [--version vX.Y.Z | --ref commit] [--dir path] [--non-interactive] [--configure-only]" \
+      printf '%s\n' "Usage: bash easy-install.sh [--version vX.Y.Z | --ref commit] [--dir path] [--non-interactive] [--configure-only] [--with-shell]" \
         "Without a version, main is an unreleased development snapshot."
       exit 0 ;;
     --version) shift; [ "$#" -gt 0 ] || fail "--version requires a release"; RELEASE_VERSION="$1" ;;
@@ -31,6 +32,7 @@ while [ "$#" -gt 0 ]; do
     --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
     --non-interactive) NONINTERACTIVE=1 ;;
     --configure-only) CONFIGURE_ONLY=1 ;;
+    --with-shell) WITH_SHELL=1 ;;
     *) fail "Unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -316,6 +318,7 @@ main() {
   if [ -z "${MAXWELL_INSTALL_COMMIT:-}" ]; then
     handoff=()
     [ "$CONFIGURE_ONLY" = "1" ] && handoff+=(--configure-only)
+    [ "$WITH_SHELL" = "1" ] && handoff+=(--with-shell)
     exec env MAXWELL_INSTALL_COMMIT="$RESOLVED_COMMIT" \
       MAXWELL_INSTALL_DIR="$INSTALL_DIR" MAXWELL_REPO_URL="$REPO_URL" \
       MAXWELL_VERSION="$RELEASE_VERSION" MAXWELL_REF="$RELEASE_REF" \
@@ -325,6 +328,7 @@ main() {
   configure
   handoff=(--local)
   [ "$CONFIGURE_ONLY" = "1" ] && handoff+=(--configure-only)
+  [ "$WITH_SHELL" = "1" ] && handoff+=(--with-shell)
   MAXWELL_INSTALL_DIR="$INSTALL_DIR" MAXWELL_NONINTERACTIVE="$NONINTERACTIVE" \
     MAXWELL_SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-0}" \
     bash "$INSTALL_DIR/install.sh" "${handoff[@]}"

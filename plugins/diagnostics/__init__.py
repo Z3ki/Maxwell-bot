@@ -1,33 +1,11 @@
 """Register Diagnostics tools with Maxwell."""
-from __future__ import annotations
 
-from typing import Any
-
-
-def _flag(bot: Any, name: str | None) -> bool:
-    if not name:
-        return True
-    cfg = getattr(bot, "config", None)
-    if cfg is None:
-        return True
-    return bool(getattr(cfg, name, True))
+from maxwell_core.plugins.bundled import build_tools
 
 
 def setup(bot, ctx=None):
-    pass
-    from .impl import UsageTool, ReportTool, DebugTool
-
-    mapping = [
-        ('usage', UsageTool, None),
-        ('report', ReportTool, None),
-        ('debug', DebugTool, None),
-    ]
-    tools = []
-    for runtime_name, cls, enable_name in mapping:
-        if not _flag(bot, enable_name):
-            continue
-        inst = cls(bot)
-        inst.name = runtime_name
-        inst.tool_name = runtime_name
-        tools.append(inst)
-    return tools
+    return build_tools(bot, __package__, [
+        ('usage', 'UsageTool', None),
+        ('report', 'ReportTool', None),
+        ('debug', 'DebugTool', None),
+    ])

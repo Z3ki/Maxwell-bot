@@ -104,6 +104,33 @@ def test_rem_is_opt_in_by_default():
     assert _config_value("REM_ENABLED") == "False"
 
 
+@pytest.mark.parametrize("flag", ["ENABLE_CREATE_SITE", "ENABLE_HD_IMAGE", "ENABLE_RAG", "ENABLE_EMAIL_TOOLS", "ENABLE_SHELL", "ENABLE_AUTONOMY", "MAXWELL_RESTRICT_PUBLIC_RUNTIME"])
+def test_unconfigured_integrations_are_off(flag):
+    assert _config_value(flag) == "False"
+
+
+@pytest.mark.parametrize("flag,settings", [
+    ("ENABLE_CREATE_SITE", {"MAXWELL_PUBLIC_BASE_URL": "https://bot.example.test"}),
+    ("ENABLE_HD_IMAGE", {"GEMINI_IMAGE_MODEL": "my-image-model"}),
+    ("ENABLE_RAG", {"EMBED_MODEL": "my-embed-model"}),
+    ("ENABLE_EMAIL_TOOLS", {"MAXWELL_EMAIL_USER": "bot@example.test", "MAXWELL_EMAIL_PASSWORD": "test"}),
+])
+def test_configured_integrations_enable_and_respect_explicit_off(flag, settings):
+    assert _config_value(flag, settings) == "True"
+    assert _config_value(flag, {**settings, flag: "false"}) == "False"
+
+
+def test_mailbox_password_alone_does_not_enable_email():
+    assert _config_value("ENABLE_EMAIL_TOOLS", {"MAXWELL_EMAIL_PASSWORD": "test"}) == "False"
+
+
+@pytest.mark.parametrize("template", [".env.example", ".env.simple.example"])
+def test_shipped_templates_do_not_enable_unconfigured_integrations(template):
+    code = "from config import Config; print(any(getattr(Config, name) for name in " \
+           "['ENABLE_CREATE_SITE','ENABLE_HD_IMAGE','ENABLE_RAG','ENABLE_EMAIL_TOOLS','ENABLE_SHELL']))"
+    assert _run(code, {"MAXWELL_ENV_FILE": str(Path(__file__).resolve().parents[1] / template)}) == "False"
+
+
 def test_enable_rem_alias_turns_rem_on():
     # The docs have always called it ENABLE_REM; honour that spelling.
     assert _config_value("REM_ENABLED", {"ENABLE_REM": "true"}) == "True"

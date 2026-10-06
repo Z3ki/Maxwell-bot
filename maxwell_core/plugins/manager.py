@@ -14,7 +14,6 @@ import shutil
 import sys
 import tempfile
 import time
-from importlib import import_module, reload
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -40,11 +39,8 @@ from maxwell_core.tools.publication import publish_plugin_tools
 
 logger = logging.getLogger("maxwell.plugins")
 
-# These bundled plugins expose detached AI workers, repository access, global
-# plugin configuration, or edits to protected prompt state. Skip setup
-# entirely: some register periodic work even when plugins.json says disabled.
-# The shell plugin is retained because its only execution backend now fails
-# closed unless gVisor and the host egress policy are available.
+# Public hosted operators can omit these plugins entirely. Self-hosted
+# installs instead follow their feature configuration and plugin settings.
 _RETIRED_PUBLIC_RUNTIME_PLUGINS = frozenset({
     "agent_life", "background_jobs", "github_projects",
     "plugin_admin", "personality",
@@ -101,7 +97,8 @@ class PluginManager:
         self.plugins_dir = (
             Path(plugins_dir) if plugins_dir else (self.root_dir / "plugins")
         )
-        self.data_dir = Path(data_dir) if data_dir else (self.root_dir / "data")
+        configured_data = getattr(getattr(bot, "config", None), "DATA_DIR", None)
+        self.data_dir = Path(data_dir or configured_data or (self.root_dir / "data"))
         self.state_file = (
             Path(state_file) if state_file else (self.data_dir / "plugins.json")
         )
@@ -836,7 +833,8 @@ class PluginManager:
         discovered: dict[str, tuple[Path, PluginManifest]] = {}
         for entry in self._plugin_dirs():
             plugin_name = entry.name
-            if plugin_name in _RETIRED_PUBLIC_RUNTIME_PLUGINS:
+            if (getattr(getattr(self.bot, "config", None), "MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
+                    and plugin_name in _RETIRED_PUBLIC_RUNTIME_PLUGINS):
                 continue
             try:
                 manifest = self._load_typed_manifest(entry, plugin_name)
@@ -850,6 +848,11 @@ class PluginManager:
                     f"(already loaded from {discovered[plugin_name][0]})"
                 )
                 logger.error(self.load_errors[plugin_name])
+                continue
+            missing_features = [name for name in manifest.required_features
+                                if not getattr(getattr(self.bot, "config", None), name, False)]
+            if missing_features:
+                logger.info("Plugin %s is off: %s", plugin_name, ", ".join(missing_features))
                 continue
             discovered[plugin_name] = (entry, manifest)
 
@@ -926,12 +929,33 @@ class PluginManager:
 
     def _load_one(self, entry: Path, plugin_name: str) -> Any:
         manifest = self._load_typed_manifest(entry, plugin_name)
+        config = getattr(self.bot, "config", None)
+        missing_features = [name for name in manifest.required_features
+                            if not getattr(config, name, False)]
+        if missing_features:
+            raise ValueError(f"required features are off: {', '.join(missing_features)}")
+        missing_packages = []
+        for name in manifest.optional_dependencies:
+            try:
+                available = importlib.util.find_spec(name) is not None
+            except (ImportError, ValueError, ModuleNotFoundError):
+                available = False
+            if not available:
+                missing_packages.append(name)
+        if missing_packages:
+            raise ValueError(f"missing optional Python packages: {', '.join(missing_packages)}")
         module_name = f"plugins.{plugin_name}"
         init_py = entry / "__init__.py"
         tools_py = entry / "tools.py"
         target_file = (
             init_py if init_py.exists() else (tools_py if tools_py.exists() else None)
         )
+        if manifest.entry:
+            target_file = (entry / manifest.entry).resolve()
+            if not target_file.is_relative_to(entry.resolve()):
+                raise ValueError("plugin entry escapes its directory")
+            if not target_file.is_file():
+                raise ValueError(f"plugin entry does not exist: {manifest.entry}")
         if not target_file:
             raise ValueError(f"No __init__.py or tools.py found in plugin {plugin_name!r}")
 
@@ -941,16 +965,13 @@ class PluginManager:
         spec = importlib.util.spec_from_file_location(
             module_name,
             str(target_file),
-            submodule_search_locations=[str(entry)] if target_file == init_py else None,
+            submodule_search_locations=[str(entry)],
         )
-        if spec and spec.loader:
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = mod
-            spec.loader.exec_module(mod)
-        elif module_name in sys.modules:
-            mod = reload(sys.modules[module_name])
-        else:
-            mod = import_module(module_name)
+        if not spec or not spec.loader:
+            raise ValueError(f"cannot load plugin entry: {target_file}")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = mod
+        spec.loader.exec_module(mod)
 
         ctx = PluginContext(self, plugin_name)
         self.loaded_plugins[plugin_name] = {

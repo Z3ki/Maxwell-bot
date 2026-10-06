@@ -22,15 +22,15 @@ def parse_bool(value, default: bool = False) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
-    # Customer-facing AI usage. Free tier is 300 messages / rolling 5 hours.
-    # Plus limits are stored and not applied; billing stays off.
-    "message_quota_enabled": True,
+    # Self-hosted installs have no message allowance. Operators can opt in
+    # to quotas for a shared service; existing persisted settings win.
+    "message_quota_enabled": False,
     "message_quota_limit": 300,
     "message_quota_window_seconds": 5 * 60 * 60,
     "message_quota_personal_plus_limit": 0,
     "message_quota_server_plus_limit": 0,
     "message_quota_server_fair_use_limit": 0,
-    "premium_discovery_enabled": True,
+    "premium_discovery_enabled": False,
     "premium_billing_enabled": False,
     "log_messages": False,
     "error_replies": True,
@@ -192,7 +192,7 @@ DEFAULT_CONTROL = {
     # Hours a generated site lives before the cleanup loop removes it.
     # 0 = never expire. A site created with permanent=true (or extended via
     # edit_site) ignores this. Used to be a hardcoded 86400 in two places.
-    "site_ttl_hours": 24,
+    "site_ttl_hours": 0,
     # Inject a restrictive CSP <meta> into every generated page. Off by
     # default: the page is the model's own document and the hosting layer is
     # where a policy belongs — the meta tag could only ever subtract from what

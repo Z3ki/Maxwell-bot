@@ -510,7 +510,7 @@ configure_env() {
     set_env_value REM_ENABLED false
   fi
 
-  set_env_value ENABLE_SHELL "${ENABLE_SHELL:-auto}"
+  set_env_value ENABLE_SHELL "${ENABLE_SHELL:-false}"
   python3 scripts/migrate_ai_env.py .env >/dev/null || true
 }
 
@@ -657,6 +657,9 @@ main() {
       bash "$INSTALL_DIR/install.sh" "${handoff[@]}"
   fi
   configure_env
+  if [ "$WITH_SHELL" = "1" ]; then
+    set_env_value ENABLE_SHELL true
+  fi
   write_host_bind
   write_run_script
   if [ "$CONFIGURE_ONLY" = "1" ]; then

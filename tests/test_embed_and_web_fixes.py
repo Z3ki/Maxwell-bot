@@ -115,6 +115,7 @@ def test_embed_cache_seed_key_matches_embed_lookup(tmp_path, monkeypatch):
     This is the bug that made the seed dead weight: the seed wrote one key
     and _embed() looked up a different one, so the embed API was hit anyway.
     """
+    monkeypatch.setattr(rag_memory, "EMBEDDINGS_ENABLED", True)
     content = "the quick brown fox jumps over the lazy dog"
     vec = _unit_vec(7)
     mgr = RAGMemoryManager(str(tmp_path))

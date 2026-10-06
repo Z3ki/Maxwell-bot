@@ -99,6 +99,7 @@ class PluginManifest:
     entry: str
     dependencies: list[str] = field(default_factory=list)
     optional_dependencies: list[str] = field(default_factory=list)
+    required_features: list[str] = field(default_factory=list)
     required_capabilities: list[str] = field(default_factory=list)
     provided_capabilities: list[str] = field(default_factory=list)
     permissions: list[str] = field(default_factory=list)
@@ -136,6 +137,7 @@ class PluginManifest:
             "entry": self.entry,
             "dependencies": list(self.dependencies),
             "optional_dependencies": list(self.optional_dependencies),
+            "required_features": list(self.required_features),
             "required_capabilities": list(self.required_capabilities),
             "provided_capabilities": list(self.provided_capabilities),
             "permissions": list(self.permissions),
@@ -225,7 +227,14 @@ def validate_manifest(
     try:
         spec_version_i = int(spec_version)
     except (TypeError, ValueError):
-        spec_version_i = MANIFEST_SPEC_VERSION
+        raise ManifestError("manifest_version must be an integer", path=path) from None
+    if spec_version_i != MANIFEST_SPEC_VERSION:
+        raise ManifestError(f"unsupported manifest version {spec_version_i}", path=path)
+
+    entry = str(data.get("entry") or data.get("entrypoint") or "").strip()
+    if entry and (not entry.endswith(".py") or Path(entry).is_absolute()
+                  or ".." in Path(entry).parts or "\\" in entry):
+        raise ManifestError("entry must be a relative Python file inside the plugin", path=path)
 
     try:
         tools = _parse_tools(data.get("tools"))
@@ -258,11 +267,12 @@ def validate_manifest(
         description=str(data.get("description") or ""),
         author=str(data.get("author") or ""),
         api_version=api_version_i,
-        entry=str(data.get("entry") or data.get("entrypoint") or ""),
+        entry=entry,
         dependencies=_as_str_list(data.get("dependencies")),
         optional_dependencies=_as_str_list(
             data.get("optional_dependencies") or data.get("optional_python")
         ),
+        required_features=_as_str_list(data.get("required_features")),
         required_capabilities=normalize_capabilities(
             data.get("required_capabilities") or data.get("requires")
         ),

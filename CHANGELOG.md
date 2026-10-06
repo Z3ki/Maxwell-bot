@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased — 2026-10-05
+## 0.1.10 — 2026-10-06
+
+Install with `--version v0.1.10`. Release assets include source, installers,
+checksums, and the versioned container image digest.
+
+- Default self-hosted installs to unlimited messages without legal DMs,
+  premium discovery, or the public hosted runtime's retired-tool restrictions.
+  Existing operator settings and owner/Discord authorization remain respected.
+- Hide website, email, HD image, embedding, and shell integrations until they
+  are configured. Keep autonomy/REM opt-in and generated sites permanent by
+  default. Support `--with-shell` through both installer handoffs.
+- Consolidate registration across 16 bundled plugins and lazily import tool
+  implementations. Validate plugin manifest versions, honor contained Python
+  entrypoints, and check feature/package dependencies before setup.
+- Preserve commands registered by other plugins, prevent disabled premium
+  commands from being restored, and honor the configured plugin data directory.
+- Enable Discord reply-author notifications by default while suppressing
+  mentions in generated text. Keep explicit quiet replies and deleted-parent
+  delivery fallbacks working.
 
 - Rewind consumed Discord attachments before fallback channel delivery, preserving
   the complete upload when a reply's parent disappears or reply state is missing

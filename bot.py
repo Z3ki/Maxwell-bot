@@ -513,8 +513,8 @@ def _is_unknown_reference_error(exc: Exception) -> bool:
     return False
 
 
-# Deny retired host-control tools at execution as well as discovery. The shell
-# is public only through its mandatory tenant-scoped gVisor backend.
+# Public hosted restrictions are opt-in on self-hosted installs. The shell
+# uses its tenant-scoped gVisor backend in either mode.
 OPERATOR_MAILBOX_TOOLS = frozenset({
     "inbox_list", "inbox_act", "email_send", "email_read_inbox", "email_get_message", "email_search",
 })
@@ -563,7 +563,9 @@ class MaxwellBot(commands.Bot):
             "command_prefix": ",",
             "help_command": None,
             "chunk_guilds_at_startup": True,
-            "allowed_mentions": discord.AllowedMentions.none(),
+            "allowed_mentions": discord.AllowedMentions(
+                everyone=False, roles=False, users=False, replied_user=True
+            ),
         }
         intents = bot_intents()
         if intents is not None:
@@ -846,7 +848,7 @@ class MaxwellBot(commands.Bot):
             failure_threshold=5, recovery_seconds=30
         )
         self._message_quota = MessageQuota(Path(self.config.DATA_DIR) / "message_quota.sqlite3")
-        install_usage_commands()
+        install_usage_commands(self)
         # Concurrency safety (see concurrency_safety.py): per-(guild, channel)
         # serialized work queues and bounded per-tool-class semaphores. Built
         # here so the types are known; the watchdog task is started/stopped in
@@ -1139,7 +1141,7 @@ class MaxwellBot(commands.Bot):
         if (
             charge_message
             and quota_user_id is not None
-            and self._control.get("message_quota_enabled", True)
+            and self._control.get("message_quota_enabled", False)
         ):
             quotas = getattr(self, "_message_quota", None)
             if quotas is not None:
@@ -2019,7 +2021,8 @@ class MaxwellBot(commands.Bot):
         disabled = set(control.get("disabled_tools", []) or [])
         if canonical in disabled or identifier in disabled:
             return "refused: this tool is disabled"
-        if canonical in PUBLIC_RUNTIME_BLOCKED_TOOLS:
+        if (getattr(getattr(self, "config", None), "MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
+                and canonical in PUBLIC_RUNTIME_BLOCKED_TOOLS):
             return "refused: this tool is retired from the public runtime"
 
         author = getattr(message, "author", None)
@@ -9220,7 +9223,6 @@ class MaxwellBot(commands.Bot):
         # "got multiple values for keyword argument 'content'".
         kwargs.pop("content", None)
         kwargs.pop("file", None)
-        kwargs["allowed_mentions"] = discord.AllowedMentions.none()
         stickers = kwargs.pop("stickers", None)
         # A YouTube unfurl can replace the live message with a data snapshot
         # that has no reply(). The answer still has to land in the channel.
@@ -9230,6 +9232,12 @@ class MaxwellBot(commands.Bot):
                 getattr(channel, "id", "?"),
             )
             reply_to = None
+        # Discord's reply-author notification is independent of mentions in
+        # the response text. Notify the reply author without parsing @mentions.
+        kwargs["allowed_mentions"] = discord.AllowedMentions(
+            everyone=False, roles=False, users=False,
+            replied_user=reply_to is not None and kwargs.get("mention_author", True),
+        )
         if reply_to is not None:
             # Catch Forbidden (no perms) and every flavour of "the parent
             # message is gone" so the response still reaches the user.
@@ -9241,6 +9249,7 @@ class MaxwellBot(commands.Bot):
                 else:
                     sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
+                kwargs["allowed_mentions"] = discord.AllowedMentions.none()
                 logger.warning(
                     "reply failed (forbidden) in channel %s; falling back to send",
                     getattr(channel, "id", "?"),
@@ -9274,6 +9283,7 @@ class MaxwellBot(commands.Bot):
                 # propagating; only the unknown-reference case is swallowed.
                 if not _is_unknown_reference_error(exc):
                     raise
+                kwargs["allowed_mentions"] = discord.AllowedMentions.none()
                 logger.warning(
                     "reply parent is gone (%s), falling back to channel.send in channel %s",
                     getattr(exc, "code", None) or exc.__class__.__name__,
@@ -12356,7 +12366,8 @@ class MaxwellBot(commands.Bot):
                 if getattr(message, "guild", None):
                     content = self._render_custom_emojis(content, message.guild)
                 params["content"] = ensure_web_references(content)
-            if name in PUBLIC_RUNTIME_BLOCKED_TOOLS:
+            if (getattr(getattr(self, "config", None), "MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
+                    and name in PUBLIC_RUNTIME_BLOCKED_TOOLS):
                 result_text = "Error - tool is retired from the public bot runtime"
             elif (
                 name in {"web_search", "fetch_url"}

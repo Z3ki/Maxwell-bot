@@ -18,7 +18,7 @@ LEGACY_CONSENT_FILE = "tos_consent.json"
 DEFAULT_PUBLIC_BASE = "https://maxwell.z3ki.dev"
 
 def enabled() -> bool:
-    raw = os.getenv("MAXWELL_LEGAL_NOTICE", "true").strip().lower()
+    raw = os.getenv("MAXWELL_LEGAL_NOTICE", "false").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
@@ -139,4 +139,5 @@ def directed_interaction(bot: Any, message: Any) -> bool:
 
 
 def install(bot: Any) -> None:
-    load(bot)
+    if enabled():
+        load(bot)

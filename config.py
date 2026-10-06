@@ -322,13 +322,22 @@ class Config:
     # No external dependency — pure code paths, on by default.
     ENABLE_IMAGE_INPUT = _feature_env("ENABLE_IMAGE_INPUT")
     ENABLE_FETCH_URL = _feature_env("ENABLE_FETCH_URL")
-    ENABLE_CREATE_SITE = _feature_env("ENABLE_CREATE_SITE")
+    ENABLE_CREATE_SITE = _feature_env(
+        "ENABLE_CREATE_SITE",
+        lambda: bool(os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip()),
+        needs="a configured MAXWELL_PUBLIC_BASE_URL",
+    )
     ENABLE_AVATAR = _feature_env("ENABLE_AVATAR")
 
-    ENABLE_AUTONOMY = _feature_env("ENABLE_AUTONOMY")
-    # image_generator uses Pollinations (free, keyless); hd_image needs an
-    # NVIDIA key but degrades to a clear error instead of breaking the tool.
+    ENABLE_AUTONOMY = _feature_env("ENABLE_AUTONOMY", default=False)
+    # Keyless image generation is available without setup. HD generation
+    # needs a model explicitly configured on the operator's provider.
     ENABLE_IMAGE_GEN = _feature_env("ENABLE_IMAGE_GEN")
+    ENABLE_HD_IMAGE = _feature_env(
+        "ENABLE_HD_IMAGE",
+        lambda: bool(os.getenv("GEMINI_IMAGE_MODEL", "").strip()),
+        needs="a configured GEMINI_IMAGE_MODEL",
+    )
 
     # Needs a system binary or Python package.
     ENABLE_VIDEO_INPUT = _feature_env(
@@ -360,25 +369,29 @@ class Config:
         "BOT_INVITE_URL", os.getenv("OFFICIAL_INVITE", "")
     ).strip()
     MAXWELL_USAGE_URL = os.getenv("MAXWELL_USAGE_URL", "").strip()
+    # Public hosted operators may retain the retired-tool restrictions.
+    MAXWELL_RESTRICT_PUBLIC_RUNTIME = _bool_env("MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
 
     # Email needs a real mailbox. Without a password the four tools could
     # only ever answer "not configured", so auto keeps them unregistered.
     ENABLE_EMAIL_TOOLS = _feature_env(
         "ENABLE_EMAIL_TOOLS",
-        lambda: bool(os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()),
-        on_text="auto: MAXWELL_EMAIL_PASSWORD is set",
-        off_text="auto: off, no MAXWELL_EMAIL_PASSWORD",
+        lambda: bool(os.getenv("MAXWELL_EMAIL_USER", "").strip()
+                     and os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()),
+        needs="MAXWELL_EMAIL_USER and MAXWELL_EMAIL_PASSWORD",
     )
 
-    # Host access. Kept on by default for parity with older installs, but
-    # this is THE security-relevant switch: `shell` runs commands as the bot
-    # user. validate() warns loudly at startup so it is never a surprise.
-    ENABLE_SHELL = _feature_env("ENABLE_SHELL")
+    # The installer enables this when --with-shell prepares the backend.
+    ENABLE_SHELL = _feature_env("ENABLE_SHELL", default=False)
 
     # RAG vector memory. Needs a reachable embedding endpoint (see
     # EMBED_* below); without one the bot still works, it just loses
     # semantic recall and falls back to recent-history context.
-    ENABLE_RAG = _feature_env("ENABLE_RAG")
+    ENABLE_RAG = _feature_env(
+        "ENABLE_RAG",
+        lambda: bool(_first_env("MAXWELL_EMBED_MODEL", "EMBED_MODEL")),
+        needs="a configured embedding model",
+    )
     RAG_WEB_STORE_ENABLED = _bool_env("RAG_WEB_STORE_ENABLED", True)
 
     # -------------------------------------------------------------------------
@@ -514,8 +527,8 @@ class Config:
 
     MAXWELL_SITE_DIR = os.getenv("MAXWELL_SITE_DIR") or "public/bot"
     MAXWELL_PUBLIC_BASE_URL = os.getenv(
-        "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
-    )
+        "MAXWELL_PUBLIC_BASE_URL", ""
+    ).strip()
     MAXWELL_API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
     MAXWELL_API_PORT = _int_env("MAXWELL_API_PORT", 8765, min_value=1, max_value=65535)
     MAXWELL_CORS_ORIGIN = os.getenv(
@@ -568,6 +581,7 @@ class Config:
         ("ENABLE_VIDEO_INPUT", "video input (frame extraction)"),
         ("ENABLE_AUDIO_INPUT", "audio input (omni models)"),
         ("ENABLE_IMAGE_GEN", "image generation"),
+        ("ENABLE_HD_IMAGE", "HD image generation"),
         ("ENABLE_WEB_SEARCH", "web search"),
         ("ENABLE_FETCH_URL", "fetch_url"),
         ("ENABLE_CREATE_SITE", "site generation"),

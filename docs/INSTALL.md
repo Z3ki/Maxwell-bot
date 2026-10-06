@@ -18,17 +18,34 @@ It asks for:
 
 The easy config uses `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`, read directly by the runtime. Existing historical `OLLAMA_*` variables and `AI_API_URL` remain accepted. An explicitly blank friendly key clears a legacy credential.
 
+Fresh self-hosted installs do not enforce message quotas, advertise premium,
+send legal notices, or apply the public bot's retired-tool restrictions.
+An existing `data/bot_control.json` keeps any quotas the operator configured;
+turn off `message_quota_enabled` in owner controls to remove them. Hosted
+operators can opt into legal DMs with `MAXWELL_LEGAL_NOTICE=true` and retain
+the public tool restrictions with `MAXWELL_RESTRICT_PUBLIC_RUNTIME=true`.
+
+Optional integrations use `auto` detection. Website tools need a nonblank
+`MAXWELL_PUBLIC_BASE_URL`; `ENABLE_CREATE_SITE=true` also allows local-only
+hosting. RAG needs `MAXWELL_EMBED_MODEL` (or `EMBED_MODEL`) after you install
+that embedding model. HD images need `GEMINI_IMAGE_MODEL` supported by your
+provider. Email needs both `MAXWELL_EMAIL_USER` and `MAXWELL_EMAIL_PASSWORD`.
+Shell stays off until `--with-shell` prepares the backend. Features without
+setup, such as keyless web search and image generation, remain available.
+Autonomy/REM are opt-in, and TTS is not bundled. Generated sites do not expire
+by default; set `site_ttl_hours` in owner controls if you want expiry.
+
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
 
 ## Versioned installation and releases
 
 The default command installs an unreleased `main` development snapshot. Both installers resolve the selected branch/tag once and use that immutable commit for the app, setup scripts, and configuration handoff. The checkout is detached; do not use `git pull` to update it.
 
-For version `0.1.9`, select the exact tag `v0.1.9`:
+For version `0.1.10`, select the exact tag `v0.1.10`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.9/easy-install.sh -o /tmp/maxwell-install.sh
-bash /tmp/maxwell-install.sh --version v0.1.9
+curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/v0.1.10/easy-install.sh -o /tmp/maxwell-install.sh
+bash /tmp/maxwell-install.sh --version v0.1.10
 ```
 
 To also prepare the public shell sandbox on that Linux Docker host, pass

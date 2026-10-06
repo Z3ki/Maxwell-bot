@@ -32,7 +32,7 @@ def test_retired_plugins_never_initialize_even_when_persisted_enabled(tmp_path):
         name: {"enabled_globally": True}
         for name in retired
     }}), encoding="utf-8")
-    bot = SimpleNamespace(tools={})
+    bot = SimpleNamespace(tools={}, config=SimpleNamespace(MAXWELL_RESTRICT_PUBLIC_RUNTIME=True))
     manager = PluginManager(bot, plugins_dir=str(plugins), data_dir=str(tmp_path),
                             state_file=str(state))
     manager.load_plugins()
@@ -49,7 +49,8 @@ def test_retired_tools_are_denied_at_dispatch_even_when_offered():
     bot = SimpleNamespace(
         tools=blocked, plugin_manager=None,
         _tool_breaker=ToolCircuitBreaker(), tool_concurrency=None, hooks=None,
-        config=SimpleNamespace(MAXWELL_OWNER_IDS={"1"}, DISABLE_TAINT_GATE=False),
+        config=SimpleNamespace(MAXWELL_OWNER_IDS={"1"}, DISABLE_TAINT_GATE=False,
+                               MAXWELL_RESTRICT_PUBLIC_RUNTIME=True),
         _record_llm_trace=AsyncMock(),
         _message_tool_platform=lambda _message: "discord",
         is_message_tainted=lambda _message: False,

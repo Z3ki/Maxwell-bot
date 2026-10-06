@@ -296,6 +296,8 @@ def test_embed_chunks_long_content(tmp_path, monkeypatch):
     mean-pool path) without raising.
     """
 
+    monkeypatch.setattr("rag_memory.EMBEDDINGS_ENABLED", True)
+
     class _FakeResp:
         def __init__(self, vec):
             self.status = 200
@@ -469,4 +471,3 @@ def test_dm_web_results_are_not_retrievable_from_guild(tmp_path, monkeypatch):
         )) == 1
 
     _run(run())
-

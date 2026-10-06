@@ -61,7 +61,7 @@ PREMIUM_COMMAND = {
 
 
 def discovery_enabled(control: dict | None) -> bool:
-    raw = (control or {}).get("premium_discovery_enabled", True)
+    raw = (control or {}).get("premium_discovery_enabled", False)
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
@@ -176,6 +176,8 @@ def _user_id(interaction: Any) -> str:
 
 def usage_text_for(bot: Any, user_id: str, *, discovery: bool | None = None) -> str:
     control = _control(bot)
+    if not control.get("message_quota_enabled", False):
+        return "Unlimited messages. This bot has no configured message allowance."
     if discovery is None:
         discovery = discovery_enabled(control)
     ledger = getattr(bot, "_message_quota", None)
@@ -216,10 +218,14 @@ async def handle_discovery_interaction(bot: Any, interaction: Any) -> bool:
     return True
 
 
-def install_usage_commands() -> None:
+def install_usage_commands(bot: Any = None) -> None:
     """Register the discovery commands. Safe to call more than once."""
-    for command in (HELP_COMMAND, USAGE_COMMAND, PREMIUM_COMMAND):
+    for command in (HELP_COMMAND, USAGE_COMMAND):
         ui.register_command(command)
+    if discovery_enabled(_control(bot)):
+        ui.register_command(PREMIUM_COMMAND)
+    else:
+        ui.unregister_command("premium")
     ui.register_interaction_handler(
         handle_discovery_interaction, priority=20, name="usage_discovery"
     )
