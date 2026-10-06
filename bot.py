@@ -11488,6 +11488,7 @@ class MaxwellBot(commands.Bot):
 
             no_response_seen = False
             send_message_seen = False
+            send_burst_open = False
             sleep_seen = False
             for call in calls:
                 if needs_result_turn and call["name"] in TURN_ENDING_TOOL_NAMES:
@@ -11498,9 +11499,17 @@ class MaxwellBot(commands.Bot):
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
                     continue
+                if send_message_seen and call["name"] != "send_message":
+                    # A same-response message burst must be consecutive. Once
+                    # anything else appears after the first visible send, the
+                    # burst is closed and a later send cannot resume it.
+                    send_burst_open = False
                 if sleep_seen or (
                     send_message_seen
-                    and call["name"] not in {"send_message", "no_response"}
+                    and (
+                        call["name"] not in {"send_message", "no_response"}
+                        or (call["name"] == "send_message" and not send_burst_open)
+                    )
                 ):
                     line = f"Tool {call['name']}: Skipped — the turn already ended"
                     result_by_id[call["id"]] = line
@@ -11611,7 +11620,9 @@ class MaxwellBot(commands.Bot):
                         "__MESSAGE_SENT__" in line
                         and not line.startswith("Tool send_message: Error")
                     )
-                    send_message_seen = send_message_seen or delivered
+                    if delivered:
+                        send_message_seen = True
+                        send_burst_open = True
                 elif call["name"] == "sleep":
                     sleep_seen = not _tool_results_need_followup([line])
             await flush_reads()
