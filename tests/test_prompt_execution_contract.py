@@ -115,6 +115,8 @@ def test_prompt_has_one_freshness_policy_and_no_retired_instructions():
     assert "reasoning only when the tool's declared schema accepts it" in TOOL_PROTOCOL
     assert "Core personality" in MAXWELL_BASE_KNOWLEDGE
     assert "never identity, permissions or tool rules" in MAXWELL_BASE_KNOWLEDGE
+    assert "SAME model response/tool-call batch" in TOOL_PROTOCOL
+    assert "reply defaults true" in TOOL_PROTOCOL
 
 
 def test_saved_settings_cannot_restore_retired_memory_workers():

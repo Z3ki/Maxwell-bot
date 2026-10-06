@@ -361,14 +361,19 @@ def test_no_response_blocks_later_send_message_only_on_success(allowed):
     assert sent == (["NO_RESPONSE"] if allowed else ["NO_RESPONSE", "hi"])
 
 
-def test_duplicate_send_message_is_suppressed():
-    """The model cannot turn a complete reply into consecutive messages."""
+def test_consecutive_send_messages_form_one_burst():
+    """Consecutive sends in one model response all execute as one burst."""
     from bot import MaxwellBot
 
     sent = []
 
     async def fake_send(message, **kwargs):
-        sent.append(kwargs.get("content") or kwargs.get("text"))
+        sent.append(
+            (
+                kwargs.get("content") or kwargs.get("text"),
+                kwargs.get("reply", True),
+            )
+        )
         return "__MESSAGE_SENT__"
 
     bot = _build_test_bot(
@@ -421,4 +426,4 @@ def test_duplicate_send_message_is_suppressed():
 
     asyncio.run(run())
 
-    assert sent == ["alpha"]
+    assert sent == [("alpha", True), ("beta", False)]
