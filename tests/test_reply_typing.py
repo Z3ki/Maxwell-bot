@@ -3,8 +3,9 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import MaxwellBot
+from bot import MaxwellBot, _current_inbound
 from bot_tools import SendMessageTool
+from typing_status import typing_acquire, typing_release, typing_suspend
 
 
 class FakeTyping:
@@ -36,6 +37,7 @@ def _bot(*, typing=True, delay=0.0):
     bot = SimpleNamespace(
         _control={"typing_indicator": typing},
         _reply_typing_delay=lambda _content: delay,
+        _mark_bot_sent=lambda _channel: None,
         user=SimpleNamespace(id=1382894657624866889),
     )
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
@@ -142,5 +144,75 @@ def test_send_message_tool_types_only_around_the_send():
         assert "__MESSAGE_SENT__" in result
         assert message.replies == ["yo"]
         assert channel.log == ["enter", "exit"]
+
+    asyncio.run(run())
+
+
+def test_send_with_slowmode_drains_typing_before_the_send():
+    events = []
+
+    class Channel:
+        id = "7"
+
+        def typing(self):
+            return FakeTyping(events)
+
+        async def send(self, content=None, **kwargs):
+            events.append("send")
+            return SimpleNamespace(id="m1")
+
+    async def no_slowmode(_channel):
+        return None
+
+    bot = _bot()
+    bot._respect_slowmode = no_slowmode
+    channel = Channel()
+
+    async def run():
+        handle = await typing_acquire(bot, channel)
+        assert events == ["enter"]
+        sent = await MaxwellBot._send_with_slowmode(bot, channel, "answer")
+        assert sent is not None
+        # Typing is fully drained BEFORE the message goes out, so no
+        # typing event can land after the reply and re-light the
+        # indicator for another expiry window.
+        assert events == ["enter", "exit", "send"]
+        await typing_release(handle)
+
+    asyncio.run(run())
+
+
+def test_generation_step_resumes_typing_after_a_send():
+    events = []
+
+    class Channel:
+        id = "7"
+
+        def typing(self):
+            return FakeTyping(events)
+
+    async def generate(messages, **kwargs):
+        return "ok"
+
+    bot = _bot()
+    bot.ai_provider = SimpleNamespace(model="m", generate_response=generate)
+    bot._night_fallback_kwargs = dict
+    channel = Channel()
+
+    async def run():
+        handle = await typing_acquire(bot, channel)
+        await typing_suspend(bot, channel)
+        assert events == ["enter", "exit"]
+        message = SimpleNamespace(channel=channel, author=None, id="m1")
+        token = _current_inbound.set(message)
+        try:
+            result = await MaxwellBot._generate_response(bot, [])
+        finally:
+            _current_inbound.reset(token)
+        assert result == "ok"
+        # A new generation step is working: typing comes back only now.
+        assert events == ["enter", "exit", "enter"]
+        await typing_release(handle)
+        assert events == ["enter", "exit", "enter", "exit"]
 
     asyncio.run(run())

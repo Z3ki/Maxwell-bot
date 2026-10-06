@@ -387,7 +387,7 @@ def test_deadline_covers_preparation_and_cleans_typing_context(tmp_path):
     bot._inbound_setting = lambda key, default, low, high: (
         0.02 if key == "live_turn_timeout_seconds" else default
     )
-    typing = SimpleNamespace(__aexit__=AsyncMock())
+    typing = SimpleNamespace(release=AsyncMock())
 
     async def preparation(msg, content):
         state = bot._begin_inflight_context(msg, content)
@@ -407,7 +407,7 @@ def test_deadline_covers_preparation_and_cleans_typing_context(tmp_path):
     assert bot._inflight_context == {}
     assert bot._active_requests == {}
     assert bot._replying_channels == set()
-    typing.__aexit__.assert_awaited_once()
+    typing.release.assert_awaited_once()
 
 
 def test_preparation_exception_cleans_up_and_records_failure(tmp_path):

@@ -244,6 +244,12 @@ from tool_registry import (  # noqa: E402 — reasoning now rides inside tool ca
     extract_reasoning,
     record_reasoning,
 )
+from typing_status import (  # noqa: E402
+    typing_acquire,
+    typing_release,
+    typing_resume,
+    typing_suspend,
+)
 import site_backend  # noqa: E402
 import site_server  # noqa: E402
 import site_test  # noqa: E402
@@ -1114,6 +1120,10 @@ class MaxwellBot(commands.Bot):
                     enforced_window_seconds(self._control),
                     guild_id=str(getattr(guild, "id", "") or ""),
                 )
+        # This step is working again: any typing that a previous send
+        # suspended in this channel comes back only now, so the indicator
+        # never trails the last delivered message.
+        await typing_resume(self, getattr(message, "channel", None))
         started = time.monotonic()
         try:
             return await selected_provider.generate_response(messages, **kwargs)
@@ -2072,13 +2082,8 @@ class MaxwellBot(commands.Bot):
             state = (getattr(self, "_inflight_context", None) or {}).get(
                 str(getattr(message, "id", "") or "")
             )
-            if state:
-                self._end_inflight_context(state)
-                await self._exit_live_typing(state.get("live_typing"))
-            if self._active_requests.get(cid) is current:
-                self._active_requests.pop(cid, None)
-                self._active_request_user.pop(cid, None)
-            self._replying_channels.discard(cid)
+            await MaxwellBot._release_turn_context(self, state)
+            MaxwellBot._clear_turn_flags(self, cid, current)
             if active_messages.get(cid) is message:
                 active_messages.pop(cid, None)
             if request_provider is not None:
@@ -4690,6 +4695,24 @@ class MaxwellBot(commands.Bot):
         for key, value in list(store.items()):
             if value is state:
                 store.pop(key, None)
+
+    async def _release_turn_context(self, state: dict[str, Any] | None) -> None:
+        """End one turn's typing and inflight-edit registration.
+
+        Typing exits first and is idempotent, so an inner ``finally`` and
+        the outer dispatcher can both call this for the same turn.
+        """
+        if not state:
+            return
+        await self._exit_live_typing(state.get("live_typing"))
+        self._end_inflight_context(state)
+
+    def _clear_turn_flags(self, channel_id: str, current_task) -> None:
+        """Drop a turn's per-channel busy markers unless a newer turn owns them."""
+        if self._active_requests.get(channel_id) is current_task:
+            self._active_requests.pop(channel_id, None)
+            self._active_request_user.pop(channel_id, None)
+        self._replying_channels.discard(channel_id)
 
     async def _wait_for_late_embeds(self, message, content: str):
         """Fetch one fresh Discord snapshot before a media turn starts."""
@@ -7888,6 +7911,13 @@ class MaxwellBot(commands.Bot):
             return
         self._last_bot_send[channel_id] = time.monotonic()
 
+    def _finish_send(self, channel, request, sent):
+        """Shared success tail of _send_with_slowmode: bookkeeping + return."""
+        self._mark_bot_sent(channel)
+        if request is not None:
+            MaxwellBot._record_delivery(self, request, sent)
+        return sent
+
     def _reply_typing_delay(self, content: str) -> float:
         """How long to look like we're composing before the send lands."""
         n = len(str(content or "").strip())
@@ -7907,21 +7937,11 @@ class MaxwellBot(commands.Bot):
         """Start Discord typing and keep refreshing until `_exit_live_typing`."""
         if not self._should_show_live_typing(message):
             return None
-        typing = getattr(getattr(message, "channel", None), "typing", None)
-        if not callable(typing):
-            return None
-        cm = typing()
-        try:
-            await cm.__aenter__()
-        except Exception:
-            return None
-        return cm
+        return await typing_acquire(self, getattr(message, "channel", None))
 
-    async def _exit_live_typing(self, cm) -> None:
-        if cm is None:
-            return
-        with contextlib.suppress(Exception):
-            await cm.__aexit__(None, None, None)
+    async def _exit_live_typing(self, handle) -> None:
+        """Release a typing handle. Idempotent across overlapping cleanups."""
+        await typing_release(handle)
 
     @contextlib.asynccontextmanager
     async def _reply_typing(self, channel, content: str = "", *, message=None):
@@ -7932,24 +7952,14 @@ class MaxwellBot(commands.Bot):
         if message is not None and getattr(message, "suppress_typing", False):
             yield
             return
-        typing = getattr(channel, "typing", None)
-        if not callable(typing):
-            yield
-            return
-        delay = self._reply_typing_delay(content)
+        handle = await typing_acquire(self, channel)
         try:
-            cm = typing()
-            await cm.__aenter__()
-        except Exception:
-            yield
-            return
-        try:
+            delay = self._reply_typing_delay(content)
             if delay > 0:
                 await asyncio.sleep(delay)
             yield
         finally:
-            with contextlib.suppress(Exception):
-                await cm.__aexit__(None, None, None)
+            await typing_release(handle)
 
     async def _send_with_slowmode(
         self,
@@ -7971,6 +7981,9 @@ class MaxwellBot(commands.Bot):
         failure (Forbidden / NotFound on a plain channel.send). When
         ``reply_to`` is set and the parent message is gone, the send is
         retried as a plain ``channel.send`` so the reply still lands.
+
+        Also drains the channel's typing indicator before dispatch so no
+        typing event can trail the message (see typing_status).
         """
         await self._respect_slowmode(channel)
         request = _current_inbound.get()
@@ -7999,6 +8012,10 @@ class MaxwellBot(commands.Bot):
             everyone=False, roles=False, users=False,
             replied_user=reply_to is not None and kwargs.get("mention_author", True),
         )
+        # Drain typing BEFORE the message goes out. A typing event that
+        # lands after the send re-lights "Maxwell is typing..." for a full
+        # expiry window after he has already answered.
+        await typing_suspend(self, channel)
         if reply_to is not None:
             # Catch Forbidden (no perms) and every flavour of "the parent
             # message is gone" so the response still reaches the user.
@@ -8029,10 +8046,7 @@ class MaxwellBot(commands.Bot):
                         getattr(channel, "id", "?"),
                     )
                     return None
-                self._mark_bot_sent(channel)
-                if request is not None:
-                    MaxwellBot._record_delivery(self, request, sent)
-                return sent
+                return MaxwellBot._finish_send(self, channel, request, sent)
             except (discord.NotFound, discord.HTTPException) as exc:
                 # A deleted parent does NOT come back as a 404. Discord
                 # answers the send with 400 "Invalid Form Body / In
@@ -8064,10 +8078,7 @@ class MaxwellBot(commands.Bot):
                         getattr(channel, "id", "?"),
                     )
                     return None
-            self._mark_bot_sent(channel)
-            if request is not None:
-                MaxwellBot._record_delivery(self, request, sent)
-            return sent
+            return MaxwellBot._finish_send(self, channel, request, sent)
         try:
             if stickers:
                 sent = await channel.send(
@@ -8082,10 +8093,7 @@ class MaxwellBot(commands.Bot):
                 getattr(channel, "id", "?"),
             )
             return None
-        self._mark_bot_sent(channel)
-        if request is not None:
-            MaxwellBot._record_delivery(self, request, sent)
-        return sent
+        return MaxwellBot._finish_send(self, channel, request, sent)
 
     def _message_carries_media(self, message) -> bool:
         """True when this message or a forwarded snapshot has ingestible media."""
@@ -10173,12 +10181,8 @@ class MaxwellBot(commands.Bot):
                 )
         except Exception as e:
             logger.error(f"Failed to build messages: {e}\n{traceback.format_exc()}")
-            self._replying_channels.discard(channel_id)
-            if self._active_requests.get(channel_id) is current_task:
-                self._active_requests.pop(channel_id, None)
-                self._active_request_user.pop(channel_id, None)
-            self._end_inflight_context(turn_context)
-            await self._exit_live_typing(live_typing)
+            await self._release_turn_context(turn_context)
+            MaxwellBot._clear_turn_flags(self, channel_id, current_task)
             return
         if self._control.get(
             "require_direct_response", True
@@ -10814,6 +10818,11 @@ class MaxwellBot(commands.Bot):
                                     break
                         except Exception as _e:  # noqa: BLE001
                             logger.debug("transition_to_final failed: %s", _e)
+                    if transitioned:
+                        # The answer is going out as a real message (which
+                        # clears Discord's typing). Make sure no typing
+                        # event can re-light the indicator behind it.
+                        await typing_suspend(self, message.channel)
                 reply_delivered = bool(transitioned)
                 async with self._reply_typing(
                     message.channel, response, message=message
@@ -10948,8 +10957,7 @@ class MaxwellBot(commands.Bot):
                 except discord.Forbidden as _exc:
                     pass
         finally:
-            self._end_inflight_context(turn_context)
-            await self._exit_live_typing(live_typing)
+            await self._release_turn_context(turn_context)
             # Safety net: walk every progress object this turn ever created
             # and stop() anything still alive, so we never leave an orphan
             # "working on it…", "thinking: …", or "<tool>: …" message
@@ -10972,14 +10980,10 @@ class MaxwellBot(commands.Bot):
             # finally restored the prior value.
             self._current_progress_by_channel.pop(channel_id, None)
             gen_progress = None
-            if self._active_requests.get(channel_id) is current_task:
-                self._active_requests.pop(channel_id, None)
-                self._active_request_user.pop(channel_id, None)
+            # Channel is no longer in-flight; the _last_bot_reply record
+            # below keeps autonomy from re-engaging its own fresh reply.
+            MaxwellBot._clear_turn_flags(self, channel_id, current_task)
             self._tick_media_context(channel_id)
-            # Channel is no longer in-flight; record that the bot just replied
-            # here so autonomy can avoid re-engaging a conversation it already
-            # answered (the "bot sees its own old reply and posts again" loop).
-            self._replying_channels.discard(channel_id)
             if normal_reply_sent:
                 self._last_bot_reply[channel_id] = time.time()
                 if author is not None and not getattr(author, "bot", False):

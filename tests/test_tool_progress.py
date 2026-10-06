@@ -72,6 +72,11 @@ class FakeMessage:
         return await self.channel.send(content, **kwargs)
 
 
+async def _drain(ticks: int = 50):
+    for _ in range(ticks):
+        await asyncio.sleep(0)
+
+
 def test_initial_post_is_generic():
     msg = FakeMessage()
     prog = tool_progress.ToolProgress(msg)
@@ -615,26 +620,32 @@ def test_slow_tool_still_posts():
     assert msg.channel.sent[0] in msg.channel.deleted
 
 
-def test_transition_to_final_edits_in_place():
-    """The fast-tool happy path: the bot has a reply, transitions
-    the progress message to BECOME the reply. No delete, no
-    second post, no flicker."""
-    msg = FakeMessage()
-    prog = tool_progress.ToolProgress(msg)
-    asyncio.run(prog.start())  # posts
-    assert len(msg.channel.sent) == 1
-    # Simulate a tick that put real content
-    prog._last_edit = 0
-    asyncio.run(prog.tick(reasoning_delta="I will check the disk. Looking now."))
-    posted = msg.channel.sent[0]
-    # transition_to_final: edit in place
-    ok = asyncio.run(prog.transition_to_final("Disk has 50GB free."))
-    assert ok is True
-    # The message was EDITED, not deleted, not re-posted
-    assert posted.content == "Disk has 50GB free."
-    assert posted not in msg.channel.deleted
-    # And it's still the same message (only one in .sent)
-    assert len(msg.channel.sent) == 1
+def test_transition_to_final_posts_the_answer_and_retires_the_placeholder():
+    """The fast-tool happy path: the answer goes out as a real message and
+    the progress placeholder is deleted right after — one message, no
+    delete-then-repost gap. A real MESSAGE_CREATE also clears Discord's
+    typing indicator, which an in-place edit never did."""
+
+    async def run():
+        msg = FakeMessage()
+        prog = tool_progress.ToolProgress(msg)
+        await prog.start()  # posts
+        assert len(msg.channel.sent) == 1
+        posted = msg.channel.sent[0]
+        ok = await prog.transition_to_final("Disk has 50GB free.")
+        assert ok is True
+        await _drain()
+        return msg, posted
+
+    msg, posted = asyncio.run(run())
+    # The answer was delivered as its own message (via reply), the
+    # placeholder was retired, and it never morphed via edit.
+    assert msg.replies == ["Disk has 50GB free."]
+    assert [m.content for m in msg.channel.sent] == [
+        "working on it…",
+        "Disk has 50GB free.",
+    ]
+    assert posted in msg.channel.deleted
 
 
 def test_transition_to_final_no_post_returns_false():
@@ -919,13 +930,13 @@ def test_streaming_tick_inserts_space_between_glued_deltas():
     asyncio.run(drive())
 
 
-def test_transition_to_final_falls_back_to_a_fresh_post_when_the_edit_fails():
-    """A failed in-place edit must not eat the reply.
+def test_transition_to_final_falls_back_to_editing_the_placeholder_when_the_send_fails():
+    """A failed send must not eat the reply.
 
-    The caller reads True from transition_to_final as "delivered" and skips
-    sending the first chunk itself. The edit runs detached, so if it fails
-    (message deleted underneath us, edit 404s) the user's answer used to
-    vanish with only a debug log line. Post it as a new message instead.
+    The caller reads True from transition_to_final as "on its way" and skips
+    sending the first chunk itself. If the fresh send fails (channel gone,
+    permissions changed) the answer falls back to editing the placeholder,
+    so the text still lands somewhere instead of vanishing.
     """
 
     async def run():
@@ -934,33 +945,35 @@ def test_transition_to_final_falls_back_to_a_fresh_post_when_the_edit_fails():
         await prog.start()
         posted = msg.channel.sent[0]
 
-        async def boom(content=None, **kwargs):
-            raise RuntimeError("message was deleted")
+        async def boom(*args, **kwargs):
+            raise RuntimeError("channel is gone")
 
-        posted.edit = boom
+        msg.reply = boom
+        msg.channel.send = boom
 
         ok = await prog.transition_to_final("Disk has 50GB free.")
         assert ok is True
         # Let the detached transition task run.
-        for _ in range(5):
-            await asyncio.sleep(0)
-        return msg
+        await _drain()
+        return msg, posted
 
-    msg = asyncio.run(run())
-    assert [m.content for m in msg.channel.sent[1:]] == ["Disk has 50GB free."]
+    msg, posted = asyncio.run(run())
+    assert len(msg.channel.sent) == 1
+    assert posted.content == "Disk has 50GB free."
+    assert posted in msg.channel.edited
+    assert posted not in msg.channel.deleted
 
 
-def test_transition_to_final_does_not_double_post_when_the_edit_works():
+def test_transition_to_final_delivers_exactly_one_answer():
     async def run():
         msg = FakeMessage()
         prog = tool_progress.ToolProgress(msg)
         await prog.start()
         ok = await prog.transition_to_final("Disk has 50GB free.")
         assert ok is True
-        for _ in range(5):
-            await asyncio.sleep(0)
+        await _drain()
         return msg
 
     msg = asyncio.run(run())
-    assert len(msg.channel.sent) == 1
-    assert msg.channel.sent[0].content == "Disk has 50GB free."
+    assert [m.content for m in msg.channel.sent[1:]] == ["Disk has 50GB free."]
+    assert len(msg.replies) == 1

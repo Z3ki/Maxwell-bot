@@ -693,21 +693,21 @@ class ToolProgress:
             logger.debug("Progress delete failed: %s", e)
 
     async def transition_to_final(self, content: str) -> bool:
-        """Replace the live progress message with the final reply.
+        """Hand the final reply to the live progress message's slot.
 
-        When a tool batch completes with a final reply in hand, edit
-        the existing progress message in place instead of deleting
-        + reposting. Avoids the delete-then-fresh-post flicker.
+        When a tool batch completes with a final reply in hand, deliver
+        the reply and retire the progress placeholder so the user sees
+        one message and no delete-then-repost gap.
 
         2026-07-21: was ``await self._posted.edit()`` which made the
         caller wait on a Discord round-trip before posting the reply.
         Now fire-and-forget so the reply is not blocked on Discord
         latency. Returns synchronously based on whether we have a
-        posted message to edit; the actual edit happens in the
+        posted message to hand off; the actual delivery happens in the
         background. If the bot is also racing a stop() (e.g. the
         tool's finally block already scheduled a delete), we still
         return True here and the background task will either land
-        the edit or fall through to delete — either way the user
+        the delivery or fall through to delete — either way the user
         sees one message.
         """
         if self._stopped or self._platform != "discord" or not self._posted:
@@ -729,34 +729,59 @@ class ToolProgress:
         return True
 
     async def _background_transition(self, posted: Any, content: str) -> None:
-        """Edit the message in place to the final reply. Fire-and-forget.
+        """Deliver the final reply as a fresh message, then retire the placeholder.
 
         The caller treats a True return from ``transition_to_final`` as "the
-        reply has been delivered" and skips sending the first chunk itself.
-        So if this edit fails — the progress message was deleted by a racing
-        stop(), a moderator removed it, the edit 404s — the user's answer is
-        gone with only a debug line to show for it. Fall back to posting the
-        content as a fresh message so a failed edit costs a cosmetic flicker
-        instead of the whole reply.
+        reply is on its way" and skips sending the first chunk itself.
+
+        Delivery is a real MESSAGE_CREATE rather than an in-place edit for
+        two reasons. A new message clears Discord's typing indicator while
+        an edit never does — with edit delivery Maxwell kept "typing..." for
+        seconds after his answer had already landed. And the reply now
+        arrives through a normal send we can observe, so a failure costs a
+        fallback instead of the whole answer.
+
+        Mentions are restricted like the normal reply path so a model reply
+        containing @everyone cannot mass-ping from this branch. If the send
+        fails (the channel went missing, permissions changed), fall back to
+        editing the placeholder so the text still lands somewhere.
         """
+        channel = getattr(self._msg, "channel", None)
+        delivered = False
         try:
-            async with self._lock:
-                await posted.edit(content=content)
-            return
+            from discord import AllowedMentions
+
+            reply = getattr(self._msg, "reply", None)
+            if callable(reply):
+                await reply(
+                    content,
+                    allowed_mentions=AllowedMentions(
+                        everyone=False,
+                        roles=False,
+                        users=False,
+                        replied_user=True,
+                    ),
+                )
+            elif channel is not None and callable(getattr(channel, "send", None)):
+                await channel.send(content, allowed_mentions=AllowedMentions.none())
+            else:
+                raise RuntimeError("no reply/send available for transition delivery")
+            delivered = True
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                "Progress transition-to-final edit failed (%s); "
-                "posting the reply as a new message instead",
+                "Progress transition send failed (%s); editing the placeholder instead",
                 e,
             )
-        channel = getattr(self._msg, "channel", None)
-        if channel is None:
-            logger.error("Transition fallback impossible: no channel; reply dropped")
+        if not delivered:
+            try:
+                async with self._lock:
+                    await posted.edit(content=content)
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "Progress transition fallback edit failed; reply dropped: %s", e
+                )
             return
-        try:
-            await channel.send(content)
-        except Exception as e:  # noqa: BLE001
-            logger.error("Transition fallback send failed; reply dropped: %s", e)
+        await self._bg_delete(posted)
 
 
 def make_progress(message: Any) -> ToolProgress:
