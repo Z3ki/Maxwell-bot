@@ -8,6 +8,13 @@ def setup(bot, ctx=None):
 
     if not __CHESS_IMPORTED__:
         return []
+    if ctx is not None:
+        from .impl import cancel_idle_games
+
+        async def _chess_idle_tick():
+            await cancel_idle_games(bot)
+
+        ctx.every(60.0, _chess_idle_tick, run_immediately=True)
     return build_tools(bot, __package__, [
         ('chess_start', 'ChessStartTool', None),
         ('chess_move', 'ChessMoveTool', None),

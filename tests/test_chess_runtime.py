@@ -1,6 +1,7 @@
 """Chess tools through Maxwell's real request dispatch, with Discord I/O faked."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -115,3 +116,73 @@ def test_completed_game_can_be_restarted(runtime):
         assert manager.active("10").history_san == []
 
     asyncio.run(run())
+
+
+def _stale_activity(seconds: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+def test_game_survives_manager_reload_after_restart(tmp_path):
+    store = str(tmp_path / "games.json")
+    manager = chess_game.ChessManager(store_path=store)
+    game = manager.start("10", "1", "Player", bot_color=True)
+    game.apply_move(chess.Move.from_uci("e2e4"))
+    manager.persist()
+
+    reloaded = chess_game.ChessManager(store_path=store)
+    restored = reloaded.active("10")
+    assert restored is not None
+    assert restored.history_san == ["e4"]
+    assert restored.turn == chess.BLACK
+    assert restored.last_activity_at == game.last_activity_at
+
+
+def test_idle_game_is_canceled_and_the_slot_frees(tmp_path):
+    store = str(tmp_path / "games.json")
+    manager = chess_game.ChessManager(store_path=store)
+    game = manager.start("10", "1", "Player", bot_color=True)
+    game.last_activity_at = _stale_activity(700)
+    manager.persist()
+
+    # The game survived the "restart" (it is still in the store) but is
+    # past its idle window, so the sweep cancels it and frees the slot.
+    reloaded = chess_game.ChessManager(store_path=store)
+    expired = reloaded.sweep_expired()
+    assert [channel for channel, _game in expired] == ["10"]
+    assert reloaded.active("10") is None
+    reloaded.start("10", "2", "Someone", bot_color=True)
+
+
+def test_expired_game_reads_as_no_active_game(tmp_path):
+    manager = chess_game.ChessManager(store_path=str(tmp_path / "games.json"))
+    manager.start("10", "1", "Player", bot_color=True)
+    manager._games["10"].last_activity_at = _stale_activity(700)
+    with pytest.raises(ValueError):
+        manager.game_for("10", "1")
+
+
+def test_chess_activity_refreshes_the_idle_window(tmp_path):
+    manager = chess_game.ChessManager(store_path=str(tmp_path / "games.json"))
+    game = manager.start("10", "1", "Player", bot_color=True)
+    game.last_activity_at = _stale_activity(500)
+    assert manager.game_for("10", "1") is game
+    assert manager.sweep_expired() == []
+
+
+def test_cancel_idle_games_announces_and_frees_the_slot(runtime):
+    manager, _message, _call = runtime
+    manager.start("10", "1", "Galletas", bot_color=True)
+    manager._games["10"].last_activity_at = _stale_activity(700)
+    manager.persist()
+
+    sent = AsyncMock(return_value=None)
+    channel = SimpleNamespace(send=sent)
+    bot = SimpleNamespace(
+        get_channel=lambda _cid: channel,
+        user=SimpleNamespace(id=999, name="Maxwell"),
+    )
+
+    asyncio.run(impl.cancel_idle_games(bot))
+    sent.assert_awaited_once()
+    assert "canceled" in sent.await_args.args[0]
+    assert manager.active("10") is None

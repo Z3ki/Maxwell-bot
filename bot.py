@@ -3416,6 +3416,9 @@ class MaxwellBot(commands.Bot):
         }
 
     async def setup_hook(self):
+        tree = getattr(self, "tree", None)
+        if tree is not None:
+            tree.on_error = self._on_tree_error
         await self.plugin_manager.complete_pending_setups()
         await self.ai_provider.initialize()
         self.memory.load_from_disk()
@@ -3606,6 +3609,24 @@ class MaxwellBot(commands.Bot):
         parent = getattr(super(), "on_interaction", None)
         if parent is not None:
             await parent(interaction)
+
+    async def _on_tree_error(self, interaction, error) -> None:
+        """Keep expected CommandNotFound routing noise out of the error log.
+
+        User-install commands ('Ask Maxwell', /maxwell, /config, ...) sync
+        via raw REST and dispatch through on_interaction. The parallel
+        CommandTree dispatch raises CommandNotFound for every one of them;
+        that is routing, not a fault. Real command failures still log.
+        """
+        from discord import app_commands
+
+        if isinstance(error, app_commands.CommandNotFound):
+            logger.debug(
+                "Command tree skipped %r (dispatched via on_interaction)",
+                getattr(error, "command_name", None) or getattr(error, "name", None),
+            )
+            return
+        logger.error("Ignoring exception in command tree", exc_info=error)
 
     async def _sync_slash_commands(self) -> None:
         """Register slash commands globally, or only in configured Dev guilds."""

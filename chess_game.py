@@ -34,6 +34,30 @@ except Exception:  # pragma: no cover - extremely unlikely
 
 logger = logging.getLogger(__name__)
 
+# A game nobody touches for this long is canceled, so a dead opponent or a
+# crashed turn can never wedge the channel's single game slot. Games
+# otherwise survive restarts and crashes via the persisted store below.
+IDLE_TIMEOUT_SECONDS = 600.0
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(text: Any) -> datetime | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
 # --------------------------------------------------------------------------- #
 # Board rendering
 # --------------------------------------------------------------------------- #
@@ -705,6 +729,7 @@ class ChessGame:
         started_at: str,
         max_depth: int = 3,
         jitter: float = 0.0,
+        last_activity_at: str | None = None,
     ) -> None:
         self.game_id = game_id
         self.channel_id = channel_id
@@ -714,6 +739,7 @@ class ChessGame:
         self.started_at = started_at
         self.max_depth = max_depth
         self.jitter = jitter
+        self.last_activity_at = last_activity_at or started_at or _now_iso()
         self.board = chess.Board()
         # SAN moves as played. Stored at push time (not recomputed from the
         # board), because board.san() on an already-made move fails — old
@@ -784,6 +810,7 @@ class ChessGame:
             "player_name": self.player_name,
             "bot_color": self.bot_color,
             "started_at": self.started_at,
+            "last_activity_at": self.last_activity_at,
             "max_depth": self.max_depth,
             "jitter": self.jitter,
             "fen": self.board.fen(),
@@ -803,6 +830,7 @@ class ChessGame:
             started_at=data.get("started_at", ""),
             max_depth=int(data.get("max_depth", 3)),
             jitter=float(data.get("jitter", 0.0)),
+            last_activity_at=data.get("last_activity_at"),
         )
         fen = data.get("fen", "")
         history = list(data.get("history_san", []) or [])
@@ -882,7 +910,27 @@ class ChessGame:
         san = self.board.san(move)
         self.board.push(move)
         self.history.append(san)
+        self.touch()
         return san
+
+    # -- activity / idle expiry -------------------------------------------- #
+    def touch(self) -> None:
+        self.last_activity_at = _now_iso()
+
+    def idle_seconds(self, now: datetime | None = None) -> float:
+        """Wall-clock seconds since the last recorded chess activity."""
+        current = now or datetime.now(timezone.utc)
+        last = _parse_iso(self.last_activity_at) or _parse_iso(self.started_at)
+        if last is None:
+            return 0.0
+        return max(0.0, (current - last).total_seconds())
+
+    def is_idle_expired(
+        self,
+        timeout: float = IDLE_TIMEOUT_SECONDS,
+        now: datetime | None = None,
+    ) -> bool:
+        return self.idle_seconds(now) >= float(timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -940,7 +988,9 @@ class ChessManager:
 
     # -- queries ----------------------------------------------------------- #
     def active(self, channel_id: str) -> ChessGame | None:
-        return self._games.get(str(channel_id))
+        with self._lock:
+            self._expire_locked()
+            return self._games.get(str(channel_id))
 
     # -- mutations --------------------------------------------------------- #
     def start(
@@ -955,6 +1005,7 @@ class ChessManager:
         force: bool = False,
     ) -> ChessGame:
         with self._lock:
+            self._expire_locked()
             key = str(channel_id)
             if key in self._games and not self._games[key].is_over and not force:
                 existing = self._games[key]
@@ -980,16 +1031,20 @@ class ChessManager:
 
     def game_for(self, channel_id: str, player_id: str) -> ChessGame:
         """Return the active game, raising KeyError-ish ValueErrors."""
-        game = self._games.get(str(channel_id))
-        if game is None:
-            raise ValueError(
-                "No chess game is active in this channel. Start one with chess_start."
-            )
-        if str(player_id) != str(game.player_id):
-            raise PermissionError(
-                f"This chess game belongs to {game.player_name}; only they can play it."
-            )
-        return game
+        with self._lock:
+            self._expire_locked()
+            game = self._games.get(str(channel_id))
+            if game is None:
+                raise ValueError(
+                    "No chess game is active in this channel. Start one with chess_start."
+                )
+            if str(player_id) != str(game.player_id):
+                raise PermissionError(
+                    f"This chess game belongs to {game.player_name}; only they can play it."
+                )
+            game.touch()
+            self._save()
+            return game
 
     def persist(self) -> None:
         with self._lock:
@@ -1000,6 +1055,31 @@ class ChessManager:
             game = self._games.pop(str(channel_id), None)
             self._save()
             return game
+
+    def sweep_expired(
+        self, timeout: float = IDLE_TIMEOUT_SECONDS
+    ) -> list[tuple[str, ChessGame]]:
+        """Cancel every game idle past ``timeout``; return the canceled ones.
+
+        Callers use the return value to announce the cancellation in the
+        game's channel; the slot is free again either way.
+        """
+        with self._lock:
+            expired = self._expire_locked(timeout)
+            if expired:
+                self._save()
+            return expired
+
+    def _expire_locked(
+        self, timeout: float = IDLE_TIMEOUT_SECONDS
+    ) -> list[tuple[str, ChessGame]]:
+        now = datetime.now(timezone.utc)
+        expired: list[tuple[str, ChessGame]] = []
+        for key, game in list(self._games.items()):
+            if game.is_idle_expired(timeout, now):
+                self._games.pop(key, None)
+                expired.append((key, game))
+        return expired
 
 
 # Singleton the tools share. Built lazily so the module import stays cheap.

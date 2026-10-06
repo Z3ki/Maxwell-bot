@@ -379,3 +379,36 @@ class ChessResignTool(Tool):
         final = _chess_append_image(final, png)
         await _chess_record(self.bot, message, f"chess game ended ({who} resigned).")
         return final + "\n\nGame ended. Use chess_start to begin a new one."
+
+
+async def cancel_idle_games(bot) -> None:
+    """Cancel games idle past the timeout and tell each channel about it.
+
+    Runs on a plugin tick so an abandoned game (dead opponent, crashed
+    turn) frees its channel slot even when nobody touches chess tools
+    again. Games live across restarts; this is what ends them.
+    """
+    from chess_game import IDLE_TIMEOUT_SECONDS
+
+    manager = _chess_get_manager()
+    if manager is None:
+        return
+    for channel_id, game in manager.sweep_expired():
+        getter = getattr(bot, "get_channel", None)
+        channel = None
+        if callable(getter):
+            try:
+                channel = getter(int(channel_id))
+            except (TypeError, ValueError):
+                channel = None
+        if channel is None:
+            continue
+        minutes = int(round(IDLE_TIMEOUT_SECONDS / 60.0))
+        name = _chess_bot_name(bot)
+        try:
+            await channel.send(
+                f"chess game between {name} and {game.player_name} canceled "
+                f"after {minutes}m of no activity. chess_start begins a new one."
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("chess idle-cancel notice failed in %s: %s", channel_id, exc)

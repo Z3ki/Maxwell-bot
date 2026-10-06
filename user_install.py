@@ -593,7 +593,7 @@ async def snapshot_channel_history(
             else:
                 rows.extend(_memory_row_from_message(msg) for msg in list(result or [])[:limit])
     except Exception as exc:
-        logger.info("user-install history stopped with %d rows (%s)", len(rows), type(exc).__name__)
+        logger.debug("user-install history stopped with %d rows (%s)", len(rows), type(exc).__name__)
     rows.reverse()
     return rows
 

@@ -119,6 +119,16 @@ RAG_QUERY_TIMEOUT_SECONDS = _float_env(
 RAG_QUERY_FAILURE_COOLDOWN_SECONDS = _float_env(
     "MAXWELL_RAG_QUERY_FAILURE_COOLDOWN_SECONDS", 15.0, 1.0, 120.0
 )
+
+
+def _ignore_task_result(task: "asyncio.Task") -> None:
+    """Consume a detached embed task's outcome so it cannot warn un-retrieved."""
+    if task.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        task.exception()
+
+
 # How long to stop calling the embedder after a connection-level failure.
 # Short enough that a restarted Ollama is picked up within a message or two,
 # long enough that a dead one doesn't cost a connect attempt per message.
@@ -1214,16 +1224,20 @@ class RAGMemoryManager:
         channel response lock while a CPU-only Ollama request queues behind
         background work. Once a request times out/fails, briefly open-circuit
         query embedding so the other RAG searches in the same turn return
-        immediately too.
+        immediately too. A timed-out embed is NOT cancelled: it keeps running
+        in the background so its result warms the cache and the next lookup
+        for the same text is instant.
         """
         if not str(query or "").strip():
             return None
         now = time.monotonic()
         if now < self._query_embed_disabled_until:
             return None
+        task = asyncio.ensure_future(self._embed(query))
+        task.add_done_callback(_ignore_task_result)
         try:
             vec = await asyncio.wait_for(
-                self._embed(query),
+                asyncio.shield(task),
                 timeout=RAG_QUERY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
