@@ -1,6 +1,6 @@
 """AutonomyEngine — Maxwell's self-directed life loop.
 
-Runs alongside REM and on_message. Wakes every N seconds, gathers context
+Runs alongside on_message. Wakes every N seconds, gathers context
 (DMs, channel history, memory, goals, recent events), asks the LLM what to
 do, and executes actions through the existing tool system.
 
@@ -1884,105 +1884,7 @@ class AutonomyEngine:
         except Exception as e:
             sections.append(f"=== ACTIVE GOALS ===\n(error: {e})")
 
-        # 3. Recent REM events (what just happened in the server?)
         events = []
-        try:
-            state = await self.store.load_state()
-            last_tick = state.get("last_tick")
-            events = await self.bot.rem_log.drain_slice(last_tick)
-            if events:
-                ev_lines = []
-                for ev in events[-30:]:
-                    content = str(ev.get("content", "")).replace("\n", " ")[:260]
-                    ts = ev.get("ts", "")
-                    when = "?"
-                    if ts:
-                        with contextlib.suppress(Exception):
-                            ev_dt = _coerce_utc_datetime(ts)
-                            when = _context_time(ev_dt) if ev_dt else "?"
-                    cid = str(ev.get("channel_id") or "?")
-                    ch_label = "room=unknown"
-                    if cid != "?":
-                        with contextlib.suppress(Exception):
-                            ch_label = (
-                                await self._register_conversation(ctx_index, cid)
-                            )[1]
-                    uid = str(ev.get("user_id") or "?")
-                    uname = str(ev.get("user_name") or "?")
-                    role = str(ev.get("role") or "?")
-                    speaker_kind = (
-                        "you/Maxwell"
-                        if self.bot.user and uid == str(self.bot.user.id)
-                        else role
-                    )
-
-                    tags = []
-                    if ev.get("message_id") and cid != "?":
-                        msg_idx = ctx_index.add_message(str(ev.get("message_id")), cid)
-                        if msg_idx:
-                            tags.append(f"msg={msg_idx}")
-
-                    addressed = []
-                    if ev.get("reply_to_author_id"):
-                        reply_name = str(ev.get("reply_to_author") or "unknown")
-                        reply_id = str(ev.get("reply_to_author_id") or "")
-                        reply_ref = (
-                            f"you/Maxwell({reply_id})"
-                            if ev.get("reply_to_self")
-                            else f"{reply_name}({reply_id})"
-                        )
-                        quoted = " ".join(
-                            str(ev.get("reply_to_content") or "").split()
-                        )[:80]
-                        if quoted:
-                            quoted = quoted.replace('"', "'")
-                            tags.append(f'reply_to={reply_ref} "{quoted}"')
-                        else:
-                            tags.append(f"reply_to={reply_ref}")
-                        addressed.append(f"reply_to:{reply_ref}")
-                    mentions = []
-                    for row in list(ev.get("mentions") or [])[:10]:
-                        if not isinstance(row, dict):
-                            continue
-                        mid = str(row.get("id") or "")
-                        if not mid:
-                            continue
-                        mname = str(row.get("name") or mid)
-                        mref = (
-                            f"you/Maxwell({mid})"
-                            if self.bot.user and mid == str(self.bot.user.id)
-                            else f"{mname}({mid})"
-                        )
-                        mentions.append(mref)
-                    if mentions:
-                        tags.append("mentions=[" + ", ".join(mentions) + "]")
-                        addressed.extend(f"mention:{ref}" for ref in mentions)
-                        if self.bot.user and any(
-                            ref.endswith(f"({self.bot.user.id})") for ref in mentions
-                        ):
-                            tags.append("mentions_you")
-                    tags.append(
-                        "addressed_to=[" + "; ".join(addressed) + "]"
-                        if addressed
-                        else "addressed_to=channel"
-                    )
-                    tag_text = " ".join(tags)
-                    ev_lines.append(
-                        f'time={when} {ch_label} speaker={uname}({uid}, {speaker_kind}) {tag_text} content="{content}"'
-                    )
-                sections.append(
-                    _truncate(
-                        "=== RECENT CONVERSATIONS (since last check) ===\n"
-                        + "\n".join(ev_lines),
-                        CTX_BUDGET_RECENT_EVENTS,
-                    )
-                )
-            else:
-                sections.append(
-                    "=== RECENT CONVERSATIONS ===\n(no new activity since last check)"
-                )
-        except Exception as e:
-            sections.append(f"=== RECENT CONVERSATIONS ===\n(error: {e})")
 
         # 4. Channel activity (what's happening right now?)
         # Events, watch, recent replies, then auto-channels / memory — not
@@ -3057,7 +2959,7 @@ class AutonomyEngine:
                     ),
                 },
             ]
-            # Cap the timeout like the REM path (bot.py _run_rem_once_guarded)
+            # Bound each provider call so the optional autonomy loop cannot stall.
             # so a misconfigured ai_timeout_seconds can't hang a tick for hours.
             timeout = max(
                 30,
@@ -3733,33 +3635,6 @@ class AutonomyEngine:
                 logger.error(f"Autonomy action {kind} failed: {e}")
             results.append(result)
 
-            # record in REM event log (skip do_nothing)
-            if kind != "do_nothing":
-                try:
-                    summary = result.get("content_summary", action.get("reason", kind))
-                    rem_log = cast(Any, getattr(self.bot, "rem_log", None))
-                    if rem_log is None:
-                        continue
-                    channel_id = str(result.get("channel_id") or "")
-                    guild_id = result.get("guild_id")
-                    await rem_log.record(
-                        {
-                            "ts": _utcnow_iso(),
-                            "channel_id": channel_id,
-                            "guild_id": str(guild_id) if guild_id else None,
-                            "user_id": str(self.bot.user.id) if self.bot.user else "",
-                            "user_name": self.bot.bot_name,
-                            "role": "assistant",
-                            "content": f"[autonomy] {kind}: {str(summary)[:300]}",
-                            "auto_mode": bool(
-                                channel_id
-                                and channel_id
-                                in (getattr(self.bot, "_auto_channels", None) or set())
-                            ),
-                        }
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to record autonomy REM event: {e}")
 
         return results
 

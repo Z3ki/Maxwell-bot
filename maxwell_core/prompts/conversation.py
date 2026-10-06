@@ -163,7 +163,9 @@ class ConversationPromptBuilder:
             host._control.get("max_response_chars", 1000) or 1000, 1000
         )
         system_parts.append(
-            f"Core personality: {personality}\nReply limit: {char_limit} chars."
+            f"Core personality (style only): {personality}\n"
+            f"Reply limit: {char_limit} chars total. Discord delivery splits "
+            "long content into messages of at most 2000 characters."
         )
         drugged_remaining = (
             host._drugged_until.get(channel_id, 0) - asyncio.get_running_loop().time()

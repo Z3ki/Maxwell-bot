@@ -6,7 +6,6 @@ def setup(bot, ctx=None):
     service = GitHubProjectService(bot, ctx)
     if ctx is not None:
         ctx.register_service("github_projects", service)
-        ctx.every(90, service.poll_once, run_immediately=False)
     tool = GitHubRepoTool(bot, service)
     tool.name = "github_repo"
     tool.tool_name = "github_repo"

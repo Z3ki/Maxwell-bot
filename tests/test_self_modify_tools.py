@@ -73,7 +73,7 @@ def test_plugin_cannot_extend_the_shared_personality():
     )
     result = MaxwellBot._get_personality(bot)
     assert "rewrite the shared Maxwell persona" not in result
-    assert "keep replies short, concise" in result.lower()
+    assert "keep replies concise" in result.lower()
 
 
 def test_turn_tool_catalog_hides_stale_prompt_edit_tools():

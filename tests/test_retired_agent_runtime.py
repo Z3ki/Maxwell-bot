@@ -5,17 +5,19 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from bot import MaxwellBot, ToolCircuitBreaker, PUBLIC_RUNTIME_BLOCKED_TOOLS
 from plugin_manager import PluginManager
 
 
-def test_retired_plugins_never_initialize_even_when_persisted_enabled(tmp_path):
+@pytest.mark.parametrize("restricted", [False, True])
+def test_retired_plugins_never_initialize_even_when_persisted_enabled(tmp_path, restricted):
     plugins = tmp_path / "plugins"
     plugins.mkdir()
-    retired = (
-        "agent_life", "background_jobs", "github_projects",
-        "plugin_admin", "personality",
-    )
+    retired = ("agent_life", "background_jobs")
+    if restricted:
+        retired += ("github_projects", "plugin_admin", "personality")
     for name in retired:
         folder = plugins / name
         folder.mkdir()
@@ -32,7 +34,7 @@ def test_retired_plugins_never_initialize_even_when_persisted_enabled(tmp_path):
         name: {"enabled_globally": True}
         for name in retired
     }}), encoding="utf-8")
-    bot = SimpleNamespace(tools={}, config=SimpleNamespace(MAXWELL_RESTRICT_PUBLIC_RUNTIME=True))
+    bot = SimpleNamespace(tools={}, config=SimpleNamespace(MAXWELL_RESTRICT_PUBLIC_RUNTIME=restricted))
     manager = PluginManager(bot, plugins_dir=str(plugins), data_dir=str(tmp_path),
                             state_file=str(state))
     manager.load_plugins()
@@ -100,7 +102,7 @@ def test_dispatch_does_not_return_sensitive_exception_text():
         tools={"chess_start": tool}, plugin_manager=None,
         _tool_breaker=ToolCircuitBreaker(), tool_concurrency=None, hooks=None,
         config=SimpleNamespace(DISABLE_TAINT_GATE=False),
-        _control={"autofix_enabled": False},
+        _control={},
         _record_llm_trace=AsyncMock(),
         _message_tool_platform=lambda _message: "discord",
         is_message_tainted=lambda _message: False,

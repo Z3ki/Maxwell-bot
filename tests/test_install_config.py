@@ -99,9 +99,12 @@ def _config_value(attr, env=None):
     return _run(f"from config import Config; print(Config.{attr})", env)
 
 
-def test_rem_is_opt_in_by_default():
-    """REM spends tokens on a timer — it must never default to on."""
-    assert _config_value("REM_ENABLED") == "False"
+def test_retired_memory_agent_environment_flags_are_ignored():
+    assert _run(
+        "from config import Config; print(any(hasattr(Config, key) for key in "
+        "('REM_ENABLED', 'AUX_MODEL', 'AI_REM_MODEL')))",
+        {"ENABLE_REM": "true", "REM_ENABLED": "true", "AUX_MODEL": "unused"},
+    ) == "False"
 
 
 @pytest.mark.parametrize("flag", ["ENABLE_CREATE_SITE", "ENABLE_HD_IMAGE", "ENABLE_RAG", "ENABLE_EMAIL_TOOLS", "ENABLE_SHELL", "ENABLE_AUTONOMY", "MAXWELL_RESTRICT_PUBLIC_RUNTIME"])
@@ -129,16 +132,6 @@ def test_shipped_templates_do_not_enable_unconfigured_integrations(template):
     code = "from config import Config; print(any(getattr(Config, name) for name in " \
            "['ENABLE_CREATE_SITE','ENABLE_HD_IMAGE','ENABLE_RAG','ENABLE_EMAIL_TOOLS','ENABLE_SHELL']))"
     assert _run(code, {"MAXWELL_ENV_FILE": str(Path(__file__).resolve().parents[1] / template)}) == "False"
-
-
-def test_enable_rem_alias_turns_rem_on():
-    # The docs have always called it ENABLE_REM; honour that spelling.
-    assert _config_value("REM_ENABLED", {"ENABLE_REM": "true"}) == "True"
-    # An explicit REM_ENABLED still wins over the alias.
-    assert (
-        _config_value("REM_ENABLED", {"ENABLE_REM": "true", "REM_ENABLED": "false"})
-        == "False"
-    )
 
 
 MINIMUM_ENV = {

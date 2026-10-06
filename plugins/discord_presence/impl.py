@@ -19,7 +19,7 @@ del _name
 class ChangePresenceTool(Tool):
     """Change bot online status"""
     tool_name = 'change_presence'
-    returns_result = False
+    returns_result = True
     ends_turn = False
 
 
@@ -129,7 +129,7 @@ class SetActivityTool(Tool):
 class SetNicknameTool(Tool):
     """Change the bot's own nickname in the server"""
     tool_name = 'set_nickname'
-    returns_result = False
+    returns_result = True
     ends_turn = False
 
 

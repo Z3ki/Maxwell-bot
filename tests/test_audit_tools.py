@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import chess
 import pytest
 
-import autofix
 from chess_game import ChessGame, ChessManager
 from discord_threads import ThreadControlTool, ThreadStore
 from plugin_manager import PluginContext, PluginManager
@@ -214,42 +213,6 @@ def test_thread_status_checks_channel_visibility(tmp_path):
     assert "secret" not in out
 
 
-def test_autofix_symlink_cannot_enter_blocked_directory(tmp_path):
-    (tmp_path / "data").mkdir()
-    secret = tmp_path / "data" / "secret.py"
-    secret.write_text("password = 'private'\n")
-    (tmp_path / "alias.py").symlink_to(secret)
-    assert autofix.allowed_relpath("alias.py", repo=tmp_path) is None
-
-
-def test_autofix_git_failure_cleans_context_and_fingerprint(monkeypatch):
-    async def scenario():
-        monkeypatch.setattr(
-            autofix,
-            "current_branch",
-            lambda _: (_ for _ in ()).throw(RuntimeError("git unavailable")),
-        )
-        autofix._active_fingerprints.add("audit")
-        try:
-            assert (
-                await autofix.run_autofix(
-                    SimpleNamespace(),
-                    tool_name="audit",
-                    tool_args={},
-                    exc=TypeError("bad"),
-                    tb_text="",
-                    fingerprint="audit",
-                )
-                is None
-            )
-            assert not autofix._IN_AUTOFIX.get()
-            assert "audit" not in autofix._active_fingerprints
-        finally:
-            autofix._active_fingerprints.discard("audit")
-
-    run(scenario())
-
-
 def test_progress_retains_message_for_cleanup_after_edit_failure():
     async def scenario():
         posted = SimpleNamespace(
@@ -325,30 +288,6 @@ def test_recovery_empty_allowlist_cannot_execute_any_tool():
     assert remaining == text
 
 
-def test_autofix_redacts_configured_credentials_from_diagnostics(monkeypatch):
-    secret = "audit-only-fake-credential"
-    monkeypatch.setenv("DISCORD_TOKEN", secret)
-    trace = f"TypeError: login failed with {secret}"
-    prompt = autofix.build_prompt(
-        tool_name="audit",
-        tool_args={"discord_token": secret},
-        tb_text=trace,
-        context=f"TOKEN = '{secret}'",
-    )
-    body = autofix._pr_body(
-        patch={"summary": secret},
-        tool_name="audit",
-        tool_args={},
-        tb_text=trace,
-        test_output=None,
-    )
-    assert secret not in json.dumps(prompt)
-    assert secret not in body
-    assert autofix.sanitize_tool_args({"OPENAI_API_KEY": "not-env-value"}) == {
-        "OPENAI_API_KEY": "[redacted]"
-    }
-
-
 def test_reasoning_param_preview_redacts_and_bounds_nested_values():
     from tool_registry import _summarize_params
 
@@ -361,21 +300,6 @@ def test_reasoning_param_preview_redacts_and_bounds_nested_values():
         {"env": '{"API_KEY": "unknown-secret-with-spaces value"}'}
     )
     assert "unknown-secret" not in json.dumps(encoded_env)
-
-
-@pytest.mark.parametrize(
-    "rel,existing", [("new_module.py", False), ("tests/test_existing.py", True)]
-)
-def test_autofix_new_files_are_new_tests_only(tmp_path, rel, existing):
-    target = tmp_path / rel
-    if existing:
-        target.parent.mkdir(parents=True)
-        target.write_text("original")
-    with pytest.raises(ValueError):
-        autofix.apply_patch(
-            {"new_files": [{"path": rel, "content": "replacement"}]}, root=tmp_path
-        )
-    assert target.read_text() == "original" if existing else not target.exists()
 
 
 def test_checkers_start_cannot_replace_another_players_match(monkeypatch):

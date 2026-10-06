@@ -47,13 +47,12 @@ def test_reconfigure_preserves_saved_provider_identity_and_disabled_shell(tmp_pa
 def test_reconfigure_accepts_explicit_environment_overrides(tmp_path):
     result = _run_installer(
         tmp_path,
-        "OLLAMA_MODEL=old\nOLLAMA_API_KEY=secret\nREM_ENABLED=true\nENABLE_REM=true\n",
-        overrides={"OLLAMA_MODEL": "new", "OLLAMA_API_KEY": "", "REM_ENABLED": "false"},
+        "OLLAMA_MODEL=old\nOLLAMA_API_KEY=secret\n",
+        overrides={"OLLAMA_MODEL": "new", "OLLAMA_API_KEY": ""},
         reconfigure=True,
     )
     assert result["OLLAMA_MODEL"] == "new"
     assert result["OLLAMA_API_KEY"] == ""
-    assert result["REM_ENABLED"] == result["ENABLE_REM"] == "false"
 
 
 def test_configure_only_needs_no_docker_and_does_not_start_services(tmp_path):
@@ -140,11 +139,10 @@ def _api_settings(tmp_path, contents):
 import sys, runpy, json
 sys.path.insert(0, {str(ROOT / "api")!r})
 ns = runpy.run_path({str(ROOT / "api/api_server.py")!r}, run_name='api_config_probe')
-from api.config import REM_ENABLED_DEFAULT
 print(json.dumps([
     ns['_API_MAX_CONCURRENT'], ns['_API_REQUEST_TIMEOUT'],
     ns['_API_GLOBAL_RPS'], ns['_API_GLOBAL_BURST'],
-    ns['_API_GLOBAL_LIMITER'] is not None, REM_ENABLED_DEFAULT,
+    ns['_API_GLOBAL_LIMITER'] is not None,
 ]))
 """
     result = subprocess.run(
@@ -159,12 +157,12 @@ print(json.dumps([
     return json.loads(result.stdout)
 
 
-def test_direct_api_start_loads_dotenv_limits_and_rem_alias(tmp_path):
+def test_direct_api_start_loads_dotenv_limits(tmp_path):
     assert _api_settings(
         tmp_path,
         "MAXWELL_API_MAX_CONCURRENT=17\nMAXWELL_API_REQUEST_TIMEOUT=2.5\n"
-        "MAXWELL_API_GLOBAL_RPS=13\nMAXWELL_API_GLOBAL_BURST=19\nENABLE_REM=true\n",
-    ) == [17, 2.5, 13, 19, True, True]
+        "MAXWELL_API_GLOBAL_RPS=13\nMAXWELL_API_GLOBAL_BURST=19\n",
+    ) == [17, 2.5, 13, 19, True]
 
 
 def test_api_bad_numeric_settings_do_not_crash_or_disable_limits(tmp_path):
@@ -173,7 +171,7 @@ def test_api_bad_numeric_settings_do_not_crash_or_disable_limits(tmp_path):
         "MAXWELL_API_MAX_CONCURRENT=oops\nMAXWELL_API_REQUEST_TIMEOUT=nan\n"
         "MAXWELL_API_GLOBAL_RPS=inf\nMAXWELL_API_GLOBAL_BURST=oops\n"
         "ENABLE_REM=true\nREM_ENABLED=false\n",
-    ) == [64, 30.0, 120.0, 240, True, False]
+    ) == [64, 30.0, 120.0, 240, True]
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "", "bad"])

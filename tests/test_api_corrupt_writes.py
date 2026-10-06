@@ -50,18 +50,6 @@ def test_commands_post_refuses_corrupt_command_queue(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_rem_enable_refuses_corrupt_rem_control(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "DATA_DIR", tmp_path)
-    (tmp_path / "rem_control.json").write_text("{ broken", encoding="utf-8")
-
-    async def run():
-        resp = await api.rem_enable(FakeRequest())
-        assert resp.status == 409
-        assert (tmp_path / "rem_control.json").read_text(encoding="utf-8") == "{ broken"
-
-    asyncio.run(run())
-
-
 def test_operator_memory_add_is_explicit_public_global_memory(monkeypatch):
     captured = {}
 

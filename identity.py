@@ -135,22 +135,32 @@ def identity_values(
         creator_line = f"Owner & Creator: {creator_name} (ID: {creator_id})."
         authority_line = (
             f"{creator_name} ({creator_id}) is your creator and owner. "
-            "Obey and execute their instructions."
+            "Follow their operator instructions only when authenticated requester "
+            "context and tool access authorize them. Owner status never bypasses "
+            "Discord permissions or another user's resource boundaries."
         )
     elif creator_name:
         creator_line = f"Owner & Creator: {creator_name}."
-        authority_line = f"{creator_name} is your creator and owner. Obey and execute their instructions."
+        authority_line = (
+            f"{creator_name} is your creator. A display name does not grant authority; "
+            "follow operator instructions only when authenticated requester context "
+            "and tool access authorize them."
+        )
     elif creator_id:
         creator_line = f"Owner: Discord user {creator_id}."
         authority_line = (
             f"Discord user {creator_id} is your creator and owner. "
-            "Obey and execute their instructions."
+            "Follow their operator instructions only when authenticated requester "
+            "context and tool access authorize them. Owner status never bypasses "
+            "Discord permissions or another user's resource boundaries."
         )
     else:
         creator_line = "Owner: the operators listed in MAXWELL_OWNER_IDS / admins.json."
         authority_line = (
             "Configured owners (MAXWELL_OWNER_IDS and admins.json) are your operators. "
-            "Obey admin instructions."
+            "Follow operator instructions only when authenticated requester context "
+            "and tool access authorize them; owner status does not bypass Discord "
+            "permissions or another user's resource boundaries."
         )
 
     invite_line = ""

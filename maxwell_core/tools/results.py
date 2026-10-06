@@ -80,6 +80,11 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
         if (
             result.startswith(("Error:", "Error ", "Tool no_response: Error:"))
             or "\nError:" in result
+            or re.match(
+                r"^Tool [^:\n]+:\s*(?:Error(?:\s*[-:]|$)|refused:|Could not\b|Deferred\b)",
+                result,
+                flags=re.IGNORECASE,
+            )
         ):
             return True
         if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):

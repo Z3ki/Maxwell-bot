@@ -1,10 +1,8 @@
 """Regressions from the 2026-08-19 multi-agent code review."""
 
-import asyncio
 from types import SimpleNamespace
 
 from bot import strip_tool_payload_leaks
-from rem import RemStore
 from tool_schemas import TOOL_PARAMETERS, build_openai_tools
 
 
@@ -37,18 +35,6 @@ def test_wait_schema_is_declared_and_prompt_edit_schema_is_retired():
     assert "wait" in names
     wait = next(t for t in tools if t["function"]["name"] == "wait")
     assert "seconds" in wait["function"]["parameters"]["properties"]
-
-
-def test_rem_patch_state_does_not_wipe_corrupt_file(tmp_path):
-    store = RemStore(str(tmp_path))
-    store.state_file.write_text("{ broken", encoding="utf-8")
-
-    async def run():
-        out = await store.patch_state({"running": False})
-        assert out == {}
-        assert store.state_file.read_text(encoding="utf-8") == "{ broken"
-
-    asyncio.run(run())
 
 
 def test_strip_keeps_plain_chat_without_tool_tags():

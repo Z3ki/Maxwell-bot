@@ -40,35 +40,12 @@ DEFAULT_CONTROL = {
     # by tailing pm2 logs, which meant every user report was "it just said
     # sorry". Turn off if you don't want internals visible in a channel.
     "error_details": True,
-    # When a tool handler raises a programming error (TypeError, …), Maxwell
-    # himself (not a sub-agent) drafts a patch + test on a topic branch and
-    # opens a PR. Never pushes to main, never auto-merges.
-    "autofix_enabled": True,
-    "autofix_open_pr": True,
-    "autofix_max_per_hour": 3,
-    "autofix_cooldown_hours": 24,
     "typing_indicator": True,
     "store_memory": True,
     "long_term_memory_enabled": True,
     "cross_context_enabled": True,
-    "cross_context_extract_enabled": True,
     "cross_context_max_items": 10,
     "cross_context_min_importance": 5,
-    "cross_context_dm_to_global_admin_only": True,
-    # Per-call timeout for the background context-extraction LLM call
-    # (the one that asks the model to summarize a message into a
-    # durable shared-context fact). 20s was way too tight for cold-start
-    # 1M-context models — the call would time out, retry, fall back to
-    # a smaller model, and flood the provider log. 60s is generous enough
-    # for a cold start and still short enough that one stuck call can't
-    # back up the rest of the context-extract queue.
-    "cross_context_extract_timeout_seconds": 60,
-    # How dense a message has to look before it is worth a context-watcher
-    # call (0..1, see watch_policy.extraction_score). Lower stores more and
-    # spends more; higher is stingier. This replaced a fixed list of English
-    # trigger phrases, so there is nothing to keep up to date when people
-    # phrase things differently.
-    "cross_context_extract_threshold": 0.25,
     # ─── global user entity memory ──────────────────────────────────────
     # Facts keyed on the Discord user id rather than on a channel or guild,
     # so what the bot knows about you follows you between servers and DMs.
@@ -78,13 +55,7 @@ DEFAULT_CONTROL = {
     # real ceiling is the character budget below — this only bounds how many
     # rows are considered.
     "entity_memory_max_items": 8,
-    # Mirror `user:`/`dm:`-scoped extracted facts into entity memory. Those
-    # facts are already global-by-user; this makes them retrievable by the
-    # entity tier too, with per-person semantic ranking.
-    "entity_memory_from_extract": True,
-    # Hybrid graph next to vector RAG: site routes + ownership triples.
-    # Deterministic (ast scan) plus optional triples from the existing
-    # context-extractor call — no extra LLM. Off leaves vector RAG as-is.
+    # Deterministic site/ownership graph alongside vector RAG.
     "knowledge_graph_enabled": True,
     # ─── per-tier context budget (see context_budget.py) ────────────────
     # Relative weights for how the memory character budget is divided. They
@@ -177,14 +148,6 @@ DEFAULT_CONTROL = {
     "max_tool_iterations": 12,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
-    # ─── background sub-agent jobs (jobs.py) ────────────────────────────
-    # Extended budgets for detached background work. Live turns stay tight;
-    # jobs get the big headroom (more thinking, more output, more timeout).
-    # 0/blank = fall back to env (BG_MAX_TOKENS / BG_TIMEOUT_SECONDS /
-    # BG_MAX_ITERS) and then to the built-in generous defaults.
-    "bg_max_tokens": 0,
-    "bg_timeout_seconds": 0,
-    "bg_max_iters": 0,
     # Prefer OpenAI-style native tool_calls when the provider supports them.
     # When this is off, the prompt teaches bare JSON lines — not XML tags.
     "native_tool_calls": True,
@@ -228,14 +191,8 @@ DEFAULT_CONTROL = {
     # silenced.
     "guild_solo_autonomy_added": [],
     "base_personality": (
-        "you're {bot_name}. keep replies short, concise, and direct. never a yes-man. natural, friendly, and very honest.\n\n"
-        "authority & conduct:\n"
-        "{authority_line}\n"
-        "- be polite and respectful. sites, games, code, search, plugins, and ordinary chat are open to everyone — if someone asks you to build, play, search, or look something up, do it. decline only admin/moderation and server-structure commands from users who lack the matching Discord permission.\n"
-        "- always be truthful — never a yes-man. if you disagree, say so. do not flatter, rubber-stamp, or tell people what they want to hear. if you don't know, say you don't know. never invent facts. niceness is not agreement.\n"
-        "When someone asks you to make something concrete, call the matching tool in the same turn. "
-        "Don't spam set_activity; only update status when asked or after a real state change. "
-        "DO NOT REPEAT STUFF: never reuse your own phrasing, a joke, a catchphrase, or the same idea you already voiced this conversation."
+        "Natural, friendly, respectful and direct. Keep replies concise, "
+        "and explain more when the user or task needs it."
     ),
     "autonomy_enabled": False,
     "autonomy_interval_seconds": 300,
@@ -243,15 +200,6 @@ DEFAULT_CONTROL = {
     "autonomy_api_key": "",  # "" = use main provider's key
     "autonomy_model": "",  # "" = use main provider's model
     "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
-    # Auxiliary background agents (REM, context-cleanup, context-watcher).
-    # "" = fall back to the autonomy config, then the main provider, so a
-    # control.json without aux overrides keeps the old shared-endpoint
-    # behaviour. Set these to route the context-manager brains to a
-    # separate model/endpoint from the autonomy tick loop.
-    "aux_base_url": "",  # "" = use autonomy (then main) base_url
-    "aux_api_key": "",  # "" = use autonomy (then main) key
-    "aux_model": "",  # "" = use autonomy (then main) model
-    "aux_disable_reasoning": True,  # False for endpoints that reject the reasoning param
     "autonomy_min_post_gap_seconds": 0,  # deprecated — no longer enforced, kept for compat
     # Legacy single-purpose cooldown. Superseded by autonomy_floor_* below, which
     # subsumes it; kept because it's honored as a FLOOR on the new cooldown, so an
@@ -315,10 +263,29 @@ DEAD_CONTROL_KEYS = frozenset(
         "intel_feed_urls",
         "intel_run_history",
         "autonomy_drives_enabled",
-        # The context janitor was replaced by RAG memory. bot.py answers every
-        # context_cleanup_* command with "engine removed" and the API routes are
-        # no-op stubs, so keeping these in DEFAULT_CONTROL only put three
-        # switches in the dashboard that could not do anything.
+        # Removed memory actors and delegated workers must stay retired even
+        # when an existing bot_control.json still enables them.
+        'aux_api_key',
+        'aux_base_url',
+        'aux_disable_reasoning',
+        'aux_model',
+        'cross_context_dm_to_global_admin_only',
+        'cross_context_extract_enabled',
+        'cross_context_extract_threshold',
+        'cross_context_extract_timeout_seconds',
+        'entity_memory_from_extract',
+        'rem_enabled',
+        'rem_interval_seconds',
+        'rem_max_turns',
+        'rem_prompt_body',
+        "bg_max_tokens",
+        "bg_timeout_seconds",
+        "bg_max_iters",
+        "bg_context_chars",
+        "autofix_enabled",
+        "autofix_open_pr",
+        "autofix_max_per_hour",
+        "autofix_cooldown_hours",
         "context_cleanup_enabled",
         "context_cleanup_interval_seconds",
         "context_cleanup_ltm_enabled",
@@ -437,7 +404,6 @@ _FALLBACK_KNOWN_TOOLS = [
     "host_file",
     "create_thread",
     "thread_control",
-    "spawn_background",
     "web_search",
     "no_response",
     "shell",
@@ -467,8 +433,6 @@ _FALLBACK_KNOWN_TOOLS = [
     "debug",
     "report",
     "github_repo",
-    "agent_life",
-    "user_sandbox",
 ]
 
 

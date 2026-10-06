@@ -15,7 +15,6 @@ from rag_memory import (
     EMBED_DIM,
     MemoryRequester,
     RAGMemoryManager,
-    RemEventLog,
     _blob_to_embedding,
     _embedding_to_blob,
 )
@@ -685,53 +684,5 @@ def test_edit_during_embedding_keeps_new_text_pending_for_recovery(
         assert memory._db.execute(
             "SELECT embedding FROM vectors WHERE id=?", (row_id,)
         ).fetchone()[0]
-
-    asyncio.run(run())
-
-
-def test_rem_consumers_cannot_mutate_nested_events_and_bad_mentions_are_ignored(
-    tmp_path,
-):
-    async def run():
-        log = RemEventLog(str(tmp_path))
-        await log.record(
-            {
-                "role": "user",
-                "content": "first",
-                "mentions": [{"id": "alice", "name": "Alice"}],
-            }
-        )
-        await log.record({"role": "user", "content": "second", "mentions": 42})
-        snapshot = await log.drain_slice()
-        snapshot[0]["mentions"][0]["name"] = "mutated"
-        assert (await log.drain_slice())[0]["mentions"][0]["name"] == "Alice"
-        await log.flush()
-        loaded = RemEventLog(str(tmp_path))
-        loaded.load_from_disk()
-        assert [row["content"] for row in await loaded.drain_slice()] == [
-            "first",
-            "second",
-        ]
-
-    asyncio.run(run())
-
-
-def test_rem_failed_save_remains_dirty_and_can_be_retried(tmp_path, monkeypatch):
-    async def run():
-        log = RemEventLog(str(tmp_path))
-        await log.record({"role": "user", "content": "keep this event"})
-        original = log._atomic_save
-        monkeypatch.setattr(
-            log, "_atomic_save", AsyncMock(side_effect=OSError("disk unavailable"))
-        )
-        with pytest.raises(OSError, match="disk unavailable"):
-            await log.flush()
-        assert log._dirty
-        monkeypatch.setattr(log, "_atomic_save", original)
-        await log.flush()
-        assert not log._dirty
-        loaded = RemEventLog(str(tmp_path))
-        loaded.load_from_disk()
-        assert (await loaded.drain_slice())[0]["content"] == "keep this event"
 
     asyncio.run(run())

@@ -22,7 +22,7 @@ This replaces the old statement that Maxwell had "zero vector DB, embedding, or 
 
 ### 3. Scoped/cross-context facts
 
-Cross-context memory is controlled by runtime settings such as `cross_context_enabled` and related extraction/visibility controls. Facts are scoped and filtered before they are injected into another turn.
+Cross-context memory is controlled by runtime settings such as `cross_context_enabled` and related visibility controls. Facts are scoped and filtered before they are injected into another turn.
 
 Do not assume all remembered facts are globally visible. Private/admin/scoped context boundaries are part of the memory model.
 
@@ -30,11 +30,9 @@ Do not assume all remembered facts are globally visible. Private/admin/scoped co
 
 `knowledge_graph.py` adds entity/relationship memory on top of conversation/fact storage. Runtime controls such as `entity_memory_enabled` and `knowledge_graph_enabled` determine whether these layers participate.
 
-### 5. REM/background consolidation
+### 5. Retired memory agents
 
-`rem.py` provides optional REM-style memory consolidation. It is a background feature, separate from normal live message handling and separate from the primary chat provider configuration.
-
-Simple installs keep token-spending background loops off by default. Runtime controls can also enable/disable background behavior after startup.
+REM, the context fact watcher and automatic long-term-memory summarizers have been removed. They no longer call an auxiliary model or create facts from transcript batches. Existing scoped facts and conversation history remain available for retrieval; normal storage and embedding maintenance still run. Saved settings cannot restore the retired actors.
 
 ### 6. Context budgets
 
@@ -56,7 +54,6 @@ When recovery is possible, Maxwell can re-fetch message content from Discord ins
 | `rag_memory.py` | SQLite/vector memory and embedding-backed retrieval |
 | `knowledge_graph.py` | Entity/relationship memory |
 | `context_budget.py` | Context/prompt budgeting helpers |
-| `rem.py` | REM-style consolidation |
 | `control_defaults.py` | Memory/context runtime defaults |
 | `api/state.py` | Runtime-control sanitization |
 | `api/storage.py` | Dashboard/admin storage paths |

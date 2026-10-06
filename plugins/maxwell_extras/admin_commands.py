@@ -296,7 +296,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                     "store_memory",
                     "long_term_memory_enabled",
                     "cross_context_enabled",
-                    "cross_context_extract_enabled",
                     "entity_memory_enabled",
                     "knowledge_graph_enabled",
                     "memory_history_messages",
@@ -339,7 +338,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                         "native_tool_calls",
                         "tool_history_messages",
                         "tool_iteration_timeout_seconds",
-                        "autofix_enabled",
                     ),
                 )
                 + f"\nDisabled tools: **{len(disabled)}**"

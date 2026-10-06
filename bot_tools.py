@@ -93,7 +93,6 @@ from plugins.diagnostics.impl import ReportTool  # noqa: F401
 from plugins.diagnostics.impl import DebugTool  # noqa: F401
 from plugins.plugin_admin.impl import ManagePluginTool  # noqa: F401
 
-from jobs import SpawnBackgroundTool  # noqa: F401
 from discord_threads import CreateThreadTool, ThreadControlTool  # noqa: F401
 
 

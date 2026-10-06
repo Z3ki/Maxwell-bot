@@ -32,7 +32,7 @@ that embedding model. HD images need `GEMINI_IMAGE_MODEL` supported by your
 provider. Email needs both `MAXWELL_EMAIL_USER` and `MAXWELL_EMAIL_PASSWORD`.
 Shell stays off until `--with-shell` prepares the backend. Features without
 setup, such as keyless web search and image generation, remain available.
-Autonomy/REM are opt-in, and TTS is not bundled. Generated sites do not expire
+Conversational autonomy is opt-in; memory agents and delegated workers have been removed, and TTS is not bundled. Generated sites do not expire
 by default; set `site_ttl_hours` in owner controls if you want expiry.
 
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
@@ -76,7 +76,7 @@ The full installer can configure:
 2. Primary provider URL/model/key.
 3. Identity and owner IDs.
 4. Operator API credentials.
-5. Optional autonomy/REM background features.
+5. Optional conversational autonomy.
 
 Prompts read from `/dev/tty`, so an interactive `curl | bash` install still works. When there is no controlling TTY, the installer switches to non-interactive mode and reads environment variables.
 

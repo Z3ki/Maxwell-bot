@@ -1,6 +1,6 @@
 """State sanitizers and domain load/save helpers for the Maxwell API server.
 
-Reads/writes the JSON state files in data/ (bot control, REM, memory/context,
+Reads/writes the JSON state files in data/ (bot control, memory/context,
 autonomy, context cleanup, commands). No route handlers, no auth logic.
 Imports only from api.storage, api.config, and repo-root control_defaults — no
 circular imports.
@@ -8,14 +8,11 @@ circular imports.
 
 import hashlib
 import json
-import os
 import time
 
 from api.config import (
     MAX_LTM_CHARS,
     MAX_LTM_LINES,
-    REM_ENABLED_DEFAULT,
-    REM_INTERVAL_DEFAULT,
 )
 from api.storage import (
     _autonomy_goals_path,
@@ -28,10 +25,6 @@ from api.storage import (
     _load,
     _load_for_write,
     _memory_text_path,
-    _rem_control_path,
-    _rem_events_path,
-    _rem_runs_path,
-    _rem_state_path,
     _safe_int,
     _safe_list,
     _safe_object,
@@ -63,65 +56,6 @@ except ImportError:
         if s in {"0", "false", "no", "off"}:
             return False
         return default
-
-
-def _sanitize_rem_control(control):
-    control = _safe_object(control)
-    interval = REM_INTERVAL_DEFAULT
-    try:
-        if control.get("interval_seconds") is not None:
-            interval = max(
-                10, _safe_int(control.get("interval_seconds"), REM_INTERVAL_DEFAULT)
-            )
-    except (TypeError, ValueError):
-        pass
-    max_turns = 3
-    try:
-        env_val = os.getenv("REM_MAX_TURNS", "3")
-        max_turns = int(env_val)
-    except (TypeError, ValueError):
-        pass
-    try:
-        if control.get("max_turns") is not None:
-            max_turns = max(0, min(_safe_int(control.get("max_turns"), 3), 10))
-    except (TypeError, ValueError):
-        pass
-    return {
-        "enabled": _parse_bool(control.get("enabled"), REM_ENABLED_DEFAULT),
-        "interval_seconds": interval,
-        "max_turns": max_turns,
-        "prompt": str(control.get("prompt") or ""),
-    }
-
-
-def _load_rem_control():
-    return _sanitize_rem_control(_load(_rem_control_path()))
-
-
-def _load_rem_control_for_write():
-    return _sanitize_rem_control(_load_for_write(_rem_control_path(), dict, {}))
-
-
-async def _save_rem_control(control):
-    await atomic_json_write(_rem_control_path(), control)
-
-
-def _load_rem_status():
-    control = _load_rem_control()
-    state = _safe_object(_load(_rem_state_path()))
-    runs = _safe_list(_load(_rem_runs_path()))
-    events = _safe_list(_load(_rem_events_path()))
-    last = runs[-1] if runs and isinstance(runs[-1], dict) else {}
-    return {
-        "enabled": control["enabled"],
-        "interval_s": control["interval_seconds"],
-        "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
-        "events_buffered": len(events),
-        "last_audit_preview": str(state.get("last_audit") or last.get("audit") or "")[
-            :500
-        ],
-        "running": bool(state.get("running")),
-    }
 
 
 def _load_control():
@@ -272,13 +206,6 @@ def _sanitize_control(control):
     out["x_mention_poll_seconds"] = max(
         60, min(_safe_int(out.get("x_mention_poll_seconds"), 300), 3600)
     )
-    # 0..1 density score (watch_policy.extraction_score). Out-of-range values
-    # would either extract from nothing or from every "lol" in every room.
-    try:
-        _extract_threshold = float(out.get("cross_context_extract_threshold"))
-    except (TypeError, ValueError):
-        _extract_threshold = 0.25
-    out["cross_context_extract_threshold"] = max(0.0, min(_extract_threshold, 1.0))
     out["autonomy_interval_seconds"] = max(
         30, _safe_int(out.get("autonomy_interval_seconds"), 300)
     )
@@ -314,9 +241,6 @@ def _sanitize_control(control):
     out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
     out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
     out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
-    out["aux_base_url"] = str(out.get("aux_base_url", "") or "")[:512]
-    out["aux_api_key"] = str(out.get("aux_api_key", "") or "")[:512]
-    out["aux_model"] = str(out.get("aux_model", "") or "")[:200]
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 2000))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
     out["tool_history_messages"] = max(
@@ -359,23 +283,8 @@ def _sanitize_control(control):
     out["cross_context_min_importance"] = max(
         1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
     )
-    out["cross_context_extract_timeout_seconds"] = max(
-        5,
-        min(
-            _safe_int(
-                out.get("cross_context_extract_timeout_seconds"), 60
-            ),
-            600,
-        ),
-    )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))
-    out["autofix_max_per_hour"] = max(
-        1, min(_safe_int(out.get("autofix_max_per_hour"), 3), 20)
-    )
-    out["autofix_cooldown_hours"] = max(
-        1, min(_safe_int(out.get("autofix_cooldown_hours"), 24), 168)
-    )
     out["autonomy_goal_stale_days"] = max(
         1, min(_safe_int(out.get("autonomy_goal_stale_days"), 14), 365)
     )

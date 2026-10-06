@@ -1,6 +1,6 @@
 # Maxwell architecture overview
 
-Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It accepts Discord text plus images, audio, video, files, embeds, replies, and app-command/context-menu requests, then runs a tool-capable model loop with memory, background jobs, and owner/admin controls.
+Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It accepts Discord text plus images, audio, video, files, embeds, replies, and app-command/context-menu requests, then runs a tool-capable model loop with scoped history/retrieval and owner/admin controls.
 
 Maxwell expects an official bot token from the Discord Developer Portal. Enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**.
 
@@ -17,11 +17,11 @@ Discord bot / app commands
         ▼
  maxwell_core (plugins, tools, prompts, hooks)
         │
-        ├── plugins/<feature>/     tools, jobs, prompt slices
+        ├── plugins/<feature>/     tools, hooks, prompt slices
         ├── providers.py           OpenAI-compatible adapter
         ├── rag_memory.py          SQLite/RAG memory
         ├── knowledge_graph.py     entity/relationship memory
-        ├── autonomy.py / rem.py   background host loops
+        ├── autonomy.py            optional conversational autonomy
         └── api/                   authenticated operator and generated-site APIs
 ```
 
@@ -40,7 +40,6 @@ Discord bot / app commands
 | `knowledge_graph.py` | Entity/relationship knowledge memory. |
 | `context_budget.py` | Prompt/context budget helpers. |
 | `autonomy.py` | Optional self-directed background action engine. |
-| `rem.py` | Optional REM-style background memory consolidation. |
 | `jobs.py` | Background jobs and long-running work. |
 | `message_pipeline.py` | Message-processing pipeline helpers. |
 | `user_install.py` | Discord user-install/app-command and context-menu support. |
@@ -61,7 +60,7 @@ Historical host/PM2 files may remain for compatibility/migration, but Docker is 
 
 `native_tool_calls` is enabled by default in current runtime controls. When the provider supports OpenAI-style tool calls, Maxwell uses the provider's structured `tool_calls`. A compatibility path remains for models/endpoints that do not produce native calls correctly.
 
-Plugins register tools through `maxwell_core`. Schemas are still normalized in `tool_schemas.py`, and the host dispatches calls through the live registry. Long-running/background jobs use the same tool/runtime concepts with their own budgets and scheduling.
+Plugins register tools through `maxwell_core`. Schemas are normalized in `tool_schemas.py`, and the host dispatches calls through the live registry. Multi-step work runs within the active user request; delegated background workers have been removed. Plugin timers remain available for ordinary maintenance such as reminder delivery.
 
 Tools marked destructive are fail-closed when the current turn has been tainted by fetched/web content. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action.
 
@@ -73,7 +72,7 @@ Current memory includes:
 - Channel/message memory and long-term fact storage.
 - Scoped shared/cross-context memory with visibility controls.
 - Entity/relationship memory through `knowledge_graph.py`.
-- Optional REM-style consolidation.
+- Scoped retrieval of existing facts; no automatic transcript extraction or consolidation.
 - Prompt/context budgeting before data is injected into a model turn.
 
 RAG availability is controlled through configuration/feature switches. Embedding failures should not be confused with the primary chat provider; `doctor.py --probe` reports the configured provider/embedding probes.
@@ -109,7 +108,7 @@ Important groups include:
 - AI/tool concurrency and timeouts.
 - Native tool calls and per-tool disable lists.
 - Memory/RAG/context budgets.
-- Autonomy/REM/background behavior.
+- Optional conversational autonomy.
 - Night/fallback routing.
 - Autofix and developer/runtime switches.
 
@@ -140,7 +139,7 @@ Most optional features use `ENABLE_*` switches with `auto|true|false` semantics:
 - `true`: force it on.
 - `false`: keep it off.
 
-Simple installs keep token-spending background loops such as autonomy/REM off by default. `doctor.py` reports resolved feature states.
+Simple installs keep token-spending background loops such as conversational autonomy off by default. `doctor.py` reports resolved feature states.
 
 ## Checking an install
 

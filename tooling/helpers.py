@@ -1267,7 +1267,6 @@ def _colour_from_text(raw):
         return None
 
 
-
 _YOUTUBE_HOST_RE = re.compile(
     r"(^|\.)((?:music\.)?youtube\.com|youtu\.be|youtube-nocookie\.com)$",
     re.I,
@@ -2388,7 +2387,6 @@ def _find_guild(guilds: list, target: str) -> tuple[Any, str]:
 # class DeleteChannelTool(Tool):  — moved to a plugin
 
 
-
 # class EditCategoryTool(Tool):  — moved to a plugin
 
 
@@ -2414,7 +2412,6 @@ def _find_guild(guilds: list, target: str) -> tuple[Any, str]:
 
 
 # class ListTimeoutsTool(Tool):  — moved to a plugin
-
 
 
 def _role_blocked(me, role) -> str:
@@ -4288,8 +4285,6 @@ async def _fetch_public_url(
 # the Docker sandbox. One prompt injection and the LLM owns your box.
 
 
-
-
 def _is_voice_channel(ch) -> bool:
     if ch is None:
         return False
@@ -5499,7 +5494,7 @@ def _report_context_lines(message) -> list[str]:
 
 def _redact_report_text(text: str) -> str:
     try:
-        from autofix import redact_diagnostics
+        from diagnostics_safety import redact_diagnostics
 
         return redact_diagnostics(str(text or ""))
     except Exception:

@@ -1,6 +1,5 @@
 """Regressions for privileged automation and remote mail boundaries."""
 
-import asyncio
 import imaplib
 import ssl
 from types import SimpleNamespace
@@ -8,55 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
-import autofix
 import bot_tools
 import mail_transport
-
-
-def test_autofix_requires_regression_tests(tmp_path):
-    with pytest.raises(RuntimeError, match="requires a regression test"):
-        asyncio.run(autofix._run_pytest(tmp_path, []))
-
-
-@pytest.mark.parametrize("outcome", ["pass", "fail", "timeout", "cancel"])
-def test_autofix_uses_isolation_and_always_removes_container(
-    tmp_path, monkeypatch, outcome
-):
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "tests/test_fix.py").write_text("def test_fix(): pass")
-    monkeypatch.setenv("MAXWELL_AUTOFIX_TEST_IMAGE", "trusted-tests:local")
-    monkeypatch.setenv("GITHUB_TOKEN", "test-secret-not-for-container")
-    calls = []
-
-    async def docker(*args, **kwargs):
-        calls.append((args, kwargs))
-        if args[0] == "run":
-            if outcome == "timeout":
-                raise TimeoutError
-            if outcome == "cancel":
-                raise asyncio.CancelledError
-            return (b"pytest output", b""), int(outcome == "fail")
-        return (b"", b""), 0
-
-    monkeypatch.setattr(bot_tools, "_run_docker_cmd", docker)
-    if outcome == "pass":
-        assert (
-            asyncio.run(autofix._run_pytest(tmp_path, ["tests/test_fix.py"]))
-            == "pytest output"
-        )
-    else:
-        error = asyncio.CancelledError if outcome == "cancel" else RuntimeError
-        with pytest.raises(error):
-            asyncio.run(autofix._run_pytest(tmp_path, ["tests/test_fix.py"]))
-    run, opts = calls[0]
-    assert run[run.index("--network") + 1] == "none"
-    assert run[run.index("--user") + 1] == "65534:65534"
-    assert "--read-only" in run and "--pull=never" in run
-    assert "no-new-privileges:true" in run
-    assert "trusted-tests:local" in run
-    assert opts["output_limit"] == 64_000
-    assert not any("docker.sock" in value or "test-secret" in value for value in run)
-    assert calls[-1][0] == ("rm", "-f", run[run.index("--name") + 1])
 
 
 @pytest.mark.parametrize("host", ["mail.example.test", "192.168.1.5", "8.8.8.8"])

@@ -13,7 +13,6 @@ import re
 import shutil
 import sqlite3
 import hashlib
-import hmac
 import time
 import uuid as _uuid
 from pathlib import Path
@@ -42,7 +41,6 @@ from api.storage import (  # noqa: E402
     _llm_traces_path,
     _load,
     _load_for_write,
-    _rem_runs_path,
     _safe_int,
     _safe_list,
     _safe_object,
@@ -169,11 +167,8 @@ from api.state import (  # noqa: E402
     _load_commands_for_write,
     _load_control,
     _load_inbox,
-    _load_rem_control_for_write,
-    _load_rem_status,
     _normalize_context_content,
     _normalize_memory_line,
-    _save_rem_control,
     _sanitize_control,
 )
 
@@ -1282,9 +1277,6 @@ async def control_reset(request):
     return _json_response({"ok": True, "control": dict(DEFAULT_CONTROL)})
 
 
-# ---------- REM ----------
-
-
 async def llm_traces(request):
     if not _has_admin_auth(request):
         return _json_response({"error": "unauthorized"}, 401)
@@ -1299,42 +1291,8 @@ async def llm_traces(request):
     return _json_response(traces[-limit:])
 
 
-async def rem_status(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    return _json_response(_load_rem_status())
-
-
-async def rem_runs(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    runs = _safe_list(_load(_rem_runs_path()))
-    try:
-        limit = max(1, min(int(request.query.get("limit", "50")), 200))
-    except (TypeError, ValueError):
-        limit = 50
-    try:
-        offset = max(0, int(request.query.get("offset", "0")))
-    except (TypeError, ValueError):
-        offset = 0
-    ordered = list(reversed(runs))
-    return _json_response(
-        {
-            "items": ordered[offset : offset + limit],
-            "total": len(runs),
-            "offset": offset,
-            "limit": limit,
-        }
-    )
-
-
-async def _queue_rem_command(cmd_type: str):
-    # Use the same cross-process FileLock path as _queue_command.
-    return await _queue_command(cmd_type)
-
-
 async def _queue_command(cmd_type: str, extra: dict | None = None):
-    """Generic command queue helper (same pattern as _queue_rem_command)."""
+    """Append an operator command with cross-process locking."""
 
     # Use cross-process FileLock in addition to in-process _file_lock for
     # better protection against bot reader/writer races on bot_commands.json.
@@ -1373,57 +1331,6 @@ async def _queue_command(cmd_type: str, extra: dict | None = None):
             return "", str(e)
 
 
-async def rem_run(request):
-    status = _load_rem_status()
-    if status.get("running"):
-        return _json_response(
-            {"ok": True, "started": False, "reason": "already running"}
-        )
-    cmd_id, err = await _queue_rem_command("rem_run")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "started": True, "id": cmd_id})
-
-
-async def _set_rem_enabled(enabled: bool, cmd_type: str):
-    async with _file_lock:
-        try:
-            control = _load_rem_control_for_write()
-            cmds = _load_commands_for_write()
-        except ValueError as exc:
-            return "", str(exc)
-        control["enabled"] = enabled
-        cmd_id = str(_uuid.uuid4())[:8]
-        cmds.append(
-            {
-                "id": cmd_id,
-                "type": cmd_type,
-                "status": "pending",
-                "result": "",
-                "created_at": time.time(),
-            }
-        )
-        if len(cmds) > MAX_COMMANDS:
-            cmds = cmds[-MAX_COMMANDS:]
-        await _save_rem_control(control)
-        await atomic_json_write(_commands_path(), cmds)
-        return cmd_id, ""
-
-
-async def rem_enable(request):
-    cmd_id, err = await _set_rem_enabled(True, "rem_enable")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "enabled": True, "id": cmd_id})
-
-
-async def rem_disable(request):
-    cmd_id, err = await _set_rem_enabled(False, "rem_disable")
-    if err:
-        return _json_response({"error": err}, 409)
-    return _json_response({"ok": True, "enabled": False, "id": cmd_id})
-
-
 # ---------- Autonomy ----------
 
 
@@ -1442,9 +1349,6 @@ async def autonomy_status(request):
             "recent_reply_block_seconds": control.get(
                 "autonomy_recent_reply_block_seconds", 0
             ),
-            "aux_model": control.get("aux_model", ""),
-            "aux_base_url": control.get("aux_base_url", ""),
-            "aux_disable_reasoning": control.get("aux_disable_reasoning", True),
             "last_tick": state.get("last_tick"),
             "last_tick_duration": state.get("last_tick_duration"),
             "actions_executed_total": state.get("actions_executed_total", 0),
@@ -1641,42 +1545,6 @@ async def autonomy_log_clear(request):
     return _json_response({"ok": True})
 
 
-# ---------- Context cleanup agent (removed — RAG memory active) ----------
-# The old ContextCleanupEngine (context_cleanup.py) has been replaced by the
-# RAG vector memory system (rag_memory.py). These endpoints are kept as no-op
-# stubs for external API callers; they all
-# report that the engine has been removed.
-_CC_REMOVED = "context cleanup engine removed (RAG memory active)"
-
-
-async def context_cleanup_status(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    return _json_response({"enabled": False, "running": False, "removed": True})
-
-
-async def context_cleanup_run(request):
-    return _json_response({"ok": True, "message": _CC_REMOVED})
-
-
-async def context_cleanup_enable(request):
-    return _json_response({"ok": True, "message": _CC_REMOVED})
-
-
-async def context_cleanup_disable(request):
-    return _json_response({"ok": True, "message": _CC_REMOVED})
-
-
-async def context_cleanup_interval(request):
-    return _json_response({"ok": True, "message": _CC_REMOVED})
-
-
-async def context_cleanup_log_clear(request):
-    if not _has_admin_auth(request):
-        return _json_response({"error": "unauthorized"}, 401)
-    return _json_response({"ok": True, "message": _CC_REMOVED})
-
-
 # ---------- Command queue ----------
 async def commands_post(request):
     try:
@@ -1724,17 +1592,10 @@ async def commands_post(request):
     elif cmd_type == "clear_memory":
         command["channel_id"] = str(body.get("channel_id", "")).strip()
     elif cmd_type == "reload_controls" or cmd_type in {
-        "rem_run",
-        "rem_enable",
-        "rem_disable",
         "autonomy_run",
         "autonomy_enable",
         "autonomy_disable",
         "autonomy_interval",
-        "context_cleanup_run",
-        "context_cleanup_enable",
-        "context_cleanup_disable",
-        "context_cleanup_interval",
         "plugin_reload",
         "plugin_reload_state",
         "plugin_enable",
@@ -2163,7 +2024,6 @@ async def bot_status(request):
                     "tools_enabled",
                     "store_memory",
                     "cross_context_enabled",
-                    "cross_context_extract_enabled",
                 ]
             },
             "stats": rag_stats,
@@ -2418,50 +2278,6 @@ async def _reliability_middleware(request, handler):
         return web.json_response({"error": "internal error"}, status=500)
 
 
-def _github_webhook_store(event: dict) -> None:
-    path = DATA_DIR / "plugins" / "github_projects" / "webhook_events.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(path, timeout=5.0):
-        try:
-            current = json.loads(path.read_text("utf-8")) if path.exists() else []
-            if not isinstance(current, list): current = []
-        except Exception:
-            current = []
-        current.append(event)
-        _atomic_json_write_sync(path, current[-500:])
-
-async def github_webhook(request):
-    secret = str(os.getenv("MAXWELL_GITHUB_WEBHOOK_SECRET", "") or "").encode()
-    if not secret:
-        return _json_response({"error":"github webhook is not configured"}, 503)
-    raw = await request.read()
-    supplied = str(request.headers.get("X-Hub-Signature-256", "") or "")
-    expected = "sha256=" + hmac.new(secret, raw, hashlib.sha256).hexdigest()
-    try:
-        valid = hmac.compare_digest(supplied, expected)
-    except Exception:
-        valid = False
-    if not valid:
-        return _json_response({"error":"invalid signature"}, 401)
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception:
-        return _json_response({"error":"invalid json"}, 400)
-    event_name = str(request.headers.get("X-GitHub-Event", "") or "")[:80]
-    repo = str(((payload.get("repository") or {}).get("full_name")) or "")[:220]
-    if not repo or "/" not in repo:
-        return _json_response({"ok":True,"ignored":"no repository"})
-    number = payload.get("number")
-    if not isinstance(number, int):
-        check_obj = payload.get("check_run") or payload.get("check_suite") or {}
-        prs = check_obj.get("pull_requests") if isinstance(check_obj, dict) else []
-        if isinstance(prs, list) and prs and isinstance(prs[0], dict): number = prs[0].get("number")
-    row = {"delivery":str(request.headers.get("X-GitHub-Delivery","") or "")[:120],"event":event_name,"action":str(payload.get("action") or "")[:80],"repo":repo,"number":int(number) if isinstance(number,int) else 0,"sender":str(((payload.get("sender") or {}).get("login")) or "")[:120],"received_at":time.time()}
-    if event_name in {"pull_request","issues","check_run","check_suite"}:
-        await asyncio.to_thread(_github_webhook_store, row)
-        return _json_response({"ok":True})
-    return _json_response({"ok":True,"ignored":event_name})
-
 def _github_oauth_page(title: str, body: str, *, ok: bool = True, status: int = 200):
     import html as _html
     color = "#3fb950" if ok else "#f85149"
@@ -2542,14 +2358,12 @@ async def github_oauth_callback(request):
     return _github_oauth_page("GitHub connected", f"Logged in as <strong>{who}</strong>. Maxwell can use this GitHub account for your Discord user now.")
 
 
-
 app = web.Application(
     middlewares=[_reliability_middleware, _auth_middleware_unless_login],
     client_max_size=256 * 1024,
 )
 app.router.add_get("/health", health_check)
 app.router.add_get("/api/health", health_check)
-app.router.add_post("/api/github/webhook", github_webhook)
 app.router.add_get("/api/github/oauth/callback", github_oauth_callback)
 app.router.add_get("/data/{file}", data_file)
 app.router.add_options(
@@ -2601,11 +2415,6 @@ app.router.add_get("/api/control", control_get)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)
 app.router.add_get("/api/llm/traces", llm_traces)
-app.router.add_get("/api/rem/status", rem_status)
-app.router.add_get("/api/rem/runs", rem_runs)
-app.router.add_post("/api/rem/run", rem_run)
-app.router.add_post("/api/rem/enable", rem_enable)
-app.router.add_post("/api/rem/disable", rem_disable)
 app.router.add_get("/api/autonomy/status", autonomy_status)
 app.router.add_get("/api/autonomy/log", autonomy_log)
 app.router.add_get("/api/autonomy/goals", autonomy_goals)
@@ -2616,12 +2425,6 @@ app.router.add_put("/api/autonomy/interval", autonomy_interval)
 app.router.add_post("/api/autonomy/goals", autonomy_goal_add)
 app.router.add_delete("/api/autonomy/goals/{goal_id}", autonomy_goal_delete)
 app.router.add_delete("/api/autonomy/log", autonomy_log_clear)
-app.router.add_get("/api/context_cleanup/status", context_cleanup_status)
-app.router.add_post("/api/context_cleanup/run", context_cleanup_run)
-app.router.add_post("/api/context_cleanup/enable", context_cleanup_enable)
-app.router.add_post("/api/context_cleanup/disable", context_cleanup_disable)
-app.router.add_put("/api/context_cleanup/interval", context_cleanup_interval)
-app.router.add_delete("/api/context_cleanup/log", context_cleanup_log_clear)
 app.router.add_get("/api/commands", commands_get)
 app.router.add_post("/api/commands", commands_post)
 app.router.add_delete("/api/commands", commands_del)

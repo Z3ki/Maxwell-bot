@@ -18,7 +18,7 @@
   "tools": [
     {
       "name": "change_presence",
-      "returns_result": false,
+      "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
       "requires_admin": false
@@ -32,7 +32,7 @@
     },
     {
       "name": "set_nickname",
-      "returns_result": false,
+      "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
       "requires_admin": false

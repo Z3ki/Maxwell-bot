@@ -261,23 +261,6 @@ def test_watch_yields_while_he_is_busy():
     asyncio.run(run())
 
 
-def test_busy_covers_rem():
-    bot = _bot()
-
-    async def run():
-        cid = 1506001126426808511
-        MaxwellBot._arm_conversation_watch(bot, cid)
-        named = _plain_followup(content="maxwell say hi")
-        bot._rem_running = True
-        assert MaxwellBot._busy_reason(bot, cid) == "REM is running"
-        assert MaxwellBot._should_live_reply(bot, named) is False
-        bot._rem_running = False
-        assert MaxwellBot._busy_reason(bot, cid) == ""
-        assert MaxwellBot._should_live_reply(bot, named) is True
-
-    asyncio.run(run())
-
-
 def test_pressure_bar_is_configurable():
     bot = _bot()
     assert MaxwellBot._watch_pressure_threshold(bot) == 0.55
@@ -685,7 +668,6 @@ def test_only_a_directed_followup_interrupts_generation():
     asyncio.run(run())
 
 
-
 def test_a_busy_room_queues_the_ping_instead_of_dropping_it():
     """The old path stored the message and forfeited the reply."""
     bot = _bot()
@@ -777,5 +759,3 @@ def test_typing_expires_and_ignores_self_and_bots():
     assert [p["id"] for p in MaxwellBot._typing_in_channel(bot, channel.id)] == ["7"]
     bot._typing_users[str(channel.id)]["7"]["expires_at"] = 0
     assert MaxwellBot._typing_in_channel(bot, channel.id) == []
-
-

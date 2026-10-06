@@ -1,10 +1,8 @@
-"""GitHub project workspaces: policy isolation, ref safety, signed webhooks."""
+"""GitHub project workspaces: policy isolation and ref safety."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import subprocess
 from pathlib import Path
@@ -12,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import api.api_server as api
 from maxwell_core.tools.dispatch import _prepare_tool_params
 from plugins.github_projects.impl import (
     ExecResult,
@@ -34,7 +31,6 @@ class Ctx:
 
 
 class Bot:
-    bg_jobs = None
     config = SimpleNamespace(DATA_DIR="data")
 
 
@@ -65,6 +61,38 @@ def test_policy_is_per_user(tmp_path):
     asyncio.run(run())
 
 
+def test_persisted_repository_agents_cannot_be_restored(tmp_path):
+    path = tmp_path / "policies.json"
+    path.write_text(json.dumps({"1": {"acme/app": {
+        "mode": "write", "auto_review": True, "schedule_enabled": True,
+        "schedule_goal": "old task", "schedule_minutes": 5,
+    }}}))
+
+    async def run():
+        store = PolicyStore(path)
+        assert await store.get("1", "acme/app") == {"mode": "write"}
+        saved = await store.set("1", "acme/app", {"auto_merge": True, "mode": "read"})
+        assert set(saved) == {"mode", "updated_at"}
+        assert "schedule_enabled" not in path.read_text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"action": "schedule_set", "schedule_goal": "old task"},
+    {"action": "policy_set", "auto_review": True},
+])
+def test_repository_agent_controls_are_rejected(tmp_path, kwargs):
+    service = GitHubProjectService(Bot(), Ctx(tmp_path))
+    tool = GitHubRepoTool(Bot(), service)
+    message = SimpleNamespace(author=SimpleNamespace(id=1))
+    result = asyncio.run(tool.execute(message, repo="acme/app", **kwargs))
+    assert result.startswith("Error:")
+    assert "were removed" in result
+    assert "schedule_set" not in tool.parameters["properties"]["action"]["enum"]
+    assert "auto_review" not in tool.parameters["properties"]
+
+
 def test_write_and_merge_require_policy_mode():
     GitHubProjectService.require_mode({"mode": "write"}, "write")
     GitHubProjectService.require_mode({"mode": "admin"}, "write")
@@ -83,77 +111,6 @@ def test_workspaces_do_not_share_users(tmp_path):
     repo = svc.repo_root("1", "acme/app")
     assert repo == a / "repos" / "acme" / "app"
     assert svc.user_root("1") in repo.parents
-
-
-class _WebhookRequest:
-    def __init__(self, body: bytes, headers: dict[str, str]):
-        self._raw = body
-        self.headers = headers
-        self.path = "/api/github/webhook"
-        self.method = "POST"
-
-    async def read(self):
-        return self._raw
-
-
-def _payload(resp):
-    return json.loads(resp.text)
-
-
-def test_github_webhook_requires_secret_and_signature(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "DATA_DIR", tmp_path)
-    monkeypatch.delenv("MAXWELL_GITHUB_WEBHOOK_SECRET", raising=False)
-    body = b'{"repository":{"full_name":"acme/app"},"number":3,"action":"opened"}'
-    req = _WebhookRequest(body, {"X-GitHub-Event": "pull_request"})
-    missing = asyncio.run(api.github_webhook(req))
-    assert missing.status == 503
-
-    monkeypatch.setenv("MAXWELL_GITHUB_WEBHOOK_SECRET", "s3cret")
-    bad = asyncio.run(api.github_webhook(req))
-    assert bad.status == 401
-
-    digest = hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
-    good = asyncio.run(
-        api.github_webhook(
-            _WebhookRequest(
-                body,
-                {
-                    "X-Hub-Signature-256": "sha256=" + digest,
-                    "X-GitHub-Event": "pull_request",
-                    "X-GitHub-Delivery": "abc",
-                },
-            )
-        )
-    )
-    assert good.status == 200
-    assert _payload(good) == {"ok": True}
-    queued = json.loads(
-        (tmp_path / "plugins" / "github_projects" / "webhook_events.json").read_text()
-    )
-    assert queued[-1]["repo"] == "acme/app"
-    assert queued[-1]["number"] == 3
-    assert queued[-1]["event"] == "pull_request"
-
-
-def test_github_webhook_ignores_unhandled_events(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "DATA_DIR", tmp_path)
-    monkeypatch.setenv("MAXWELL_GITHUB_WEBHOOK_SECRET", "s3cret")
-    body = b'{"repository":{"full_name":"acme/app"},"action":"created"}'
-    digest = hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
-    resp = asyncio.run(
-        api.github_webhook(
-            _WebhookRequest(
-                body,
-                {
-                    "X-Hub-Signature-256": "sha256=" + digest,
-                    "X-GitHub-Event": "star",
-                },
-            )
-        )
-    )
-    assert _payload(resp) == {"ok": True, "ignored": "star"}
-    queue = tmp_path / "plugins" / "github_projects" / "webhook_events.json"
-    assert not queue.exists()
 
 
 def test_list_without_user_token_returns_error(tmp_path, monkeypatch):

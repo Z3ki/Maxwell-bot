@@ -15,7 +15,7 @@ def _call(name):
     }
 
 
-def test_mutations_and_interleaved_sends_follow_declared_order(monkeypatch):
+def test_mutations_finish_before_a_batched_reply_is_deferred(monkeypatch):
     async def run():
         events = []
         owner = SimpleNamespace(_control={}, tools={})
@@ -29,7 +29,7 @@ def test_mutations_and_interleaved_sends_follow_declared_order(monkeypatch):
 
         monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
         monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
-        await MaxwellBot._process_native_tool_calls(
+        _cleaned, results = await MaxwellBot._process_native_tool_calls(
             owner,
             message,
             "",
@@ -42,11 +42,10 @@ def test_mutations_and_interleaved_sends_follow_declared_order(monkeypatch):
         assert events == [
             "start:create_site",
             "end:create_site",
-            "start:send_message",
-            "end:send_message",
             "start:edit_site",
             "end:edit_site",
         ]
+        assert any("Tool send_message: Deferred" in line for line in results)
 
     asyncio.run(run())
 

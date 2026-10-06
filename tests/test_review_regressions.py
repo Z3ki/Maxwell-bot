@@ -6,11 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import MaxwellBot
 from maxwell_core.plugins.manager import PluginManager
 from maxwell_core.prompts.component import PromptComponent
 from maxwell_core.tools.registry import get_global_registry
-from rag_memory import MemoryRequester, RAGMemoryManager
 
 
 @pytest.mark.parametrize("async_setup", [False, True])
@@ -85,52 +83,3 @@ def test_plugin_reload_preserves_host_aliases_and_core_services(tmp_path, async_
             await manager.teardown()
 
     asyncio.run(run())
-
-
-@pytest.mark.parametrize("guild", ["guild", ""])
-def test_rem_reply_backfill_retains_recorded_guild_provenance(tmp_path, monkeypatch, guild):
-    def skip_background(_memory, coroutine):
-        coroutine.close()
-
-    monkeypatch.setattr(RAGMemoryManager, "_spawn", skip_background)
-    memory = RAGMemoryManager(str(tmp_path))
-    event = {
-        "role": "assistant",
-        "user_id": "1",
-        "channel_id": "room",
-        "guild_id": guild or None,
-        "message_id": "inbound-request-id",
-        "ts": "2026-10-04T20:15:00Z",
-        "content": "Recovered bot reply",
-    }
-    bot = SimpleNamespace(
-        _control={"store_memory": True},
-        memory=memory,
-        rem_log=SimpleNamespace(events=[event]),
-        user=SimpleNamespace(id=1),
-        bot_name="Maxwell",
-    )
-
-    async def run():
-        await memory.add_to_channel_memory("room", {
-            "message_id": event["message_id"], "guild_id": guild,
-            "author_id": "alice", "content": "Original user request",
-        })
-        await MaxwellBot._backfill_bot_replies_from_rem(bot)
-        await MaxwellBot._backfill_bot_replies_from_rem(bot)
-        requester = MemoryRequester(
-            user_id="alice", channel_id="room", guild_id=guild, is_dm=not guild,
-        )
-        transcript = await memory.get_channel_memory("room", requester=requester)
-        assert [row["content"] for row in transcript].count(event["content"]) == 1
-        original = next(row for row in transcript if row["message_id"] == event["message_id"])
-        assert original["content"] == "Original user request"
-        restored = memory._db.execute(
-            "SELECT guild_id FROM vectors WHERE content=?", (event["content"],),
-        ).fetchone()
-        assert restored["guild_id"] == guild
-
-    try:
-        asyncio.run(run())
-    finally:
-        memory._db.close()

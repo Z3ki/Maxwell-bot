@@ -39,12 +39,6 @@ BASE_SITE_DIR = Path(
 ADMIN_USER = os.getenv("MAXWELL_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.getenv("MAXWELL_ADMIN_PASSWORD", "").strip()
 
-REM_ENABLED_DEFAULT = _parse_bool(
-    os.getenv("REM_ENABLED"), _parse_bool(os.getenv("ENABLE_REM"), False)
-)
-REM_INTERVAL_DEFAULT = _int_env_safe("REM_INTERVAL_SECONDS", 600)
-REM_RUN_HISTORY_DEFAULT = _int_env_safe("REM_RUN_HISTORY", 50)
-
 MAX_LTM_LINES = 999
 MAX_LTM_CHARS = 1000
 MAX_COMMANDS = 200

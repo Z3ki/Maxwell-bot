@@ -78,19 +78,12 @@ def test_guild_plugin_overrides_keep_only_numeric_guilds_and_boolean_plugin_valu
         "max_tool_iterations",
         "tool_history_messages",
         "memory_history_messages",
+        "per_user_cooldown_seconds",
     ],
 )
 def test_zero_is_honored_not_treated_as_unset(key):
     """`out.get(k) or default` used to swap a real 0 for the default."""
     assert _sanitize_control({key: 0})[key] == 0
-
-
-def test_zero_is_honored_for_float_keys():
-    out = _sanitize_control(
-        {"cross_context_extract_threshold": 0, "per_user_cooldown_seconds": 0}
-    )
-    assert out["cross_context_extract_threshold"] == 0.0
-    assert out["per_user_cooldown_seconds"] == 0.0
 
 
 def test_float_shaped_ints_are_accepted():
@@ -113,8 +106,6 @@ def test_out_of_range_is_clamped_not_defaulted():
         ("inbound_retry_attempts", 1, 5),
         ("inbound_retry_delay_seconds", 1, 300),
         ("gap_recovery_max_messages", 0, 100),
-        ("autofix_max_per_hour", 1, 20),
-        ("autofix_cooldown_hours", 1, 168),
     ],
 )
 def test_inbound_reliability_limits(key, low, high):
@@ -129,8 +120,6 @@ def test_inbound_reliability_limits(key, low, high):
     [
         "require_direct_response",
         "respond_to_edited_mentions",
-        "autofix_enabled",
-        "autofix_open_pr",
     ],
 )
 def test_inbound_policy_booleans(key):

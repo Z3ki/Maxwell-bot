@@ -3,8 +3,6 @@
 import asyncio
 import json
 import sqlite3
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -15,10 +13,8 @@ from concurrency_safety import ChannelWorkQueues, KeyedLocks
 from context_budget import TIER_ORDER, allocate
 from email_inbox import MailPollState, _fetch_new_sync
 from inbox import InboxStore
-from jobs import BackgroundJobManager
 from knowledge_graph import KnowledgeGraph
 from rag_memory import EMBED_DIM, EMBED_MAX_CHARS, MemoryRequester, RAGMemoryManager
-from rem import RemStore, run_rem_once
 
 
 def _requester(
@@ -48,30 +44,6 @@ def test_floor_settings_honor_zero_and_reject_infinity():
     assert settings.mid_flow_min_messages == FloorSettings.mid_flow_min_messages
 
 
-@pytest.mark.parametrize("payload", ['{"actions": "bad"}', '{"actions": ["bad"]}'])
-def test_malformed_rem_actions_do_not_consume_slice(tmp_path, payload):
-    async def run():
-        memory = SimpleNamespace(get_long_term_memory=list)
-        log = SimpleNamespace(
-            drain_slice=AsyncMock(return_value=[{"content": "a fact"}])
-        )
-        provider = SimpleNamespace(
-            generate_chat_completion=AsyncMock(return_value={"content": payload})
-        )
-        await run_rem_once(
-            memory_manager=memory,
-            rem_log=log,
-            provider=provider,
-            data_dir=str(tmp_path),
-            model="fake",
-        )
-        state = await RemStore(str(tmp_path)).load_state()
-        assert not state.get("last_rem_run_ts")
-        assert state["running"] is False
-
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("raw", ['{"items":', "[]", '{"items": {}}'])
 def test_inbox_mutation_preserves_corrupt_file(tmp_path, raw):
     async def run():
@@ -94,30 +66,6 @@ def test_goal_mutation_preserves_corrupt_file(tmp_path, raw):
         with pytest.raises(ValueError):
             await store.add_goal("new")
         assert store.goals_file.read_text() == raw
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("failure", ["cancel", "error"])
-def test_background_task_setup_failure_releases_runtime_and_capacity(tmp_path, failure):
-    async def run():
-        manager = BackgroundJobManager(str(tmp_path / "jobs.json"))
-        job = manager.create(guild_id="g", channel_id="c", user_id="u", goal="test")
-        manager.attach_runtime(job.id, message=object())
-
-        async def worker():
-            raise RuntimeError("setup failed")
-
-        task = asyncio.create_task(worker())
-        manager.track_task(job.id, task)
-        if failure == "cancel":
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        await asyncio.sleep(0)
-        assert manager.active_count() == 0
-        assert not manager._runtime
-        assert not manager._tasks
-        assert job.status == ("cancelled" if failure == "cancel" else "error")
 
     asyncio.run(run())
 

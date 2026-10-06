@@ -44,7 +44,6 @@ _AI_LEGACY_ENV = {
     "AI_BASE_URL": "OLLAMA_BASE_URL",
     "AI_API_KEY": "OLLAMA_API_KEY",
     "AI_MODEL": "OLLAMA_MODEL",
-    "AI_REM_MODEL": "OLLAMA_REM_MODEL",
     "AI_TEMPERATURE": "OLLAMA_TEMPERATURE",
     "AI_DISABLE_REASONING": "OLLAMA_DISABLE_REASONING",
     "AI_REASONING_EFFORT": "OLLAMA_REASONING_EFFORT",
@@ -245,7 +244,6 @@ class Config:
     # not serve fails later, as an opaque 404 from the provider. Empty fails
     # at startup with a sentence that says what to do.
     AI_MODEL = _first_env("AI_MODEL", "OLLAMA_MODEL")
-    AI_REM_MODEL = os.getenv(_env_name("AI_REM_MODEL")) or AI_MODEL
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     AI_MAX_OUTPUT_TOKENS = _int_env(
@@ -287,7 +285,6 @@ class Config:
     OLLAMA_BASE_URL = AI_BASE_URL
     OLLAMA_API_KEY = AI_API_KEY
     OLLAMA_MODEL = AI_MODEL
-    OLLAMA_REM_MODEL = AI_REM_MODEL
     OLLAMA_TEMPERATURE = AI_TEMPERATURE
     OLLAMA_DISABLE_REASONING = AI_DISABLE_REASONING
     OLLAMA_REASONING_EFFORT = AI_REASONING_EFFORT
@@ -427,19 +424,6 @@ class Config:
     AUTONOMY_MODEL = os.getenv("AUTONOMY_MODEL", "").strip()
     AUTONOMY_DISABLE_REASONING = _bool_env("AUTONOMY_DISABLE_REASONING", False)
 
-    # Auxiliary background agents (REM, context-cleanup, context-watcher).
-    # These are the "context manager" brains — separate from the autonomy
-    # tick loop so they can run on a different (e.g. cheaper/faster) model
-    # than autonomy. Defaults fall back to the autonomy config, which in
-    # turn falls back to the main AI_* provider, so a fresh install
-    # with no AUX_* vars behaves exactly as before (all background agents
-    # shared one endpoint).
-    AUX_BASE_URL = os.getenv("AUX_BASE_URL", "").strip()
-    AUX_API_KEY = os.getenv(
-        "AUX_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")
-    ).strip()
-    AUX_MODEL = os.getenv("AUX_MODEL", "").strip()
-    AUX_DISABLE_REASONING = _bool_env("AUX_DISABLE_REASONING", True)
 
     # Live tool progress messages are on by default. A per-server
     # `/progress arguments:off` silences a noisy server; MAXWELL_PROGRESS_MESSAGES=false
@@ -501,21 +485,7 @@ class Config:
     MEMORY_MESSAGE_LIMIT = _int_env(
         "MEMORY_MESSAGE_LIMIT", 2000, min_value=1, max_value=10000
     )
-    # REM is a background LLM loop: it spends tokens on its own schedule.
-    # Opt-in, so a fresh install never quietly bills you. `ENABLE_REM` is
-    # accepted as an alias because that is the name the docs always used.
-    REM_ENABLED = _bool_env("REM_ENABLED", _bool_env("ENABLE_REM", False))
-    FEATURE_REASONS["REM_ENABLED"] = (
-        "enabled in .env"
-        if REM_ENABLED
-        else "off by default (opt in with ENABLE_REM=true)"
-    )
-    REM_INTERVAL_SECONDS = _int_env("REM_INTERVAL_SECONDS", 600, min_value=10)
-    REM_MAX_TURNS = _int_env("REM_MAX_TURNS", 3, min_value=0, max_value=10)
-    REM_EVENT_BUFFER_MAX = _int_env(
-        "REM_EVENT_BUFFER_MAX", 500, min_value=1, max_value=10000
-    )
-    REM_RUN_HISTORY = _int_env("REM_RUN_HISTORY", 50, min_value=1, max_value=1000)
+
 
     DATA_DIR = os.getenv("DATA_DIR", "data")
     LOGS_DIR = os.getenv("LOGS_DIR", os.getenv("LOGS", "logs"))
@@ -590,7 +560,6 @@ class Config:
         ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_RAG", "RAG vector memory"),
         ("ENABLE_AUTONOMY", "autonomy engine"),
-        ("REM_ENABLED", "REM dreaming pass"),
     )
 
     @classmethod

@@ -516,26 +516,6 @@ def setup(bot, ctx=None):
         permissions=["discord.channels"],
     )
 
-    write_wrapper_plugin(
-        "background_jobs",
-        "Background Jobs",
-        "Spawn detached background coding/research jobs.",
-        '''"""Register the spawn_background tool."""
-from jobs import SpawnBackgroundTool
-
-
-def setup(bot, ctx=None):
-    tool = SpawnBackgroundTool(bot)
-    tool.name = "spawn_background"
-    tool.tool_name = "spawn_background"
-    tool.returns_result = True
-    return [tool]
-''',
-        [{"name": "spawn_background", "returns_result": True}],
-        protected=True,
-        permissions=["jobs.run"],
-    )
-
     reexport = '''"""Compatibility re-exports for Maxwell tools.
 
 Implementations live in ``plugins/*/impl.py``. Shared helpers live in
@@ -548,7 +528,6 @@ from tooling.helpers import *  # noqa: F401,F403
 
 {class_exports}
 
-from jobs import SpawnBackgroundTool  # noqa: F401
 from discord_threads import CreateThreadTool, ThreadControlTool  # noqa: F401
 
 

@@ -25,7 +25,7 @@
     },
     {
       "name": "clear_sleep",
-      "returns_result": false,
+      "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
       "requires_admin": false

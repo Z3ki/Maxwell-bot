@@ -3,7 +3,7 @@
 No route handlers, no auth logic. Path resolvers look up DATA_DIR lazily from
 `api.api_server` so monkeypatching `api.api_server.DATA_DIR` (used by
 test_api_corrupt_writes) and `setenv("DATA_DIR")` + reload (used by
-test_api_rem) both keep working.
+operator API tests) both keep working.
 """
 
 import asyncio
@@ -148,22 +148,6 @@ def _control_path() -> Path:
     return _data_dir() / "bot_control.json"
 
 
-def _rem_state_path() -> Path:
-    return _data_dir() / "rem_state.json"
-
-
-def _rem_runs_path() -> Path:
-    return _data_dir() / "rem_runs.json"
-
-
-def _rem_events_path() -> Path:
-    return _data_dir() / "rem_events.json"
-
-
-def _rem_control_path() -> Path:
-    return _data_dir() / "rem_control.json"
-
-
 def _autonomy_state_path() -> Path:
     return _data_dir() / "autonomy_state.json"
 
@@ -174,18 +158,6 @@ def _autonomy_goals_path() -> Path:
 
 def _autonomy_log_path() -> Path:
     return _data_dir() / "autonomy_log.json"
-
-
-def _context_cleanup_state_path() -> Path:
-    return _data_dir() / "context_cleanup_state.json"
-
-
-def _context_cleanup_control_path() -> Path:
-    return _data_dir() / "context_cleanup_control.json"
-
-
-def _context_cleanup_log_path() -> Path:
-    return _data_dir() / "context_cleanup_log.json"
 
 
 def _commands_path() -> Path:

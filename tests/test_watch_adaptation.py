@@ -51,11 +51,6 @@ def _bot(control=None, admins=()):
         "_conversation_watch_enabled",
         "_conversation_watch_active",
         "_watch_debounce_seconds",
-        "_should_extract_context",
-        "_normalize_context_entry",
-        "_extract_shared_context_fact",
-        "_extract_threshold",
-        "_note_extraction_ran",
         "_directly_addressed",
         "_soft_addressed",
         "_addressing_someone_else",
@@ -203,106 +198,6 @@ def test_reading_who_a_message_is_aimed_at():
 # --------------------------------------------------------------------------
 # Context extraction
 # --------------------------------------------------------------------------
-
-
-def test_reactions_no_longer_cost_a_watcher_call():
-    bot = _bot()
-
-    async def run():
-        for chatter in ("lol", "ok", "EZE", "hahaha", "k"):
-            assert bot._should_extract_context(_msg(chatter)) is False
-
-    asyncio.run(run())
-
-
-def test_a_fact_phrased_outside_the_old_trigger_list_is_caught():
-    bot = _bot()
-
-    async def run():
-        assert (
-            bot._should_extract_context(
-                _msg("everyone just calls me Z, that's the name I go by")
-            )
-            is True
-        )
-
-    asyncio.run(run())
-
-
-def test_extraction_can_be_switched_off_entirely():
-    bot = _bot(control={"cross_context_extract_enabled": False})
-
-    async def run():
-        assert bot._should_extract_context(_msg("Ana owns the DNS for z3ki.dev")) is False
-
-    asyncio.run(run())
-
-
-def test_private_user_install_turn_is_never_sent_to_context_memory():
-    bot = _bot(admins=(7,))
-    private = _msg("Ada owns the staging DNS for the private project domain")
-    private.response_visibility = "private"
-
-    assert bot._should_extract_context(private) is False
-    assert bot._normalize_context_entry(
-        private,
-        {
-            "should_store": True,
-            "importance": 10,
-            "scope": "global",
-            "visibility": "shared",
-            "summary": "Private project domain and staging DNS",
-        },
-    ) is None
-
-    # Defensive worker-side guard also stops a task scheduled before a policy
-    # change or invoked directly from sending the private text to a provider.
-    asyncio.run(bot._extract_shared_context_fact(private))
-
-
-def test_an_empty_message_with_no_media_is_skipped():
-    bot = _bot()
-
-    async def run():
-        assert bot._should_extract_context(_msg("")) is False
-
-    asyncio.run(run())
-
-
-def test_one_room_cannot_monopolise_the_extractor():
-    bot = _bot()
-
-    async def run():
-        marginal = _msg("I prefer dark mode")
-        assert bot._should_extract_context(marginal) is True
-        bot._note_extraction_ran(marginal)
-        assert bot._should_extract_context(_msg("bro that's wild")) is False
-        # Something genuinely specific still gets through right away.
-        assert (
-            bot._should_extract_context(
-                _msg("the staging box is prod-2 and Ana owns https://z3ki.dev")
-            )
-            is True
-        )
-
-    asyncio.run(run())
-
-
-def test_the_threshold_is_configurable():
-    strict = _bot(control={"cross_context_extract_threshold": 0.95})
-    loose = _bot(control={"cross_context_extract_threshold": 0.0})
-
-    async def run():
-        text = _msg("Ana owns the DNS for z3ki.dev")
-        assert strict._should_extract_context(text) is False
-        assert loose._should_extract_context(_msg("lol")) is True
-
-    asyncio.run(run())
-
-
-def test_a_garbage_threshold_falls_back_to_the_default():
-    bot = _bot(control={"cross_context_extract_threshold": "nope"})
-    assert bot._extract_threshold() == 0.25
 
 
 # --------------------------------------------------------------------------

@@ -1276,7 +1276,7 @@ class _ConfigPanel(discord.ui.View):
             selected = _SERVER_SETTINGS.get(self.selected_key, ("Setting", ""))[0]
             hint = "Only the server owner or a member with Manage Server can change these settings."
             if self.selected_key == "plugins":
-                hint += " Plugin choices limit tool and guild-event access in this server; scheduled background jobs remain application-owner controlled."
+                hint += " Plugin choices limit tool and guild-event access in this server."
             value = self._current_value()
             if len(value) > 240:
                 value = value[:237] + "..."

@@ -23,7 +23,7 @@ from discord_account import application_client_id, bot_oauth_install_urls
 class ReactTool(Tool):
     """React to a message with an emoji"""
     tool_name = 'react'
-    returns_result = False
+    returns_result = True
     ends_turn = False
 
 
@@ -209,7 +209,7 @@ class EditMessageTool(Tool):
 class DeleteMessageTool(Tool):
     """Delete a message. Own messages always; others need manage_messages."""
     tool_name = 'delete_message'
-    returns_result = False
+    returns_result = True
     ends_turn = False
 
 
@@ -1415,7 +1415,6 @@ def _pick_invite_channel(guild) -> tuple[Any, str]:
         return ch, ""
     name = getattr(guild, "name", "that server")
     return None, f"Error: no channel in {name} I can create an invite from"
-
 
 
 class BotInviteUrlTool(Tool):

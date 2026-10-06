@@ -1,10 +1,4 @@
-"""Tests for WaitTool and the multi-terminal dispatch ordering.
-
-These tests cover the 2026-08-08 change that lets Maxwell issue multiple
-send_messages per turn, with optional `wait` calls between them, in
-declared order. Previously the dispatch loop dropped any send_message
-after the first as a 'duplicate terminal tool call'.
-"""
+"""Wait pauses a batch; successful terminal calls stop later work and replies."""
 import asyncio
 import sys
 import time
@@ -217,10 +211,8 @@ def _build_test_bot(tools_dict):
     return bot
 
 
-def test_send_message_then_wait_then_send_message_runs_in_order():
-    """Three terminal calls (send → wait → send) must execute in the
-    order the model emitted them. Previously the second send was dropped
-    as a duplicate terminal tool call."""
+def test_send_message_stops_later_wait_and_duplicate_reply():
+    """A completed reply ends the batch, including later silent waits."""
     from bot import MaxwellBot
 
     events = []
@@ -295,12 +287,10 @@ def test_send_message_then_wait_then_send_message_runs_in_order():
 
     asyncio.run(run())
 
-    assert events == [
-        ("send", "first msg"),
-        ("wait_start", 1.0),
-        ("wait_end", 1.0),
-        ("send", "second msg"),
-    ], f"Out-of-order or missing events: {events}"
+    assert events == [("send", "first msg")]
+    skipped = [row for row in bot._last_native_followup_messages if row["role"] == "tool"]
+    assert len(skipped) == 3
+    assert all("turn already ended" in row["content"] for row in skipped[1:])
 
 
 @pytest.mark.parametrize("allowed", [True, False])
@@ -371,8 +361,8 @@ def test_no_response_blocks_later_send_message_only_on_success(allowed):
     assert sent == (["NO_RESPONSE"] if allowed else ["NO_RESPONSE", "hi"])
 
 
-def test_two_send_messages_in_a_row_both_fire_in_order():
-    """Two send_messages back-to-back (no wait) — both must fire, in order."""
+def test_duplicate_send_message_is_suppressed():
+    """The model cannot turn a complete reply into consecutive messages."""
     from bot import MaxwellBot
 
     sent = []
@@ -431,4 +421,4 @@ def test_two_send_messages_in_a_row_both_fire_in_order():
 
     asyncio.run(run())
 
-    assert sent == ["alpha", "beta"], f"Out of order: {sent}"
+    assert sent == ["alpha"]

@@ -21,7 +21,7 @@
   "tools": [
     {
       "name": "react",
-      "returns_result": false,
+      "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
       "requires_admin": false
@@ -35,7 +35,7 @@
     },
     {
       "name": "delete_message",
-      "returns_result": false,
+      "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
       "requires_admin": false
@@ -121,7 +121,10 @@
   "prompt": {
     "position": "tools",
     "priority": 80,
-    "requires_tools": ["bot_invite_url", "create_invite"],
+    "requires_tools": [
+      "bot_invite_url",
+      "create_invite"
+    ],
     "text": "ADD THIS BOT: when someone asks how to add Maxwell / this bot, add as app, add to my apps, or add to a server, call bot_invite_url then send_message the matching link. kind=app is Add to my apps; kind=server is Add to a server; default both. Do not invent a URL. SERVER INVITES: create_invite makes a discord.gg for a server this bot is already in. Pass server= name or ID when it is not this room, including from DMs. The person asking still needs create_instant_invite there. I cannot join from a discord.gg invite code."
   }
 }

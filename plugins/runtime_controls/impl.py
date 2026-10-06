@@ -67,7 +67,7 @@ class ClearSleepTool(Tool):
     not sleeping. Use when the bot decided to sleep but the user
     immediately needs a reply."""
     tool_name = 'clear_sleep'
-    returns_result = False
+    returns_result = True
     ends_turn = False
 
 
@@ -89,21 +89,12 @@ class ClearSleepTool(Tool):
         return result
 
 class WaitTool(Tool):
-    """Pause the current tool batch for N seconds before continuing.
+    """Pause before later actions in this batch, for at most 10 seconds.
 
-    Use this WITHIN a single turn to space out multiple actions — e.g.
-    `send_message('starting...')` → `wait(2)` → `send_message('done!')`
-    for a staged reveal, or `send_message('countdown: 3')` → `wait(1)` →
-    `send_message('2')` → `wait(1)` → `send_message('1')` → `wait(1)` →
-    `send_message('go!')`.
-
-    Distinct from `sleep`: `sleep` turns off the bot for minutes (rest),
-    `wait` is a sub-turn pause that keeps the turn open and lets you
-    follow up with more tool calls.
-
-    Max is 10 seconds — longer pauses should use `sleep` instead. The
-    user-visible progress message updates to 'waiting Ns…' so they
-    know the bot isn't stuck."""
+    This does not schedule a model follow-up or reopen an ended turn.
+    send_message still ends the batch; put any wait before it.
+    sleep suspends the bot for minutes and ends dispatch.
+    """
     tool_name = 'wait'
     returns_result = False
     ends_turn = False
@@ -115,8 +106,8 @@ class WaitTool(Tool):
     def get_description(self):
         return (
             "Pause this tool batch (`wait`) for `seconds` (float, default 2, max 10). "
-            "Turn stays open. For spacing separate send_messages only — not "
-            "to chunk a normal reply. If someone is typing, wait for them to send. "
+            "Put wait before the final send_message; it cannot reopen an ended turn. "
+            "Wait does not schedule another model turn. If someone is typing, pause briefly. "
             "Distinct from sleep (minutes, ends dispatch)."
         )
 

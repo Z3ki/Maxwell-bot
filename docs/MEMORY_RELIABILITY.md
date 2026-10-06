@@ -15,7 +15,7 @@ Memory reads used in prompt assembly now require a validated `MemoryRequester`. 
 
 Rows whose original scope cannot be proven remain in SQLite and are hidden from prompt retrieval. This includes legacy unscoped LTM rows and graph edges without requester provenance. New chat-graph edges and their non-public nodes are namespaced to the exact source channel (or exact DM); public site-index edges remain shareable. Legacy graph edges remain stored but hidden. Administrator status does not widen ordinary semantic or transcript retrieval. The explicit global-recall tool returns only operator-approved public facts.
 
-The LTM extractor and older REM/consolidation paths can still produce unscoped facts. Those writes are retained but fail closed in ordinary prompts. A later change should attach the originating channel/guild to extraction jobs before making their output retrievable. That needs a decision about which conversation scopes may be consolidated together.
+The LTM extractor and REM/consolidation actors have been removed. Historical unscoped facts are retained but fail closed in ordinary prompts. Existing facts still require valid provenance and visibility before retrieval; disabling the actors does not broaden their access.
 
 ## Prompt boundaries
 

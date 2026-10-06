@@ -1,19 +1,14 @@
 """The watch adapts to the room, and extraction stops keying off phrasing."""
 
-import math
 
 from watch_policy import (
     REPLY_PRESSURE_THRESHOLD,
-    EXTRACT_THRESHOLD,
     AddressSignal,
-    ExtractionContext,
     WatchState,
     debounce_seconds,
     describe_signal,
-    extraction_score,
     name_mentioned,
     reply_pressure,
-    should_extract,
     window_seconds,
 )
 
@@ -179,86 +174,6 @@ def test_the_prompt_states_the_situation_instead_of_repeating_the_rule():
 # --------------------------------------------------------------------------
 # Context extraction
 # --------------------------------------------------------------------------
-
-
-def test_reactions_are_not_worth_a_call():
-    for chatter in ("lol", "ok", "hahahaha", "EZE", "k", "?"):
-        assert should_extract(ExtractionContext(text=chatter)) is False
-
-
-def test_a_specific_statement_is():
-    ctx = ExtractionContext(
-        text="The staging box is prod-2 and Ana owns the DNS at https://z3ki.dev"
-    )
-    assert should_extract(ctx) is True
-
-
-def test_the_same_fact_phrased_differently_still_lands():
-    """The old trigger list caught the first of these and dropped the rest."""
-    for phrasing in (
-        "my name is Zeke, call me Z",
-        "everyone just calls me Z, that's the name I go by",
-        "llamame Z, es como me dice todo el mundo",
-    ):
-        assert should_extract(ExtractionContext(text=phrasing)) is True
-
-
-def test_repetition_scores_below_variety():
-    padded = extraction_score(ExtractionContext(text="haha " * 12)).value
-    varied = extraction_score(
-        ExtractionContext(text="the deploy box reboots nightly at four in the morning")
-    ).value
-    assert padded < varied
-
-
-def test_a_room_that_just_stored_something_has_to_clear_a_higher_bar():
-    marginal = ExtractionContext(text="I prefer dark mode")
-    assert should_extract(marginal) is True
-    marginal.since_last_extract = 30
-    assert should_extract(marginal) is False
-
-
-def test_but_something_specific_still_gets_through_immediately():
-    ctx = ExtractionContext(
-        text="The staging box is prod-2 and Ana owns the DNS at https://z3ki.dev",
-        since_last_extract=0,
-    )
-    assert should_extract(ctx) is True
-
-
-def test_an_admin_dm_is_the_highest_signal_channel_he_has():
-    plain = ExtractionContext(text="switching us to Postgres next week")
-    dm = ExtractionContext(
-        text="switching us to Postgres next week", is_dm=True, author_is_admin=True
-    )
-    assert extraction_score(dm).value > extraction_score(plain).value
-
-
-def test_media_alone_can_be_worth_a_look():
-    assert extraction_score(ExtractionContext(text="", has_attachments=True)).value > 0
-
-
-def test_an_empty_message_scores_nothing():
-    assert extraction_score(ExtractionContext(text="")).value == 0.0
-
-
-def test_the_score_is_bounded_and_explains_itself():
-    ctx = ExtractionContext(
-        text="the box Ana runs is prod-2, see https://z3ki.dev for the schedule",
-        is_dm=True,
-        author_is_admin=True,
-        author_seen_before=False,
-        has_attachments=True,
-    )
-    score = extraction_score(ctx)
-    assert 0.0 <= score.value <= 1.0
-    assert any("proper-noun" in reason for reason in score.reasons)
-    assert any("link" in reason for reason in score.reasons)
-
-
-def test_the_default_threshold_is_deliberately_permissive():
-    assert 0.0 < EXTRACT_THRESHOLD < 0.5
-    assert not math.isnan(EXTRACT_THRESHOLD)
 
 
 def test_only_named_or_live_lines_clear_the_bar():

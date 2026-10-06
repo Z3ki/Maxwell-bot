@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Remove REM, context fact extraction, automatic memory summaries, delegated
+  background workers, scheduled GitHub maintenance and automatic code repair.
+  Remove their API routes, commands, settings and auxiliary model configuration;
+  saved settings cannot reactivate them. Keep scoped history/retrieval and the
+  separately opt-in conversational autonomy feature.
+- Consolidate Discord and tool instructions, keep personality limited to style,
+  require authenticated permission context, and distinguish reply drafting from
+  external actions. Defer terminal replies until action results have been read,
+  return confirmation for state changes, and suppress duplicate replies in a batch.
+
 ## 0.1.10 — 2026-10-06
 
 Install with `--version v0.1.10`. Release assets include source, installers,

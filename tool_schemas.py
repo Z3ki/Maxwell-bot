@@ -636,17 +636,6 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "name": _str("New title, for action=rename"),
         },
     ),
-    "spawn_background": _obj(
-        {
-            "goal": _str(
-                "What the background job should do (site, research, images, code, or any long task). Required."
-            ),
-            "context": _str(
-                "Extra spec for the job: requirements, style, constraints. Optional."
-            ),
-        },
-        ["goal"],
-    ),
     "web_search": _obj(
         {
             "query": _str("Search query"),
@@ -880,6 +869,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 # Tools whose output is fed back to the model in a fresh turn.
 RESULT_TOOL_NAMES: frozenset[str] = frozenset(
     {
+        "react",
+        "delete_message",
+        "change_presence",
+        "set_nickname",
+        "clear_sleep",
         "image_generator",
         "hd_image",
         "lookup_user",
@@ -953,10 +947,8 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "email_search",
         "inbox_list",
         "inbox_act",
-        # set_activity gets a follow-up so the model can react to its own
-        # status change. change_presence deliberately does NOT — that one is
-        # the online/idle/dnd dot the user just set, and a follow-up turn
-        # would race to undo it.
+        # Status changes return confirmation so failures are visible to the
+        # model. A follow-up must preserve the user's requested status.
         "set_activity",
         # more_tools hands the full catalog back and must get a turn to use it.
         "more_tools",
@@ -968,9 +960,6 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "usage",
         "debug",
         "report",
-        # spawn_background hands the job id back so the live turn can ack it
-        # by name, then ends (the detached job delivers the real answer later).
-        "spawn_background",
     }
 )
 

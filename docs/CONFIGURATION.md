@@ -138,7 +138,6 @@ Frequently used controls include:
 | `entity_memory_enabled` | Entity memory |
 | `knowledge_graph_enabled` | Relationship/knowledge-graph memory |
 | `autonomy_enabled` | Runtime autonomy switch |
-| `autofix_enabled` | Runtime autofix switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
 The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the authenticated operator API or `/maintenance` to editing `bot_control.json` while Maxwell is running. There is no browser admin frontend or Discord browser OAuth login.
@@ -147,11 +146,11 @@ The authoritative set and valid ranges are in `control_defaults.py` and `api.sta
 
 `prompt_context_budget` and `memory_context_budget` are character budgets, not exact model-token counts. The final prompt limit is soft: complete historical transcript blocks may be removed, but authorization/system instructions, live input, and native tool-call/result records are preserved rather than clipped mid-rule.
 
-Tool guidance is conditional on enabled plugins, available tools, and request scope. A background job on Discord does not inherit Discord-only delivery instructions. Component `token_budget` values are advisory; they never truncate an instruction.
+Tool guidance is conditional on enabled plugins, available tools, and request scope. Component `token_budget` values are advisory; they never truncate an instruction.
 
 Reusable instructions and authorized history precede volatile requester/time/retrieval context. This permits prefix-cache reuse when the provider supports it and the prefix remains byte-identical; changing model, tool access, or configuration can invalidate that prefix. Maxwell does not promise a cache hit or a provider-specific token saving.
 
-Background workers put job IDs, goals, and context in user input after stable instructions. REM caps the entire serialized short-term slice at 120,000 characters, including JSON escapes and metadata; metadata-only overflow fails without consuming the slice. Explicit zero context-tier ceilings allocate nothing to that tier.
+Explicit zero context-tier ceilings allocate nothing to that tier. REM, context extraction, automatic memory summaries, delegated workers and automatic code repair have been removed; legacy settings for these actors are stripped during sanitization.
 
 
 ## Message reliability
@@ -164,11 +163,11 @@ Relevant controls include `live_turn_timeout_seconds`, `inbound_retry_attempts`,
 
 Current Maxwell includes `rag_memory.py`. `RAGMemoryManager` is a vector-backed, SQLite-backed memory manager for channel memory, long-term facts, and scoped shared context using an OpenAI-compatible embedding endpoint.
 
-`knowledge_graph.py` adds entity/relationship memory. REM-style consolidation is optional and controlled separately. Embedding/RAG settings live in the advanced `.env.example`; `doctor.py --probe` checks the configured embedding endpoint when RAG is enabled.
+`knowledge_graph.py` adds entity/relationship memory. There is no background model extracting or consolidating facts. Embedding/RAG settings live in the advanced `.env.example`; `doctor.py --probe` checks the configured embedding endpoint when RAG is enabled.
 
 ## Optional/background features
 
-Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Important examples include `ENABLE_RAG`, `ENABLE_AUTONOMY`, `ENABLE_REM`, and `ENABLE_SHELL`.
+Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Important examples include `ENABLE_RAG`, `ENABLE_AUTONOMY`, and `ENABLE_SHELL`.
 
 Simple installs keep token-spending background loops off by default. The exact dependency detection is implemented in `config.py` and reported by `doctor.py`.
 

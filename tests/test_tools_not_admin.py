@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from bot import TOOL_PROTOCOL
+from bot import TOOL_PROTOCOL, MAXWELL_BASE_KNOWLEDGE
 from control_defaults import DEFAULT_CONTROL
 from bot_tools import (
     BanMemberTool,
@@ -28,30 +28,30 @@ def test_tool_protocol_keeps_creative_tools_open():
         and "update_server_prompt" not in TOOL_PROTOCOL
     )
     assert (
-        "Sites, games, code, search, plugins and chat are open to everyone"
+        "Sites, games, code, search, plugins and ordinary chat are available to everyone"
         in TOOL_PROTOCOL
     )
     personality = DEFAULT_CONTROL["base_personality"].lower()
     assert "run tools" not in personality
     assert "politely decline" not in personality
-    # Personality may use {placeholders} instead of a literal name; the
-    # access rule still has to stay in the default text.
-    assert "open to everyone" in personality
+    # Access rules belong to the code-owned protocol, not mutable style.
+    assert "permission" not in personality
 
 
 def test_tool_protocol_states_dm_and_cross_chat_restrictions():
     text = TOOL_PROTOCOL.lower()
-    assert "in dms, discord moderation" in text
-    assert "send_message stays in the current chat" in text
-    assert "from a dm you cannot send" in text
+    assert "in dms, guild listing, moderation, structure and forwarding tools are unavailable" in text
+    assert "send_message from a dm stays in that chat" in text
+    assert "both bot and requester must have create_instant_invite there" in text
+    assert "sending to another channel or dm requires runtime admin authorization" in text
     assert "sites, search" in text
     assert "list_channels" in text
     assert "list_roles" in text
     assert "list_members" in text
-    assert "person asking" in text
-    assert "manage_messages" in text
+    assert "requester to have the matching discord permission" in MAXWELL_BASE_KNOWLEDGE.lower()
+    assert "manage_messages" in MAXWELL_BASE_KNOWLEDGE.lower()
     assert "owner/admin authorization" not in text
-    assert "call report" in text
+    assert "use report" in text
 
 
 def test_tool_descriptions_do_not_say_admin_only():
@@ -90,7 +90,6 @@ def test_leave_server_refuses_a_non_admin():
     result = asyncio.run(LeaveServerTool(bot).execute(msg, server="Villa"))
     assert result.startswith("Error:")
     assert "admin" in result.lower()
-
 
 
 def test_list_servers_works_for_anyone():

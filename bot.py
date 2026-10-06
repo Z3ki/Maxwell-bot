@@ -221,9 +221,7 @@ from providers import (  # noqa: E402
     ProviderEmptyResponseError,
     ProviderUsageExhaustedError,
 )
-from rag_memory import RAGMemoryManager, RemEventLog, MemoryRequester  # noqa: E402
-from jobs import BackgroundJobManager  # noqa: E402
-from autofix import schedule_tool_autofix  # noqa: E402
+from rag_memory import RAGMemoryManager, MemoryRequester  # noqa: E402
 from discord_threads import (  # noqa: E402
     ThreadStore,
     is_discord_thread,
@@ -241,7 +239,6 @@ from user_install import (  # noqa: E402
     is_user_install_message,
 )
 import legal_notice  # noqa: E402
-from rem import RemStore, load_rem_defaults, run_rem_once  # noqa: E402
 from tool_progress import make_progress as _make_tool_progress  # noqa: E402
 from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
     extract_reasoning,
@@ -253,6 +250,8 @@ import site_test  # noqa: E402
 from plugin_manager import PluginManager  # noqa: E402
 from tool_schemas import (  # noqa: E402
     RESULT_TOOL_NAMES,
+    TURN_ENDING_TOOL_NAMES,
+    returns_result,
     build_openai_tools,
     contract_groups,
     elide_tool_calls_for_history,
@@ -590,13 +589,6 @@ class MaxwellBot(commands.Bot):
         self.bot_name = ident["bot_name"]
         self.ai_provider: Any = None
         self.memory: Any = None
-        self.rem_log: Any = None
-        self.rem_store: Any = None
-        self.rem_enabled = self.config.REM_ENABLED
-        self.rem_interval_seconds = self.config.REM_INTERVAL_SECONDS
-        self.rem_max_turns = self.config.REM_MAX_TURNS
-        self.rem_prompt_body = load_rem_defaults()["prompt"]
-        self._rem_running = False
         self.tools = {}
         self.plugin_manager = PluginManager(self)
         # Bounded: a plain dict here kept one Lock alive per channel the bot
@@ -620,13 +612,6 @@ class MaxwellBot(commands.Bot):
             max_age=300.0,
             on_drop=self._on_reply_queue_drop,
         )
-        # Detached background sub-agent jobs for long tasks (sites, builds,
-        # research). A job frees the channel turn immediately and delivers
-        # later via channel.send. See jobs.py.
-        _jobs_data_dir = getattr(self.config, "DATA_DIR", "") or "data"
-        self.bg_jobs = BackgroundJobManager(
-            data_path=os.path.join(_jobs_data_dir, "background_jobs.json")
-        )
         # One reply per message id. Discord redelivers MESSAGE_CREATE after a
         # gateway resume; without this that is a second full reply, which
         # looks exactly like the bot spamming.
@@ -639,7 +624,7 @@ class MaxwellBot(commands.Bot):
             else "data/watermarks.json"
         )
         self._request_journal = RequestJournal(
-            os.path.join(_jobs_data_dir, "inbound_requests.sqlite3")
+            os.path.join(self.config.DATA_DIR or "data", "inbound_requests.sqlite3")
         )
         self._inbound_processing: set[str] = set()
         self._recovery_cursors: dict[str, int] = {}
@@ -667,7 +652,7 @@ class MaxwellBot(commands.Bot):
         # quiet server's single question times out waiting.
         self._ai_slots = FairSemaphore(self._ai_concurrency)
         # Per-call priority tracking. "user" calls (Discord replies)
-        # outrank "background" calls (autonomy, intel, context_cleanup, REM) so a
+        # outrank "background" calls (optional conversational autonomy) so a
         # slow upstream can't make the user wait behind a 60s background tick.
         # Active calls: asyncio.Task -> "user" | "background"
         self._ai_call_kind: dict[asyncio.Task, str] = {}
@@ -694,13 +679,6 @@ class MaxwellBot(commands.Bot):
         # him. The watch window and the debounce are derived from this rather
         # than being the same two constants for every room.
         self._watch_states: dict[str, Any] = {}
-        # channel_id -> monotonic time of that room's last context extraction,
-        # and the set of authors we have already extracted about. Both feed
-        # the extraction score: a room that just produced a fact has to clear
-        # a higher bar, and a voice we have never stored anything from clears
-        # a slightly lower one.
-        self._last_extract_at: dict[str, float] = {}
-        self._extracted_authors: set[str] = set()
         # channel_id -> pending watch follow-up. Wait a beat so a burst of
         # lines becomes one reply instead of one LLM turn per message.
         self._watch_debounce: dict[str, dict] = {}
@@ -816,22 +794,10 @@ class MaxwellBot(commands.Bot):
         self._reaction_seen_order: list[str] = []
         self._message_reactions: dict[str, list[dict]] = {}
         self._message_reactions_order: list[str] = []
-        self._recorded_rem_msg_ids: set[int] = (
-            set()
-        )  # "message_id" dedup for REM events
-        self._context_tasks: set[asyncio.Task] = set()
         # Fire-and-forget presence/housekeeping tasks. The loop keeps only a
         # weak reference to a running task, so anything not held here can be
         # garbage-collected mid-await and silently never finish.
         self._detached_tasks: set[asyncio.Task] = set()
-        # channel_id -> latest message deferred for context extraction. When the
-        # bot is mid-turn (replying / running a tool) in a room we DON'T fire the
-        # context watcher immediately — it would contend for AI slots and flood
-        # the channel with "watcher" calls. Instead we stash the newest message
-        # here and flush it once the turn finishes (see
-        # _flush_deferred_context_extraction). Only the LATEST message per channel
-        # is kept, so a burst collapses to one follow-up extract.
-        self._deferred_context: dict[str, Any] = {}
         self._trace_lock = asyncio.Lock()
         self._tasks: list[Any] = []
         # Last time we swept the task list for completed entries. Without this
@@ -840,10 +806,6 @@ class MaxwellBot(commands.Bot):
         self.autonomy_engine: Any = None  # initialized after tools
         self.autonomy_provider: Any = None
         self._autonomy_provider_sig: str = ""
-        # Auxiliary background agents (REM, context-cleanup, context-watcher)
-        # share this provider/model, separate from the autonomy tick loop.
-        self.aux_provider: Any = None
-        self._aux_provider_sig: str = ""
         self._tool_breaker = ToolCircuitBreaker(
             failure_threshold=5, recovery_seconds=30
         )
@@ -1302,204 +1264,12 @@ class MaxwellBot(commands.Bot):
             logger.warning(f"_get_autonomy_provider failed, falling back to main: {e}")
             return self.ai_provider
 
-    async def _get_aux_provider(self):
-        """Return a provider for the auxiliary background agents (REM,
-        context-cleanup, context-watcher).
-
-        Resolution order: aux_* control keys -> AUX_* env -> autonomy_*
-        control keys -> AUTONOMY_* env -> main ai_provider. This lets an
-        operator run the context-manager brains on a different (e.g.
-        cheaper/faster) model than the autonomy tick loop, while a fresh
-        install with no AUX_* config behaves exactly as before (all
-        background agents shared the autonomy endpoint).
-
-        Like ``_get_autonomy_provider``: build+cache a dedicated
-        OpenAICompatibleProvider keyed on the resolved (base_url, api_key, model,
-        disable_reasoning) signature so config churn doesn't leak
-        ClientSessions; re-probe initialize() when the cached provider is
-        unavailable so a transient failure self-heals; never raise (a
-        background tick must not crash over provider resolution).
-        """
-        try:
-            control = self._control or {}
-            base_url = (
-                str(control.get("aux_base_url", "") or "").strip()
-                or self.config.AUX_BASE_URL
-            )
-            api_key = (
-                str(control.get("aux_api_key", "") or "").strip()
-                or self.config.AUX_API_KEY
-            )
-            model = (
-                str(control.get("aux_model", "") or "").strip() or self.config.AUX_MODEL
-            )
-            if "aux_disable_reasoning" in control:
-                disable_reasoning = bool(control.get("aux_disable_reasoning", True))
-            else:
-                disable_reasoning = bool(self.config.AUX_DISABLE_REASONING)
-            # No dedicated aux endpoint configured -> resolve down to the
-            # autonomy provider (which itself falls back to the main
-            # provider). This preserves the pre-separation behaviour where
-            # REM/context-cleanup/context-watcher all shared autonomy's
-            # endpoint, and a per-call model override is still passed at
-            # call time below.
-            if not base_url:
-                old = self.aux_provider
-                if old is not None and hasattr(old, "close"):
-                    try:
-                        task = asyncio.create_task(old.close())
-                        self._track_task(task)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to schedule old aux provider close: {e}"
-                        )
-                self.aux_provider = None
-                self._aux_provider_sig = ""
-                # Fall through to autonomy so the model/base_url cascade is
-                # consistent for every caller without duplicating it here.
-                return await self._get_autonomy_provider()
-            sig = f"{base_url}|{api_key}|{model}|dr={_safe_int(disable_reasoning, 0)}"
-            cached = self.aux_provider if sig == self._aux_provider_sig else None
-            if cached is not None and getattr(cached, "available", False):
-                return cached
-            # Aux agents produce short JSON plans/audits — cap conservatively
-            # so we don't exceed the model's output limit.
-            aux_max_tokens = min(
-                _safe_int(self.config.AI_MAX_OUTPUT_TOKENS or 200000, 200000), 8192
-            )
-            if cached is None:
-                old = self.aux_provider
-                if old is not None and hasattr(old, "close"):
-                    try:
-                        task = asyncio.create_task(old.close())
-                        self._track_task(task)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to schedule old aux provider close: {e}"
-                        )
-                provider = self._make_chat_provider(
-                    name="aux",
-                    base_url=base_url,
-                    model=model or self.config.AI_MODEL,
-                    max_tokens=aux_max_tokens,
-                    temperature=self.config.AI_TEMPERATURE,
-                    api_key=api_key,
-                    disable_reasoning=disable_reasoning,
-                    fallback_base_url=self.config.AI_FALLBACK_BASE_URL,
-                    fallback_model=self.config.AI_FALLBACK_MODEL,
-                    fallback_api_key=self.config.AI_FALLBACK_API_KEY,
-                    fallback_disable_reasoning=self.config.AI_FALLBACK_DISABLE_REASONING,
-                    fallback_reasoning_effort=getattr(
-                        self.config, "AI_FALLBACK_REASONING_EFFORT", ""
-                    )
-                    or "",
-                    retry_attempts=self.config.AI_RETRY_ATTEMPTS,
-                    empty_response_retries=getattr(
-                        self.config, "AI_EMPTY_RESPONSE_RETRIES", None
-                    ),
-                    enable_audio_input=_owner_audio_input_enabled(self),
-                )
-            else:
-                provider = cached
-            try:
-                await provider.initialize()
-            except Exception as e:
-                logger.warning(f"Aux provider initialize() failed: {e}")
-            self.aux_provider = provider
-            self._aux_provider_sig = sig
-            if not getattr(provider, "available", False):
-                logger.warning(
-                    "Aux provider unavailable, falling back to main ai_provider for this tick"
-                )
-                return self.ai_provider
-            return provider
-        except Exception as e:
-            logger.warning(f"_get_aux_provider failed, falling back to main: {e}")
-            return self.ai_provider
-
-    def _get_aux_model(self) -> str | None:
-        """Resolve the per-call model override for aux background agents.
-
-        Order: aux_model control key -> AUX_MODEL env -> autonomy_model
-        control key -> AUTONOMY_MODEL env -> None (use the resolved
-        provider's own model). Returning None lets a caller that fell
-        back to the main ai_provider still pass model=None and use the
-        provider default.
-        """
-        control = self._control or {}
-        return (
-            str(control.get("aux_model", "") or "").strip()
-            or self.config.AUX_MODEL
-            or str(control.get("autonomy_model", "") or "").strip()
-            or self.config.AUTONOMY_MODEL
-            or None
-        )
 
     def _setup_memory(self):
         self.memory = RAGMemoryManager(
             data_dir=self.config.DATA_DIR, max_messages=self.config.MEMORY_MESSAGE_LIMIT
         )
 
-        # Wire the LTM auto-summarizer's LLM hook to the live ai_provider
-        # (ollama-backed). The summarizer passes a transcript to the LLM
-        # and expects a list of durable facts back.
-        async def _ltm_summarizer_fn(transcript: str, max_facts: int = 20) -> list:
-            try:
-                prompt = (
-                    "Extract durable facts from this transcript: preferences, "
-                    "identity, technical facts, ongoing tasks, project status. "
-                    "Skip greetings, reactions, ephemeral chatter. One fact per "
-                    "line, terse complete sentences. At most "
-                    f"{max_facts} facts. If nothing durable, return an empty list.\n\n"
-                    "TRANSCRIPT:\n" + transcript + "\n\n"
-                    'Return JSON: {"facts": ["fact 1", "fact 2", ...]}'
-                )
-                # generate_response is async + streaming-friendly; pass
-                # max_tokens=1200 to bound the summary length.
-                resp = await self._generate_response(
-                    [{"role": "user", "content": prompt}],
-                    max_tokens=1200,
-                    temperature=0.2,
-                )
-                text = str(resp) if resp else ""
-                import json as _json
-                import re as _re
-
-                # Strip ```json ``` markdown fence if present.
-                fence_match = _re.search(
-                    r"```(?:json)?\s*(\{.*?\})\s*```",
-                    text,
-                    _re.DOTALL,
-                )
-                if fence_match:
-                    text = fence_match.group(1)
-                try:
-                    data = _json.loads(text)
-                    if isinstance(data, dict):
-                        return list(data.get("facts", []))
-                except Exception as e:
-                    logger.debug("Fact JSON parse failed, trying line split: %s", e)
-                # Sometimes the model returns raw lines, not JSON.
-                lines = [
-                    ln.strip().lstrip("-•* ").strip()
-                    for ln in (str(resp) if resp else "").splitlines()
-                    if ln.strip()
-                    and not ln.strip().startswith("{")
-                    and not ln.strip().startswith("}")
-                    and not ln.strip().startswith("```")
-                ]
-                return lines[:max_facts] if lines else []  # type: ignore[index]  # always len > 0
-            except Exception as e:
-                logger.warning(f"LTM summarizer LLM call failed: {e}")
-                return []
-
-        self.memory._ltm_summarizer_fn = _ltm_summarizer_fn
-        self.rem_log = RemEventLog(
-            data_dir=self.config.DATA_DIR, max_events=self.config.REM_EVENT_BUFFER_MAX
-        )
-        self.rem_store = RemStore(
-            self.config.DATA_DIR, run_history=self.config.REM_RUN_HISTORY
-        )
         self.inbox = InboxStore(self.config.DATA_DIR)
         self.thread_store = ThreadStore(self.config.DATA_DIR)
         self.thread_store.load()
@@ -1793,8 +1563,8 @@ class MaxwellBot(commands.Bot):
         DM is one user_id — but nothing used that, so the bot could learn your
         name in one server and meet you as a stranger in the next. This is the
         cheap half of the fix: one upsert per stored message recording who was
-        seen, under what name, and where. The expensive half (facts) is
-        written by the extractor.
+        seen, under what name, and where. Historical scoped facts remain
+        separate; there is no automatic fact extractor.
 
         Runs on the message path, so it must never raise and never block: an
         identity row is a nicety, a dropped message is not.
@@ -3389,8 +3159,6 @@ class MaxwellBot(commands.Bot):
         active = getattr(self, "_active_requests", None) or {}
         if any(task is not None and not task.done() for task in active.values()):
             return "a request is still running"
-        if getattr(self, "_rem_running", False):
-            return "REM is running"
         with contextlib.suppress(Exception):
             sleeping, _ = self._is_sleeping()
             if sleeping:
@@ -3660,20 +3428,6 @@ class MaxwellBot(commands.Bot):
         await self.plugin_manager.complete_pending_setups()
         await self.ai_provider.initialize()
         self.memory.load_from_disk()
-        self.rem_log.load_from_disk()
-        # Backfill the bot's own old replies from REM into channel
-        # memory. Up until this fix the bot's own reply text only
-        # landed in REM (the dream log), never in the channel memory
-        # the LLM context pulls from — so a user asking "what did you
-        # explain about X?" got a blank stare from the model. We now
-        # write every reply to channel memory (see _handle_message
-        # normal-reply / send_message / auto_site branches) but for
-        # the historical replies still sitting in REM this one-shot
-        # backfill recovers them. Idempotent: synthetic message_ids
-        # are derived from the REM event so add_to_channel_memory's
-        # dedup skips anything we already wrote.
-        await self._backfill_bot_replies_from_rem()
-        await self._load_rem_control()
         self._load_sites()
         self._load_admins()
         self._load_auto_channels()
@@ -3708,7 +3462,6 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._control_reload_loop()),
             asyncio.create_task(self._command_queue_loop()),
             asyncio.create_task(self._discord_state_loop()),
-            asyncio.create_task(self._rem_scheduler_loop()),
             asyncio.create_task(self._watermark_save_loop(), name="watermark-save"),
             asyncio.create_task(self._inbound_retry_loop(), name="inbound-retry"),
         ]
@@ -5599,10 +5352,6 @@ class MaxwellBot(commands.Bot):
                 memory_item = self._message_memory_item(message)
                 try:
                     await self.add_message_to_memory(channel_id, memory_item, message)
-                    if self.rem_log:
-                        # Raw message only — passing rendered memory text would
-                        # double-apply render_discord_context_text in REM.
-                        await self._record_rem_event(message, "user")
                 except asyncio.CancelledError:
                     # 2026-07-31: CancelledError is BaseException, not Exception.
                     # The previous `except Exception` block silently dropped the
@@ -5611,13 +5360,12 @@ class MaxwellBot(commands.Bot):
                     # coroutine mid-INSERT. Log it explicitly so silent message
                     # drops become visible.
                     logger.warning(
-                        f"Memory/REM write cancelled in on_message "
+                        f"Memory write cancelled in on_message "
                         f"(msg_id={memory_item.get('message_id')} channel={channel_id})"
                     )
                     raise  # surface cancellation up to the caller
                 except Exception as e:
-                    logger.warning(f"Memory/REM write failed in on_message: {e}")
-            self._maybe_schedule_context_extraction(message)
+                    logger.warning(f"Memory write failed in on_message: {e}")
         finally:
             # The critical section ends here. Everything below — media
             # downloads, gating, and the reply itself — runs unlocked, so a
@@ -5810,15 +5558,10 @@ class MaxwellBot(commands.Bot):
         args = parts[1] if len(parts) > 1 else None
         known = {
             "stop",
-            "bg",
-            "jobs",
-            "job",
             "clearmem",
             "downvote",
             "neg",
-            "summarize",
             "context",
-            "rem",
             "autonomy",
             "drug",
             "sleep",
@@ -5847,13 +5590,11 @@ class MaxwellBot(commands.Bot):
         admin_commands = {
             "clearmem",
             "context",
-            "rem",
             "autonomy",
             "progress",
             "ticket",
             "downvote",
             "neg",
-            "summarize",
             "solo",
             "x",
             "debug",
@@ -5864,16 +5605,6 @@ class MaxwellBot(commands.Bot):
         channel_id = str(message.channel.id)
         try:
             if cmd == "stop":
-                # `/stop arguments:job <id>` cancels a background job instead of the live turn.
-                _stop_args = (args or "").strip().split()
-                if len(_stop_args) >= 2 and _stop_args[0].lower() == "job":
-                    _ok, _msg = self.bg_jobs.cancel(
-                        _stop_args[1],
-                        requester_id=getattr(message.author, "id", ""),
-                        is_admin=self._is_admin(message.author.id),
-                    )
-                    await message.channel.send(_msg)
-                    return
                 # `/stop` must stop everything for this room: the turn that is
                 # generating AND anything queued behind it. Cancelling only the
                 # in-flight task let the next queued reply start immediately,
@@ -5923,44 +5654,6 @@ class MaxwellBot(commands.Bot):
                     if prev is None or now - float(prev) > 30.0:
                         last[channel_id] = now
                         await message.channel.send("nothing to stop")
-            elif cmd == "bg":
-                await message.channel.send(
-                    "Detached AI jobs are retired. Ask me here and I'll handle the request."
-                )
-            elif cmd == "jobs":
-                _gid = str(message.guild.id) if message.guild else "DM"
-                _uid = str(message.author.id)
-                _is_adm = self._is_admin(message.author.id)
-                await message.channel.send(
-                    self.bg_jobs.list_text(
-                        limit=10,
-                        guild_id=_gid,
-                        user_id=None if _is_adm else _uid,
-                    )
-                )
-            elif cmd == "job":
-                _job_args = (args or "").strip().split(maxsplit=1)
-                if len(_job_args) == 2 and _job_args[0].lower() == "cancel":
-                    _ok, _msg = self.bg_jobs.cancel(
-                        _job_args[1],
-                        requester_id=getattr(message.author, "id", ""),
-                        is_admin=self._is_admin(message.author.id),
-                    )
-                    await message.channel.send(_msg)
-                else:
-                    _job = self.bg_jobs.get(_job_args[0] if _job_args else "")
-                    _gid = str(message.guild.id) if message.guild else ""
-                    _uid = str(message.author.id)
-                    _is_adm = self._is_admin(message.author.id)
-                    if _job is None:
-                        await message.channel.send("usage: `/job arguments:cancel <id>`")
-                    elif not _is_adm and ((_gid and _job.guild_id != _gid) or (not _gid and _job.user_id != _uid)):
-                        await message.channel.send("job not found.")
-                    else:
-                        await message.channel.send(
-                            f"`{_job.id}` [{_job.status}] {_job.goal[:200]}"
-                            + (f"\n{_job.progress[:500]}" if _job.progress else "")
-                        )
             elif cmd == "clearmem":
                 active = self._active_requests.get(channel_id)
                 if active is not None and not active.done():
@@ -6043,24 +5736,8 @@ class MaxwellBot(commands.Bot):
                     await message.channel.send(
                         "Usage: `/negative-memory arguments:add <text>` · `list` · `del <id>`"
                     )
-            elif cmd == "summarize":
-                # Manually trigger the LTM auto-summarizer over the
-                # last N hours of user messages.
-                hours = 24
-                if args:
-                    with contextlib.suppress(ValueError):
-                        hours = max(1, min(168, int(args.strip())))
-                await message.channel.send(f"⏳ summarizing last {hours}h of messages…")
-                added = await self.memory.summarize_recent_to_ltm(hours=hours)
-                await message.channel.send(
-                    f"✓ wrote {added} new LTM facts from the last {hours}h."
-                    if added
-                    else "nothing new worth remembering."
-                )
             elif cmd == "context":
                 await self._handle_context_command(message, args)
-            elif cmd == "rem":
-                await self._handle_rem_command(message, args)
             elif cmd == "autonomy":
                 await self._handle_autonomy_command(message, args)
             elif cmd == "drug":
@@ -7106,227 +6783,6 @@ class MaxwellBot(commands.Bot):
         except Exception as e:
             logger.debug("ticket channel greet failed for #%s: %s", name, e)
 
-    async def _load_rem_control(self):
-        try:
-            defaults = load_rem_defaults()
-            control = await self.rem_store.load_control()
-            self.rem_enabled = parse_bool(
-                control.get("enabled"), self.config.REM_ENABLED
-            )
-            self.rem_interval_seconds = max(
-                10,
-                _safe_int(
-                    control.get(
-                        "interval_seconds",
-                        defaults.get(
-                            "interval_seconds", self.config.REM_INTERVAL_SECONDS
-                        ),
-                    ),
-                    self.config.REM_INTERVAL_SECONDS,
-                ),
-            )
-            self.rem_max_turns = max(
-                0,
-                min(
-                    _safe_int(
-                        control.get(
-                            "max_turns",
-                            defaults.get("max_turns", self.config.REM_MAX_TURNS),
-                        ),
-                        self.config.REM_MAX_TURNS,
-                    ),
-                    10,
-                ),
-            )
-            self.rem_prompt_body = str(
-                control.get("prompt") or defaults.get("prompt") or self.rem_prompt_body
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load REM control: {e}")
-
-    async def _save_rem_control(self):
-        await self.rem_store.save_control(
-            {
-                "enabled": self.rem_enabled,
-                "interval_seconds": self.rem_interval_seconds,
-                "max_turns": self.rem_max_turns,
-                "prompt": self.rem_prompt_body,
-            }
-        )
-
-    async def _rem_status(self) -> dict:
-        state = await self.rem_store.load_state()
-        runs = await self.rem_store.load_runs()
-        last = runs[-1] if runs else {}
-        return {
-            "enabled": self.rem_enabled,
-            "interval_s": self.rem_interval_seconds,
-            "last_run": state.get("last_rem_run_ts") or last.get("ts") or "",
-            "last_audit_preview": (state.get("last_audit") or last.get("audit") or "")[
-                :500
-            ],
-            "events_buffered": await self.rem_log.size(),
-            "model": self.config.AI_REM_MODEL,
-            "running": self._rem_running or bool(state.get("running")),
-        }
-
-    async def _run_rem_once_guarded(self) -> tuple[bool, str, dict | None]:
-        if self._rem_running:
-            return False, "REM is already running", None
-        self._rem_running = True
-        try:
-            # Set persistent running flag. Wrapped so a patch_state failure
-            # (disk error / corrupt store) doesn't escape before the finally
-            # that resets _rem_running — that used to wedge REM permanently
-            # (every later call saw _rem_running=True).
-            with contextlib.suppress(Exception):
-                await self.rem_store.patch_state(
-                    {
-                        "running": True,
-                        "running_since": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-            timeout = max(
-                10,
-                min(
-                    _safe_int(
-                        self._control.get("ai_timeout_seconds", 3600) or 3600, 3600
-                    ),
-                    7200,
-                ),
-            )
-            await self._acquire_ai_slot(timeout=timeout, key="rem")
-            try:
-                # REM uses the aux provider/model (the context-manager brain),
-                # which falls back to the autonomy provider then the main
-                # provider. This keeps REM on a separate model from the
-                # autonomy tick loop when AUX_* is configured, and behaves
-                # exactly as before (shared autonomy endpoint) when it isn't.
-                rem_provider = await self._get_aux_provider()
-                if not callable(
-                    getattr(rem_provider, "generate_response", None)
-                ) and not callable(
-                    getattr(rem_provider, "generate_chat_completion", None)
-                ):
-                    rem_provider = self.ai_provider
-                rem_model = self._get_aux_model() or self.config.AI_REM_MODEL
-                run = await run_rem_once(
-                    memory_manager=self.memory,
-                    rem_log=self.rem_log,
-                    provider=rem_provider,
-                    data_dir=self.config.DATA_DIR,
-                    model=rem_model,
-                    max_turns=self.rem_max_turns,
-                    run_history=self.config.REM_RUN_HISTORY,
-                    prompt_body=self.rem_prompt_body,
-                    timeout=timeout,
-                    # REM produces a short audit, not free-form prose; cap
-                    # max_tokens like autonomy so we don't blow past the model's
-                    # output limit (default AI_MAX_OUTPUT_TOKENS=200000 risks a 400).
-                    max_tokens=8192,
-                )
-            finally:
-                await self._release_ai_slot()
-            logger.info(f"REM pass complete: {run.get('audit', '')[:160]}")
-            return True, "ok", run
-        except Exception as e:
-            logger.warning(f"REM pass failed: {e}")
-            return False, str(e), None
-        finally:
-            self._rem_running = False
-            # Always clear persistent running flag on exit (success, error, or cancel).
-            # Previous logic only cleared on !success path, leaving "running": true after
-            # normal completion (dashboard + ,rem saw stuck REM). Also covers CancelledError.
-            with contextlib.suppress(Exception):
-                await self.rem_store.patch_state(
-                    {"running": False, "running_since": ""}
-                )
-
-    async def _rem_scheduler_loop(self):
-        consecutive_failures = 0
-        while True:
-            base_interval = max(10, _safe_int(self.rem_interval_seconds or 600, 600))
-            # Backoff on consecutive failures so a dead/unreachable provider
-            # doesn't re-drain and re-attempt the same event slice every
-            # interval forever (wasting AI slots + CPU). Mirrors intel/context_cleanup.
-            backoff = min(consecutive_failures, 5)
-            await asyncio.sleep(base_interval * (1 + backoff))
-            await self._load_rem_control()
-            if not self.rem_enabled:
-                consecutive_failures = 0
-                continue
-            try:
-                ok, _msg, _run = await self._run_rem_once_guarded()
-                if ok:
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-            except asyncio.CancelledError as _exc:
-                raise
-            except Exception as e:
-                consecutive_failures += 1
-                logger.warning(f"REM scheduler error: {e}")
-
-    async def _handle_rem_command(self, message, args: str | None):
-        arg = (args or "").strip().lower()
-        if not arg:
-            status = await self._rem_status()
-            await message.channel.send(
-                "REM status\n"
-                f"enabled: {status['enabled']} running: {status['running']}\n"
-                f"interval: {status['interval_s']}s model: {status['model']}\n"
-                f"last run: {status['last_run'] or 'never'} events: {status['events_buffered']}\n"
-                f"audit: {status['last_audit_preview'] or '-'}"
-            )
-            return
-        if arg == "now":
-            ok, reason, run = await self._run_rem_once_guarded()
-            await message.channel.send(
-                f"REM done: {(run or {}).get('audit', reason)[:1500]}"
-                if ok
-                else f"REM not started: {reason}"
-            )
-            return
-        if arg == "on":
-            self.rem_enabled = True
-            await self._save_rem_control()
-            await message.channel.send("REM enabled for this process.")
-            return
-        if arg == "off":
-            self.rem_enabled = False
-            await self._save_rem_control()
-            await message.channel.send("REM disabled for this process.")
-            return
-        if arg.startswith("audit"):
-            parts = arg.split()
-            limit = 5
-            if len(parts) > 1:
-                with contextlib.suppress(ValueError):
-                    limit = max(1, min(_safe_int(parts[1], 1), 20))
-            runs = (await self.rem_store.load_runs())[-limit:]
-            if not runs:
-                await message.channel.send("No REM runs yet.")
-                return
-            lines = [
-                f"{r.get('ts', '?')} turns={r.get('turns_used', 0)} events={r.get('events', 0)} {str(r.get('audit', ''))[:500]}"
-                for r in runs
-            ]
-            for chunk in self._split_response("\n".join(lines), limit=1900):
-                await message.channel.send(chunk)
-            return
-        if arg == "fix":
-            enabled = self.rem_enabled
-            defaults = load_rem_defaults()
-            self.rem_prompt_body = defaults["prompt"]
-            self.rem_interval_seconds = defaults["interval_seconds"]
-            self.rem_max_turns = defaults["max_turns"]
-            self.rem_enabled = enabled
-            await self._save_rem_control()
-            await message.channel.send("REM defaults restored.")
-            return
-        await message.channel.send(
-            "Usage: `/rem arguments:<status|now|on|off|audit [N]|fix>`"
-        )
 
     async def _handle_autonomy_command(self, message, args: str | None):
         arg = (args or "").strip().lower()
@@ -7519,158 +6975,6 @@ class MaxwellBot(commands.Bot):
             parts.append("[embed]")
         return " ".join(p for p in parts if p).strip()
 
-    async def _record_rem_event(self, message, role: str, content: str | None = None):
-        if str(getattr(message, "response_visibility", "public") or "public") == "private":
-            return
-        try:
-            msg_id = getattr(message, "id", None)
-            if msg_id and role == "user":
-                if msg_id in self._recorded_rem_msg_ids:
-                    return
-                self._recorded_rem_msg_ids.add(msg_id)
-                if len(self._recorded_rem_msg_ids) > 1000:
-                    self._recorded_rem_msg_ids = set(
-                        list(self._recorded_rem_msg_ids)[-500:]
-                    )
-
-            visible = self._visible_event_content(message, content)
-            if not visible:
-                return
-            event_ts = (
-                _message_created_at_iso(message)
-                if role == "user"
-                else datetime.now(timezone.utc).isoformat()
-            )
-            mentions = [
-                {
-                    "id": str(user.id),
-                    "name": getattr(user, "display_name", str(user.id)),
-                }
-                for user in list(getattr(message, "mentions", []) or [])[:10]
-            ]
-            reply_meta = self._reply_meta_from_message(message)
-
-            await self.rem_log.record(
-                {
-                    "ts": event_ts,
-                    "channel_id": str(message.channel.id),
-                    "guild_id": str(message.guild.id) if message.guild else None,
-                    "message_id": str(msg_id or ""),
-                    "user_id": str(message.author.id)
-                    if role == "user"
-                    else (str(self.user.id) if self.user else ""),
-                    "user_name": message.author.display_name
-                    if role == "user"
-                    else self.bot_name,
-                    "role": role,
-                    "content": visible,
-                    "mentions": mentions,
-                    **reply_meta,
-                    "auto_mode": str(message.channel.id) in self._auto_channels,
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Failed to record REM event: {e}")
-
-    async def _backfill_bot_replies_from_rem(self) -> None:
-        """One-shot recovery: copy the bot's own past replies from REM
-        into channel memory so the LLM context can find them.
-
-        Before this fix, the bot's own reply text only landed in REM
-        (the dream log), never in the channel memory the LLM context
-        pulls from. A user asking "what did you explain about X?" got a
-        blank stare. Every reply path now writes to channel memory
-        going forward; this recovers the historical ones still sitting
-        in REM (the buffer is capped at 500 events so the recovery is
-        necessarily partial, but anything in REM is recent and the
-        channels the user actually pings are usually the ones with
-        recent activity).
-
-        Idempotent: synthetic message_ids are derived from the REM
-        event's ts+channel so ``add_to_channel_memory``'s dedup skips
-        anything we already wrote. Running this on every startup is
-        cheap (the in-memory dict is fast).
-        """
-        if not getattr(self, "rem_log", None) or not getattr(self, "memory", None):
-            return
-        if not self._control.get("store_memory", True):
-            return
-        try:
-            events = list(getattr(self.rem_log, "events", []) or [])
-        except Exception as e:
-            logger.warning(f"Backfill: could not read REM events: {e}")
-            return
-
-        bot_user_id = str(self.user.id) if self.user else ""
-        written = 0
-        skipped = 0
-        for ev in events:
-            try:
-                if not isinstance(ev, dict):
-                    continue
-                if ev.get("role") != "assistant":
-                    continue
-                channel_id = str(ev.get("channel_id") or "").strip()
-                if not channel_id:
-                    continue
-                content = str(ev.get("content") or "").strip()
-                if not content:
-                    continue
-                # Strip the same artifacts the normal-reply path strips
-                # so the model sees clean content in the LLM context.
-                # These come from the bot emitting the token as part of
-                # its output (e.g. when it called send_message as a
-                # tool and the visible reply came back through).
-                for token in (
-                    "__NO_RESPONSE__",
-                    "__SHELL_SENT__",
-                    "__MEME_SENT__",
-                    "__MEDIA_SENT__",
-                    "__MESSAGE_SENT__",
-                ):
-                    content = content.replace(token, "")
-                content = content.strip()
-                if not content:
-                    continue
-                ts = str(ev.get("ts") or "")
-                # Synthetic message_id derived from the REM event so
-                # dedup works on re-runs. Prepend a namespace prefix
-                # (``rem_backfill:``) so it can't collide with a real
-                # Discord message_id.
-                synthetic_id = f"rem_backfill:{channel_id}:{ts}"
-                try:
-                    await self.memory.add_to_channel_memory(
-                        channel_id,
-                        {
-                            "author": self.bot_name,
-                            # 2026-07-22: drop the bogus "self" literal fallback.
-                            # A non-numeric author_id ("self") never matches
-                            # self_user_id in _build_messages is_self, so the
-                            # bot's backfilled reply was rendered as a user turn.
-                            # Empty string falls back to name-only matching,
-                            # which correctly detects Maxwell via bot_name.
-                            "author_id": ev.get("user_id") or bot_user_id or "",
-                            "author_is_bot": True,
-                            "content": content,
-                            "message_id": synthetic_id,
-                            "guild_id": str(ev.get("guild_id") or ""),
-                            "timestamp": ts or datetime.now(timezone.utc).isoformat(),
-                        },
-                    )
-                    written += 1
-                except Exception as e:  # noqa: BLE001
-                    logger.debug(
-                        f"Backfill: failed to write assistant event to channel {channel_id}: {e}"
-                    )
-                    skipped += 1
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"Backfill: skipping malformed REM event: {e}")
-                skipped += 1
-        if written or skipped:
-            logger.info(
-                f"REM backfill: wrote {written} bot replies to channel memory"
-                + (f" ({skipped} skipped)" if skipped else "")
-            )
 
     def _load_control(self, force: bool = False):
         path = Path(self.config.DATA_DIR) / "bot_control.json"
@@ -7763,7 +7067,7 @@ class MaxwellBot(commands.Bot):
     def _sync_audio_input_flags(self) -> None:
         """Keep every provider's audio flag in lockstep with process_audio."""
         enabled = _owner_audio_input_enabled(self)
-        for attr in ("ai_provider", "autonomy_provider", "aux_provider"):
+        for attr in ("ai_provider", "autonomy_provider"):
             provider = getattr(self, attr, None)
             if provider is not None:
                 provider.enable_audio_input = enabled
@@ -7778,113 +7082,11 @@ class MaxwellBot(commands.Bot):
                 self._load_blacklist(quiet=True)
                 self._load_sites(quiet=True)
                 self._load_control()
-                await self._load_rem_control()
             except asyncio.CancelledError as _exc:
                 raise
             except Exception as e:
                 logger.error(f"Control reload loop error: {e}")
 
-    def _context_source_kind(self, message) -> str:
-        if isinstance(message.channel, discord.DMChannel):
-            return "dm"
-        if isinstance(message.channel, discord.GroupChannel):
-            return "group"
-        if message.guild:
-            return "guild"
-        return "unknown"
-
-    def _extract_threshold(self) -> float:
-        raw = (getattr(self, "_control", None) or {}).get(
-            "cross_context_extract_threshold", watch_policy.EXTRACT_THRESHOLD
-        )
-        try:
-            return max(0.0, min(float(raw), 1.0))
-        except (TypeError, ValueError):
-            return watch_policy.EXTRACT_THRESHOLD
-
-    def _should_extract_context(self, message) -> bool:
-        """Is this message worth spending a context-watcher call on?
-
-        This used to be a list of about fifteen English phrases — "remember",
-        "i like", "my name is". Anything said in other words was dropped, and
-        "I like it" about lunch was kept. It is now a density score over
-        structure: length, lexical variety, named things, where it was said,
-        and how recently this room already produced a fact. No wording rules,
-        so it works for a rephrase and for someone not typing in English.
-
-        The model behind _extract_shared_context_fact still makes the real
-        call and still answers should_store:false — this only decides whether
-        asking it is worth the request.
-        """
-        # Private user-install turns are kept in a tenant-specific conversation
-        # context. Never send their content to the shared context extractor,
-        # even as a user-scoped fact: later public turns could retrieve it.
-        if str(getattr(message, "response_visibility", "public") or "public") == "private":
-            return False
-        if not self._control.get(
-            "cross_context_enabled", True
-        ) or not self._control.get("cross_context_extract_enabled", True):
-            return False
-        combined = message_combined_content(message)
-        has_media = any(
-            getattr(src, "attachments", None) or getattr(src, "embeds", None)
-            for src in iter_message_payloads(message)
-        )
-        if not combined and not has_media:
-            return False
-        author = getattr(message, "author", None)
-        author_id = str(getattr(author, "id", "") or "")
-        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
-        is_admin = False
-        with contextlib.suppress(Exception):
-            is_admin = bool(author is not None and self._is_admin(author.id))
-        since = math.inf
-        last = (getattr(self, "_last_extract_at", None) or {}).get(channel_id)
-        if last is not None:
-            with contextlib.suppress(RuntimeError):
-                since = max(0.0, asyncio.get_running_loop().time() - last)
-        ctx = watch_policy.ExtractionContext(
-            text=combined,
-            is_dm=isinstance(getattr(message, "channel", None), discord.DMChannel),
-            author_is_admin=is_admin,
-            has_attachments=has_media,
-            since_last_extract=since,
-            author_seen_before=author_id
-            in (getattr(self, "_extracted_authors", None) or set()),
-        )
-        score = watch_policy.extraction_score(ctx)
-        threshold = self._extract_threshold()
-        if score.value >= threshold:
-            logger.debug(
-                "Context extract: %.2f >= %.2f (%s)",
-                score.value,
-                threshold,
-                ", ".join(score.reasons),
-            )
-            return True
-        return False
-
-    def _note_extraction_ran(self, message) -> None:
-        """Remember that this room and author just produced an extraction."""
-        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
-        author_id = str(getattr(getattr(message, "author", None), "id", "") or "")
-        store = getattr(self, "_last_extract_at", None)
-        if store is None:
-            self._last_extract_at = {}
-            store = self._last_extract_at
-        with contextlib.suppress(RuntimeError):
-            store[channel_id] = asyncio.get_running_loop().time()
-        if len(store) > 500:
-            for stale in list(store)[:250]:
-                store.pop(stale, None)
-        seen = getattr(self, "_extracted_authors", None)
-        if seen is None:
-            self._extracted_authors = set()
-            seen = self._extracted_authors
-        if author_id:
-            seen.add(author_id)
-            if len(seen) > 2000:
-                self._extracted_authors = set(list(seen)[-1000:])
 
     def _channel_turn_active(self, channel_id: str) -> bool:
         """True when a reply/tool turn is in-flight for this channel."""
@@ -7893,401 +7095,6 @@ class MaxwellBot(commands.Bot):
             return True
         return channel_id in (getattr(self, "_replying_channels", None) or set())
 
-    def _flush_deferred_context_extraction(self, channel_id: str) -> None:
-        """Run the latest deferred extract once a turn completes."""
-        message = (getattr(self, "_deferred_context", None) or {}).pop(
-            str(channel_id), None
-        )
-        if message is None:
-            return
-        self._maybe_schedule_context_extraction(message)
-
-    def _maybe_schedule_context_extraction(self, message):
-        if not self._should_extract_context(message):
-            return
-        channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
-        # While a reply/tool turn is running in this room, don't fire the watcher
-        # now — stash the newest message and run it after the turn finishes. This
-        # stops the watcher from polling every message a tool posts and flooding
-        # the channel with "watcher" calls that contend for AI slots.
-        if channel_id and self._channel_turn_active(channel_id):
-            self._deferred_context[channel_id] = message
-            return
-        if len(self._context_tasks) >= 20:
-            logger.warning("Skipping context extraction; backlog is full")
-            return
-        # Record it at schedule time, not on success: the point of the recency
-        # term is to space out calls, and a call that returns should_store
-        # false cost the same request as one that stored something.
-        self._note_extraction_ran(message)
-        task = asyncio.create_task(self._extract_shared_context_fact(message))
-        self._context_tasks.add(task)
-        task.add_done_callback(self._context_tasks.discard)
-        if len(self._context_tasks) > 20:
-            for stale in list(self._context_tasks)[:5]:
-                if stale.done():
-                    self._context_tasks.discard(stale)
-
-    @staticmethod
-    def _json_object_from_text(text: str) -> dict:
-        text = (text or "").strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as _exc:
-            pass
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            return {}
-        try:
-            data = json.loads(match.group(0))
-            return data if isinstance(data, dict) else {}
-        except json.JSONDecodeError as _exc:
-            return {}
-
-    @staticmethod
-    def _sensitive_context_text(text: str) -> bool:
-        lowered = (text or "").lower()
-        sensitive = (
-            "password",
-            "token",
-            "api key",
-            "apikey",
-            "secret",
-            "private key",
-            "address",
-            "phone",
-            "ssn",
-            "social security",
-            "credit card",
-            "card number",
-            "2fa",
-            "otp",
-        )
-        return any(word in lowered for word in sensitive)
-
-    def _normalize_context_entry(self, message, data: dict) -> dict | None:
-        if str(getattr(message, "response_visibility", "public") or "public") == "private":
-            return None
-        if not isinstance(data, dict) or not data.get("should_store"):
-            return None
-        summary = " ".join(
-            str(data.get("summary") or data.get("content") or "").split()
-        )[:1000]
-        if not summary:
-            return None
-        try:
-            importance = int(data.get("importance", 5))
-        except (TypeError, ValueError):
-            importance = 5
-        min_importance = max(
-            1,
-            min(
-                _safe_int(self._control.get("cross_context_min_importance", 5) or 5, 5),
-                10,
-            ),
-        )
-        if importance < min_importance:
-            return None
-
-        is_admin = self._is_admin(message.author.id)
-        is_dm = isinstance(message.channel, discord.DMChannel)
-        guild_id = str(message.guild.id) if message.guild else ""
-        channel_id = str(message.channel.id)
-        author_id = str(message.author.id)
-        scope = str(data.get("scope") or "").strip().lower()
-        visibility = str(data.get("visibility") or "shared").strip().lower()
-        if visibility not in {"private", "shared", "admin_only", "public_hint"}:
-            visibility = "shared"
-
-        # Non-admins may only create user-scoped facts (never global/guild/channel shared).
-        if is_admin:
-            allowed_scopes = {"global", f"user:{author_id}", f"channel:{channel_id}"}
-            if guild_id:
-                allowed_scopes.add(f"guild:{guild_id}")
-            if is_dm:
-                allowed_scopes.add(f"dm:{author_id}")
-        else:
-            allowed_scopes = {f"user:{author_id}"}
-            if is_dm:
-                allowed_scopes.add(f"dm:{author_id}")
-        if not scope:
-            scope = "global" if is_admin and is_dm else f"user:{author_id}"
-        if not is_admin:
-            # Force private user facts for non-admins (prevents shared-context poison).
-            scope = (
-                f"user:{author_id}"
-                if not is_dm
-                else (
-                    f"dm:{author_id}"
-                    if f"dm:{author_id}" in allowed_scopes
-                    else f"user:{author_id}"
-                )
-            )
-            if visibility not in {"private", "admin_only"}:
-                visibility = "private"
-        if is_dm and not is_admin:
-            scope = f"user:{author_id}"
-            if visibility != "admin_only":
-                visibility = "private"
-        if (
-            is_dm
-            and is_admin
-            and scope.startswith("guild:")
-            and self._control.get("cross_context_dm_to_global_admin_only", True)
-        ):
-            pass
-        elif scope not in allowed_scopes and not (
-            is_admin and (scope == "global" or scope.startswith("guild:"))
-        ):
-            scope = f"user:{author_id}"
-        if self._sensitive_context_text(summary):
-            visibility = "admin_only" if is_admin else "private"
-            if not is_admin:
-                scope = f"user:{author_id}"
-
-        tags = data.get("tags", [])
-        if isinstance(tags, str):
-            tags = [tags]
-        if not isinstance(tags, list):
-            tags = []
-        expires_at = ""
-        try:
-            hours = float(data.get("expires_in_hours") or 0)
-            if hours > 0:
-                expires_at = (
-                    datetime.now(timezone.utc) + timedelta(hours=min(hours, 24 * 365))
-                ).isoformat()
-        except (TypeError, ValueError):
-            pass
-        return {
-            "scope": scope,
-            "visibility": visibility,
-            "importance": max(1, min(importance, 10)),
-            "content": summary,
-            "source_user_id": author_id,
-            "source_channel_id": channel_id,
-            "source_guild_id": guild_id,
-            "source_kind": self._context_source_kind(message),
-            "source_is_dm": is_dm,
-            "source_channel_public": bool(
-                not is_dm and getattr(
-                    getattr(message.channel, "permissions_for", lambda *_: None)(
-                        getattr(message.guild, "default_role", None)
-                    ),
-                    "view_channel", False,
-                )
-            ),
-            "tags": tags,
-            "expires_at": expires_at,
-        }
-
-    async def _extract_shared_context_fact(self, message):
-        if str(getattr(message, "response_visibility", "public") or "public") == "private":
-            return
-        try:
-            text = (message_combined_content(message) or "").strip()
-            attachment_note = ""
-            names = []
-            for source in iter_message_payloads(message):
-                for a in list(getattr(source, "attachments", None) or [])[:5]:
-                    names.append(
-                        f"{a.filename} ({getattr(a, 'content_type', None) or 'unknown'})"
-                    )
-                    if len(names) >= 5:
-                        break
-                if len(names) >= 5:
-                    break
-            if names:
-                attachment_note = "\nAttachments/media present: " + ", ".join(names)
-            embed_note = ""
-            if getattr(message, "embeds", None):
-                titles = [
-                    str(
-                        getattr(embed, "title", None)
-                        or getattr(embed, "description", None)
-                        or getattr(embed, "url", None)
-                        or "embed"
-                    )[:160]
-                    for embed in message.embeds[:3]
-                ]
-                embed_note = "\nEmbeds present: " + "; ".join(titles)
-            _sfa = getattr(message, "author", None)
-            is_admin = self._is_admin(_sfa.id) if _sfa is not None else False
-            guild_id = str(message.guild.id) if message.guild else ""
-            channel_id = str(message.channel.id)
-            prompt = (
-                f"You are {process_name(self)}'s context watcher — extract one durable fact or skip.\n"
-                "STORE: preference, identity, ops instruction, stack/schedule/project, "
-                "or an explicit remember-this.\n"
-                "SKIP: chatter, jokes, greetings, secrets/credentials, one-off asks, "
-                "media-only unless the text says it matters.\n"
-                "OUTPUT JSON only, no fence:\n"
-                '{ "should_store": bool, "importance": 1-10, "scope": "...", '
-                '"visibility": "...", "summary": "<one-line fact>", "tags": ["..."], '
-                '"expires_in_hours": <int or null>, '
-                '"triples": [{"s":"Name","rel":"OWNS","o":"Thing"}] }\n'
-                "scope ∈ {global, user:<id>, guild:<id>, channel:<id>, dm:<id>}. "
-                "visibility ∈ {shared, private, admin_only, public_hint}. "
-                "Non-admin DMs → scope=user:<id>, visibility=private. "
-                "importance 8-10 identity/ops, 5-7 useful, 1-4 trivia. "
-                "expires_in_hours null = persistent. If unsure, should_store false. "
-                "triples optional; rel ∈ OWNS,USES,DISLIKES,DEPENDS_ON,"
-                "CONFIGURED_WITH,PREFERS,BUILT,WORKS_ON. Only durable project/"
-                "ownership/preference links — omit triples rather than guess."
-            )
-            user = (
-                f"Author: {message.author.display_name} ({message.author.id})\n"
-                f"Admin author: {'yes' if is_admin else 'no'}\n"
-                f"Source: {self._context_source_kind(message)} channel={channel_id} guild={guild_id or 'none'}\n"
-                f"Message:\n{text[:2500]}{attachment_note}{embed_note}\n\n"
-                'Extract a fact or return {"should_store": false}.'
-            )
-            # Both the AI-slot acquisition and the provider call share one
-            # configurable timeout. 20s was too tight for cold-start
-            # 1M-context models — the call would time out, retry, fall
-            # back to a smaller model, and flood the provider log. Operators
-            # who want a stricter cap can lower it via dashboard.
-            extract_timeout = max(
-                5,
-                min(
-                    _safe_int(
-                        self._control.get("cross_context_extract_timeout_seconds", 60)
-                        or 60,
-                        60,
-                    ),
-                    600,
-                ),
-            )
-            await self._acquire_ai_slot(
-                timeout=extract_timeout,
-                key=f"extract:{getattr(getattr(message, 'channel', None), 'id', '') or ''}",
-            )
-            try:
-                # Context watcher uses the aux provider/model (the
-                # context-manager brain), separate from the autonomy tick
-                # loop. Falls back to the autonomy provider then the main
-                # provider if aux isn't configured. Never raises out of
-                # provider resolution.
-                context_provider = await self._get_aux_provider()
-                if not callable(
-                    getattr(context_provider, "generate_response", None)
-                ) and not callable(
-                    getattr(context_provider, "generate_chat_completion", None)
-                ):
-                    context_provider = self.ai_provider
-                context_model = self._get_aux_model()
-                raw = await context_provider.generate_response(
-                    [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": user},
-                    ],
-                    timeout=extract_timeout,
-                    model=context_model,
-                    **self._night_fallback_kwargs(context_provider),
-                )
-            finally:
-                await self._release_ai_slot()
-            data = self._json_object_from_text(raw)
-            entry = self._normalize_context_entry(message, data)
-            if not entry:
-                return
-            context_id = await self.memory.add_shared_context(
-                entry,
-                requester=_memory_requester_for(self, message),
-            )
-            if context_id:
-                logger.info(
-                    f"Context watcher stored fact {context_id}: {entry['content'][:120]}"
-                )
-            await self._mirror_fact_to_entity(message, entry)
-            self._ingest_graph_triples(message, data)
-        except Exception as e:
-            logger.warning(f"Context extraction error: {e}")
-
-    async def _mirror_fact_to_entity(self, message, entry: dict) -> None:
-        """Copy an explicitly shared, non-expiring fact into scoped entity memory.
-
-        A ``user:<id>`` or ``dm:<id>`` fact is already about one human and
-        already ignores guild boundaries — it is the entity tier under an
-        older name. Mirroring it means the entity tier is populated from day
-        one instead of starting empty, and gets per-person semantic ranking
-        that the scope-string lookup cannot do.
-
-        Private, restricted, admin-only and expiring facts stay only in their
-        original scope. The entity row receives the same requester provenance,
-        so retrieval cannot silently broaden access.
-        """
-        if not self._control.get("entity_memory_enabled", True):
-            return
-        if not self._control.get("entity_memory_from_extract", True):
-            return
-        scope = str((entry or {}).get("scope") or "")
-        if not scope.startswith(("user:", "dm:")):
-            return
-        # The entity tier has no expiry policy of its own. Only facts
-        # explicitly marked shareable are eligible, and DM facts never travel.
-        if str(entry.get("visibility") or "").lower() not in {"shared", "public_hint"}:
-            return
-        if scope.startswith("dm:"):
-            return
-        # An expiring fact is explicitly temporary, and the entity tier has no
-        # concept of expiry — mirroring one would make a fact the extractor
-        # said should last a day last forever.
-        if str(entry.get("expires_at") or "").strip():
-            return
-        uid = scope.split(":", 1)[1].strip()
-        if not uid:
-            return
-        add_fact = getattr(self.memory, "add_entity_fact", None)
-        if not callable(add_fact):
-            return
-        try:
-            author = getattr(message, "author", None)
-            guild = getattr(message, "guild", None)
-            _fid, created = await add_fact(
-                uid,
-                str(entry.get("content") or ""),
-                importance=_safe_int(entry.get("importance"), 5),
-                source_guild_id=str(getattr(guild, "id", "") or ""),
-                source="extract",
-                author=str(getattr(author, "display_name", "") or ""),
-                requester=_memory_requester_for(self, message),
-                visibility=str(entry.get("visibility") or "private"),
-            )
-            if created:
-                logger.info("Entity memory: new fact for user %s", uid)
-        except Exception as e:
-            logger.debug(f"entity mirror skipped: {e}")
-
-    def _ingest_graph_triples(self, message, data: dict) -> None:
-        """Fold extractor triples into the SQLite graph. No extra LLM call."""
-        if not parse_bool(
-            (getattr(self, "_control", None) or {}).get(
-                "knowledge_graph_enabled", True
-            ),
-            True,
-        ):
-            return
-        graph = getattr(getattr(self, "memory", None), "graph", None)
-        if graph is None or not isinstance(data, dict):
-            return
-        triples = data.get("triples")
-        if not triples:
-            return
-        try:
-            author = getattr(message, "author", None)
-            n = graph.ingest_triples(
-                triples,
-                speaker_id=str(getattr(author, "id", "") or ""),
-                speaker_name=str(getattr(author, "display_name", "") or ""),
-                requester=_memory_requester_for(self, message),
-            )
-            if n:
-                logger.info("Knowledge graph: stored %s triple(s)", n)
-        except Exception as e:
-            logger.debug("graph triple ingest skipped: %s", e)
 
     def _graph_prompt_block(
         self, query: str, user_id: str, budget: int,
@@ -8500,7 +7307,6 @@ class MaxwellBot(commands.Bot):
                             self._load_auto_channels()
                             self._load_blacklist()
                             self._load_shell_whitelist()
-                            await self._load_rem_control()
                             cmd["result"] = "controls reloaded"
                         elif typ == "plugin_reload_state":
                             pm = getattr(self, "plugin_manager", None)
@@ -8567,21 +7373,8 @@ class MaxwellBot(commands.Bot):
                                 cmd["result"] = pm.uninstall_plugin(
                                     str(cmd.get("plugin") or "")
                                 )
-                        elif typ == "rem_run":
-                            ok, reason, run = await self._run_rem_once_guarded()
-                            cmd["result"] = (
-                                f"REM done: {(run or {}).get('audit', '')[:300]}"
-                                if ok
-                                else f"REM not started: {reason}"
-                            )
-                        elif typ == "rem_enable":
-                            self.rem_enabled = True
-                            await self._save_rem_control()
-                            cmd["result"] = "REM enabled"
-                        elif typ == "rem_disable":
-                            self.rem_enabled = False
-                            await self._save_rem_control()
-                            cmd["result"] = "REM disabled"
+                        elif typ in {"rem_run", "rem_enable", "rem_disable"}:
+                            cmd["result"] = "REM and background memory agents were removed"
                         elif typ == "autonomy_run":
                             tick_result = await self.autonomy_engine.tick()
                             cmd["result"] = f"autonomy tick: {tick_result}"
@@ -8695,40 +7488,6 @@ class MaxwellBot(commands.Bot):
             "on",
         } and hasattr(self.memory, "_embed_pending_all"):
             _spawn_background(self.memory._embed_pending_all())
-
-        # Bootstrap summary 5 minutes after boot — give the bot time
-        # to settle so we accumulate real chat first.
-        async def _boot_summarize():
-            try:
-                await asyncio.sleep(300)
-                n = await self.memory.summarize_recent_to_ltm(hours=24)
-                if n:
-                    logger.info(f"Boot summarizer wrote {n} LTM facts")
-            except Exception as e:
-                logger.warning(f"Boot summarizer failed: {e}")
-
-        _spawn_background(_boot_summarize())
-
-        # Daily LTM summarizer at 04:00 local. Computes seconds-until-
-        # next-04:00 on each loop start; if the start-of-day window is
-        # missed it fires on the next loop tick.
-        async def _daily_summarizer_loop():
-            while True:
-                try:
-                    now = datetime.now()
-                    target = now.replace(hour=4, minute=0, second=0, microsecond=0)
-                    if target <= now:
-                        target = target + timedelta(days=1)
-                    wait_s = (target - now).total_seconds()
-                    await asyncio.sleep(wait_s)
-                    n = await self.memory.summarize_recent_to_ltm(hours=24)
-                    if n:
-                        logger.info(f"Daily LTM summarizer wrote {n} facts")
-                except Exception as e:
-                    logger.error(f"Daily summarizer error: {e}")
-                    await asyncio.sleep(3600)  # backoff on failure
-
-        _spawn_background(_daily_summarizer_loop())
 
         # Active cleanup of stale channel rows on a 10-minute cadence.
         while True:
@@ -11170,10 +9929,6 @@ class MaxwellBot(commands.Bot):
         # Mark this channel as in-flight (bot is generating a reply) so autonomy
         # can skip posting into it and avoid racing the real reply.
         self._replying_channels.add(channel_id)
-        try:
-            await self._record_rem_event(message, "user", content)
-        except Exception as e:
-            logger.warning(f"REM event recording failed: {e}")
         current_task = asyncio.current_task()
         ai_timeout = max(
             10,
@@ -12138,7 +10893,6 @@ class MaxwellBot(commands.Bot):
                             f"Failed to record bot reply in channel memory: {_e}"
                         )
                 if reply_delivered:
-                    await self._record_rem_event(message, "assistant", response)
                     normal_reply_sent = True
                     await self._mark_inbox_announced()
         except asyncio.CancelledError as _exc:
@@ -12224,10 +10978,6 @@ class MaxwellBot(commands.Bot):
             # here so autonomy can avoid re-engaging a conversation it already
             # answered (the "bot sees its own old reply and posts again" loop).
             self._replying_channels.discard(channel_id)
-            # The context watcher was held back while this turn ran (to avoid
-            # flooding watcher calls / contending for AI slots). Run it now on
-            # the latest deferred message for this room.
-            self._flush_deferred_context_extraction(channel_id)
             if normal_reply_sent:
                 self._last_bot_reply[channel_id] = time.time()
                 if author is not None and not getattr(author, "bot", False):
@@ -12512,12 +11262,6 @@ class MaxwellBot(commands.Bot):
             else:
                 category = "internal tool failure"
             result_text = f"Error - {category} ({name})"
-            try:
-                schedule_tool_autofix(
-                    self, tool_name=name, tool_args=params, exc=e
-                )
-            except Exception:
-                logger.debug("autofix schedule failed", exc_info=True)
             with contextlib.suppress(Exception):
                 self._track_task(
                     asyncio.create_task(
@@ -12628,6 +11372,14 @@ class MaxwellBot(commands.Bot):
         calls = normalize_native_tool_calls(raw_tool_calls)
         if not calls:
             return (cleaned, [], []) if include_images else (cleaned, [])
+
+        # Results do not exist yet when the model generates this batch. Hold
+        # terminal replies until it has inspected the actual action results.
+        needs_result_turn = any(
+            returns_result(c["name"])
+            or c["name"] not in {"send_message", "no_response", "sleep", "typing", "wait"}
+            for c in calls
+        )
 
         # Preserve raw tool_calls for the assistant message in the follow-up turn
         raw_for_history = []
@@ -12744,7 +11496,21 @@ class MaxwellBot(commands.Bot):
 
             no_response_seen = False
             send_message_seen = False
+            sleep_seen = False
             for call in calls:
+                if needs_result_turn and call["name"] in TURN_ENDING_TOOL_NAMES:
+                    line = (
+                        f"Tool {call['name']}: Deferred — inspect the tool results "
+                        "on the next model turn before replying or ending."
+                    )
+                    result_by_id[call["id"]] = line
+                    tool_results.append(line)
+                    continue
+                if sleep_seen or (send_message_seen and call["name"] != "no_response"):
+                    line = f"Tool {call['name']}: Skipped — the turn already ended"
+                    result_by_id[call["id"]] = line
+                    tool_results.append(line)
+                    continue
                 if not no_response_seen and parallel_safe(call):
                     pending.append(call)
                     continue
@@ -12835,6 +11601,8 @@ class MaxwellBot(commands.Bot):
                         "__MESSAGE_SENT__" in line
                         and not line.startswith("Tool send_message: Error")
                     )
+                elif call["name"] == "sleep":
+                    sleep_seen = not _tool_results_need_followup([line])
             await flush_reads()
 
         # Tools must run EXACTLY ONCE. The old `except Exception: await run_all()`
@@ -13946,12 +12714,6 @@ async def main():
             cancel_once(task)
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        for task in list(getattr(bot, "_context_tasks", []) or []):
-            cancel_once(task)
-        if getattr(bot, "_context_tasks", None):
-            await asyncio.gather(*list(bot._context_tasks), return_exceptions=True)
-            bot._context_tasks.clear()
-
         # Cancel in-flight reply tasks so a restart does not leak them.
         def _iter_tasks(task_dict):
             for v in list(task_dict.values()):
@@ -13972,10 +12734,6 @@ async def main():
         except Exception as e:
             logger.error(f"Failed to flush memory on shutdown: {e}")
         try:
-            await bot.rem_log.flush()
-        except Exception as e:
-            logger.error(f"Failed to flush REM events on shutdown: {e}")
-        try:
             await bot.ai_provider.close()
         except Exception as e:
             logger.error(f"Failed to close AI provider: {e}")
@@ -13987,14 +12745,6 @@ async def main():
                 await ap.close()
         except Exception as e:
             logger.error(f"Failed to close autonomy provider: {e}")
-        # Close the separately-built aux provider too (it owns its own
-        # aiohttp session). Guarded so a missing/never-built provider is fine.
-        try:
-            xp = getattr(bot, "aux_provider", None)
-            if xp is not None and hasattr(xp, "close") and xp is not bot.ai_provider:
-                await xp.close()
-        except Exception as e:
-            logger.error(f"Failed to close aux provider: {e}")
         try:
             await close_shared_session()
         except Exception as e:

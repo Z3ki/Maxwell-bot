@@ -41,6 +41,7 @@ logger = logging.getLogger("maxwell.plugins")
 
 # Public hosted operators can omit these plugins entirely. Self-hosted
 # installs instead follow their feature configuration and plugin settings.
+_REMOVED_BACKGROUND_PLUGINS = frozenset({"agent_life", "background_jobs"})
 _RETIRED_PUBLIC_RUNTIME_PLUGINS = frozenset({
     "agent_life", "background_jobs", "github_projects",
     "plugin_admin", "personality",
@@ -833,6 +834,8 @@ class PluginManager:
         discovered: dict[str, tuple[Path, PluginManifest]] = {}
         for entry in self._plugin_dirs():
             plugin_name = entry.name
+            if plugin_name in _REMOVED_BACKGROUND_PLUGINS:
+                continue
             if (getattr(getattr(self.bot, "config", None), "MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
                     and plugin_name in _RETIRED_PUBLIC_RUNTIME_PLUGINS):
                 continue
