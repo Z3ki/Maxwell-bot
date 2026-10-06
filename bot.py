@@ -2664,9 +2664,11 @@ class MaxwellBot(commands.Bot):
         else:
             mid = str(getattr(target, "id", "") or "")
             discord_msg = target
-        overlay = (getattr(self, "_message_reactions", None) or {}).get(mid)
-        if overlay:
-            stored = list(overlay)
+        overlays = getattr(self, "_message_reactions", None) or {}
+        if mid in overlays:
+            # An empty live overlay means the last reaction was removed.
+            # Do not resurrect the persisted snapshot or Discord count cache.
+            return format_reactions_annotation(overlays[mid])
         if stored:
             return format_reactions_annotation(stored)
         if discord_msg is None:
@@ -12132,7 +12134,7 @@ class MaxwellBot(commands.Bot):
         if not tools or not self._control.get("tools_enabled", True):
             return ""
         allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
-        names = [name for name in tools if name in allowed]
+        names = sorted(name for name in tools if name in allowed)
         if not names:
             return ""
         # Group the catalog by result contract instead of dumping one flat

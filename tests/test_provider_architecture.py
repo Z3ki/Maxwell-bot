@@ -436,6 +436,7 @@ def test_concurrent_results_never_exchange_tool_calls_usage_models_or_timing():
                     "usage": {
                         "prompt_tokens": 11 if self.marker == "one" else 22,
                         "completion_tokens": 1,
+                        "prompt_tokens_details": {"cached_tokens": 5 if self.marker == "one" else 15},
                     },
                 }
 
@@ -458,6 +459,8 @@ def test_concurrent_results_never_exchange_tool_calls_usage_models_or_timing():
         first = await first
         assert (first.tool_calls[0]["id"], second.tool_calls[0]["id"]) == ("one", "two")
         assert (first.usage["prompt_tokens"], second.usage["prompt_tokens"]) == (11, 22)
+        assert (first.usage["cached_tokens"], second.usage["cached_tokens"]) == (5, 15)
+        assert (first.timing["cached_tokens"], second.timing["cached_tokens"]) == (5, 15)
         assert (first.model, second.model) == ("first", "second")
         assert (first.timing["model"], second.timing["model"]) == ("first", "second")
         first.assistant_message["tool_calls"][0]["id"] = "changed"

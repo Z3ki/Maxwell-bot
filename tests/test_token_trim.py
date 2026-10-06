@@ -154,6 +154,24 @@ def test_tool_prompt_lists_full_catalog_on_chat_turn():
     assert chat == full
 
 
+@pytest.mark.parametrize("native", [False, True])
+def test_tool_prompt_and_native_payload_order_survive_registry_reload(native):
+    import json
+
+    bot = _live_bot()
+    bot._control.update(native_tool_calls=native, disabled_tools=["shell"])
+    message = _msg("hi")
+    first = MaxwellBot._tool_system_prompt(bot, message=message, content="hi")
+    first_tools = MaxwellBot._build_openai_tools(bot, message=message, content="hi")
+    bot.tools = dict(reversed(list(bot.tools.items())))
+    second = MaxwellBot._tool_system_prompt(bot, message=message, content="hi")
+    second_tools = MaxwellBot._build_openai_tools(bot, message=message, content="hi")
+    assert first == second
+    assert json.dumps(first_tools) == json.dumps(second_tools)
+    assert "shell" not in first.split("## Tool contract")[0]
+    assert "email_send" not in first.split("## Tool contract")[0]
+
+
 def test_disabled_tools_still_hidden():
     bot = _live_bot()
     bot._control["disabled_tools"] = ["shell", "inbox_list"]

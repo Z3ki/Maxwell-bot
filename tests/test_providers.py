@@ -1243,6 +1243,44 @@ def test_stream_options_rejected_is_learned_and_resent():
     assert "stream_options" not in session.payloads[1]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_provider_retains_request_local_cache_metrics_from_json_and_sse(stream):
+    class CacheResponse(FakeResponse):
+        def __init__(self, cached):
+            self.cached = cached
+            super().__init__()
+            body = self._json_body()
+            frames = [
+                {"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {"choices": [], "usage": body["usage"]},
+            ]
+            blob = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+            self.content = _FakeAsyncStream([blob.encode()])
+
+        def _json_body(self):
+            usage = {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105}
+            if self.cached is not None:
+                usage["prompt_tokens_details"] = {"cached_tokens": self.cached, "cache_write_tokens": 10}
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": usage}
+
+    provider = OpenAICompatibleProvider("http://primary.test/v1", "cache-model", 10, 0.5)
+    provider.available = True
+    provider._session = FakeSequenceSession([CacheResponse(80), CacheResponse(0), CacheResponse(None)])
+
+    async def run():
+        results = [await provider.generate_response([{"role": "user", "content": "hi"}], stream=stream)
+                   for _ in range(3)]
+        assert [r.usage.get("cached_tokens") for r in results] == [80, 0, None]
+        assert [r.timing.get("cached_tokens") for r in results] == [80, 0, None]
+        assert all(r.usage["total_tokens"] == 105 for r in results)
+        assert results[0].usage["cache_write_tokens"] == 10
+        assert results[0].timing["cache_write_tokens"] == 10
+        assert "cached_tokens" not in provider._last_usage
+        assert "cached_tokens" not in provider._last_timing
+
+    asyncio.run(run())
+
+
 def test_temperature_constraint_is_learned_and_resent():
     """'only 0.6 is allowed' must resend at 0.6, not burn retries."""
     provider = OpenAICompatibleProvider("http://primary.test/v1", "picky-model", 10, 0.9)

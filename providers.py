@@ -888,7 +888,11 @@ class OpenAICompatibleProvider(ChatProvider):
         usage = _normalize_llm_usage(response.payload.get("usage", {}))
         request_usage = {
             key: usage[key]
-            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            for key in (
+                "prompt_tokens", "completion_tokens", "total_tokens",
+                "cached_tokens", "cache_write_tokens",
+            )
+            if key in usage
         }
         content = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
@@ -916,7 +920,7 @@ class OpenAICompatibleProvider(ChatProvider):
         self._timing_history.append(timing)
         self._endpoint_cooldown.pop(endpoint.name, None)
         logger.info(
-            "Provider timing done request_id=%s endpoint=%s model=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s",
+            "Provider timing done request_id=%s endpoint=%s model=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s cached_tokens=%s cache_write_tokens=%s",
             request_id,
             endpoint.name,
             model,
@@ -928,6 +932,8 @@ class OpenAICompatibleProvider(ChatProvider):
             len(content),
             len(tool_calls),
             request_usage["total_tokens"],
+            request_usage.get("cached_tokens", "unknown"),
+            request_usage.get("cache_write_tokens", "unknown"),
         )
         return _CompletionMessage(
             message, usage, model=model, provider=provider, timing=timing

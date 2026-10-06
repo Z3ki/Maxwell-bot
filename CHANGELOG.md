@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Keep guild emojis/stickers and reaction snapshots after the transcript,
+  use the same history window for short and long requests, and trim oversized
+  histories in message chunks. Sort authorized tool catalogs and schemas so
+  registry reloads preserve their prefix. Preserve provider-reported cache
+  reads/writes in request-local usage, timings and logs; show cache reads and
+  the input hit ratio in `/debug`, distinguishing missing metrics from zero.
 - Remove REM, context fact extraction, automatic memory summaries, delegated
   background workers, scheduled GitHub maintenance and automatic code repair.
   Remove their API routes, commands, settings and auxiliary model configuration;

@@ -276,6 +276,118 @@ def test_history_window_start_holds_still_when_a_new_message_arrives():
     assert first_line() == before
 
 
+def test_short_turn_and_guild_asset_changes_preserve_system_and_history():
+    memory = FakeMemory([
+        {"message_id": str(i), "author": "alice", "author_id": "456", "content": f"ROW{i:04}"}
+        for i in range(120)
+    ])
+    bot = _bot(memory)
+    bot._control.update(emoji_context_enabled=True, memory_history_messages=100)
+    bot._is_admin = lambda _uid: False
+    bot._guild_emojis = {"9": {"wave": "123"}}
+    bot._guild_stickers = {"9": {"hello": "456"}}
+    bot._GRID_MAX_EMOJIS, bot._GRID_MAX_STICKERS = 48, 12
+    message = _message()
+    message.guild = SimpleNamespace(id=9, name="test")
+
+    async def run():
+        short = await MaxwellBot._build_messages(bot, message, "hi")
+        long = await MaxwellBot._build_messages(bot, message, "Describe the conversation. " * 5)
+        bot._guild_emojis["9"] = {"new_emoji": "124"}
+        bot._guild_stickers["9"] = {"new_sticker": "457"}
+        changed = await MaxwellBot._build_messages(bot, message, "Describe the conversation. " * 5)
+        return short, long, changed
+
+    short, long, changed = asyncio.run(run())
+    assert short[:2] == long[:2] == changed[:2]
+    assert "ROW0020" in short[1]["content"]  # well beyond the former 40-row cap
+    assert "ROW0119" in short[1]["content"]
+    assert ":wave:" in long[2]["content"]
+    assert "[STICKER (hello)]" in long[2]["content"]
+    assert ":new_emoji:" in changed[2]["content"]
+    assert "[STICKER (new_sticker)]" in changed[2]["content"]
+    assert ":wave:" not in short[0]["content"]
+
+
+def test_reaction_updates_only_change_tail_and_edits_and_deletions_remain_visible():
+    memory = FakeMemory([
+        {"message_id": "10", "author": "alice", "author_id": "456", "content": "original text",
+         "reactions": [{"emoji": "👍", "user_name": "bob"}]},
+        {"message_id": "11", "author": "alice", "author_id": "456", "content": "keep me"},
+    ])
+    bot = _bot(memory)
+    bot._message_reactions = {}
+    bot._reactions_annotation_for = MaxwellBot._reactions_annotation_for.__get__(bot)
+
+    async def run():
+        first = await MaxwellBot._build_messages(bot, _message(), "hi")
+        bot._message_reactions["10"] = [{"emoji": "😂", "user_name": "carol"}]
+        changed = await MaxwellBot._build_messages(bot, _message(), "hi")
+        bot._message_reactions["10"] = []
+        removed = await MaxwellBot._build_messages(bot, _message(), "hi")
+        memory.messages[0]["content"] = "edited text"
+        edited = await MaxwellBot._build_messages(bot, _message(), "hi")
+        memory.messages.pop(0)
+        deleted = await MaxwellBot._build_messages(bot, _message(), "hi")
+        return first, changed, removed, edited, deleted
+
+    first, changed, removed, edited, deleted = asyncio.run(run())
+    assert first[:2] == changed[:2] == removed[:2]
+    assert "[reactions:" not in first[1]["content"]
+    assert "message 10; alice(456): original text [reactions: 👍 bob]" in first[2]["content"]
+    assert "[reactions: 😂 carol]" in changed[2]["content"]
+    assert "Current reactions on retained history" not in removed[2]["content"]
+    assert "edited text" in edited[1]["content"]
+    assert "original text" not in edited[1]["content"]
+    assert "edited text" not in deleted[1]["content"]
+    assert "keep me" in deleted[1]["content"]
+
+
+def test_character_budget_trims_message_chunks_and_omits_evicted_reactions():
+    memory = FakeMemory([
+        {"message_id": str(i), "author": "alice", "author_id": "456",
+         "content": f"ROW{i:04} " + "detail " * 30}
+        for i in range(160)
+    ])
+    memory.messages[0]["reactions"] = [{"emoji": "👍", "user_name": "bob"}]
+    bot = _bot(memory)
+    bot._control.update(memory_history_messages=160, memory_context_budget=5000)
+    bot._reactions_annotation_for = MaxwellBot._reactions_annotation_for.__get__(bot)
+
+    async def run():
+        first = await MaxwellBot._build_messages(bot, _message(), "hi")
+        memory.messages.append({"message_id": "160", "author": "alice", "author_id": "456",
+                                "content": "ROW0160 " + "detail " * 30})
+        second = await MaxwellBot._build_messages(bot, _message(), "hi")
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first[1]["content"].startswith("<previous_conversation>")
+    assert len(first[1]["content"]) <= 5000
+    assert first[1]["content"].splitlines()[1] == second[1]["content"].splitlines()[1]
+    assert "ROW0159" in first[1]["content"]
+    assert "ROW0160" in second[1]["content"]
+    assert "ROW0000" not in str(first)
+    assert "[reactions:" not in str(first)
+
+
+def test_reactions_do_not_attach_to_retained_duplicate_text_from_an_evicted_message():
+    memory = FakeMemory([
+        {"message_id": str(i), "author": "alice", "author_id": "456",
+         "content": "identical repeated message " * 10}
+        for i in range(80)
+    ])
+    memory.messages[0]["reactions"] = [{"emoji": "👍", "user_name": "old reaction"}]
+    memory.messages[-1]["reactions"] = [{"emoji": "😂", "user_name": "recent reaction"}]
+    bot = _bot(memory)
+    bot._control.update(memory_history_messages=80, memory_context_budget=5000)
+    bot._reactions_annotation_for = MaxwellBot._reactions_annotation_for.__get__(bot)
+    result = asyncio.run(MaxwellBot._build_messages(bot, _message(), "hi"))
+    assert "old reaction" not in str(result)
+    assert "message 79;" in str(result)
+    assert "recent reaction" in str(result)
+
+
 def test_shared_memory_is_historical_and_never_attributed_without_provenance():
     memory = FakeMemory()
 

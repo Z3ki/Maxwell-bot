@@ -207,6 +207,28 @@ def test_format_timing_debug_last_call():
     assert "primary" in text
 
 
+@pytest.mark.parametrize("cached", [0, 80])
+def test_debug_reports_cache_read_ratio_and_writes_without_changing_usage(cached):
+    rec = compute_llm_timing(
+        request_start=0, first_token_s=0.2, ended_at=1,
+        usage={"prompt_tokens": 100, "completion_tokens": 5,
+               "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": 20}},
+    )
+    assert rec["cached_tokens"] == cached
+    assert rec["cache_write_tokens"] == 20
+    assert rec["total_tokens"] == 105
+    text = format_timing_debug([rec])
+    assert f"cache {cached}/100 input tokens ({cached:.1f}%)" in text
+    assert "cache writes 20 input tokens" in text
+
+
+def test_debug_does_not_report_missing_cache_data_as_zero_hits():
+    rec = compute_llm_timing(request_start=0, first_token_s=0.2, ended_at=1,
+                             usage={"prompt_tokens": 100, "completion_tokens": 5})
+    assert "cached_tokens" not in rec
+    assert "cache unknown (provider did not report)" in format_timing_debug([rec])
+
+
 def test_format_timing_debug_weighted_tps():
     short = compute_llm_timing(
         request_start=0.0,

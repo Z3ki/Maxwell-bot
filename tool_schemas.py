@@ -1081,6 +1081,25 @@ def _recovery_properties(name: str) -> dict[str, Any]:
     return props
 
 
+def _canonical_schema(value: Any) -> Any:
+    """Stable object/required ordering without reordering semantic arrays."""
+    if isinstance(value, dict):
+        canonical = {}
+        for key in sorted(value, key=str):
+            item = value[key]
+            if (
+                key == "required"
+                and isinstance(item, (list, tuple))
+                and all(isinstance(entry, str) for entry in item)
+            ):
+                item = sorted(set(item))
+            canonical[key] = _canonical_schema(item)
+        return canonical
+    if isinstance(value, (list, tuple)):
+        return [_canonical_schema(item) for item in value]
+    return value
+
+
 def build_openai_tools(
     tools: dict[str, Any],
     *,
@@ -1101,7 +1120,8 @@ def build_openai_tools(
         max_description_chars = 1024
     disabled = disabled_names or set()
     out: list[dict[str, Any]] = []
-    for name, tool in tools.items():
+    for name in sorted(tools):
+        tool = tools[name]
         if name in disabled:
             continue
         if allowed_names is not None and name not in allowed_names:
@@ -1147,7 +1167,7 @@ def build_openai_tools(
                 "function": {
                     "name": name,
                     "description": desc,
-                    "parameters": params,
+                    "parameters": _canonical_schema(params),
                 },
             }
         )

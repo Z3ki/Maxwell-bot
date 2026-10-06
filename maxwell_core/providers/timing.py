@@ -81,7 +81,7 @@ def compute_llm_timing(
         headers_val = float(headers_ms or 0.0)
     except (TypeError, ValueError):
         headers_val = 0.0
-    return {
+    timing = {
         "ts": time.time(),
         "endpoint": str(endpoint or ""),
         "model": str(model or ""),
@@ -98,6 +98,10 @@ def compute_llm_timing(
         "content_chars": int(content_chars or 0),
         "tool_calls": int(tool_calls or 0),
     }
+    for field in ("cached_tokens", "cache_write_tokens"):
+        if field in normalized:
+            timing[field] = normalized[field]
+    return timing
 
 
 def format_timing_debug(
@@ -247,7 +251,7 @@ def _format_timing_row(rec: dict, indent: str = "") -> list[str]:
     ttft_s = f"ttft {float(rec.get('ttft_ms') or 0):.0f}ms"
     if headers_val >= 1.0:
         ttft_s += f" (headers {headers_val:.0f}ms)"
-    return [
+    lines = [
         f"{indent}{ep}  {model}",
         (
             f"{indent}{ttft_s}  "
@@ -259,3 +263,13 @@ def _format_timing_row(rec: dict, indent: str = "") -> list[str]:
             f"{rec.get('completion_tokens', 0)} out  tps {tps_s}"
         ),
     ]
+    if "cached_tokens" in rec:
+        cached = rec["cached_tokens"]
+        prompt = rec.get("prompt_tokens", 0)
+        ratio = f" ({cached / prompt:.1%})" if prompt else ""
+        lines.append(f"{indent}cache {cached}/{prompt} input tokens{ratio}")
+    else:
+        lines.append(f"{indent}cache unknown (provider did not report)")
+    if "cache_write_tokens" in rec:
+        lines.append(f"{indent}cache writes {rec['cache_write_tokens']} input tokens")
+    return lines

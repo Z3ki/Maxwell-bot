@@ -48,6 +48,32 @@ attributes remain snapshots for external Python integrations; internal Maxwell
 code reads `Config.AI_*`. `OllamaProvider = OpenAICompatibleProvider` remains a
 deprecated import alias. No removal date is imposed on existing deployments.
 
+## Prompt caching diagnostics
+
+The leading system instructions and history precede volatile turn context.
+Guild emojis/stickers and current reaction snapshots live in that later block;
+short messages use the configured history window instead of a smaller cap.
+Ordinary history eviction removes message chunks, and tool catalogs/schemas are
+sorted independently of registration order. Explicit personal-app history
+limits remain exact. Edits, deletions and changes in authorized tools still
+change the prompt; correctness and permissions take precedence over cache reuse.
+Large per-turn context can also reduce history to fit the model budget.
+
+`/debug` and the debug tool show provider-reported cached input tokens and their
+share of input, plus cache writes when supplied. Request-local `usage` and
+`timing` retain `cached_tokens` and `cache_write_tokens`. Compatible nested
+`prompt_tokens_details` / `input_tokens_details` and DeepSeek's
+`prompt_cache_hit_tokens` are accepted. Missing or inconsistent cache metrics
+remain unknown; a reported zero is a measured miss. Cache counts are subsets
+of input and are not added again to total usage.
+
+Stable prefixes improve reuse opportunities but do not guarantee cache hits.
+Provider/model support, routing, retention and any required cache breakpoints
+still apply. This Chat Completions client does not inject vendor-specific
+cache settings or implement the Responses API. See the official
+[OpenAI caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [DeepSeek caching guide](https://api-docs.deepseek.com/guides/kv_cache).
+
 ## Architecture and extension points
 
 `maxwell_core/providers/models.py` defines immutable `ProviderConfig`,

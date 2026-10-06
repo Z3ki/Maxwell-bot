@@ -62,12 +62,40 @@ def _normalize_llm_usage(raw) -> dict:
     # Preserve extra billable tokens but never report a total smaller than
     # the components already known to have been generated.
     total = max(_first_present_token_count(raw, "total_tokens"), prompt + completion)
-    return {
+    normalized = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total,
         "cost_usd": _reported_cost_usd(raw),
     }
+    # Cache reads are a subset of input tokens, never additional usage.
+    # Absence is unknown, not a reported zero. Keep canonical fields on a
+    # second normalization (e.g. timing), and accept compatible API aliases.
+    details = [raw]
+    details.extend(
+        value for key in ("prompt_tokens_details", "input_tokens_details")
+        if isinstance(value := raw.get(key), dict)
+    )
+    for field in ("cached_tokens", "cache_write_tokens"):
+        candidates = [detail.get(field) for detail in details]
+        if field == "cached_tokens":
+            candidates.append(raw.get("prompt_cache_hit_tokens"))
+        for value in candidates:
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                number = float(value)
+                if not math.isfinite(number) or number < 0 or not number.is_integer():
+                    continue
+                count = value if isinstance(value, int) else int(number)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if count > prompt:
+                # Inconsistent metadata cannot support a cache hit ratio.
+                continue
+            normalized[field] = count
+            break
+    return normalized
 
 
 def _estimate_completion_tokens(

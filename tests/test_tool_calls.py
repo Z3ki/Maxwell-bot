@@ -199,6 +199,50 @@ def test_reasoning_is_not_forced_in_required():
     assert set(required) == {"content"}
 
 
+def test_plugin_tool_schemas_are_identical_after_registry_and_property_reordering():
+    import copy
+    import json
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "z": {"type": "object", "properties": {
+                "b": {"type": "string", "enum": ["second", "first"]},
+                "a": {"type": "integer"},
+            }, "required": ["b", "a"]},
+            "a": {"type": "string"},
+        },
+        "required": ["z", "a"],
+    }
+
+    class Tool(_FakeTool):
+        def __init__(self, params):
+            self.params = params
+
+        def get_parameters(self):
+            return self.params
+
+    def reverse_dicts(value):
+        if isinstance(value, dict):
+            return {key: reverse_dicts(item) for key, item in reversed(list(value.items()))}
+        if isinstance(value, list):
+            return [reverse_dicts(item) for item in value]
+        return value
+
+    original = copy.deepcopy(schema)
+    alternate = reverse_dicts(schema)
+    alternate["required"].reverse()
+    alternate["properties"]["z"]["required"].reverse()
+    one = build_openai_tools({"plugin_z": Tool(schema), "plugin_a": Tool(schema),
+                             "hidden": Tool(schema)}, allowed_names={"plugin_z", "plugin_a"})
+    two = build_openai_tools({"hidden": Tool(alternate), "plugin_a": Tool(alternate),
+                             "plugin_z": Tool(alternate)}, allowed_names={"plugin_a", "plugin_z"})
+    assert json.dumps(one) == json.dumps(two)
+    assert [item["function"]["name"] for item in one] == ["plugin_a", "plugin_z"]
+    assert one[0]["function"]["parameters"]["properties"]["z"]["properties"]["b"]["enum"] == ["second", "first"]
+    assert schema == original  # canonicalization must not mutate plugin state
+
+
 def test_reasoning_param_schema_is_stable():
     # same shape everywhere — no per-tool drift
     assert REASONING_PARAM["type"] == "string"

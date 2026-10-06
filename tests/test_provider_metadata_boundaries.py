@@ -44,6 +44,37 @@ def test_usage_retains_additional_billable_tokens_and_cost_aliases():
     }
 
 
+@pytest.mark.parametrize("metadata", [
+    {"cached_tokens": 8},
+    {"prompt_tokens_details": {"cached_tokens": "8"}},
+    {"input_tokens_details": {"cached_tokens": 8.0}},
+    {"prompt_cache_hit_tokens": 8},
+])
+def test_usage_retains_reported_cache_reads_without_double_counting(metadata):
+    usage = _normalize_llm_usage({"prompt_tokens": 10, "completion_tokens": 5, **metadata})
+    assert usage["cached_tokens"] == 8
+    assert usage["total_tokens"] == 15
+    assert _normalize_llm_usage(usage)["cached_tokens"] == 8
+
+
+@pytest.mark.parametrize("bad", [None, True, False, -1, 11, 1.5, "bad", {}, [], float("nan"), float("inf")])
+def test_bad_cache_read_metadata_is_unknown_and_does_not_hide_valid_alias(bad):
+    raw = {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": bad}}
+    assert "cached_tokens" not in _normalize_llm_usage(raw)
+    assert _normalize_llm_usage({**raw, "prompt_cache_hit_tokens": 8})["cached_tokens"] == 8
+
+
+@pytest.mark.parametrize("details", [None, True, "bad", [], {}])
+def test_missing_cache_metadata_is_distinct_from_reported_zero(details):
+    assert "cached_tokens" not in _normalize_llm_usage({"prompt_tokens_details": details})
+    usage = _normalize_llm_usage({"prompt_tokens": 10, "prompt_tokens_details": {
+        "cached_tokens": 0, "cache_write_tokens": 10,
+    }})
+    assert usage["cached_tokens"] == 0
+    assert usage["cache_write_tokens"] == 10
+    assert usage["total_tokens"] == 10
+
+
 @pytest.mark.parametrize("bad", [True, "secret", float("nan"), float("inf"), 10**400])
 def test_invalid_cost_does_not_hide_valid_alternate_cost(bad):
     assert _reported_cost_usd({"cost": bad, "total_cost": 0.002}) == 0.002

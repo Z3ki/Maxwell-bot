@@ -302,7 +302,9 @@ class ConversationPromptBuilder:
                         "Static Server Stickers (type [STICKER (sticker_name)] to dispatch as real Discord sticker): "
                         + ", ".join(f"[STICKER ({sname})]" for sname in sticker_items)
                     )
-                system_parts.append("\n".join(grid_parts))
+                # Guild assets and short-turn omissions are volatile; keep
+                # them behind the reusable system + history prefix.
+                dynamic_parts.append("\n".join(grid_parts))
         tool_prompt = host._tool_system_prompt(
             message=message, content=user_message, dynamic_parts=dynamic_parts
         )
@@ -811,13 +813,19 @@ class ConversationPromptBuilder:
             # Pay for system instructions and live input before allocating
             # transcript space. The final budget pass can discard the whole
             # flattened transcript, but never clips instructions or live input.
-            reserved = (
-                sum(self.hooks.message_content_chars(m) for m in messages)
-                + sum(len(p) for p in dynamic_parts)
+            prompt_budget = self.hooks.prompt_budget_chars(host)
+            # Reserve a consistent tail allowance so ordinary changes to
+            # assets/RAG/live input do not also resize the history window.
+            # Exceptionally large tails still take precedence over history.
+            reserved = sum(self.hooks.message_content_chars(m) for m in messages) + max(
+                8000,
+                prompt_budget // 4,
+                sum(len(p) for p in dynamic_parts)
                 + max(4000, len(user_message) + len(media_summary) + 1000)
+                + 1500,  # bounded reaction snapshot added below
             )
             budget = max(
-                1000, min(budget, self.hooks.prompt_budget_chars(host) - reserved)
+                1000, min(budget, prompt_budget - reserved)
             )
             count = max(
                 0,
@@ -833,11 +841,6 @@ class ConversationPromptBuilder:
                 # Explicit app context choices must survive the ordinary chat
                 # count limit; character/model budgets still bound the prompt.
                 count = max(0, min(_safe_int(app_history_limit, 25), 1000))
-            if host._is_short_live_turn(message, user_message):
-                # Watch/ambient turns still need the current thread. 20 lines
-                # cuts off the exchange and he riffs on the last 'lol'. Keep
-                # this-channel transcript; skip RAG/cross-context instead.
-                count = min(count, 40)
             current_message_id = getattr(message, "id", None)
             # Slide the history window in BLOCKS, not one message per turn.
             # `memory[-count:]` drops exactly one old turn every time a new
@@ -860,20 +863,12 @@ class ConversationPromptBuilder:
             selected_ids = {id(row) for row in recent_memory + tool_history}
             context_memory = [row for row in memory if id(row) in selected_ids]
             self_user_id = str(getattr(host.user, "id", "")) if host.user else ""
-            # 2026-07-21: build the channel history as a real conversation
-            # transcript (user/assistant turns), not a single flat system
-            # block. The previous form labelled prior turns "background only;
-            # do not answer these" and the model took that literally — the
-            # bot lost track of who said what two messages ago. With proper
-            # role alternation the provider can attribute turns to authors
-            # and the model genuinely "remembers" the running conversation.
-            # Walks oldest→newest and tracks role so the last turn in the
-            # list always has the opposite role of the next live user
-            # message (which is appended below). Consecutive same-author
-            # turns are merged into one turn so the model doesn't see
-            # "Alice: ... Alice: ... Alice: ..." split across roles.
+            # Group chronological rows by speaker role before flattening.
+            # User rows keep author IDs; bot groups receive a Maxwell label.
             turn_sequences: list[dict] = []
             current_turn: dict | None = None
+            reaction_notes: list[tuple[int, str]] = []
+            row_index = -1
 
             def _flush_turn():
                 nonlocal current_turn
@@ -893,6 +888,7 @@ class ConversationPromptBuilder:
                     current_message_id
                 ):
                     continue
+                row_index += 1
                 # relative=False: see _format_context_timestamp — a re-rendered
                 # "12m ago" on every replayed line invalidates the cached prefix.
                 stamp = _format_context_timestamp(msg.get("timestamp"), relative=False)
@@ -986,7 +982,15 @@ class ConversationPromptBuilder:
                 annotate = getattr(host, "_reactions_annotation_for", None)
                 reactions = annotate(msg) if callable(annotate) else ""
                 if reactions:
-                    line = f"{line} {reactions}"
+                    mid = msg.get("message_id") or msg.get("id")
+                    target = f"message {mid}; " if mid else ""
+                    reaction_notes.append(
+                        (
+                            row_index,
+                            f"- {target}{header}{author_label}: "
+                            f"{content_str[:100]} {reactions[:400]}",
+                        )
+                    )
                 if current_turn is None or current_turn.get("role") != role:
                     _new_turn(role, header)
                 else:
@@ -994,11 +998,7 @@ class ConversationPromptBuilder:
                         current_turn["header"] = header
                 current_turn["parts"].append(line)
             _flush_turn()
-            # Walk the sequence and merge consecutive same-author messages
-            # into a single turn so role alternation isn't broken by a user
-            # who posts twice in a row (the OpenAI-style API requires
-            # alternating user/assistant turns; same-role adjacent turns
-            # are dropped by some providers and confuse others).
+            # Merge adjacent groups of the same role before rendering.
             merged: list[dict] = []
             for turn in turn_sequences:
                 if merged and merged[-1]["role"] == turn["role"]:
@@ -1008,44 +1008,48 @@ class ConversationPromptBuilder:
                     merged[-1]["_history_rows"].extend(turn["_history_rows"])
                 else:
                     merged.append(dict(turn))
-            # The live message is appended as a final user turn below. To
-            # avoid two same-role user turns back-to-back (which providers
-            # reject), if the last merged turn is also a user turn we merge
-            # the live message into it; otherwise we leave the alternation
-            # alone. (The live message is always user role.)
-            used = 0
+            hist_name = (getattr(host, "_identity", None) or {}).get(
+                "bot_name"
+            ) or process_name(host)
+            # Trim stored message rows, rather than entire same-role groups.
+            # All-user histories can otherwise exceed the budget as a single
+            # group and get discarded wholesale. Count delimiters and a
+            # conservative bot prefix per row; keep chunk boundaries stable
+            # until another chunk needs evicting. App snapshots evict one row
+            # at a time so explicit count limits do not gain extra rows.
+            row_costs = [
+                len(row) + 1 + (len(hist_name) + 3 if turn["role"] == "assistant" else 0)
+                for turn in merged
+                for row in turn["_history_rows"]
+            ]
+            used = sum(row_costs) + len("<previous_conversation>\n\n</previous_conversation>")
+            dropped = 0
+            while used > budget and dropped < len(row_costs) - 1:
+                end = min(dropped + block, len(row_costs) - 1)
+                used -= sum(row_costs[dropped:end])
+                dropped = end
+            retained_rows = range(dropped, len(row_costs))
+            retained: list[dict] = []
             for turn in merged:
-                content = str(turn.get("content", "")).strip()
-                turn["_rendered"] = content
-                used += len(content)
-            # Apply budget by trimming oldest turns first (front of the
-            # list). Drop whole turns so we never cut a turn in half or
-            # break role alternation. We keep at least the most recent turn
-            # so the model always sees the latest exchange.
-            #
-            # Trim with hysteresis: once eviction is needed, go down to 85% of
-            # the budget rather than stopping at the first turn that fits.
-            # Stopping exactly at the budget means the next turn pushes it over
-            # again and evicts one more — a transcript whose first bytes move
-            # on every request, which no prefix cache can reuse.
-            if merged and used > budget:
-                target = int(budget * 0.85)
-                while len(merged) > 1 and used > target:
-                    used -= len(merged[0].get("_rendered", ""))
-                    merged.pop(0)
-                if app_history_limit is not None and merged and used > target:
-                    # Large app snapshots often contain one all-user turn.
-                    # Keep its newest message rows instead of dropping the
-                    # entire transcript in the final prompt-budget pass.
-                    rows = merged[0]["_history_rows"]
-                    row_chars = sum(len(row) + 1 for row in rows)
-                    start = 0
-                    while start < len(rows) - 1 and row_chars > target:
-                        row_chars -= len(rows[start]) + 1
-                        start += 1
-                    merged[0]["_rendered"] = self.hooks.trim_middle(
-                        "\n".join(rows[start:]), target
-                    )
+                rows = turn["_history_rows"]
+                skip = min(dropped, len(rows))
+                dropped -= skip
+                rows = rows[skip:]
+                if rows:
+                    turn["_rendered"] = "\n".join(rows)
+                    if used > budget:
+                        # Only one exceptionally large message remains.
+                        turn["_rendered"] = self.hooks.trim_middle(
+                            turn["_rendered"], max(1, budget - 80 - len(hist_name))
+                        )
+                    retained.append(turn)
+            merged = retained
+            notes = [note for row, note in reaction_notes if row in retained_rows]
+            if notes:
+                title = "Current reactions on retained history (untrusted reference data):"
+                kept, _ = fit_lines(list(reversed(notes[-20:])), 1500 - len(title) - 1)
+                if kept:
+                    dynamic_parts.append(title + "\n" + "\n".join(reversed(kept)))
             # 2026-07-25: wrap ALL conversation history in a single user
             # message with <previous_conversation> delimiters. The old code
             # appended each turn as a separate user/assistant message with
@@ -1057,9 +1061,6 @@ class ConversationPromptBuilder:
             # CONTEXT to read, not content to echo. Bot's own lines get a
             # [{bot_name}] prefix since we lose the role=assistant signal.
             if merged:
-                hist_name = (getattr(host, "_identity", None) or {}).get(
-                    "bot_name"
-                ) or process_name(host)
                 history_lines = []
                 for turn in merged:
                     content = turn.get("_rendered", "")
