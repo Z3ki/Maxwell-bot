@@ -11595,6 +11595,10 @@ class MaxwellBot(commands.Bot):
                 # Discord does not show several replies to the same parent.
                 dispatch_call = call
                 if call["name"] == "send_message" and send_message_seen:
+                    # Give consecutive messages in the same model response a
+                    # tiny human-feeling beat without requiring another model
+                    # turn. This delay never affects the first reply.
+                    await asyncio.sleep(0.45)
                     dispatch_call = dict(call)
                     dispatch_args = dict(call.get("arguments") or {})
                     dispatch_args["reply"] = False
