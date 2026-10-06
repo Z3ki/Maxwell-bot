@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags: ['v*.*.*']
-    paths: ['VERSION']
+    paths: ['VERSION', '.github/workflows/release.yml']
 
 permissions:
   contents: write
@@ -70,11 +70,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null || true)"
-          if [[ -z "$existing" ]]; then
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$GITHUB_SHA"
-          else
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha)"
             test "$existing" = "$GITHUB_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$GITHUB_SHA"
           fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" dist/* --clobber
