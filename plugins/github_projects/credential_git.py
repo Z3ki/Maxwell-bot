@@ -42,9 +42,11 @@ def validate_git_commands(commands: list[list[str]]) -> None:
         if len(command) == 4 and command[:2] == ["checkout", "-B"]:
             accepted = ref(command[2]) and ref(command[3])
         if len(command) == 3 and command[:2] == ["fetch", "origin"]:
-            accepted = bool(re.fullmatch(
-                r"pull/[1-9][0-9]*/head:refs/remotes/origin/pr/[1-9][0-9]*", command[2]
-            ))
+            match = re.fullmatch(
+                r"\+?pull/([1-9][0-9]*)/head:refs/remotes/origin/pr/([1-9][0-9]*)", command[2]
+            )
+            # Force is confined to the matching PR tracking ref, never branches.
+            accepted = bool(match and match[1] == match[2])
         if not accepted:
             raise ValueError("unsupported Git command; use the structured repository workflows")
 
@@ -56,10 +58,13 @@ import inspect
 GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
     r'''
     import base64
+    import errno
+    import fcntl
     import json
     import os
     import re
     import selectors
+    import shutil
     import stat
     import subprocess
     import sys
@@ -72,6 +77,13 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
     DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     budget = [0, 0]
+    original_objects = {}
+    object_cache = None
+    cache_signatures = {}
+    used_cache = {}
+
+    def signature(info):
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
     def account(size=0):
         budget[0] += size
@@ -128,6 +140,84 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                     target.write(chunk)
                     remaining -= len(chunk)
 
+    def snapshot_object(source_fd, name, destination):
+        """Share immutable objects or reflink them into private disk storage.
+
+        Only sanitized object filenames enter this tree. Open and verify the
+        source without following symlinks, including after the hardlink step.
+        Credential files and executable Git configuration are never shared.
+        """
+        descriptor = os.open(name, FILE_FLAGS, dir_fd=source_fd)
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("unsupported non-regular Git object")
+            account(info.st_size)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(name, destination, src_dir_fd=source_fd, follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno not in {errno.EXDEV, errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS}:
+                    raise
+                # Separate Docker mounts cannot hardlink directly. Keep a
+                # private disk cache so unchanged packs are copied at most
+                # once even on filesystems without reflink support.
+                parts = destination.parts
+                key = "/".join(parts[parts.index("objects") + 1:])
+                cached = object_cache / key if object_cache is not None else None
+                record = cache_signatures.get(key)
+                if cached is not None:
+                    try:
+                        cached_info = cached.lstat()
+                    except FileNotFoundError:
+                        cached_info = None
+                    if (cached_info is not None and stat.S_ISREG(cached_info.st_mode)
+                            and record == [list(signature(info)), list(signature(cached_info))]):
+                        os.link(cached, destination, follow_symlinks=False)
+                        used_cache[key] = record
+                        original_objects[str(destination)] = (signature(info), signature(destination.stat()))
+                        return
+                # Cross-filesystem storage can still avoid data copies via
+                # FICLONE. A streaming disk copy is the portable last resort.
+                with destination.open("xb") as target:
+                    try:
+                        fcntl.ioctl(target.fileno(), 0x40049409, source.fileno())
+                    except OSError as clone_error:
+                        if clone_error.errno not in {errno.EXDEV, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTTY, errno.ENOSYS}:
+                            raise
+                        remaining = info.st_size
+                        while remaining:
+                            chunk = source.read(min(remaining, 65536))
+                            if not chunk:
+                                raise ValueError("Git object changed while copying")
+                            target.write(chunk)
+                            remaining -= len(chunk)
+                if cached is not None:
+                    cached.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = cached.with_name(cached.name + ".new")
+                    temporary.unlink(missing_ok=True)
+                    os.link(destination, temporary, follow_symlinks=False)
+                    os.replace(temporary, cached)
+                    used_cache[key] = [list(signature(info)), list(signature(cached.stat()))]
+            else:
+                linked = destination.lstat()
+                if not stat.S_ISREG(linked.st_mode) or (linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino):
+                    destination.unlink()
+                    raise ValueError("Git object changed while linking")
+            original_objects[str(destination)] = (signature(info), signature(destination.stat()))
+
+    def check_object_budget(gitdir):
+        size = entries = 0
+        for parent, directories, files in os.walk(gitdir / "objects", followlinks=False):
+            entries += len(directories) + len(files)
+            for name in files:
+                info = (Path(parent) / name).lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("unsupported symbolic or special Git object")
+                size += info.st_size
+            if size > MAX_BYTES or entries > MAX_ENTRIES:
+                raise ValueError("Git object store exceeds 4 GiB or 250000 entries")
+
     def copy_tree(source_fd, destination, *, objects=False, depth=0):
         if depth > 64:
             raise ValueError("Git metadata exceeds depth limit")
@@ -156,7 +246,10 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                 finally:
                     os.close(descriptor)
             elif stat.S_ISREG(info.st_mode):
-                copy_file(source_fd, name, destination / name)
+                if objects:
+                    snapshot_object(source_fd, name, destination / name)
+                else:
+                    copy_file(source_fd, name, destination / name)
             else:
                 raise ValueError("unsupported symbolic or special Git metadata")
 
@@ -196,6 +289,7 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
             "[submodule]\nrecurse = false\n[protocol]\nallow = never\n" +
             "[protocol \"https\"]\nallow = always\n" +
             "[credential]\nhelper =\n[commit]\ngpgSign = false\n" +
+            "[gc]\nauto = 0\n[maintenance]\nauto = false\n" +
             "[http]\nfollowRedirects = false\n" +
             ("[extensions]\nobjectformat = sha256\n" if object_format == "sha256" else ""),
             encoding="utf-8",
@@ -276,6 +370,15 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                 finally:
                     os.close(descriptor)
             else:
+                original = original_objects.get(str(path))
+                if original and signature(path.stat()) == original[1]:
+                    try:
+                        unchanged = os.stat(name, dir_fd=destination_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if stat.S_ISREG(unchanged.st_mode) and signature(unchanged) == original[0]:
+                            continue
                 publish_file(path, destination_fd, name)
         # Pruned ref directories can remain empty, but must contain no stale
         # refs. Objects are append-only and are never pruned by this executor.
@@ -325,7 +428,7 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
         finally:
             os.close(destination_fd)
 
-    def execute(request, worktree, scratch):
+    def execute(request, worktree, scratch, credentials):
         commands = request["commands"]
         validate_git_commands(commands)
         repo = request["repo"]
@@ -349,7 +452,7 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                     raise ValueError("cannot clone into a nonempty workspace")
             else:
                 gitdir = snapshot(worktree_fd, scratch, env, remote)
-            auth = scratch / "network-config"
+            auth = credentials / "network-config"
             token = request["token"]
             if not token or any(char in token for char in "\r\n\0"):
                 raise ValueError("invalid GitHub credential")
@@ -398,17 +501,58 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                 error = (error + err)[:120000]
                 if code:
                     break
+            check_object_budget(gitdir)
             publish(gitdir, worktree_fd, fresh)
             return code, output, error
         finally:
             os.close(worktree_fd)
 
+    def cached_execute(request, worktree, storage, credentials):
+        global object_cache, cache_signatures
+        if storage is None:
+            with tempfile.TemporaryDirectory(prefix="maxwell-git-") as directory:
+                return execute(request, worktree, Path(directory), credentials)
+        cache_root = Path(storage)
+        with (cache_root / "cache.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            # Only the lock holder creates disk snapshots. Remove remnants of
+            # killed containers before starting another operation.
+            for stale in cache_root.glob("maxwell-git-*"):
+                if stale.is_dir() and not stale.is_symlink():
+                    shutil.rmtree(stale)
+            object_cache = cache_root / "object-cache"
+            object_cache.mkdir(exist_ok=True)
+            manifest = cache_root / "cache.json"
+            try:
+                with manifest.open() as stream:
+                    raw = stream.read(64 * 1024 * 1024 + 1)
+                decoded = json.loads(raw) if len(raw) <= 64 * 1024 * 1024 else {}
+                cache_signatures = decoded if isinstance(decoded, dict) else {}
+            except (FileNotFoundError, ValueError):
+                cache_signatures = {}
+            with tempfile.TemporaryDirectory(prefix="maxwell-git-", dir=storage) as directory:
+                result = execute(request, worktree, Path(directory), credentials)
+            # Retain only this snapshot's objects: stale packs cannot grow
+            # the persistent cache without bound.
+            for parent, _dirs, files in os.walk(object_cache):
+                for name in files:
+                    path = Path(parent) / name
+                    if str(path.relative_to(object_cache)) not in used_cache:
+                        path.unlink()
+            temporary = manifest.with_suffix(".new")
+            temporary.write_text(json.dumps(used_cache), encoding="utf-8")
+            os.replace(temporary, manifest)
+            return result
+
     def main():
         request = json.load(sys.stdin)
         token = str(request.get("token", ""))
         try:
-            with tempfile.TemporaryDirectory(prefix="maxwell-git-") as directory:
-                code, output, error = execute(request, Path(sys.argv[1]), Path(directory))
+            # Private disk caches contain sanitized objects only. Authentication
+            # stays on ephemeral /tmp, including when a container is killed.
+            storage = sys.argv[2] if len(sys.argv) > 2 else None
+            with tempfile.TemporaryDirectory(prefix="maxwell-git-auth-") as credentials:
+                code, output, error = cached_execute(request, Path(sys.argv[1]), storage, Path(credentials))
         except (OSError, ValueError, TimeoutError) as exc:
             code, output, error = 2, "", str(exc) + "\n"
         if token:

@@ -8,7 +8,7 @@ from __future__ import annotations
 from tooling import helpers as _helpers
 from tools import Tool
 from discord_media import clean_media_url
-from rag_memory import MemoryRequester
+from maxwell_core.memory.scope import MemoryRequester
 from web_references import record_web_search_hits
 from web_search import SearchService
 from web_page_text import extract_page_text

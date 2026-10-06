@@ -4,7 +4,7 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 
 from identity import fill_identity, process_name
-from rag_memory import MemoryRequester
+from maxwell_core.memory.scope import MemoryRequester
 from utils import _coerce_utc_datetime, _safe_int
 
 # Puerto Rico uses Atlantic Standard Time throughout the year.

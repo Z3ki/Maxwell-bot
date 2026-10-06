@@ -16,6 +16,19 @@ import site_server
 import site_test
 
 
+def test_archived_vectors_are_not_reported_as_an_embedding_backlog(monkeypatch):
+    monkeypatch.setattr(api, "_has_admin_auth", lambda _request: True)
+    monkeypatch.setattr(api, "_rag_query", lambda _query: [])
+    monkeypatch.setattr(api, "_rag_query_one", lambda _query: {"c": 5000})
+    response = asyncio.run(api.rag_memory_stats(SimpleNamespace()))
+    import json
+    stats = json.loads(response.text)
+    assert stats["mode"] == "history_only"
+    assert stats["retrieval_enabled"] is False
+    assert stats["pending_embeddings"] == 0
+    assert stats["embed_model"] == ""
+
+
 def test_operator_api_rejects_discord_token_without_basic_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("MAXWELL_ADMIN_USER", "operator")
     monkeypatch.setenv("MAXWELL_ADMIN_PASSWORD", "secret")
@@ -216,4 +229,3 @@ def test_reliability_middleware_preserves_http_exceptions(monkeypatch, error):
             )
 
     asyncio.run(scenario())
-

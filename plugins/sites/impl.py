@@ -804,10 +804,6 @@ class DeleteSiteTool(_SiteOwnedTool):
         # Container, server code, database, and secrets go too.
         with contextlib.suppress(Exception):
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
-        with contextlib.suppress(Exception):
-            from knowledge_graph import drop_site as _drop_site_graph
-
-            _drop_site_graph(self.bot, slug)
         if save_error is not None:
             return f"Error deleting site '{slug}': {save_error}"
         return (
@@ -1184,6 +1180,8 @@ class HostFileTool(Tool):
 
     def get_description(self):
         base = _public_files_target(self.bot)[1]
+        if not base:
+            return "Host a public file. Requires MAXWELL_PUBLIC_BASE_URL; use send_file for a chat attachment."
         return (
             f"Host a file at a permanent public URL under {base}/<name>/. "
             "Pass url (fetch a public file), path (a file in your active /workspace), "
@@ -1204,6 +1202,8 @@ class HostFileTool(Tool):
         encoding: str = "text",
         **kwargs,
     ) -> str:
+        if not _public_files_target(self.bot)[1]:
+            return "Error: public hosting requires MAXWELL_PUBLIC_BASE_URL; use send_file for a chat attachment."
         if _private_request(message):
             return "Error: choose Public visibility before hosting a public file."
         source_url = str(url or "").strip()

@@ -143,45 +143,30 @@ def build(builder, message, **kwargs):
     return asyncio.run(builder.build(message, "latest request", **kwargs))
 
 
-def test_retrieved_facts_are_scoped_and_cached_web_is_explicitly_historical():
+def test_only_scoped_recent_history_is_read_despite_legacy_retrieval_controls():
     builder, message, memory = service()
     before = copy.deepcopy(memory.rows)
     messages = build(builder, message)
     all_text = "\n".join(row["content"] for row in messages)
-    assert "authorized durable fact" in all_text
-    assert "recalled message" in all_text
-    assert "authorized shared fact" in all_text
-    assert "historical page text" in all_text
-    assert "not verified current facts" in all_text
-    assert "https://example.com/source" in all_text
+    assert "older message" in all_text
+    assert "older reply" in all_text
+    for retired in ("authorized durable fact", "recalled message", "authorized shared fact", "historical page text"):
+        assert retired not in all_text
     assert memory.rows == before
-    assert len(memory.requests) >= 5
-    assert all(
-        (req.user_id, req.channel_id, req.guild_id, req.is_admin)
-        == ("42", "20", "30", False)
-        for req in memory.requests
-    )
+    assert len(memory.requests) == 1
+    req = memory.requests[0]
+    assert (req.user_id, req.channel_id, req.guild_id, req.is_admin) == ("42", "20", "30", False)
     assert messages[0]["content"].startswith("CORE INSTRUCTIONS")
-    transcript_index = next(
-        index
-        for index, row in enumerate(messages)
-        if row["content"].startswith("<previous_conversation>")
-    )
-    facts_index = next(
-        index
-        for index, row in enumerate(messages)
-        if "authorized durable fact" in row["content"]
-    )
-    assert transcript_index < facts_index < len(messages) - 1
     assert "latest request" in messages[-1]["content"]
     assert "trusted reply-parent context" in messages[-1]["content"]
 
 
-def test_cold_embeddings_fall_back_to_authorized_recent_facts():
-    builder, message, _ = service(cold=True)
+def test_cold_legacy_embeddings_do_not_trigger_fallback_fact_reads():
+    builder, message, memory = service(cold=True)
     messages = build(builder, message)
-    assert any("cold-start authorized fact" in row["content"] for row in messages)
-    assert not any("Earlier web results" in row["content"] for row in messages)
+    assert len(memory.requests) == 1
+    assert any("older message" in row["content"] for row in messages)
+    assert not any("cold-start authorized fact" in row["content"] for row in messages)
 
 
 def test_optional_memory_failures_preserve_instructions_history_and_live_request():

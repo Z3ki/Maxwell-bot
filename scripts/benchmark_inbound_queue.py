@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Microbenchmark bounded inbound reply admission without Discord or providers.
+"""Microbenchmark optional and uncapped inbound reply admission without Discord or providers.
 
 The unbounded reference uses a global capacity above the offered workload to
 model the pre-cap ReplyQueue. Handlers block on an Event so the benchmark holds
@@ -77,7 +77,7 @@ async def _sample(
             dropped += 1
 
     queue = ReplyQueue(
-        max_directed=8,
+        max_directed=0,
         max_outstanding=capacity,
         on_drop=on_drop,
     )
@@ -225,8 +225,8 @@ def main():
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--max-outstanding", type=int, default=256)
     args = parser.parse_args()
-    if args.iterations < 1 or args.max_outstanding < 1:
-        parser.error("iterations and max-outstanding must be positive")
+    if args.iterations < 1 or args.max_outstanding < 0:
+        parser.error("iterations must be positive; max-outstanding must be nonnegative (0 is unlimited)")
     asyncio.run(_run(args))
 
 

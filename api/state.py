@@ -191,7 +191,6 @@ def _sanitize_control(control):
         60,
         min(_safe_int(out.get("tool_iteration_timeout_seconds"), 3600), 14400),
     )
-    out["ai_concurrency"] = max(1, min(out["ai_concurrency"], 10))
     out["email_inbox_poll_seconds"] = max(
         30, min(_safe_int(out.get("email_inbox_poll_seconds"), 120), 3600)
     )
@@ -262,26 +261,12 @@ def _sanitize_control(control):
         "message_quota_server_fair_use_limit",
     ):
         out[_plus_key] = max(0, min(_safe_int(out.get(_plus_key), 0), 1_000_000))
+    # Unlimited request admission also applies to saved hosted-runtime quotas.
+    out["message_quota_enabled"] = False
     # Premium is not launched. A stored true must not turn billing on.
     out["premium_billing_enabled"] = False
     out["live_max_output_tokens"] = max(
         256, min(_safe_int(out.get("live_max_output_tokens"), 4096), 32768)
-    )
-    out["cross_context_max_items"] = max(
-        1, min(_safe_int(out.get("cross_context_max_items"), 10), 50)
-    )
-    out["entity_memory_max_items"] = max(
-        1, min(_safe_int(out.get("entity_memory_max_items"), 8), 50)
-    )
-    # Tier weights are ratios, so any non-negative value is meaningful and 0
-    # is a real setting (that tier off). The upper bound exists only to keep
-    # one tier from being written as 10**9 and reducing every other weight to
-    # an integer-division zero.
-    for _tier in ("recent", "ltm", "entity", "facts", "web"):
-        _key = f"context_tier_{_tier}_weight"
-        out[_key] = max(0, min(_safe_int(out.get(_key), 0), 100))
-    out["cross_context_min_importance"] = max(
-        1, min(_safe_int(out.get("cross_context_min_importance"), 5), 10)
     )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))

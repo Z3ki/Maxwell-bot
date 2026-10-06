@@ -88,14 +88,14 @@ def test_zero_is_honored_not_treated_as_unset(key):
 
 def test_float_shaped_ints_are_accepted():
     """Dashboard number inputs hand back strings; "5.0" must not fall back."""
-    out = _sanitize_control({"ai_concurrency": "5.0", "max_tool_iterations": "12"})
-    assert out["ai_concurrency"] == 5
-    assert out["max_tool_iterations"] == 12
+    out = _sanitize_control({"max_tool_iterations": "5.0", "ai_timeout_seconds": "120"})
+    assert out["max_tool_iterations"] == 5
+    assert out["ai_timeout_seconds"] == 120
 
 
 def test_out_of_range_is_clamped_not_defaulted():
-    out = _sanitize_control({"ai_concurrency": 999, "max_tool_iterations": -5})
-    assert out["ai_concurrency"] == 10
+    out = _sanitize_control({"ai_timeout_seconds": 99999, "max_tool_iterations": -5})
+    assert out["ai_timeout_seconds"] == 7200
     assert out["max_tool_iterations"] == 0
 
 

@@ -11,8 +11,7 @@
   "bundled": true,
   "enabled_by_default": true,
   "permissions": [
-    "messages.send",
-    "memory.read"
+    "messages.send"
   ],
   "tools": [
     {
@@ -22,10 +21,6 @@
     {
       "name": "send_rich_message",
       "returns_result": false
-    },
-    {
-      "name": "recall_cross_server_memory",
-      "returns_result": true
     },
     {
       "name": "inspect_media_url",

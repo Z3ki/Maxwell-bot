@@ -15,11 +15,11 @@ and no premium upsell. Owner and Discord permissions still apply. Existing
 operator settings are preserved when updating.
 
 Optional tools appear only after setup: set `MAXWELL_PUBLIC_BASE_URL` for
-websites, an embedding model for RAG, `GEMINI_IMAGE_MODEL` for HD images, and
+websites, `GEMINI_IMAGE_MODEL` for HD images, and
 mailbox credentials for email. Add `--with-shell` for the shell backend.
-Conversational autonomy remains opt-in; TTS is not currently bundled. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Conversation history and scoped retrieval remain available.
+Conversational autonomy remains opt-in; TTS is not currently bundled. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
 
-The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.10`, select `--version v0.1.10`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
+The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.11`, select `--version v0.1.11`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
 
 Before running it, create a bot in the Discord Developer Portal and enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**. The setup machine needs Git, curl, and Python 3. Maxwell itself runs in Docker. On supported Linux systems the installer can install Docker; on macOS/Windows use Docker Desktop.
 
@@ -115,7 +115,7 @@ docker compose logs -f maxwell
 # Check config/dependencies
 docker compose exec maxwell python3 doctor.py
 
-# Probe configured AI/embedding endpoints
+# Probe configured chat endpoints
 docker compose exec maxwell python3 doctor.py --probe
 
 # Stop Maxwell
@@ -196,7 +196,7 @@ Before deploying backends, run `sudo bash scripts/setup_site_host.sh` on the Doc
 - Generated and edited images go to the model for inspection, not straight to Discord. Maxwell chooses whether to send them with `send_media`, use their permanent URLs or local files in a site, regenerate them, or answer normally.
 - Fail-closed handling for destructive tools after fetched/web content has tainted the current turn.
 - Personal, server, and restricted application-owner settings through `/config`.
-- SQLite-backed RAG/vector memory plus scoped context, entity/knowledge-graph memory, with no auxiliary memory agents.
+- Scoped recent conversation history in SQLite, without embeddings, vector search, or local inference workers.
 - Optional autonomy/background actions with runtime controls.
 - Generated static sites and custom FastAPI/SQLite backend containers with server-side secrets and aggregate resource limits.
 
@@ -211,7 +211,7 @@ plugins/                Feature plugins (tools, jobs, prompt slices)
 bot_tools.py            Compatibility re-exports of plugin tools
 providers.py            OpenAI-compatible provider wrapper
 config.py               Environment-backed config
-rag_memory.py           Vector/RAG memory
+conversation_memory.py  Scoped SQLite conversation history
 knowledge_graph.py      Entity/relationship memory
 control_defaults.py     Runtime control defaults
 user_install.py         Discord user-install/app-command support

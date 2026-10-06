@@ -4,6 +4,7 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 ``tooling.helpers``.
 """
 from __future__ import annotations
+from generated_artifacts import generated_file
 
 from types import SimpleNamespace
 
@@ -671,6 +672,13 @@ class SendFileTool(Tool):
         **kwargs,
     ) -> str:
         if path:
+            artifact = generated_file(path)
+            if artifact is not None:
+                blob, generated_name = artifact
+                if len(blob) > self.MAX_SIZE:
+                    return "Error: generated attachment exceeds the upload size limit"
+                safe_name = _safe_attachment_filename(filename or generated_name, default="file")
+                return await self._send_blob(message, blob, safe_name)
             shell_tool = (getattr(self.bot, "tools", None) or {}).get("shell")
             reader = getattr(shell_tool, "read_workspace_file", None)
             if not callable(reader):

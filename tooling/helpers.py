@@ -187,8 +187,8 @@ async def _get_shared_session() -> aiohttp.ClientSession:
         if _SHARED_SESSION is None or _SHARED_SESSION.closed:
             connector = aiohttp.TCPConnector(
                 resolver=cast(Any, _SafeResolver()),
-                limit=30,
-                limit_per_host=5,
+                limit=0,
+                limit_per_host=0,
                 force_close=True,
             )
             _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
@@ -203,8 +203,8 @@ async def _recreate_shared_session():
                 await _SHARED_SESSION.close()
         connector = aiohttp.TCPConnector(
             resolver=cast(Any, _SafeResolver()),
-            limit=30,
-            limit_per_host=5,
+            limit=0,
+            limit_per_host=0,
             force_close=True,
         )
         _SHARED_SESSION = aiohttp.ClientSession(connector=connector)
@@ -1983,10 +1983,9 @@ def _public_image_target(bot) -> tuple[str, str]:
     cfg = getattr(bot, "config", None)
     site_dir = str(getattr(cfg, "MAXWELL_SITE_DIR", "public/bot") or "public/bot")
     pub = str(
-        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")
-        or "https://maxwell.example.com"
-    ).rstrip("/")
-    return os.path.join(site_dir, "_images"), f"{pub}/bot/_images"
+        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or ""
+    ).strip().rstrip("/")
+    return os.path.join(site_dir, "_images"), f"{pub}/bot/_images" if pub else ""
 
 
 def _persist_public_image(
@@ -2005,7 +2004,7 @@ def _persist_public_image(
         with open(path, "wb") as f:
             f.write(image_bytes)
         logger.info(f"Persisted public image {path}")
-        return path, f"{pub_base}/{name}"
+        return path, f"{pub_base}/{name}" if pub_base else None
     except Exception as e:
         logger.warning(f"Failed to persist public image: {e}")
         return None, None
@@ -2021,10 +2020,9 @@ def _public_files_target(bot) -> tuple[str, str]:
     cfg = getattr(bot, "config", None)
     site_dir = str(getattr(cfg, "MAXWELL_SITE_DIR", "public/bot") or "public/bot")
     pub = str(
-        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com")
-        or "https://maxwell.example.com"
-    ).rstrip("/")
-    return os.path.join(site_dir, "_files"), f"{pub}/bot/_files"
+        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or ""
+    ).strip().rstrip("/")
+    return os.path.join(site_dir, "_files"), f"{pub}/bot/_files" if pub else ""
 
 
 _HOST_MIME_EXT = {
@@ -3406,12 +3404,8 @@ class _SiteOwnedTool(Tool):
     def __init__(self, bot):
         super().__init__(bot)
         self.base_dir = getattr(bot.config, "MAXWELL_SITE_DIR", "public/bot")
-        self.base_url = (
-            getattr(
-                bot.config, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
-            ).rstrip("/")
-            + "/bot"
-        )
+        public = str(getattr(bot.config, "MAXWELL_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+        self.base_url = public + "/bot" if public else ""
 
     def _control(self) -> dict:
         return (
@@ -3420,6 +3414,8 @@ class _SiteOwnedTool(Tool):
 
     def _resolve(self, message: Message, name: str | None):
         """(slug, entry, site_dir, None) or (None, None, None, error string)."""
+        if not self.base_url:
+            return None, None, None, "Error: public hosting requires MAXWELL_PUBLIC_BASE_URL."
         slug = re.sub(r"[^a-z0-9-]", "-", str(name or "").lower().strip())[:30].strip(
             "-"
         )

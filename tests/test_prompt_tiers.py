@@ -1,13 +1,4 @@
-"""The prompt's memory tiers: the entity block, and the per-tier budget.
-
-Two things are pinned here. First, that what the bot knows about a person
-reaches the prompt at all, phrased so the model treats it as background about
-*them* rather than as something they just said. Second, that every lookup tier
-is bounded in characters — the reason for the budget is that the transcript is
-assembled last, in the middle of the message list where the whole-prompt trim
-cannot reach it, so an unbounded lookup tier is paid for by the running
-conversation.
-"""
+"""Retired retrieval tiers cannot run, even with stale enabled controls."""
 
 import asyncio
 from types import SimpleNamespace
@@ -112,7 +103,7 @@ def _prompt(bot, text=LONG_TURN):
     return "\n".join(str(m.get("content") or "") for m in messages)
 
 
-def test_what_the_bot_knows_about_a_person_reaches_the_prompt():
+def test_legacy_person_facts_are_not_retrieved_or_injected():
     memory = _Memory(
         entity={
             "user_id": "456",
@@ -124,18 +115,14 @@ def test_what_the_bot_knows_about_a_person_reaches_the_prompt():
     )
     prompt = _prompt(_bot(memory))
 
-    assert "About this person" in prompt
-    assert "works night shifts" in prompt
-    # The name on the current message is noise; the *other* names are what
-    # make someone recognisable across servers.
-    assert "also seen as: BongoCat" in prompt
-    assert "also seen as: alice" not in prompt
-    assert "2 server(s) and DMs" in prompt
+    assert "About this person" not in prompt
+    assert "works night shifts" not in prompt
+    assert "BongoCat" not in prompt
+    assert memory.profile_calls == []
 
 
 
-
-def test_the_tier_is_bounded_in_characters():
+def test_large_legacy_fact_sets_are_never_loaded():
     # A hundred long facts must not reach the prompt just because the item
     # cap allows eight of them; the budget is what actually holds.
     memory = _Memory(
@@ -145,10 +132,9 @@ def test_the_tier_is_bounded_in_characters():
     bot = _bot(memory, {"entity_memory_max_items": 50})
     prompt = _prompt(bot)
 
-    budget = memory.profile_calls[0]["budget"]
-    block_size = prompt.count("x")
-    assert block_size <= budget
-    assert block_size < 100 * 5000
+    assert memory.profile_calls == []
+    assert "x" * 5000 not in prompt
+
 
 
 def test_switching_the_tier_off_skips_it_entirely():
@@ -161,11 +147,7 @@ def test_switching_the_tier_off_skips_it_entirely():
     assert memory.profile_calls == []
 
 
-def test_the_entity_tier_follows_the_person_across_channels():
-    # The global person facts are keyed on the Discord user id only, so the
-    # same facts must render whether the person talks in channel A or channel B
-    # (or, by the same id, DMs). This is the "remember across servers/channels"
-    # guarantee — the entity tier must never be channel-scoped.
+def test_legacy_person_facts_cannot_follow_users_across_channels():
     memory = _Memory(
         entity={"user_id": "456", "display_names": ["alice"]},
         facts=[{"content": "works night shifts", "importance": 8}],
@@ -180,8 +162,9 @@ def test_the_entity_tier_follows_the_person_across_channels():
 
     first = prompt_for_channel(123)
     second = prompt_for_channel(999)
-    assert "works night shifts" in first
-    assert "works night shifts" in second
+    assert "works night shifts" not in first
+    assert "works night shifts" not in second
+    assert memory.profile_calls == []
 
 
 def test_legacy_server_prompt_is_never_read_or_injected():
@@ -241,7 +224,7 @@ def test_the_plan_never_promises_more_than_the_prompt_can_hold():
     assert total <= MaxwellBot._prompt_budget_chars(bot)
 
 
-def test_operator_weights_move_the_split():
+def test_stale_retrieval_weights_cannot_take_budget_from_history():
     bot = _bot(
         _Memory(),
         {
@@ -251,7 +234,8 @@ def test_operator_weights_move_the_split():
         },
     )
     plan = MaxwellBot._context_budget_plan(bot, _message(), LONG_TURN, ["prefix"])
-    assert plan.budget_for("ltm") > plan.budget_for("recent")
+    assert plan.budget_for("ltm") == 0
+    assert plan.budget_for("recent") > 0
 
 
 def test_an_ambient_turn_gives_the_lookup_tiers_budget_to_the_transcript():

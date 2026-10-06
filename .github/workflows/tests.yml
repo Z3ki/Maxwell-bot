@@ -32,12 +32,9 @@ jobs:
       - run: python scripts/check_shell_syntax.py
       - name: Regression tests and shared-core branch coverage
         run: python -m pytest -W error::RuntimeWarning --cov --cov-report=term-missing:skip-covered
-      - name: Benchmark scoped memory retrieval
+      - name: Benchmark scoped conversation history
         if: matrix.python-version == '3.12'
-        run: python scripts/benchmark_memory_scaling.py --guilds 100 500 1000 --facts-per-guild 5 --iterations 10
-      - name: Benchmark bounded inbound admission
+        run: python scripts/benchmark_conversation_history.py --guilds 100 500 1000 --iterations 10
+      - name: Benchmark uncapped inbound admission
         if: matrix.python-version == '3.12'
-        run: python scripts/benchmark_inbound_queue.py --servers 100 500 1000 --iterations 10 --max-outstanding 256
-      - name: Benchmark pending embedding recovery scan
-        if: matrix.python-version == '3.12'
-        run: python scripts/benchmark_embedding_backlog.py --rows 500000 --pending 1000 --iterations 10
+        run: python scripts/benchmark_inbound_queue.py --servers 100 500 1000 --iterations 10 --max-outstanding 0

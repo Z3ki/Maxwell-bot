@@ -2,7 +2,7 @@
 """Maxwell install check: what works, what doesn't, and what to do about it.
 
     python3 doctor.py            # report
-    python3 doctor.py --probe    # also call the model + embedding endpoints
+    python3 doctor.py --probe    # also call the configured chat endpoint
 
 Exits non-zero only when something actually stops the bot from starting —
 missing optional features are reported, not treated as failures.
@@ -55,7 +55,6 @@ def check_core_packages() -> None:
         "aiohttp": "aiohttp",
         "aiofiles": "aiofiles",
         "dotenv": "python-dotenv",
-        "numpy": "numpy",
         "chess": "python-chess",
         "PIL": "pillow",
     }
@@ -286,26 +285,6 @@ async def _probe_chat(cfg) -> tuple[str, str]:
         return "bad", f"{type(e).__name__}: {e}"
 
 
-async def _probe_embeddings(cfg) -> tuple[str, str]:
-    import aiohttp
-
-    from rag_memory import EMBED_HEADERS, EMBED_MODEL, EMBED_URL
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                EMBED_URL,
-                json={"model": EMBED_MODEL, "input": "maxwell doctor probe"},
-                headers=EMBED_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                body = await resp.text()
-                if resp.status < 400:
-                    return "ok", f"{EMBED_MODEL} @ {EMBED_URL}"
-                return "warn", f"HTTP {resp.status} from {EMBED_URL}: {body[:120]}"
-    except Exception as e:
-        return "warn", f"{type(e).__name__}: {e}"
-
 
 def probe(cfg) -> None:
     if cfg is None:
@@ -315,15 +294,6 @@ def probe(cfg) -> None:
     line(state, "chat endpoint", detail)
     if state == "bad":
         problems.append("the model endpoint is unreachable — check AI_BASE_URL/API key")
-    if cfg.ENABLE_RAG:
-        state, detail = asyncio.run(_probe_embeddings(cfg))
-        line(state, "embedding endpoint", detail)
-        if state != "ok":
-            print(
-                f"    {DIM}RAG memory degrades to recent-history context. Fix with "
-                f"`ollama pull qwen3-embedding:0.6b`, point MAXWELL_EMBED_BASE_URL at "
-                f"another endpoint, or set ENABLE_RAG=false.{RESET}"
-            )
 
 
 def main() -> int:
@@ -331,7 +301,7 @@ def main() -> int:
     parser.add_argument(
         "--probe",
         action="store_true",
-        help="also call the model and embedding endpoints",
+        help="also call the configured chat model endpoints",
     )
     args = parser.parse_args()
 

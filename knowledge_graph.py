@@ -491,7 +491,7 @@ class KnowledgeGraph:
         requester=None,
     ) -> int:
         """Store admin-authorized triples inside their exact source context."""
-        from rag_memory import MemoryRequester
+        from maxwell_core.memory.scope import MemoryRequester
 
         if (
             not isinstance(requester, MemoryRequester)
@@ -616,7 +616,7 @@ class KnowledgeGraph:
         self, node_ids: list[str], *, hops: int = 2, limit: int = 40, requester=None
     ) -> list[tuple[str, str, str, str, str]]:
         """Return public site edges and chat edges from this exact context."""
-        from rag_memory import MemoryRequester
+        from maxwell_core.memory.scope import MemoryRequester
 
         if (
             not isinstance(requester, MemoryRequester)
@@ -672,7 +672,7 @@ class KnowledgeGraph:
         self, *, query: str, user_id: str = "", budget: int = 800, requester=None
     ) -> str:
         """Crisp graph triples for an explicitly authorized requester."""
-        from rag_memory import MemoryRequester
+        from maxwell_core.memory.scope import MemoryRequester
         if not isinstance(requester, MemoryRequester) or not requester.valid or not requester.is_admin:
             return ""
         budget = max(0, int(budget or 0))

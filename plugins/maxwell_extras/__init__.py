@@ -14,7 +14,6 @@ def setup(bot, ctx):
 
     from .tools import (
         InspectMediaUrlTool,
-        RecallCrossServerMemoryTool,
         ReminderStore,
         ReminderTool,
         SendRichMessageTool,
@@ -64,7 +63,6 @@ def setup(bot, ctx):
         MaxwellUpdatesTool(bot),
         ReminderTool(bot, store),
         rich_tool,
-        RecallCrossServerMemoryTool(bot),
         InspectMediaUrlTool(bot),
     ]
 

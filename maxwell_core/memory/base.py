@@ -1,6 +1,6 @@
 """Memory service protocol.
 
-The SQLite/RAG implementation stays in ``rag_memory.py``. The core and
+The live SQLite history implementation is ``conversation_memory.py``. The core and
 plugins should depend on this protocol rather than a concrete database.
 """
 

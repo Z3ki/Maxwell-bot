@@ -62,10 +62,7 @@ import watch_policy  # noqa: E402
 import channel_watch  # noqa: E402
 from concurrency_safety import (  # noqa: E402
     ChannelWorkQueues,
-    FairSemaphore,
     KeyedLocks,
-    ToolConcurrency,
-    classify_tool,
     cancel_once,
     loop_watchdog,
 )
@@ -75,6 +72,7 @@ from message_pipeline import (  # noqa: E402
     RequestJournal,
     Watermarks,
 )
+from generated_artifacts import begin_generated_files, reset_generated_files  # noqa: E402
 from tooling.helpers import (  # noqa: E402
     ReasoningLogTool,
     notify_owner,
@@ -196,7 +194,6 @@ from identity import (  # noqa: E402
 from context_budget import (  # noqa: E402
     BudgetPlan,
     allocate,
-    weights_from_control,
 )
 from control_defaults import (  # noqa: E402
     DEAD_CONTROL_KEYS,
@@ -221,7 +218,8 @@ from providers import (  # noqa: E402
     ProviderEmptyResponseError,
     ProviderUsageExhaustedError,
 )
-from rag_memory import RAGMemoryManager, MemoryRequester  # noqa: E402
+from conversation_memory import ConversationMemoryManager  # noqa: E402
+from maxwell_core.memory.scope import MemoryRequester  # noqa: E402
 from discord_threads import (  # noqa: E402
     ThreadStore,
     is_discord_thread,
@@ -608,13 +606,11 @@ class MaxwellBot(commands.Bot):
         # 15s acquire in on_message timed out constantly and the message was
         # thrown away.
         self._channel_locks = KeyedLocks(max_idle=256)
-        # One reply at a time per channel, with a process-wide bound.
-        # Addressed overflow is durably deferred by the inbound journal.
+        # Conversations retain their order; unrelated channels start immediately.
+        # There is no process-wide admission cap or shared reply waiting list.
         self._reply_queue = ReplyQueue(
-            max_directed=8,
-            max_outstanding=getattr(
-                self.config, "MAX_PENDING_REPLY_REQUESTS", 256
-            ),
+            max_directed=0,
+            max_outstanding=0,
             max_age=300.0,
             on_drop=self._on_reply_queue_drop,
         )
@@ -651,15 +647,7 @@ class MaxwellBot(commands.Bot):
         # to wait before posting so we don't race Discord's per-channel
         # slowmode timer and get rate-limited (429) on a busy channel.
         self._last_bot_send: dict[str, float] = {}
-        self._ai_concurrency = 2
-        # Admission to the LLM slots. Fair across rooms: see FairSemaphore.
-        # A dozen servers talking at once now take turns instead of racing,
-        # so a burst in one guild can't hold both slots back to back while a
-        # quiet server's single question times out waiting.
-        self._ai_slots = FairSemaphore(self._ai_concurrency)
-        # Per-call priority tracking. "user" calls (Discord replies)
-        # outrank "background" calls (optional conversational autonomy) so a
-        # slow upstream can't make the user wait behind a 60s background tick.
+        # Track calls for diagnostics without limiting or queueing inference.
         # Active calls: asyncio.Task -> "user" | "background"
         self._ai_call_kind: dict[asyncio.Task, str] = {}
         # Cache of recent users seen in each channel's conversation, so we can
@@ -817,12 +805,9 @@ class MaxwellBot(commands.Bot):
         )
         self._message_quota = MessageQuota(Path(self.config.DATA_DIR) / "message_quota.sqlite3")
         install_usage_commands(self)
-        # Concurrency safety (see concurrency_safety.py): per-(guild, channel)
-        # serialized work queues and bounded per-tool-class semaphores. Built
-        # here so the types are known; the watchdog task is started/stopped in
-        # main() where the running event loop is available.
+        # Per-conversation work ordering and the event-loop watchdog remain
+        # independent of global request admission.
         self.channel_queues: ChannelWorkQueues = ChannelWorkQueues()
-        self.tool_concurrency: ToolConcurrency = ToolConcurrency()
         self._setup_ai()
         self._setup_memory()
         self._setup_tools()
@@ -1276,7 +1261,7 @@ class MaxwellBot(commands.Bot):
 
 
     def _setup_memory(self):
-        self.memory = RAGMemoryManager(
+        self.memory = ConversationMemoryManager(
             data_dir=self.config.DATA_DIR, max_messages=self.config.MEMORY_MESSAGE_LIMIT
         )
 
@@ -1984,6 +1969,7 @@ class MaxwellBot(commands.Bot):
         request_provider_token = _current_request_provider.set(None)
         byok_budget_token = _current_byok_tool_budget.set({"calls": 0})
         web_references_token = begin_web_references()
+        generated_files_token = begin_generated_files()
         effects_token = _current_inbound_effects.set({
             "message_id": str(getattr(message, "id", "") or ""),
             "tools_running": 0,
@@ -2092,6 +2078,7 @@ class MaxwellBot(commands.Bot):
             _current_request_provider.reset(request_provider_token)
             _current_byok_tool_budget.reset(byok_budget_token)
             reset_web_references(web_references_token)
+            reset_generated_files(generated_files_token)
             _current_inbound.reset(token)
             _current_inbox_notices.reset(inbox_token)
             _current_inbound_effects.reset(effects_token)
@@ -3404,15 +3391,11 @@ class MaxwellBot(commands.Bot):
     async def _acquire_ai_slot(
         self, timeout: float, *, priority: str = "background", key: str = ""
     ):
-        """Acquire one of `ai_concurrency` LLM slots.
+        """Track an active inference call; all calls start without admission waits.
 
-        priority="user" outranks "background", so a person is never stuck
-        behind a 60s autonomy tick. `key` is the fairness bucket — pass the
-        channel id from a reply path. Among waiters of the same priority the
-        least-recently-served key goes first, which is what stops one loud
-        room from monopolising the pool when many servers are active.
+        Keep the call signature shared with optional conversational autonomy.
+        The provider and live-turn deadlines still bound execution time.
         """
-        await self._ai_slots.acquire(timeout, key=str(key or ""), priority=priority)
         task = asyncio.current_task()
         if task is not None:
             self._ai_call_kind[task] = priority
@@ -3421,15 +3404,16 @@ class MaxwellBot(commands.Bot):
         task = asyncio.current_task()
         if task is not None:
             self._ai_call_kind.pop(task, None)
-        await self._ai_slots.release()
-
-    def _notify_ai_waiters(self):
-        with contextlib.suppress(RuntimeError):
-            _spawn_background(self._ai_slots.set_capacity(self._ai_concurrency))
 
     def ai_slot_stats(self) -> dict:
-        """Queue depth for the dashboard / doctor. Cheap, no locking."""
-        return self._ai_slots.stats()
+        """Active inference calls; zero capacity denotes unlimited admission."""
+        return {
+            "capacity": 0,
+            "active": len(self._ai_call_kind),
+            "waiting": 0,
+            "waiting_by_priority": {},
+            "known_keys": 0,
+        }
 
     async def setup_hook(self):
         await self.plugin_manager.complete_pending_setups()
@@ -3461,9 +3445,7 @@ class MaxwellBot(commands.Bot):
             started = self.plugin_manager.start_jobs()
             if started:
                 logger.info("Plugin jobs started: %d", started)
-        self.memory.start_embedding_recovery_worker()
         self._tasks = [
-            asyncio.create_task(self._backfill_site_graph(), name="site-graph-backfill"),
             asyncio.create_task(self._site_cleanup_loop()),
             asyncio.create_task(self._memory_cleanup_loop()),
             asyncio.create_task(self._control_reload_loop()),
@@ -3886,7 +3868,10 @@ class MaxwellBot(commands.Bot):
                 continue
             if self._reply_queue.contains(cid, mid) or mid in self._inbound_processing:
                 continue
-            if self._reply_queue.depth(cid) >= self._reply_queue.max_directed:
+            if (
+                self._reply_queue.max_directed > 0
+                and self._reply_queue.depth(cid) >= self._reply_queue.max_directed
+            ):
                 continue
             if time.time() - float(row["updated_at"]) < delay * max(1, row["attempts"]):
                 continue
@@ -5066,7 +5051,11 @@ class MaxwellBot(commands.Bot):
                             requests.pop(mid, None)
                         elif time.time() - saved["created_at"] >= 900:
                             self._record_request_outcome(requests[mid], "failed", "interaction_expired")
-                    if message_id not in requests and len(requests) >= self._reply_queue.max_outstanding:
+                    if (
+                        self._reply_queue.max_outstanding > 0
+                        and message_id not in requests
+                        and len(requests) >= self._reply_queue.max_outstanding
+                    ):
                         await self._request_failure(message, "interaction_capacity")
                         return
                     requests[message_id] = message
@@ -5629,6 +5618,9 @@ class MaxwellBot(commands.Bot):
             return
         channel_id = str(message.channel.id)
         try:
+            if cmd in {"context", "downvote", "neg"} and isinstance(self.memory, ConversationMemoryManager):
+                await message.channel.send("Durable memory and vector recall have been retired. Recent conversation context remains available.")
+                return
             if cmd == "stop":
                 # `/stop` must stop everything for this room: the turn that is
                 # generating AND anything queued behind it. Cancelling only the
@@ -7023,9 +7015,6 @@ class MaxwellBot(commands.Bot):
             for key, default in DEFAULT_CONTROL.items():
                 if isinstance(default, bool):
                     control[key] = parse_bool(control.get(key), default)
-            control["ai_concurrency"] = max(
-                1, min(_safe_int(control.get("ai_concurrency", 2) or 2, 2), 10)
-            )
             control["max_response_chars"] = max(
                 80,
                 min(
@@ -7052,6 +7041,7 @@ class MaxwellBot(commands.Bot):
                 60,
                 min(_safe_int(control.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600),
             )
+            control["message_quota_enabled"] = False
             control["premium_billing_enabled"] = False
             control["live_max_output_tokens"] = max(
                 256, min(_safe_int(control.get("live_max_output_tokens"), 4096), 32768)
@@ -7066,9 +7056,6 @@ class MaxwellBot(commands.Bot):
                     3600,
                 ),
             )
-            if control["ai_concurrency"] != self._ai_concurrency:
-                self._ai_concurrency = control["ai_concurrency"]
-                self._notify_ai_waiters()
             self._control = control
             poller = getattr(self, "mail_poller", None)
             if poller is not None:
@@ -7442,7 +7429,7 @@ class MaxwellBot(commands.Bot):
                             "context_cleanup_interval",
                         ):
                             cmd["result"] = (
-                                "context cleanup engine removed (RAG memory active)"
+                                "context cleanup engine removed (conversation history only)"
                             )
                         elif typ == "inbox_act":
                             cmd["result"] = await apply_inbox_action(
@@ -7503,17 +7490,6 @@ class MaxwellBot(commands.Bot):
                 logger.error(f"Command queue error: {e}")
 
     async def _memory_cleanup_loop(self):
-        # Do not stampede local Ollama on boot. Pending-row migration used
-        # to POST batches of 50 into /api/embed and stall the whole box.
-        # Catch up lazily on search / new writes instead.
-        if os.getenv("MAXWELL_EMBED_PENDING_ON_BOOT", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        } and hasattr(self.memory, "_embed_pending_all"):
-            _spawn_background(self.memory._embed_pending_all())
-
         # Active cleanup of stale channel rows on a 10-minute cadence.
         while True:
             await asyncio.sleep(600)
@@ -7526,7 +7502,7 @@ class MaxwellBot(commands.Bot):
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(hours=12)
         cleared = 0
-        # RAGMemoryManager uses SQLite, not an in-memory dict.
+        # Conversation history uses SQLite, not an in-memory dict.
         # Clean up old channels by querying the DB directly.
         if hasattr(self.memory, "_db") and self.memory._db:
             try:
@@ -7549,8 +7525,8 @@ class MaxwellBot(commands.Bot):
                         # channel must not stop the cleanup sweep.
                         logger.debug("Cleanup skipped channel %s: %s", cid, e)
             except Exception as e:
-                logger.warning(f"RAG memory cleanup query failed: {e}")
-        # Fallback: old-style memory dict (shouldn't exist with RAG but be safe)
+                logger.warning(f"Conversation history cleanup query failed: {e}")
+        # Compatibility with lightweight history backends used by transports.
         else:
             for cid, msgs in list(getattr(self.memory, "memory", {}).items()):
                 if not msgs:
@@ -11195,22 +11171,11 @@ class MaxwellBot(commands.Bot):
                         )
                 if not result_text:
                     logger.info("Executing tool %s", name)
-                    # Budget by resource class. Image generation, shell, and
-                    # site deploys each get a small independent allowance, so
-                    # a run of them in one room cannot consume the outbound
-                    # capacity every other room's reply needs. Cheap tools
-                    # share a wide "default" budget and effectively never
-                    # queue.
-                    budgets = getattr(self, "tool_concurrency", None)
-                    gate = (
-                        budgets.slot(classify_tool(name, tool))
-                        if budgets is not None
-                        else contextlib.nullcontext()
+                    # Unrelated requests never wait on a bot-wide tool budget.
+                    # Resource-owning tools enforce their sandbox/worker bounds.
+                    raw = await MaxwellBot._invoke_request_tool(
+                        self, message, name, tool, **params
                     )
-                    async with gate:
-                        raw = await MaxwellBot._invoke_request_tool(
-                            self, message, name, tool, **params
-                        )
                     if raw is None:
                         result_text = ""
                     else:
@@ -12399,38 +12364,10 @@ class MaxwellBot(commands.Bot):
     def _context_budget_plan(
         self, message, user_message: str, system_parts: list[str]
     ) -> BudgetPlan:
-        """Divide the prompt's memory characters across the memory tiers.
-
-        The total is what is left of the prompt budget once the static system
-        blocks assembled so far and headroom for the live turn are paid for.
-        Weights come from the control set so an operator can decide, say, that
-        this bot is a lookup tool and should
-        spend on facts rather than on transcript.
-
-        Tiers the controls have switched off are excluded before the split, so
-        turning off cross-context does not leave a 7% hole — the characters go
-        to the tiers that are still on.
-        """
-        control = getattr(self, "_control", None) or {}
-        overhead = (
-            sum(len(p) for p in system_parts)
-            + 4000  # live user turn, media summary, music context
-        )
+        """Give the remaining prompt budget to scoped conversation history."""
+        overhead = sum(len(part) for part in system_parts) + 4000
         total = max(0, MaxwellBot._prompt_budget_chars(self) - overhead)
-
-        disabled: set[str] = set()
-        short_turn = self._is_short_live_turn(message, user_message)
-        if not control.get("long_term_memory_enabled", True) or short_turn:
-            # A short ambient turn deliberately skips RAG (see the transcript
-            # comment below) — its budget belongs to the transcript, not to a
-            # tier that will not render.
-            disabled.add("ltm")
-            disabled.add("web")
-        if not control.get("cross_context_enabled", True) or short_turn:
-            disabled.add("facts")
-        if not control.get("entity_memory_enabled", True):
-            disabled.add("entity")
-        return allocate(total, weights=weights_from_control(control), disabled=disabled)
+        return allocate(total, disabled={"ltm", "web", "facts", "entity"})
 
     async def _entity_profile_for(
         self, message, user_message: str, budget: int

@@ -130,8 +130,9 @@ class ReplyQueue:
     message is gone". The contract here is "your turn comes after the one in
     front of you", which is what a person in the room expects.
 
-    The per-channel waiting queue is bounded by ``max_directed``. A separate
-    process-wide ``max_outstanding`` count covers queued and running turns.
+    Optional ``max_directed`` and ``max_outstanding`` counts cap per-channel
+    waiting work and process-wide retained turns respectively. Both default to
+    zero, disabling admission caps while preserving conversation order.
     Soft chatter is evicted first. Directed work that cannot be retained is
     returned as ``deferred`` for durable requeueing; accepted directed requests
     never expire or lose their place.
@@ -144,13 +145,13 @@ class ReplyQueue:
     def __init__(
         self,
         *,
-        max_directed: int = 8,
-        max_outstanding: int = 256,
+        max_directed: int = 0,
+        max_outstanding: int = 0,
         max_age: float = 300.0,
         on_drop: Callable[[str, _Pending, str], None] | None = None,
     ) -> None:
-        self.max_directed = max(1, int(max_directed))
-        self.max_outstanding = max(1, int(max_outstanding))
+        self.max_directed = max(0, int(max_directed))
+        self.max_outstanding = max(0, int(max_outstanding))
         self.max_age = max(10.0, float(max_age))
         # Counts queued plus currently executing entries. Submission and
         # completion update it synchronously on the event loop.
@@ -193,7 +194,7 @@ class ReplyQueue:
     @property
     def full(self) -> bool:
         """Whether another retained turn needs durable deferral."""
-        return self._outstanding >= self.max_outstanding
+        return self.max_outstanding > 0 and self._outstanding >= self.max_outstanding
 
     def depth(self, channel_id: Any) -> int:
         state = self._channels.get(str(channel_id or ""))
@@ -293,7 +294,7 @@ class ReplyQueue:
             reason = "deferred" if entry.directed else "queue full"
             self._note_drop(cid, entry, reason)
             return "deferred" if entry.directed else "dropped"
-        if self._outstanding >= self.max_outstanding:
+        if self.full:
             reason = "deferred" if entry.directed else "queue full"
             self._note_drop(cid, entry, reason)
             return "deferred" if entry.directed else "dropped"
@@ -321,8 +322,8 @@ class ReplyQueue:
 
     def _make_room(self, cid: str, state: _ChannelState) -> bool:
         if (
-            len(state.queue) < self.max_directed
-            and self._outstanding < self.max_outstanding
+            (self.max_directed == 0 or len(state.queue) < self.max_directed)
+            and not self.full
         ):
             return True
         for index, entry in enumerate(state.queue):

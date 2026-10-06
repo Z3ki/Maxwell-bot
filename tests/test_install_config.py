@@ -115,7 +115,6 @@ def test_unconfigured_integrations_are_off(flag):
 @pytest.mark.parametrize("flag,settings", [
     ("ENABLE_CREATE_SITE", {"MAXWELL_PUBLIC_BASE_URL": "https://bot.example.test"}),
     ("ENABLE_HD_IMAGE", {"GEMINI_IMAGE_MODEL": "my-image-model"}),
-    ("ENABLE_RAG", {"EMBED_MODEL": "my-embed-model"}),
     ("ENABLE_EMAIL_TOOLS", {"MAXWELL_EMAIL_USER": "bot@example.test", "MAXWELL_EMAIL_PASSWORD": "test"}),
 ])
 def test_configured_integrations_enable_and_respect_explicit_off(flag, settings):

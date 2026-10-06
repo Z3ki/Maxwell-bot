@@ -106,11 +106,26 @@ Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`
 
 The former comma-prefix commands are no longer accepted. `/help` lets you browse available slash commands by topic.
 
-Customer-facing AI usage is messages, not tokens. The free allowance is 300 messages per rolling five-hour window (`message_quota_limit` / `message_quota_window_seconds`). The ledger lives at `DATA_DIR/message_quota.sqlite3`. One user-visible AI turn or user-created background job counts as one message. Tool-loop follow-ups do not. `/usage` shows that allowance. `/premium` is an optional discovery command and is not a purchase. Premium is not launched: Personal Plus is proposed at $2.99/month per user and Server Plus at $4.99/month per server, using Discord's native Guild Subscription that stays with the purchased server and cannot be transferred. Exact Plus allowances are not decided and are not applied. Billing, checkout, and …
+Public and self-hosted runtimes admit unlimited messages. The saved quota switch is forced off, including on upgrades from a hosted setup. Legacy allowance settings and the historical ledger remain readable but do not throttle requests. `/premium` remains optional discovery only; billing is unavailable.
 
 ## Runtime controls
 
 Defaults live in `control_defaults.py`. `bot_control.json` overrides them at runtime.
+
+Live replies have no bot-wide request, inference, or provider connection cap,
+including primary and fallback models. Independent channels and servers start
+concurrently. Legacy `ai_concurrency` and `MAX_PENDING_REPLY_REQUESTS` settings
+are ignored, and saved message quotas are forced off. Turns in one conversation
+retain their order with no backlog admission cap. Tool dispatch has no shared
+budget, while shell isolation, search-worker bounds, request deadlines, Discord
+rate limits, and upstream provider limits still apply. Removing local admission
+caps does not establish a measured production capacity.
+
+Credentialed Git uses a private disk volume per user/repository for sanitized
+object caching; unchanged packs are reused across operations. Working snapshots
+are deleted after commands, stale snapshots are cleaned on the next operation,
+and the cache retains only current objects within the 4 GiB limit. Authentication
+files stay on the container's ephemeral `/tmp` rather than the persistent cache.
 
 Frequently used controls include:
 
@@ -122,7 +137,6 @@ Frequently used controls include:
 | `disabled_tools` | Per-tool deny list |
 | `require_direct_response` | Require an answer/acknowledgement for eligible direct requests |
 | `respond_to_edited_mentions` | Allow a newly added direct mention to start one request |
-| `ai_concurrency` | Live AI concurrency limit |
 | `max_tool_iterations` | Tool-loop iteration cap |
 | `tool_iteration_timeout_seconds` | Tool-loop timeout |
 | `prompt_context_budget` | Approximate prompt/context budget |
@@ -130,13 +144,9 @@ Frequently used controls include:
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
 | `message_quota_limit` | Free messages per rolling window (default 300) |
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
-| `message_quota_enabled` | Enforce the customer-facing message allowance |
+| `message_quota_enabled` | Forced off for unlimited request admission |
 | `premium_billing_enabled` | Forced off. Billing is not available |
 | `store_memory` | Conversation-memory storage switch |
-| `long_term_memory_enabled` | Long-term memory switch |
-| `cross_context_enabled` | Scoped cross-context facts |
-| `entity_memory_enabled` | Entity memory |
-| `knowledge_graph_enabled` | Relationship/knowledge-graph memory |
 | `autonomy_enabled` | Runtime autonomy switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
@@ -150,7 +160,7 @@ Tool guidance is conditional on enabled plugins, available tools, and request sc
 
 Reusable instructions and authorized history precede volatile requester/time/retrieval context. This permits prefix-cache reuse when the provider supports it and the prefix remains byte-identical; changing model, tool access, or configuration can invalidate that prefix. Maxwell does not promise a cache hit or a provider-specific token saving.
 
-Explicit zero context-tier ceilings allocate nothing to that tier. REM, context extraction, automatic memory summaries, delegated workers and automatic code repair have been removed; legacy settings for these actors are stripped during sanitization.
+Prompt memory budget is allocated to recent history. REM, RAG, embedding workers, entity/graph retrieval, context extraction, automatic summaries, delegated workers, and automatic code repair are removed from the live runtime. Saved settings cannot reactivate them.
 
 
 ## Message reliability
@@ -159,15 +169,15 @@ Directed inbound work is journaled in `DATA_DIR/inbound_requests.sqlite3` with l
 
 Relevant controls include `live_turn_timeout_seconds`, `inbound_retry_attempts`, and `inbound_retry_delay_seconds`. Maxwell deliberately avoids blind replay after a tool or Discord send may already have taken effect.
 
-## Memory and RAG
+## Conversation history
 
-Current Maxwell includes `rag_memory.py`. `RAGMemoryManager` is a vector-backed, SQLite-backed memory manager for channel memory, long-term facts, and scoped shared context using an OpenAI-compatible embedding endpoint.
+`conversation_memory.py` stores scoped recent messages in SQLite without an embedding endpoint, vector search, graph retrieval, local model, or recovery worker. The existing `maxwell_rag.db` filename and schema are retained so upgrades preserve conversation history and archived facts. Archived vectors remain on disk for export and are never loaded into live prompts.
 
-`knowledge_graph.py` adds entity/relationship memory. There is no background model extracting or consolidating facts. Embedding/RAG settings live in the advanced `.env.example`; `doctor.py --probe` checks the configured embedding endpoint when RAG is enabled.
+`ENABLE_RAG` and legacy retrieval controls cannot enable RAG. NumPy is no longer a runtime dependency. Old vector modules and their regression fixtures remain available for offline migration work only. `doctor.py --probe` checks chat endpoints.
 
 ## Optional/background features
 
-Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Important examples include `ENABLE_RAG`, `ENABLE_AUTONOMY`, and `ENABLE_SHELL`.
+Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Examples include `ENABLE_AUTONOMY` and `ENABLE_SHELL`; `ENABLE_RAG` is permanently disabled.
 
 Simple installs keep token-spending background loops off by default. The exact dependency detection is implemented in `config.py` and reported by `doctor.py`.
 

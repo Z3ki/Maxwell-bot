@@ -67,7 +67,7 @@ def test_redaction_hides_nested_secrets():
 
 def test_control_value_coercion_is_strict():
     assert _coerce_value("tools_enabled", "off") is False
-    assert _coerce_value("ai_concurrency", "3") == 3
+    assert _coerce_value("max_tool_iterations", "3") == 3
     assert _coerce_value("disabled_tools", '["web_search"]') == ["web_search"]
     with pytest.raises(ValueError):
         _coerce_value("tools_enabled", "maybe")
@@ -83,16 +83,16 @@ def test_set_control_persists_and_updates_live_state(tmp_path):
 
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
-        _control={"ai_concurrency": 2},
+        _control={"live_turn_timeout_seconds": 180},
         _load_control=load_control,
     )
-    before, after = asyncio.run(_set_control(bot, "ai_concurrency", "99"))
-    assert before == 2
-    assert after == 10
-    assert bot._control["ai_concurrency"] == 10
+    before, after = asyncio.run(_set_control(bot, "live_turn_timeout_seconds", "99"))
+    assert before == 180
+    assert after == 99
+    assert bot._control["live_turn_timeout_seconds"] == 99
     assert calls == [True]
     stored = json.loads((tmp_path / "bot_control.json").read_text(encoding="utf-8"))
-    assert stored["ai_concurrency"] == 10
+    assert stored["live_turn_timeout_seconds"] == 99
 
 
 def test_sensitive_control_cannot_be_changed_through_discord(tmp_path):

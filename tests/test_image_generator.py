@@ -11,6 +11,10 @@ import pytest
 from PIL import Image
 
 from bot_tools import HDImageGeneratorTool, ImageGeneratorTool
+from bot_tools import SendFileTool
+from generated_artifacts import begin_generated_files, reset_generated_files
+from plugins.images.impl import _generated_image_result
+from tooling.helpers import _public_files_target, _public_image_target
 
 
 class _Response:
@@ -109,3 +113,40 @@ def test_generation_requires_a_prompt(tool_class):
     tool = tool_class(SimpleNamespace())
     result = asyncio.run(tool.execute(SimpleNamespace()))
     assert result.startswith("Error:")
+
+
+def test_generated_image_can_be_delivered_without_public_hosting_or_shell(tmp_path):
+    async def scenario():
+        bot = SimpleNamespace(config=SimpleNamespace(
+            MAXWELL_PUBLIC_BASE_URL="", MAXWELL_SITE_DIR=str(tmp_path), ENABLE_CREATE_SITE=False,
+        ), tools={})
+        image_bytes = b"\x89PNG\r\n\x1a\n" + b"generated-image-fixture"
+        sent = []
+
+        async def send(**kwargs):
+            file = kwargs["file"]
+            sent.append((file.filename, file.fp.read()))
+            return SimpleNamespace(attachments=[])
+
+        message = SimpleNamespace(channel=SimpleNamespace(id=1, send=send), reply=send)
+        token = begin_generated_files()
+        try:
+            result = _generated_image_result(bot, image_bytes, prefix="img", summary="generated")
+            assert "example.com" not in result
+            assert "create_site" not in result
+            path = re.search(r"Attachment path: (\S+)", result).group(1)
+            delivered = await SendFileTool(bot).execute(message, path=path)
+            assert delivered.startswith("__FILE_SENT__"), delivered
+            assert sent == [("img.png", image_bytes)]
+            # A separate turn cannot access the same generated attachment.
+            other = begin_generated_files()
+            try:
+                assert (await SendFileTool(bot).execute(message, path=path)).startswith("Error:")
+            finally:
+                reset_generated_files(other)
+        finally:
+            reset_generated_files(token)
+        assert (await SendFileTool(bot).execute(message, path=path)).startswith("Error:")
+        assert _public_image_target(bot)[1] == _public_files_target(bot)[1] == ""
+
+    asyncio.run(scenario())

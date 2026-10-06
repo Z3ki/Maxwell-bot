@@ -73,14 +73,10 @@ from utils import (  # noqa: E402 - fd-safe atomic writes
 
 DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 
-# RAG vector memory SQLite DB (managed by rag_memory.RAGMemoryManager in the bot
-# process). The API server opens it read/write for stats + LTM admin edits. We
-# use a fresh connection per request with check_same_thread=False so we never
-# share a cursor across the aiohttp event-loop's thread pool.
+# Compatibility database/routes preserve archived records for operator export.
+# The live bot stores scoped transcript history and never generates embeddings.
 RAG_DB_PATH = DATA_DIR / "maxwell_rag.db"
-RAG_EMBED_MODEL = os.getenv(
-    "MAXWELL_EMBED_MODEL", os.getenv("EMBED_MODEL", "qwen3-embedding:0.6b")
-)
+RAG_EMBED_MODEL = ""
 
 
 def _rag_db() -> sqlite3.Connection:
@@ -243,8 +239,9 @@ async def rag_memory_stats(request):
                 "ltm": ltm["c"] if ltm else 0,
                 "total_vectors": total_vectors["c"] if total_vectors else 0,
                 "embedded": embedded["c"] if embedded else 0,
-                "pending_embeddings": (total_vectors["c"] if total_vectors else 0)
-                - (embedded["c"] if embedded else 0),
+                "mode": "history_only",
+                "retrieval_enabled": False,
+                "pending_embeddings": 0,
                 "embed_model": RAG_EMBED_MODEL,
             }
         )
@@ -1994,8 +1991,9 @@ async def bot_status(request):
             "ltm": ltm_row["c"] if ltm_row else 0,
             "total_vectors": total_row["c"] if total_row else 0,
             "embedded": emb_row["c"] if emb_row else 0,
-            "pending_embeddings": (total_row["c"] if total_row else 0)
-            - (emb_row["c"] if emb_row else 0),
+            "mode": "history_only",
+            "retrieval_enabled": False,
+            "pending_embeddings": 0,
             "embed_model": RAG_EMBED_MODEL,
         }
     except sqlite3.Error:
@@ -2006,6 +2004,8 @@ async def bot_status(request):
             "ltm": 0,
             "total_vectors": 0,
             "embedded": 0,
+            "mode": "history_only",
+            "retrieval_enabled": False,
             "pending_embeddings": 0,
             "embed_model": RAG_EMBED_MODEL,
         }
@@ -2136,11 +2136,9 @@ async def _options_handler(request):
 # ---------- Long-term memory (RAG SQLite vector DB) ----------
 # The old file-based long_term_memory.txt is gone. LTM entries now live as rows
 # in the `vectors` table with kind='ltm'. IDs are UUIDs (uuid.uuid4().hex), not
-# positional integers. The bot's RAGMemoryManager owns embedding generation; the
-# API server just inserts/updates/deletes rows and leaves embedding NULL (the
-# bot will embed lazily on next search, or a background _embed_pending pass will
-# pick it up).
-_LTM_REMOVED_MSG = "context cleanup engine removed (RAG memory active)"
+# positional integers. These routes edit archived records only. Live retrieval
+# and embedding generation are retired; edits leave embedding NULL.
+_LTM_REMOVED_MSG = "context cleanup engine removed (conversation history only)"
 
 
 async def memory_add(request):

@@ -22,8 +22,7 @@ def parse_bool(value, default: bool = False) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
-    # Self-hosted installs have no message allowance. Operators can opt in
-    # to quotas for a shared service; existing persisted settings win.
+    # Public and self-hosted runtimes both admit unlimited messages.
     "message_quota_enabled": False,
     "message_quota_limit": 300,
     "message_quota_window_seconds": 5 * 60 * 60,
@@ -42,32 +41,6 @@ DEFAULT_CONTROL = {
     "error_details": True,
     "typing_indicator": True,
     "store_memory": True,
-    "long_term_memory_enabled": True,
-    "cross_context_enabled": True,
-    "cross_context_max_items": 10,
-    "cross_context_min_importance": 5,
-    # ─── global user entity memory ──────────────────────────────────────
-    # Facts keyed on the Discord user id rather than on a channel or guild,
-    # so what the bot knows about you follows you between servers and DMs.
-    # Off means the tier is neither written nor read; existing rows are kept.
-    "entity_memory_enabled": True,
-    # Facts about the current speaker injected into one prompt. The tier's
-    # real ceiling is the character budget below — this only bounds how many
-    # rows are considered.
-    "entity_memory_max_items": 8,
-    # Deterministic site/ownership graph alongside vector RAG.
-    "knowledge_graph_enabled": True,
-    # ─── per-tier context budget (see context_budget.py) ────────────────
-    # Relative weights for how the memory character budget is divided. They
-    # are normalized, so what matters is their ratio, not the total. A
-    # weight of 0 switches that tier off. A tier that comes in under budget
-    # returns the remainder to the others, so these are shares of demand,
-    # not fixed reservations.
-    "context_tier_recent_weight": 70,
-    "context_tier_ltm_weight": 12,
-    "context_tier_entity_weight": 8,
-    "context_tier_facts_weight": 7,
-    "context_tier_web_weight": 3,
     # ─── repetition guards ──────────────────────────────────────────────
     # Collapse repetition inside a single reply before it is sent: laugh runs
     # ("jajajajajaja" -> "ja"), doubled words, a sentence said twice, a phrase
@@ -139,7 +112,6 @@ DEFAULT_CONTROL = {
     "night_fallback_start_hour": 22,
     "night_fallback_end_hour": 9,
     "ai_timeout_seconds": 3600,
-    "ai_concurrency": 2,
     "memory_history_messages": 20,
     "memory_context_budget": 24000,
     "tool_history_messages": 4,
@@ -249,6 +221,23 @@ DEFAULT_CONTROL = {
 
 DEAD_CONTROL_KEYS = frozenset(
     {
+        # Global inference admission was retired. Persisted values must not
+        # restore the old shared two-call pool after upgrading.
+        "ai_concurrency",
+        # Durable RAG, entity, and graph retrieval no longer run in the bot.
+        "long_term_memory_enabled",
+        "cross_context_enabled",
+        "cross_context_max_items",
+        "cross_context_min_importance",
+        "entity_memory_enabled",
+        "entity_memory_max_items",
+        "knowledge_graph_enabled",
+        "context_tier_recent_weight",
+        "context_tier_ltm_weight",
+        "context_tier_entity_weight",
+        "context_tier_facts_weight",
+        "context_tier_web_weight",
+
         "auto_mode_enabled",
         "auto_eval_every",
         "auto_max_recent_replies",

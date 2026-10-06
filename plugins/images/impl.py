@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tooling import helpers as _helpers
 from tools import Tool
+from generated_artifacts import register_generated_file
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -22,6 +23,7 @@ def _generated_image_result(bot, image_bytes: bytes, *, prefix: str, summary: st
     mime = _sniff_image_mime(image_bytes)
     ext = {"image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}.get(mime, ".png")
     local_path, perm_url = _persist_public_image(bot, image_bytes, ext=ext, prefix=prefix)
+    attachment_path = register_generated_file(image_bytes, f"{prefix}{ext}")
     preview = image_bytes
     # The tool-media dispatcher accepts base64 payloads smaller than 5 MB.
     # Keep the full generated file; resize only an oversized model preview.
@@ -41,11 +43,16 @@ def _generated_image_result(bot, image_bytes: bytes, *, prefix: str, summary: st
     result = summary + "\nNot sent to chat. Inspect the attached image and decide what to do next."
     if perm_url:
         result += f"\nImage URL: {perm_url}\nUse send_media with this URL only if you decide to send the image."
-    if local_path:
+    if attachment_path:
         result += (
-            f"\nLocal path: {local_path} "
-            f'(pass to create_site as images=[{{"path": "{local_path}"}}] to bundle it into a site)'
+            f"\nAttachment path: {attachment_path}\n"
+            f'Use send_file(path="{attachment_path}") if you decide to send the image. '
+            "This attachment is available only during this request."
         )
+    if local_path:
+        result += f"\nLocal path: {local_path}"
+        if getattr(getattr(bot, "config", None), "ENABLE_CREATE_SITE", False):
+            result += f' (pass to create_site as images=[{{"path": "{local_path}"}}] to bundle it into a site)'
     payload = base64.b64encode(preview).decode("ascii")
     return result + f"\n__IMAGE_B64__data:{mime};base64,{payload}__END_IMAGE_B64__"
 
@@ -61,8 +68,8 @@ class ImageGeneratorTool(Tool):
         return (
             "Generate an AI image (~2-5s) — the DEFAULT image tool, text-to-image only. "
             "It CANNOT take an input image: to edit/modify/restyle an existing image, use hd_image. "
-            "Params: prompt (required). Returns the image for your inspection, plus a reusable URL. "
-            "Does not send it to chat. Decide whether to send_media, use it in a site, regenerate, or reply normally."
+            "Params: prompt (required). Returns the image for inspection and a request-local attachment path. "
+            "Does not send it to chat. Use send_file with that path to deliver it, or send_media with its URL when hosting is configured."
         )
 
     async def execute(
@@ -168,8 +175,8 @@ class HDImageGeneratorTool(Tool):
             "Params: prompt (required — for an edit, describe the change, not the whole scene); "
             "image (optional — an http(s) URL, a local path, or a list of up to 4 of them, to edit "
             "or use as reference). If image is omitted and the user attached images to the message, "
-            "those are used automatically. Returns the image for your inspection, plus a reusable URL. "
-            "Does not send it to chat. Decide whether to send_media, use it in a site, regenerate, or reply normally."
+            "those are used automatically. Returns the image for inspection and a request-local attachment path. "
+            "Does not send it to chat. Use send_file with that path to deliver it, or send_media with its URL when hosting is configured."
         )
 
     def _endpoint(self) -> tuple[str, str, str]:

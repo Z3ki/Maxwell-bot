@@ -19,7 +19,7 @@ is covered. Python 3.11 and 3.12 run the same checks in CI.
 
 | Concern | Implementation | Responsibility |
 |---|---|---|
-| Conversation prompts | `maxwell_core/prompts/conversation.py` | Stable instructions, authorized memory tiers, transcript, volatile context, live request |
+| Conversation prompts | `maxwell_core/prompts/conversation.py` | Stable instructions, scoped recent transcript, volatile context, live request |
 | Prompt identity and protocol | `maxwell_core/prompts/protocols.py` | Code-owned instructions and model-controlled web grounding |
 | Visible response cleanup | `maxwell_core/transport/output_safety.py` | Remove protocol leaks while preserving prose, links, and code |
 | Prompt identity and time | `maxwell_core/transport/context_helpers.py` | Requester scope, live Discord identity, explicit Puerto Rico timestamps |
@@ -30,9 +30,9 @@ is covered. Python 3.11 and 3.12 run the same checks in CI.
 | Plugin lifecycle | `maxwell_core/plugins/manager.py`, `lifecycle.py` | Setup, dependencies, rollback, teardown, reload, and resource ownership |
 | Registry compatibility | `maxwell_core/tools/publication.py` | Refresh dynamic schemas without stealing built-in or another manager's entries |
 | Scoped memory policy | `maxwell_core/memory/scope.py`, `identity.py` | Authorization and deduplication tied to provenance |
-| Embedding validation | `maxwell_core/memory/embeddings.py` | Ordered, finite vectors that do not mutate caller buffers |
-| Memory storage | `rag_memory.py` | SQLite persistence, authorized retrieval, and embedding recovery |
-| Request lifecycle | `message_pipeline.py`, `concurrency_safety.py` | Bounded admission, fairness, cancellation, cleanup, and journal/watermark state |
+| Archived embedding validation | `maxwell_core/memory/embeddings.py` | Offline migration fixtures; not imported by the live bot |
+| Memory storage | `conversation_memory.py` | Scoped recent history, edit identity, and retention without vectors |
+| Request lifecycle | `message_pipeline.py`, `concurrency_safety.py` | Uncapped admission, conversation ordering, cancellation, and journal/watermark state |
 
 `bot.py` remains the Discord composition root and turn coordinator. Existing
 imports from `bot` and `providers` remain available; new helper callers should
@@ -57,7 +57,7 @@ for a predecessor shields the predecessor's cleanup and still propagates its own
 cancellation. A lock obtained before acquisition remains the channel's lock even
 when idle lock entries are pruned.
 
-Fact deduplication includes user, server, channel, and visibility provenance.
+Archived migration fixtures still verify that fact deduplication includes user, server, channel, and visibility provenance.
 The `scoped_content_identity_v1` migration upgrades stored hashes atomically,
 keeps row IDs, metadata, and embeddings, and records completion in
 `memory_migrations`. Its temporary index bounds collision checks. Later opens
@@ -76,7 +76,7 @@ New tests exercise real module behavior and local SQLite databases, including:
   malformed metadata; sanitized transcript patches; reordered embedding batches.
 - Queue saturation, request replacement, repeated cancellation, timeout while
   waiting for admission, and cleanup of unrelated users' work.
-- Zero history controls, scoped backend calls, cold embeddings, optional memory
+- Zero history controls, scoped backend calls, retired retrieval tiers, optional memory
   failure, stable transcript prefixes, and host-independent Puerto Rico time.
 - Code/prose/link preservation, mixed protocol payload suppression, nested
   response envelopes, and seeded input invariants.
@@ -84,7 +84,7 @@ New tests exercise real module behavior and local SQLite databases, including:
 The suite uses synthetic provider responses and local storage; it does not need
 production credentials. The optional real-provider progress test requires
 `AI_BASE_URL`, and the browser-rendering test requires Chromium. Synthetic load
-benchmarks cover 100/500/1,000 guilds and a 500,000-row pending-embedding database;
+benchmarks cover uncapped admission and scoped recent history at 100/500/1,000 guilds;
 they measure local services rather than Discord or model throughput.
 
 ## Remaining large components

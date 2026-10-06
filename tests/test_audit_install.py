@@ -103,7 +103,7 @@ def test_first_install_runs_configuration_wizard(tmp_path):
     assert values["ENABLE_SHELL"] == "false"
     assert values["MAXWELL_LEGAL_NOTICE"] == "false"
     assert not values["MAXWELL_PUBLIC_BASE_URL"]
-    assert not values["MAXWELL_EMBED_MODEL"]
+    assert "MAXWELL_EMBED_MODEL" not in values
     assert not values["GEMINI_IMAGE_MODEL"]
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
 
@@ -240,12 +240,18 @@ def test_healthcheck_tolerates_exited_process(tmp_path, monkeypatch):
     assert not bot_is_running(tmp_path)
 
 
-def test_numpy_requirement_supports_python311_and312():
+def test_numpy_is_dev_only_and_supports_python311_and312():
     from packaging.requirements import Requirement
 
     requirements = [
         Requirement(line.split("#", 1)[0].strip())
         for line in (ROOT / "requirements.txt").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert all(r.name != "numpy" for r in requirements)
+    requirements = [
+        Requirement(line.split("#", 1)[0].strip())
+        for line in (ROOT / "requirements-dev.txt").read_text().splitlines()
         if line.strip() and not line.startswith("#")
     ]
     for python_version, numpy_version in [("3.11", "2.3.5"), ("3.12", "2.5.1")]:

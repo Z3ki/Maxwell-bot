@@ -242,7 +242,7 @@ def _embed(bot: Any, section: str) -> discord.Embed:
             name="AI / Capacity",
             value=(
                 f"Model: **{runtime['model']}**\n"
-                f"AI concurrency: **{_fmt(control.get('ai_concurrency'))}**\n"
+                "AI concurrency: **unlimited**\n"
                 f"Max tool iterations: **{_fmt(control.get('max_tool_iterations'))}**\n"
                 f"Prompt budget: **{_fmt(control.get('prompt_context_budget'))}** chars\n"
                 f"Max live output: **{_fmt(control.get('live_max_output_tokens'))}** tokens"
@@ -294,10 +294,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                 control,
                 (
                     "store_memory",
-                    "long_term_memory_enabled",
-                    "cross_context_enabled",
-                    "entity_memory_enabled",
-                    "knowledge_graph_enabled",
                     "memory_history_messages",
                     "memory_context_budget",
                 ),

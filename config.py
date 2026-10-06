@@ -4,7 +4,7 @@ Design note — optional features
 -------------------------------
 Maxwell only *requires* two things: a Discord token and an OpenAI-compatible
 model endpoint. Everything else (YouTube, web search, email, video frames,
-RAG embeddings) is optional and gated behind an ``ENABLE_*`` switch.
+generated sites) is optional and gated behind an ``ENABLE_*`` switch. Live RAG is retired.
 
 Those switches are tri-state:
 
@@ -222,10 +222,6 @@ class Config:
     DISCORD_BOT_TOKEN = (os.getenv("DISCORD_BOT_TOKEN") or "").strip()
     DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
     MAXWELL_DEV_MODE = _bool_env("MAXWELL_DEV_MODE", False)
-    # In-memory directed turn bound; overflow stays in the durable journal.
-    MAX_PENDING_REPLY_REQUESTS = _int_env(
-        "MAX_PENDING_REPLY_REQUESTS", 256, min_value=1, max_value=10000
-    )
     MAXWELL_DEV_GUILD_IDS: ClassVar[frozenset[str]] = frozenset(
         item.strip()
         for item in os.getenv("MAXWELL_DEV_GUILD_IDS", "").split(",")
@@ -381,20 +377,13 @@ class Config:
     # The installer enables this when --with-shell prepares the backend.
     ENABLE_SHELL = _feature_env("ENABLE_SHELL", default=False)
 
-    # RAG vector memory. Needs a reachable embedding endpoint (see
-    # EMBED_* below); without one the bot still works, it just loses
-    # semantic recall and falls back to recent-history context.
-    ENABLE_RAG = _feature_env(
-        "ENABLE_RAG",
-        lambda: bool(_first_env("MAXWELL_EMBED_MODEL", "EMBED_MODEL")),
-        needs="a configured embedding model",
-    )
-    RAG_WEB_STORE_ENABLED = _bool_env("RAG_WEB_STORE_ENABLED", True)
+    # Retired. Legacy environment settings cannot start local inference.
+    ENABLE_RAG = False
+    RAG_WEB_STORE_ENABLED = False
 
     # -------------------------------------------------------------------------
-    # Embeddings for RAG memory. Defaults target a local Ollama, but any
-    # OpenAI-compatible /v1/embeddings endpoint works — set EMBED_BASE_URL
-    # to e.g. https://api.openai.com/v1 with EMBED_MODEL/EMBED_DIM to match.
+    # Offline migration compatibility only. The live runtime never reads
+    # these settings or constructs an embedding client.
     # -------------------------------------------------------------------------
     EMBED_BASE_URL = _first_env(
         "MAXWELL_EMBED_BASE_URL", "EMBED_BASE_URL", default="http://localhost:11434"
@@ -558,7 +547,6 @@ class Config:
         ("ENABLE_AVATAR", "avatar changes"),
         ("ENABLE_EMAIL_TOOLS", "email tools"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
-        ("ENABLE_RAG", "RAG vector memory"),
         ("ENABLE_AUTONOMY", "autonomy engine"),
     )
 

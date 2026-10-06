@@ -388,10 +388,13 @@ def test_reactions_do_not_attach_to_retained_duplicate_text_from_an_evicted_mess
     assert "recent reaction" in str(result)
 
 
-def test_shared_memory_is_historical_and_never_attributed_without_provenance():
+def test_legacy_shared_memory_is_not_read_or_attributed():
     memory = FakeMemory()
 
+    shared_reads = []
+
     async def shared_context(**_kwargs):
+        shared_reads.append(_kwargs)
         return [
             {
                 "content": "Persona configured as Dame Curie",
@@ -423,8 +426,8 @@ def test_shared_memory_is_historical_and_never_attributed_without_provenance():
         "content"
     ].lower()
     assert "Dame Curie" in prompt
-    assert "historical reference only" in prompt
-    assert "never infer who created them" in prompt
+    assert shared_reads == []
+    assert "Persona configured as Dame Curie" not in prompt
     assert "source-owner-42" not in prompt
 
 

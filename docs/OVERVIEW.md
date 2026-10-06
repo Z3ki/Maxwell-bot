@@ -1,6 +1,6 @@
 # Maxwell architecture overview
 
-Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It accepts Discord text plus images, audio, video, files, embeds, replies, and app-command/context-menu requests, then runs a tool-capable model loop with scoped history/retrieval and owner/admin controls.
+Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It accepts Discord text plus images, audio, video, files, embeds, replies, and app-command/context-menu requests, then runs a tool-capable model loop with scoped recent history and owner/admin controls.
 
 Maxwell expects an official bot token from the Discord Developer Portal. Enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**.
 
@@ -19,8 +19,7 @@ Discord bot / app commands
         │
         ├── plugins/<feature>/     tools, hooks, prompt slices
         ├── providers.py           OpenAI-compatible adapter
-        ├── rag_memory.py          SQLite/RAG memory
-        ├── knowledge_graph.py     entity/relationship memory
+        ├── conversation_memory.py scoped SQLite history
         ├── autonomy.py            optional conversational autonomy
         └── api/                   authenticated operator and generated-site APIs
 ```
@@ -36,8 +35,8 @@ Discord bot / app commands
 | `config.py` | Loads `.env`, validates core settings, resolves optional feature flags. |
 | `providers.py` | OpenAI-compatible chat/streaming provider client, endpoint normalization, retries/fallbacks. |
 | `bot_tools.py`, `tool_registry.py`, `tool_schemas.py`, `tools.py` | Compatibility re-exports, reasoning traces, and schema helpers. Implementations live in `plugins/*/impl.py`. |
-| `rag_memory.py` | `RAGMemoryManager`: SQLite-backed/vector-backed memory for channel messages, long-term facts, and scoped context. |
-| `knowledge_graph.py` | Entity/relationship knowledge memory. |
+| `conversation_memory.py` | Scoped recent conversation history, queried directly from SQLite without vectors or embedding requests. |
+| `rag_memory.py`, `knowledge_graph.py` | Archived vector/graph compatibility code for offline migrations; not used by the live bot. |
 | `context_budget.py` | Prompt/context budget helpers. |
 | `autonomy.py` | Optional self-directed background action engine. |
 | `jobs.py` | Background jobs and long-running work. |
@@ -66,16 +65,9 @@ Tools marked destructive are fail-closed when the current turn has been tainted 
 
 ## Memory
 
-Current memory includes:
+The live `memory` service is `ConversationMemoryManager`. It reads only recent transcript rows authorized for the current guild/channel or DM and applies the existing prompt budget. History remains on disk between restarts without a global in-memory cache.
 
-- `RAGMemoryManager` in `rag_memory.py`, backed by SQLite and an OpenAI-compatible embedding endpoint, published to plugins as the `memory` service.
-- Channel/message memory and long-term fact storage.
-- Scoped shared/cross-context memory with visibility controls.
-- Entity/relationship memory through `knowledge_graph.py`.
-- Scoped retrieval of existing facts; no automatic transcript extraction or consolidation.
-- Prompt/context budgeting before data is injected into a model turn.
-
-RAG availability is controlled through configuration/feature switches. Embedding failures should not be confused with the primary chat provider; `doctor.py --probe` reports the configured provider/embedding probes.
+Live vector/RAG, entity/graph and shared-context retrieval, embedding generation, and embedding recovery are retired. Existing database records are preserved for export. Legacy `ENABLE_RAG` and saved retrieval controls cannot restore these services. NumPy is a development dependency for archived migration fixtures only.
 
 ## Discord app surfaces
 
@@ -107,7 +99,7 @@ Important groups include:
 - Replies/triggers and direct-response policy.
 - AI/tool concurrency and timeouts.
 - Native tool calls and per-tool disable lists.
-- Memory/RAG/context budgets.
+- Conversation-history and prompt budgets.
 - Optional conversational autonomy.
 - Night/fallback routing.
 - Autofix and developer/runtime switches.

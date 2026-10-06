@@ -2,3 +2,6 @@
 pytest>=8.3.5
 pytest-cov>=7.1.0,<8
 ruff>=0.16.6,<0.17
+# Archived vector-store fixtures and offline migration benchmarks only.
+numpy>=2.3.5,<2.4; python_version < "3.12"
+numpy>=2.5.1; python_version >= "3.12"

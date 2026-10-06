@@ -11,7 +11,7 @@ cleanup, memory policy, and plugin lifecycle have explicit module boundaries.
 | Shared services | `maxwell_core/` | Plugins, registries, prompts, transport helpers, provider protocols, memory policy |
 | Features | `plugins/<feature>/` | Tools, prompts, jobs, hooks, API extras |
 | Provider adapter | `providers.py` | OpenAI-compatible requests, endpoint fallback, retry policy |
-| Memory storage | `rag_memory.py`, `knowledge_graph.py` | Authorized persistence, retrieval, embedding recovery |
+| Memory storage | `conversation_memory.py` | Scoped SQLite transcript history without vector or local inference work |
 | Scheduling | `jobs.py`, `autonomy.py`, `rem.py` | Host scheduling with feature policy supplied by plugins |
 
 See [MAINTAINABILITY.md](MAINTAINABILITY.md) for module ownership, lifecycle

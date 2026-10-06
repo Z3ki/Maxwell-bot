@@ -31,8 +31,8 @@ plugin host. Remaining work for a later session:
 - Remote URL plugin install still requires a local path/zip the owner already
   trusts. Workbench covers generated local code. Manifests should set
   `requires_restart` when binary deps change.
-- `rag_memory.py` remains the SQLite implementation; plugins should take it
-  from `ctx.service("memory")` rather than constructing their own.
+- `conversation_memory.py` is the live SQLite history service; plugins should
+  take it from `ctx.service("memory")`. Legacy RAG/graph modules are offline only.
 
 Do not re-audit the old `bot.py` `_setup_tools` list — it is gone. Start from
 `plugins/*/plugin.json` and `maxwell_core`.

@@ -41,9 +41,9 @@ def repository(worktree: Path) -> Path:
     return worktree
 
 
-def execute(worktree: Path, commands, *, checkout=False, script=GIT_SCRIPT):
+def execute(worktree: Path, commands, *, checkout=False, script=GIT_SCRIPT, storage=None):
     return subprocess.run(
-        [sys.executable, "-I", "-c", script, str(worktree)],
+        [sys.executable, "-I", "-c", script, str(worktree)] + ([str(storage)] if storage else []),
         input=json.dumps({"repo": "acme/app", "commands": commands,
                           "checkout": checkout, "token": TOKEN}),
         capture_output=True, text=True, timeout=45,
@@ -166,10 +166,14 @@ def test_docker_credential_transport_is_not_argv_or_workspace_environment(tmp_pa
         assert TOKEN not in " ".join(args)
         assert "-e" not in args and "--env" not in args
         assert kwargs.get("env") is None
+        mount = args[args.index("--mount") + 1]
+        assert mount.startswith("type=volume,source=maxwell-git-cache-")
+        assert mount.endswith(",destination=/git-scratch")
+        assert not any("size=5g" in arg for arg in args)
         # Exercise the exact production request and script after checking its
         # public transport rather than returning an echo of invocation details.
         executed = subprocess.run(
-            [sys.executable, "-I", "-c", args[-2], str(worktree)],
+            [sys.executable, "-I", "-c", args[-3], str(worktree)],
             input=input, capture_output=True, timeout=45,
         )
         return ExecResult(executed.returncode, executed.stdout.decode(), executed.stderr.decode())
@@ -303,3 +307,109 @@ def test_fresh_clone_fetch_prune_and_push_keep_credentials_out_of_hostile_worksp
             if path.is_file():
                 assert TOKEN.encode() not in path.read_bytes()
                 assert encoded.encode() not in path.read_bytes()
+
+
+def test_pr_checkout_tracks_rebased_remote_head(tmp_path):
+    publisher = repository(tmp_path / "publisher")
+    remote = tmp_path / "server" / "acme" / "app.git"
+    remote.parent.mkdir(parents=True)
+    git(publisher, "clone", "--bare", str(publisher), str(remote))
+    worktree = repository(tmp_path / "workspace")
+    commands = [
+        ["fetch", "origin", "+pull/5/head:refs/remotes/origin/pr/5"],
+        ["checkout", "-B", "review", "refs/remotes/origin/pr/5"],
+    ]
+    with smart_http_remote(tmp_path / "server") as (port, _authorization):
+        script = GIT_SCRIPT.replace("https", "http").replace("github.com/", f"127.0.0.1:{port}/")
+        git(publisher, "commit", "--allow-empty", "-qm", "first PR head")
+        git(publisher, "push", str(remote), "HEAD:refs/pull/5/head")
+        first = execute(worktree, commands, script=script)
+        assert first.returncode == 0, first.stderr
+        old = git(worktree, "rev-parse", "HEAD").strip()
+        git(publisher, "reset", "--hard", "HEAD~1")
+        git(publisher, "commit", "--allow-empty", "-qm", "rebased PR head")
+        git(publisher, "push", "--force", str(remote), "HEAD:refs/pull/5/head")
+        second = execute(worktree, commands, script=script)
+        assert second.returncode == 0, second.stderr
+        assert git(worktree, "rev-parse", "HEAD").strip() == git(publisher, "rev-parse", "HEAD").strip()
+        assert git(worktree, "rev-parse", "HEAD").strip() != old
+
+
+@pytest.mark.parametrize("refspec", [
+    "+pull/5/head:refs/remotes/origin/pr/6",
+    "+refs/heads/main:refs/heads/main",
+    "+pull/5/head:refs/heads/main",
+    "pull/5/head:refs/remotes/origin/pr/6",
+])
+def test_forced_pr_fetch_cannot_target_another_ref(refspec):
+    with pytest.raises(ValueError):
+        validate_git_commands([["fetch", "origin", refspec]])
+
+
+def test_status_does_not_copy_or_republish_a_two_gib_object_store(tmp_path):
+    worktree = repository(tmp_path / "workspace")
+    objects = worktree / ".git" / "objects"
+    unused = objects / "ff" / ("0" * 38)
+    unused.parent.mkdir(exist_ok=True)
+    with unused.open("wb") as stream:
+        stream.truncate(2 * 1024**3 + 1)
+    before = {p.relative_to(objects): (p.stat().st_ino, p.stat().st_mtime_ns)
+              for p in objects.rglob("*") if p.is_file()}
+    # Same-filesystem snapshots must use sanitized links, never object copying.
+    script = GIT_SCRIPT.replace(
+        'def copy_file(source_fd, name, destination):',
+        'def copy_file(source_fd, name, destination):\n'
+        '    if "objects" in destination.parts:\n'
+        '        raise AssertionError("copied an existing object")',
+    )
+    result = execute(worktree, [["status", "--short", "--branch"]], script=script)
+    assert result.returncode == 0, result.stderr
+    after = {p.relative_to(objects): (p.stat().st_ino, p.stat().st_mtime_ns)
+             for p in objects.rglob("*") if p.is_file()}
+    assert after == before
+
+
+def test_object_store_over_four_gib_reports_size_error_before_copying(tmp_path):
+    worktree = repository(tmp_path / "workspace")
+    unused = worktree / ".git" / "objects" / "ff" / ("0" * 38)
+    unused.parent.mkdir(exist_ok=True)
+    with unused.open("wb") as stream:
+        stream.truncate(4 * 1024**3 + 1)
+    result = execute(worktree, [["status", "--short", "--branch"]])
+    assert result.returncode == 2
+    assert "exceeds 4 GiB" in result.stderr
+
+
+def test_separate_mount_cache_reuses_objects_and_never_persists_credentials(tmp_path):
+    worktree = repository(tmp_path / "workspace")
+    storage = tmp_path / "private-volume"
+    storage.mkdir()
+    # Model Docker's separate bind/volume mounts even on one test filesystem.
+    script = GIT_SCRIPT.replace("original_objects = {}", """original_objects = {}
+original_link = os.link
+def cross_mount_link(source, destination, **kwargs):
+    if kwargs.get('src_dir_fd') is not None:
+        raise OSError(errno.EXDEV, 'separate mount')
+    return original_link(source, destination, **kwargs)
+os.link = cross_mount_link""", 1)
+    first = execute(worktree, [["status", "--short", "--branch"]], script=script, storage=storage)
+    assert first.returncode == 0, first.stderr
+    cache = storage / "object-cache"
+    before = {p.relative_to(cache): (p.stat().st_ino, p.stat().st_mtime_ns)
+              for p in cache.rglob("*") if p.is_file()}
+    assert before
+    # Reusing the cache must finish without creating a second object copy.
+    guarded = script.replace('with destination.open("xb") as target:',
+                             'raise AssertionError("copied a cached object")\n'
+                             '            with destination.open("xb") as target:')
+    second = execute(worktree, [["status", "--short", "--branch"]], script=guarded, storage=storage)
+    assert second.returncode == 0, second.stderr
+    after = {p.relative_to(cache): (p.stat().st_ino, p.stat().st_mtime_ns)
+             for p in cache.rglob("*") if p.is_file()}
+    assert after == before
+    encoded = base64.b64encode(f"x-access-token:{TOKEN}".encode())
+    for path in storage.rglob("*"):
+        if path.is_file():
+            assert TOKEN.encode() not in path.read_bytes()
+            assert encoded not in path.read_bytes()
+    assert not list(storage.glob("maxwell-git-*"))

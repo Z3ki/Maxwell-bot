@@ -23,7 +23,7 @@ import discord
 from discord import Message
 
 from tools import Tool
-from rag_memory import MemoryRequester
+from maxwell_core.memory.scope import MemoryRequester
 from utils import FileLock, _atomic_json_write_sync, _load_json_safe, _safe_int
 
 logger = logging.getLogger(__name__)

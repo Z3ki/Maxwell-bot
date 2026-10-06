@@ -684,8 +684,10 @@ class OpenAICompatibleProvider(ChatProvider):
                 # SSRF protection belongs on the shared session used by tools like
                 # fetch_url, which DO accept untrusted URLs.
                 connector = aiohttp.TCPConnector(
-                    limit=16,
-                    limit_per_host=6,
+                    # aiohttp uses zero to disable connection admission caps.
+                    # Primary and fallback calls share no local waiting pool.
+                    limit=0,
+                    limit_per_host=0,
                     ttl_dns_cache=300,
                     enable_cleanup_closed=True,
                     keepalive_timeout=30,

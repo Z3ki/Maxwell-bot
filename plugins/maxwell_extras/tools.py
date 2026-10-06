@@ -27,7 +27,7 @@ import aiohttp
 import discord
 
 from tools import Tool
-from rag_memory import MemoryRequester
+from maxwell_core.memory.scope import MemoryRequester
 
 logger = logging.getLogger(__name__)
 

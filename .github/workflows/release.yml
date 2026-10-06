@@ -2,14 +2,16 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*.*.*']
+    paths: ['VERSION']
 
 permissions:
   contents: write
   packages: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -23,8 +25,13 @@ jobs:
         run: |
           version="$(cat VERSION)"
           [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          test "$GITHUB_REF_NAME" = "v$version"
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF_TYPE" = tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          else
+            test "$GITHUB_REF_NAME" = main
+          fi
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:v$version" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -48,8 +55,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          git archive --format=tar.gz --prefix="maxwell-$GITHUB_REF_NAME/" -o "dist/maxwell-$GITHUB_REF_NAME.tar.gz" HEAD
+          git archive --format=tar.gz --prefix="maxwell-$RELEASE_TAG/" -o "dist/maxwell-$RELEASE_TAG.tar.gz" HEAD
           cp easy-install.sh install.sh VERSION dist/
+          python scripts/release_notes.py > dist/RELEASE_NOTES.md
           (cd dist && sha256sum *.sh VERSION *.tar.gz > SHA256SUMS)
       - name: Publish versioned container image
         env:
@@ -61,4 +69,16 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Maxwell $GITHUB_REF_NAME" --notes-file CHANGELOG.md
+        run: |
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha 2>/dev/null || true)"
+          if [[ -z "$existing" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$GITHUB_SHA"
+          else
+            test "$existing" = "$GITHUB_SHA"
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+            gh release edit "$RELEASE_TAG" --title "Maxwell $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --title "Maxwell $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          fi

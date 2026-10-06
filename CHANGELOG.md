@@ -1,7 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.1.11 — 2026-10-06
 
+Install with `--version v0.1.11`. This release groups all changes since
+0.1.10. Assets include source, installers, checksums, and the container digest.
+
+- Publish validated version bumps on `main` through the release workflow,
+  retaining tag-triggered releases and publishing only the current changelog section.
+
+- Remove global live-reply and inference admission caps, provider/shared HTTP
+  connection caps, and the shared tool-dispatch budgets. Independent channels
+  and servers start concurrently for primary and fallback models. Ignore old
+  `ai_concurrency` and `MAX_PENDING_REPLY_REQUESTS` settings, remove per-channel
+  admission caps and message quotas, retain conversation ordering and resource-specific
+  containment, and track active inference calls.
+- Replace live RAG with scoped SQLite conversation history. Remove vector,
+  entity/graph and shared-context retrieval, embedding requests/recovery workers,
+  and NumPy from runtime dependencies. Preserve the existing database and archived
+  records for upgrades/export; old controls cannot restore retrieval.
+- Refresh matching PR tracking refs after force pushes/rebases (#57).
+- Deliver generated images through request-local attachment handles without
+  public hosting or shell access; advertise public URLs only when configured
+  and fail hosting tools clearly when no base URL is set (#58).
+- Put isolated Git snapshots/clones on disk, share or reflink sanitized existing
+  objects, reuse a private disk cache across separate mounts, avoid rewriting
+  unchanged packs, and enforce the 4 GiB object limit
+  with a clear error instead of exhausting tmpfs memory (#59).
 - Keep guild emojis/stickers and reaction snapshots after the transcript,
   use the same history window for short and long requests, and trim oversized
   histories in message chunks. Sort authorized tool catalogs and schemas so
@@ -11,7 +35,7 @@
 - Remove REM, context fact extraction, automatic memory summaries, delegated
   background workers, scheduled GitHub maintenance and automatic code repair.
   Remove their API routes, commands, settings and auxiliary model configuration;
-  saved settings cannot reactivate them. Keep scoped history/retrieval and the
+  saved settings cannot reactivate them. Keep scoped recent history and the
   separately opt-in conversational autonomy feature.
 - Consolidate Discord and tool instructions, keep personality limited to style,
   require authenticated permission context, and distinguish reply drafting from

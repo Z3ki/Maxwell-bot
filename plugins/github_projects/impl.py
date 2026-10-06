@@ -435,14 +435,18 @@ class GitHubProjectService:
         if not token:
             raise PermissionError("GitHub credential is not configured")
         target = self.repo_root(uid, repo)
+        cache_volume = "maxwell-git-cache-" + hashlib.sha256(
+            f"{uid}\0{repo}".encode()
+        ).hexdigest()[:24]
         args = [
             "docker", "run", "--rm", "--init", "--interactive", "--read-only",
             "--network", "bridge", "--memory", "2g", "--memory-swap", "2g",
             "--cpus", "1.5", "--pids-limit", "384",
             "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=5g",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
+            "--mount", f"type=volume,source={cache_volume},destination=/git-scratch",
             "-v", f"{target}:/repository:rw", "--workdir", "/tmp", _IMAGE,
-            "python3", "-I", "-c", GIT_SCRIPT, "/repository",
+            "python3", "-I", "-c", GIT_SCRIPT, "/repository", "/git-scratch",
         ]
         payload = json.dumps({
             "repo": repo, "commands": commands, "checkout": checkout, "token": token,
@@ -469,7 +473,7 @@ class GitHubProjectService:
         if number<=0: raise ValueError("PR number must be positive")
         branch=f"maxwell/pr-{number}"
         commands = [
-            ["fetch", "origin", f"pull/{number}/head:refs/remotes/origin/pr/{number}"],
+            ["fetch", "origin", f"+pull/{number}/head:refs/remotes/origin/pr/{number}"],
             ["checkout", "-B", branch, f"refs/remotes/origin/pr/{number}"],
             ["status", "--short", "--branch"],
         ]
