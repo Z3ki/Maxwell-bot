@@ -11324,7 +11324,7 @@ class MaxwellBot(commands.Bot):
             params_text = json.dumps(mem_params, ensure_ascii=False, sort_keys=True)
         except TypeError:
             params_text = strip_media_payloads(str(mem_params))
-        await self.memory.add_to_channel_memory(
+        await self.add_message_to_memory(
             str(channel_id),
             {
                 "author": "Tool",
@@ -11334,6 +11334,7 @@ class MaxwellBot(commands.Bot):
                 "tool_params": mem_params,
                 "tool_result": result,
             },
+            message,
         )
 
     async def _process_native_tool_calls(

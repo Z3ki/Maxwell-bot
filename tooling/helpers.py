@@ -5347,14 +5347,14 @@ async def _chess_record(bot, message, text: str) -> None:
     try:
         mem = getattr(bot, "memory", None)
         if mem is not None and hasattr(mem, "add_to_channel_memory"):
-            await mem.add_to_channel_memory(
-                str(getattr(message.channel, "id", "") or ""),
-                {
-                    "author": "Tool",
-                    "content": text,
-                    "is_tool": True,
-                },
-            )
+            channel_id = str(getattr(message.channel, "id", "") or "")
+            item = {"author": "Tool", "content": text, "is_tool": True}
+            writer = getattr(bot, "add_message_to_memory", None)
+            if callable(writer):
+                await writer(channel_id, item, message)
+            else:
+                item["guild_id"] = str(getattr(getattr(message, "guild", None), "id", "") or "")
+                await mem.add_to_channel_memory(channel_id, item)
     except Exception as e:  # pragma: no cover
         # Memory write is best-effort; never fail the tool over it.
         logger.debug("Failed to record tool output in channel memory: %s", e)

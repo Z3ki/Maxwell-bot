@@ -1,6 +1,7 @@
 """Chess tools through Maxwell's real request dispatch, with Discord I/O faked."""
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -186,3 +187,51 @@ def test_cancel_idle_games_announces_and_frees_the_slot(runtime):
     sent.assert_awaited_once()
     assert "canceled" in sent.await_args.args[0]
     assert manager.active("10") is None
+
+
+@pytest.mark.parametrize("ending", ["checkmate", "stalemate"])
+def test_finished_games_expire_silently_while_idle_live_games_are_canceled(runtime, ending):
+    manager, message, call = runtime
+    finished = manager.start("10", "1", "Player", bot_color=chess.BLACK)
+    if ending == "checkmate":
+        for san in ("f3", "e5", "g4", "Qh4#"):
+            finished.apply_move(finished.parse_move(san))
+    else:
+        finished.board = chess.Board("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1")
+    assert finished.is_over
+    live = manager.start("11", "2", "Other", bot_color=chess.BLACK)
+    finished.last_activity_at = _stale_activity(601)
+    live.last_activity_at = _stale_activity(601)
+    manager.persist()
+    channels = {10: SimpleNamespace(send=AsyncMock()), 11: SimpleNamespace(send=AsyncMock())}
+    bot = SimpleNamespace(get_channel=channels.get, user=SimpleNamespace(id=999, name="Maxwell"))
+
+    asyncio.run(impl.cancel_idle_games(bot))
+
+    channels[10].send.assert_not_awaited()
+    channels[11].send.assert_awaited_once()
+    assert "canceled" in channels[11].send.await_args.args[0]
+    assert manager.active("10") is None
+    assert manager.active("11") is None
+    assert chess_game.ChessManager(store_path=manager._store)._games == {}
+    asyncio.run(impl.cancel_idle_games(bot))
+    assert channels[11].send.await_count == 1
+
+
+@pytest.mark.parametrize("expiry_path", ["sweep", "lazy"])
+def test_finished_game_cleanup_is_persisted_without_an_idle_live_game(tmp_path, expiry_path):
+    store = tmp_path / "games.json"
+    manager = chess_game.ChessManager(store_path=str(store))
+    game = manager.start("10", "1", "Player", bot_color=chess.BLACK)
+    for san in ("f3", "e5", "g4", "Qh4#"):
+        game.apply_move(game.parse_move(san))
+    game.last_activity_at = _stale_activity(601)
+    manager.persist()
+    assert "10" in json.loads(store.read_text())
+
+    if expiry_path == "sweep":
+        assert manager.sweep_expired() == []
+    else:
+        assert manager.active("10") is None
+    assert manager._games == {}
+    assert json.loads(store.read_text()) == {}

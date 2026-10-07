@@ -3,6 +3,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
+from conversation_memory import ConversationMemoryManager
+from maxwell_core.memory.scope import MemoryRequester
 
 from autonomy import (
     AutonomyContextIndex,
@@ -31,7 +35,9 @@ class FakeMemory:
     async def add_to_channel_memory(self, channel_id, message):
         self.added.append((channel_id, message))
 
-    async def get_channel_memory(self, channel_id):
+    async def get_channel_memory(self, channel_id, *, requester=None):
+        assert isinstance(requester, MemoryRequester) and requester.valid
+        assert requester.channel_id == str(channel_id)
         return list(self.channel_rows.get(str(channel_id), []))
 
     async def list_recent_channel_ids(self, limit=20):
@@ -435,6 +441,7 @@ def test_exec_post_channel_records_autonomy_message_as_self_memory(tmp_path):
         "author_is_bot": True,
         "content": "that was me",
         "message_id": "777",
+        "guild_id": "9",
         "autonomy": True,
         "autonomy_reason": "",
     }
@@ -716,7 +723,9 @@ def test_gather_context_reads_watch_rooms_outside_auto_channels(tmp_path):
     assert "hey from the watch room" in context
 
 
-def test_gather_context_includes_normal_channel_memory(tmp_path):
+@pytest.mark.parametrize("memory_backend", ["fake", "sqlite"])
+@pytest.mark.parametrize("accessible", [True, False])
+def test_gather_context_includes_normal_channel_memory(tmp_path, memory_backend, accessible):
     class Store:
         async def load_goals(self):
             return []
@@ -735,8 +744,11 @@ def test_gather_context_includes_normal_channel_memory(tmp_path):
         id = 100
         name = "general"
         topic = ""
+        guild = SimpleNamespace(id=9)
 
         async def history(self, limit=1):
+            if not accessible:
+                raise PermissionError("channel history is inaccessible")
             if False:
                 yield None
 
@@ -757,6 +769,9 @@ def test_gather_context_includes_normal_channel_memory(tmp_path):
             ]
         }
     )
+    rows = memory.channel_rows["100"]
+    if memory_backend == "sqlite":
+        memory = ConversationMemoryManager(str(tmp_path / "history"))
     channel = Channel()
     bot = SimpleNamespace(
         config=SimpleNamespace(DATA_DIR=str(tmp_path)),
@@ -774,8 +789,25 @@ def test_gather_context_includes_normal_channel_memory(tmp_path):
     engine = AutonomyEngine(bot)
     engine.store = Store()
 
-    context = asyncio.run(engine.gather_context())
+    async def scenario():
+        if memory_backend == "sqlite":
+            for index, row in enumerate(rows):
+                await memory.add_to_channel_memory("100", row | {"guild_id": "9", "message_id": str(index)})
+            for guild, cid in [("other", "100"), ("", "100"), ("9", "200")]:
+                await memory.add_to_channel_memory(cid, {"guild_id": guild, "content": "unrelated private history"})
+        try:
+            return await engine.gather_context()
+        finally:
+            if memory_backend == "sqlite":
+                await memory.flush()
 
+    context = asyncio.run(scenario())
+
+    assert "unrelated private history" not in context
+    if not accessible:
+        assert "RECENT CONTEXT MEMORY" not in context
+        assert "i already said this like maxwell" not in context
+        return
     assert "RECENT CONTEXT MEMORY" in context
     assert "You/Maxwell(42): i already said this like maxwell" in context
     assert "You/Maxwell: old self row with missing id" in context

@@ -3,9 +3,62 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
+
+
+def _workflow_step_script(workflow, name):
+    step = workflow.split(f"      - name: {name}\n", 1)[1]
+    block = step.split("        run: |\n", 1)[1]
+    return re.split(r"\n(?=\S| {1,9}\S)", block, maxsplit=1)[0].replace("\n          ", "\n")[10:]
+
+
+@pytest.mark.parametrize("tag_state", ["missing", "matching", "mismatched", "annotated-matching", "annotated-mismatched", "unreachable"])
+def test_release_guard_prevents_publication_from_a_different_commit(tmp_path, tag_state):
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/release.yml").read_text()
+    script = _workflow_step_script(workflow, "Check release tag before publication")
+    # Run against real git refs, including peeled annotated tags, rather than
+    # faking tag resolution and accidentally accepting a tag object's SHA.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, env=git_env, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init")
+    git("commit", "--allow-empty", "-m", "first")
+    first = git("rev-parse", "HEAD")
+    if tag_state.startswith("annotated"):
+        git("tag", "-a", "v0.1.11", "-m", "release")
+    elif tag_state in {"matching", "mismatched"}:
+        git("tag", "v0.1.11")
+    if "mismatched" in tag_state:
+        git("commit", "--allow-empty", "-m", "later workflow edit")
+    sha = git("rev-parse", "HEAD")
+    git("remote", "add", "origin", str(repo if tag_state != "unreachable" else tmp_path / "missing"))
+    output = tmp_path / "outputs"
+    result = subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=repo, capture_output=True, text=True,
+                            env={**git_env, "RELEASE_TAG": "v0.1.11", "GITHUB_SHA": sha,
+                                 "GITHUB_OUTPUT": str(output), "GITHUB_REF_TYPE": "branch"})
+    if tag_state == "unreachable":
+        assert result.returncode != 0
+        assert not output.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert output.read_text().strip() == ("publish=false" if "mismatched" in tag_state else "publish=true")
+        if "mismatched" in tag_state:
+            assert git("rev-parse", "v0.1.11^{commit}") == first
+            assert "Skipping" in result.stdout
+    # The publishing job must depend on the guard's result, including every
+    # Docker build/push and release upload; concurrent SHAs share one lock.
+    assert "needs: prepare" in workflow
+    assert "if: needs.prepare.outputs.publish == 'true'" in workflow
+    assert re.search(r"group: release-\$\{\{ github.repository \}\}", workflow)
 
 
 @pytest.mark.parametrize("tag_state", ["missing", "matching", "mismatched"])

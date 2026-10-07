@@ -11,16 +11,21 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-${{ github.sha }}
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.guard.outputs.publish }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      image: ${{ steps.version.outputs.image }}
     steps:
       - uses: actions/checkout@v4
       - name: Validate release version
+        id: version
         shell: bash
         run: |
           version="$(cat VERSION)"
@@ -31,7 +36,38 @@ jobs:
             test "$GITHUB_REF_NAME" = main
           fi
           echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:v$version" >> "$GITHUB_ENV"
+          echo "release_tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}:v$version" >> "$GITHUB_OUTPUT"
+      - name: Check release tag before publication
+        id: guard
+        shell: bash
+        run: |
+          status=0
+          refs="$(git ls-remote --exit-code origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")" || status=$?
+          case "$status" in
+            0)
+              existing="$(printf '%s\n' "$refs" | awk 'NR == 1 {sha = $1} $2 ~ /\^\{\}$/ {sha = $1} END {print sha}')"
+              if [[ "$existing" != "$GITHUB_SHA" ]]; then
+                echo "Skipping $RELEASE_TAG: it already belongs to commit $existing."
+                echo "publish=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            2) ;; # No matching tag: first publication of this version.
+            *) exit "$status" ;; # An unavailable remote is not a missing tag.
+          esac
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

@@ -1059,26 +1059,30 @@ class ChessManager:
     def sweep_expired(
         self, timeout: float = IDLE_TIMEOUT_SECONDS
     ) -> list[tuple[str, ChessGame]]:
-        """Cancel every game idle past ``timeout``; return the canceled ones.
+        """Retire idle games; return only unfinished games canceled by timeout.
 
         Callers use the return value to announce the cancellation in the
         game's channel; the slot is free again either way.
         """
         with self._lock:
-            expired = self._expire_locked(timeout)
-            if expired:
-                self._save()
-            return expired
+            return self._expire_locked(timeout)
 
     def _expire_locked(
         self, timeout: float = IDLE_TIMEOUT_SECONDS
     ) -> list[tuple[str, ChessGame]]:
         now = datetime.now(timezone.utc)
         expired: list[tuple[str, ChessGame]] = []
+        changed = False
         for key, game in list(self._games.items()):
             if game.is_idle_expired(timeout, now):
                 self._games.pop(key, None)
-                expired.append((key, game))
+                changed = True
+                # Keep the final board available during the idle window, then
+                # retire it silently. Only unfinished games were canceled.
+                if not game.is_over:
+                    expired.append((key, game))
+        if changed:
+            self._save()
         return expired
 
 

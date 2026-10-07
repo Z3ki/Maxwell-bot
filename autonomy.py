@@ -54,6 +54,7 @@ from typing import Any, ClassVar, cast
 
 import discord
 
+from maxwell_core.memory.scope import MemoryRequester
 from control_defaults import (
     DEFAULT_CONTROL,
 )  # noqa: E402
@@ -2018,7 +2019,20 @@ class AutonomyEngine:
                 for cid in reversed(channel_ids_to_check):
                     if not self._channel_allowed(cid):
                         continue
-                    rows = await memory.get_channel_memory(cid)
+                    # Only read rooms whose Discord history was accessible in
+                    # this tick. A cached transcript cannot grant access to a
+                    # missing channel or one whose permissions were revoked.
+                    pair = history_by_id.get(cid)
+                    if pair is None:
+                        continue
+                    channel = pair[0]
+                    guild = getattr(channel, "guild", None)
+                    if not self._guild_allowed(str(getattr(guild, "id", "") or "")):
+                        continue
+                    requester = MemoryRequester.from_message(SimpleNamespace(
+                        author=self.bot.user, channel=channel, guild=guild,
+                    ))
+                    rows = await memory.get_channel_memory(cid, requester=requester)
                     if not rows:
                         continue
                     ch_label = (await self._register_conversation(ctx_index, cid))[1]
@@ -3856,6 +3870,7 @@ class AutonomyEngine:
                 ),
             ),
             "message_id": str(getattr(sent_message, "id", "")),
+            "guild_id": str(getattr(getattr(channel, "guild", None), "id", "") or ""),
             "timestamp": (
                 getattr(sent_message, "created_at", None) or datetime.now(timezone.utc)
             ).isoformat(),

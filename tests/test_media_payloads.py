@@ -42,11 +42,17 @@ def test_metadata_scrubbing_preserves_the_input_and_normal_text():
 
 
 @pytest.mark.parametrize("kind,tool", [("IMAGE", "see_image"), ("AUDIO", "see_media")])
-def test_dispatch_extracts_media_but_never_persists_it(monkeypatch, kind, tool):
+@pytest.mark.parametrize("guild_id", [None, 123])
+def test_dispatch_extracts_media_but_never_persists_it(monkeypatch, kind, tool, guild_id):
     async def run():
         memory = SimpleNamespace(add_to_channel_memory=AsyncMock())
-        owner = SimpleNamespace(_control={}, tools={}, memory=memory)
-        message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+        owner = object.__new__(MaxwellBot)
+        owner._control = {}
+        owner.tools = {}
+        owner.memory = memory
+        owner._progress_enabled = lambda _guild_id: False
+        guild = SimpleNamespace(id=guild_id) if guild_id else None
+        message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=guild)
         payload = "QUFB" * 2000
         raw = f"Tool {tool}: Loaded media.\n__{kind}_B64__{payload}__END_{kind}_B64__"
         monkeypatch.setattr(
@@ -67,6 +73,7 @@ def test_dispatch_extracts_media_but_never_persists_it(monkeypatch, kind, tool):
         )
         memory.add_to_channel_memory.assert_awaited_once()
         saved = memory.add_to_channel_memory.call_args.args[1]
+        assert saved["guild_id"] == str(guild_id or "")
         assert payload[:100] not in json.dumps(saved)
         assert "Loaded media." in saved["tool_result"]
         assert payload[:100] not in json.dumps(owner._last_native_followup_messages)

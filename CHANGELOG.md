@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Store tool-call, chess, and autonomous-message history under its originating
+  guild so future server prompts include the recorded actions (#62).
+- Read autonomy history with a channel-scoped requester, only after successfully
+  accessing that channel's Discord history (#63).
+- Retire finished chess games silently after the idle window, preserving
+  cancellation notices for abandoned games and persisting lazy expiry (#61).
+- Check existing version tags before the release build or publication, skip
+  versions owned by another commit, and serialize release runs so workflow edits
+  cannot overwrite a published version's container image (#64).
+
 ## 0.1.11 — 2026-10-06
 
 Install with `--version v0.1.11`. This release groups all changes since
