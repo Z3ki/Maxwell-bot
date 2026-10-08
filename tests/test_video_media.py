@@ -51,14 +51,26 @@ def test_fetch_url_rejects_audio_payload_as_text(monkeypatch):
         return "https://cdn.example/clip.mp3", "audio/mpeg", b"\xff\xfe\x00\x01"
 
     monkeypatch.setattr("bot_tools._fetch_public_url", fetch)
-    bot = SimpleNamespace(mark_message_tainted=lambda *_args: None)
-    result = asyncio.run(
-        FetchUrlTool(bot).execute(_message(), url="https://cdn.example/clip.mp3")
+    off = SimpleNamespace(mark_message_tainted=lambda *_args: None)
+    off_result = asyncio.run(
+        FetchUrlTool(off).execute(_message(), url="https://cdn.example/clip.mp3")
     )
+    assert off_result.startswith("Error:")
+    assert "audio input is off" in off_result
+    assert "Do not transcribe" in off_result
+    assert "\ufffd" not in off_result
 
-    assert result.startswith("Error:")
-    assert "audio media" in result
-    assert "\ufffd" not in result
+    on = SimpleNamespace(
+        mark_message_tainted=lambda *_args: None,
+        config=SimpleNamespace(ENABLE_AUDIO_INPUT=True),
+        _control={"process_audio": True},
+    )
+    on_result = asyncio.run(
+        FetchUrlTool(on).execute(_message(), url="https://cdn.example/clip.mp3")
+    )
+    assert on_result.startswith("Error:")
+    assert "audio media" in on_result
+    assert "\ufffd" not in on_result
 
 
 def test_video_tool_returns_frames_and_audio_for_followup_input():
