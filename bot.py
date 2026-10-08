@@ -198,6 +198,7 @@ from context_budget import (  # noqa: E402
 from control_defaults import (  # noqa: E402
     DEAD_CONTROL_KEYS,
     DEFAULT_CONTROL,
+    audio_input_enabled,
     guild_capability_for_tool,
     parse_bool,
 )
@@ -420,22 +421,8 @@ def _format_user_error(exc: BaseException, limit: int = 300) -> str:
 
 
 def _owner_audio_input_enabled(owner) -> bool:
-    """Whether audio should be extracted and forwarded to the model.
-
-    ``ENABLE_AUDIO_INPUT=false`` is a hard off (same as images). Dashboard
-    ``process_audio`` can still mute audio when the env switch is on.
-    """
-    cfg = getattr(owner, "config", None)
-    if cfg is not None and not parse_bool(
-        getattr(cfg, "ENABLE_AUDIO_INPUT", True), True
-    ):
-        return False
-    control = getattr(owner, "_control", None) or {}
-    if isinstance(control, dict) and "process_audio" in control:
-        return parse_bool(control.get("process_audio"), False)
-    if cfg is None:
-        return False
-    return parse_bool(getattr(cfg, "ENABLE_AUDIO_INPUT", False), False)
+    """Whether audio should be extracted and forwarded to the model."""
+    return audio_input_enabled(owner)
 
 
 def _message_created_at_iso(message) -> str:

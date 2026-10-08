@@ -204,13 +204,9 @@ class SeeVideoTool(Tool):
             return False
 
     def _audio_enabled(self) -> bool:
-        control = getattr(self.bot, "_control", None) or {}
-        if isinstance(control, dict) and "process_audio" in control:
-            return parse_bool(control.get("process_audio"), False)
-        return parse_bool(
-            getattr(getattr(self.bot, "config", None), "ENABLE_AUDIO_INPUT", False),
-            False,
-        )
+        from control_defaults import audio_input_enabled
+
+        return audio_input_enabled(self.bot)
 
     def _max_size(self) -> int:
         max_size = 10 * 1024 * 1024

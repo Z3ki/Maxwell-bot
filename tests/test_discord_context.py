@@ -144,6 +144,47 @@ def test_clip_and_voice_attachments_are_annotated():
     assert "VALORANT" in text
     assert "Hallway" in text
     assert "voice message" in text
+    assert "voice.ogg" in text
+
+
+def test_voice_annotation_does_not_invite_hearing_when_audio_is_off():
+    voice = SimpleNamespace(
+        filename="voice-message.ogg",
+        content_type="audio/ogg",
+        duration=7.6,
+        waveform=b"xx",
+        flags=SimpleNamespace(clip=False, spoiler=False),
+        title=None,
+        description=None,
+        clip_created_at=None,
+        clip_participants=None,
+        application=None,
+        width=None,
+        height=None,
+        url="https://cdn.discordapp.com/attachments/1/voice-message.ogg",
+        is_spoiler=lambda: False,
+        is_voice_message=lambda: True,
+    )
+    msg = SimpleNamespace(
+        type="MessageType.default",
+        content="what does this say https://cdn.example/note.ogg",
+        author=SimpleNamespace(display_name="Alice", id=1),
+        attachments=[voice],
+        embeds=[],
+        stickers=[],
+        components=[],
+        poll=None,
+        mentions=[],
+        channel_mentions=[],
+        role_mentions=[],
+        created_at=None,
+        guild=None,
+    )
+    text = render_discord_context_text(msg, hear_audio=False)
+    assert "[voice message:" in text
+    assert "not included, audio input is off" in text
+    assert "cdn.discordapp.com" not in text
+    assert "[media URL: audio — not included, audio input is off]" in text
 
 
 def test_heic_and_opus_links_are_annotated():

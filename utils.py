@@ -335,7 +335,7 @@ def _media_http_url(value: Any) -> str:
     )
 
 
-def _attachment_annotation(att: Any) -> str:
+def _attachment_annotation(att: Any, *, hear_audio: bool = True) -> str:
     name = str(getattr(att, "filename", "") or "file")
     ctype = str(getattr(att, "content_type", "") or "").split(";")[0].lower()
     lower = name.lower()
@@ -377,6 +377,11 @@ def _attachment_annotation(att: Any) -> str:
     if _attachment_is_voice(att):
         dur = getattr(att, "duration", None)
         dur_bit = f" {float(dur):.0f}s" if dur else ""
+        if not hear_audio:
+            return (
+                f"[voice message:{dur_bit} {name} — not included, "
+                f"audio input is off]{extra}"
+            )
         return f"[voice message:{dur_bit} {name}{url_bit}]{extra}"
     if ctype.startswith("image/") or lower.endswith(
         (
@@ -400,6 +405,10 @@ def _attachment_annotation(att: Any) -> str:
     ):
         dur = getattr(att, "duration", None)
         dur_bit = f" {float(dur):.0f}s" if dur else ""
+        if not hear_audio:
+            return (
+                f"[audio:{dur_bit} {name} — not included, audio input is off]{extra}"
+            )
         return f"[audio:{dur_bit} {name}{url_bit}]{extra}"
     if ctype.startswith("video/") or lower.endswith(
         (".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpeg", ".mpg", ".3gp")
@@ -451,9 +460,10 @@ def _payload_attr_items(message: Any, name: str, cap: int) -> list:
     return items
 
 
-def _format_compact_attachment(att: Any) -> str:
+def _format_compact_attachment(att: Any, *, hear_audio: bool = True) -> str:
     filename = str(getattr(att, "filename", None) or "attachment")
     mime = str(getattr(att, "content_type", None) or "").strip()
+    lower = filename.lower()
     if mime:
         extra = mime
     else:
@@ -462,6 +472,13 @@ def _format_compact_attachment(att: Any) -> str:
             extra = f"{int(size)} bytes"
         except (TypeError, ValueError):
             extra = "unknown"
+    audio = _attachment_is_voice(att) or mime.split(";", 1)[0].lower().startswith(
+        "audio/"
+    ) or lower.endswith(
+        (".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".flac", ".aac", ".wma")
+    )
+    if audio and not hear_audio:
+        return f"{filename} ({extra}) — not included, audio input is off"
     url = _media_http_url(att)
     if url:
         return f"{filename} ({extra}) {url}"
@@ -469,13 +486,13 @@ def _format_compact_attachment(att: Any) -> str:
 
 
 def _compact_attachments_note(
-    message: Any, *, raw_content: str = "", cap: int = 5
+    message: Any, *, raw_content: str = "", cap: int = 5, hear_audio: bool = True
 ) -> str:
     """``[attachments: name (mime) url]`` — skip if content already has one."""
     if "[attachments:" in str(raw_content or ""):
         return ""
     names = [
-        _format_compact_attachment(att)
+        _format_compact_attachment(att, hear_audio=hear_audio)
         for att in _payload_attr_items(message, "attachments", cap)
     ]
     if not names:
@@ -760,7 +777,11 @@ def _message_flags_annotation(message: Any) -> str | None:
 
 
 def _render_message_annotations(
-    message: Any, raw_content: str = "", *, compact: bool = True
+    message: Any,
+    raw_content: str = "",
+    *,
+    compact: bool = True,
+    hear_audio: bool = True,
 ) -> str:
     """Extra structured context Discord messages carry outside plain content:
     polls, app commands, system events, embeds, attachments, buttons/selects,
@@ -799,12 +820,14 @@ def _render_message_annotations(
 
     for att in list(getattr(message, "attachments", None) or [])[:5]:
         try:
-            parts.append(_attachment_annotation(att))
+            parts.append(_attachment_annotation(att, hear_audio=hear_audio))
         except Exception as e:
             logger.debug("Attachment annotation failed: %s", e)
             continue
     if compact:
-        att_note = _compact_attachments_note(message, raw_content=raw_content)
+        att_note = _compact_attachments_note(
+            message, raw_content=raw_content, hear_audio=hear_audio
+        )
         if att_note:
             parts.append(att_note)
 
@@ -948,6 +971,9 @@ def _render_message_annotations(
         seen.add(u)
         found.append(("gif", u))
     for kind, u in found[:5]:
+        if kind == "audio" and not hear_audio:
+            parts.append("[media URL: audio — not included, audio input is off]")
+            continue
         parts.append(f"[media URL: {kind} {u}]")
 
     for snap in iter_message_snapshots(message)[:3]:
@@ -960,7 +986,9 @@ def _render_message_annotations(
             header += f": {snap_text[:1500]}"
         header += "]"
         parts.append(header)
-        nested = _render_message_annotations(snap, raw_content=snap_text, compact=False)
+        nested = _render_message_annotations(
+            snap, raw_content=snap_text, compact=False, hear_audio=hear_audio
+        )
         if nested:
             parts.append(nested)
 
@@ -1114,7 +1142,11 @@ def _discord_id(obj: Any) -> str:
 
 
 def render_discord_context_text(
-    message: Any, content: str | None = None, known_users: dict | None = None
+    message: Any,
+    content: str | None = None,
+    known_users: dict | None = None,
+    *,
+    hear_audio: bool = True,
 ) -> str:
     """Make Discord tokens readable for prompts/logged context without mutating the real message.
     known_users: optional {user_id: display_name} from conversation history to resolve pings.
@@ -1128,7 +1160,9 @@ def render_discord_context_text(
     text = str(
         content if content is not None else (getattr(message, "content", "") or "")
     )
-    annotations = _render_message_annotations(message, raw_content=text)
+    annotations = _render_message_annotations(
+        message, raw_content=text, hear_audio=hear_audio
+    )
     if not text:
         return annotations
 

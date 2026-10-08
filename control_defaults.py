@@ -18,6 +18,25 @@ def parse_bool(value, default: bool = False) -> bool:
     return default
 
 
+def audio_input_enabled(owner) -> bool:
+    """Whether audio bytes should reach the model.
+
+    ``ENABLE_AUDIO_INPUT=false`` is a hard off. Dashboard ``process_audio``
+    can still mute audio when the env switch is on.
+    """
+    cfg = getattr(owner, "config", None)
+    if cfg is not None and not parse_bool(
+        getattr(cfg, "ENABLE_AUDIO_INPUT", True), True
+    ):
+        return False
+    control = getattr(owner, "_control", None) or {}
+    if isinstance(control, dict) and "process_audio" in control:
+        return parse_bool(control.get("process_audio"), False)
+    if cfg is None:
+        return False
+    return parse_bool(getattr(cfg, "ENABLE_AUDIO_INPUT", False), False)
+
+
 # Canonical DEFAULT_CONTROL — both bot and API import this.
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {

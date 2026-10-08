@@ -338,6 +338,13 @@ class FetchUrlTool(Tool):
                 )
             return "Error: URL contains video media, not readable text; use see_video"
         if mime.startswith("audio/") or url_ext in SeeVideoTool.AUDIO_EXTS:
+            from control_defaults import audio_input_enabled
+
+            if not audio_input_enabled(self.bot):
+                return (
+                    "Error: URL contains audio, and audio input is off. "
+                    "You did not receive the audio. Do not transcribe it or guess what it says."
+                )
             return (
                 "Error: URL contains audio media, not readable text. "
                 f"Attach or post the audio URL so {process_name(self.bot) or 'the bot'} can hear it."

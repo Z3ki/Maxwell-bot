@@ -223,3 +223,25 @@ def test_media_request_keeps_media_manifest_in_live_turn():
     )
     assert "current media manifest" in messages[-1]["content"]
     assert any("Multimodal:" in row["content"] for row in messages)
+
+
+def test_disabled_audio_input_forbids_inventing_a_transcript():
+    builder, message, _ = service(process_audio=False)
+    builder.host.config.ENABLE_AUDIO_INPUT = False
+    messages = build(
+        builder, message, has_media=True, media_summary="current media manifest"
+    )
+    joined = "\n".join(row["content"] for row in messages)
+    assert "Audio input is off" in joined
+    assert "Do not transcribe them" in joined
+    assert "don't claim you can't see/hear them" not in joined
+    assert "Do not claim you heard any audio" in joined
+
+
+def test_enabled_audio_input_still_asks_the_model_to_inspect_it():
+    builder, message, _ = service(process_audio=True)
+    builder.host.config.ENABLE_AUDIO_INPUT = True
+    messages = build(builder, message, has_media=True)
+    joined = "\n".join(row["content"] for row in messages)
+    assert "Audio input is off" not in joined
+    assert "don't claim you can't see/hear them" in joined

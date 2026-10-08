@@ -19,7 +19,7 @@ import discord
 
 from autonomy import _reply_relation_bit
 from context_budget import BudgetPlan, fit_lines
-from control_defaults import DEFAULT_CONTROL
+from control_defaults import DEFAULT_CONTROL, audio_input_enabled
 from discord_threads import is_discord_thread
 from identity import process_name
 from media_payloads import strip_media_payloads
@@ -308,11 +308,26 @@ class ConversationPromptBuilder:
         )
         if tool_prompt:
             system_parts.append(tool_prompt)
-        if has_media:
+        hear_audio = audio_input_enabled(host)
+        if not hear_audio:
             dynamic_parts.append(
-                "Multimodal: images/audio/video are in the payload (oldest→newest). "
-                "Inspect them; don't claim you can't see/hear them unless none were sent."
+                "Audio input is off. You did not receive any audio. "
+                "Voice messages and audio files in the transcript are labels only. "
+                "Do not transcribe them, guess their words, or describe how they sound. "
+                "If asked what one says, say you can't hear it because audio input is off."
             )
+        if has_media:
+            if hear_audio:
+                dynamic_parts.append(
+                    "Multimodal: images/audio/video are in the payload (oldest→newest). "
+                    "Inspect them; don't claim you can't see/hear them unless none were sent."
+                )
+            else:
+                dynamic_parts.append(
+                    "Multimodal: images are in the payload (oldest→newest). "
+                    "Inspect those images. Audio was not forwarded. "
+                    "Do not claim you heard any audio."
+                )
         append_inbox = getattr(host, "_append_inbox_dynamic", None)
         if callable(append_inbox):
             await append_inbox(dynamic_parts, message=message)
@@ -734,8 +749,12 @@ class ConversationPromptBuilder:
     ) -> list[dict]:
         host = self.host
         channel_id = str(message.channel.id)
+        hear_audio = audio_input_enabled(host)
         latest_text = render_discord_context_text(
-            message, user_message, known_users=host._recent_users.get(channel_id, {})
+            message,
+            user_message,
+            known_users=host._recent_users.get(channel_id, {}),
+            hear_audio=hear_audio,
         )
         _live_author = getattr(message, "author", None)
         author_id = (
