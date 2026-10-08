@@ -51,8 +51,14 @@ docker compose -f docker-compose.dev.yml stop
 
 `stop` retains Dev data, logs, and model. `down` removes Dev containers and
 network while retaining named volumes. Never use `down -v` unless Dev data
-deletion has been reviewed and backed up. Rebuild Dev with `up -d --build
-maxwell-dev`; this does not restart Production. Roll back by checking out the
+deletion has been reviewed and backed up. After updating the separate Dev
+checkout, recreate its bot so Python loads the new code and stops old tasks:
+
+```sh
+docker compose -f docker-compose.dev.yml up -d --build --force-recreate --no-deps maxwell-dev
+```
+
+This does not restart Production or the Dev model. Roll back by checking out the
 previous Dev commit in this isolated checkout and rebuilding only the Dev bot.
 
 ## Limits

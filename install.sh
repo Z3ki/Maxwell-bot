@@ -580,7 +580,9 @@ start_stack() {
   # Keep the existing host service alive if the image cannot be built.
   "${COMPOSE[@]}" -f "$COMPOSE_FILE" build
   stop_host_maxwell
-  "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --no-build
+  # A bind-mounted checkout can change without changing the image or Compose
+  # config. Python keeps the previous imports/tasks alive until it restarts.
+  "${COMPOSE[@]}" -f "$COMPOSE_FILE" up -d --no-build --force-recreate maxwell
   ok "container started"
 }
 

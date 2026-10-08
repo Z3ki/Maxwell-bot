@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recreate the Maxwell container on installer updates even when the image and
+  Compose configuration are unchanged, stopping tasks from older imported code.
+  Document the separate Dev restart required after updating its checkout.
 - Store tool-call, chess, and autonomous-message history under its originating
   guild so future server prompts include the recorded actions (#62).
 - Read autonomy history with a channel-scoped requester, only after successfully

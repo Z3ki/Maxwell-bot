@@ -112,6 +112,52 @@ start_stack
     assert not (tmp_path / "stopped").exists()
 
 
+@pytest.mark.parametrize("compose_file", ["docker-compose.yml", "docker-compose.bridge.yml"])
+def test_update_recreates_bot_even_when_image_and_compose_config_are_unchanged(tmp_path, compose_file):
+    source = (ROOT / "install.sh").read_text().removesuffix('main "$@"\n')
+    driver = source + """
+compose_file_for_host() { printf '%s' "$TEST_COMPOSE_FILE"; }
+rewrite_localhost_for_bridge() { :; }
+resolve_compose() { COMPOSE=(fake_compose); }
+stop_host_maxwell() { :; }
+fake_compose() {
+  # Model Compose's unchanged-image behavior: up leaves the current process
+  # alive unless explicitly recreated, even after the source bind changes.
+  [ "$1" = "-f" ] && [ "$2" = "$TEST_COMPOSE_FILE" ] || return 91
+  shift 2
+  case "$1" in
+    build) return 0 ;;
+    up)
+      local recreate=0 service=
+      shift
+      for arg in "$@"; do
+        case "$arg" in
+          --force-recreate) recreate=1 ;;
+          -*) ;;
+          *) service="$arg" ;;
+        esac
+      done
+      [ "$service" = "maxwell" ] || return 92
+      if [ "$recreate" = 1 ]; then
+        cp checkout-revision running-revision
+      fi
+      ;;
+    *) return 93 ;;
+  esac
+}
+start_stack
+"""
+    (tmp_path / "checkout-revision").write_text("agents-removed")
+    running = tmp_path / "running-revision"
+    running.write_text("context-watcher-active")
+    result = subprocess.run(
+        ["bash", "-c", driver], cwd=tmp_path, capture_output=True, text=True,
+        env=dict(os.environ, TEST_COMPOSE_FILE=compose_file), timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert running.read_text() == "agents-removed"
+
+
 def test_defaults_are_literal_data_and_follow_dotenv_quoting(tmp_path):
     path = tmp_path / ".env"
     path.write_text(

@@ -317,6 +317,13 @@ bash install.sh --dir "$PWD"
 
 The installer keeps `.env`, `data/`, and generated-site state.
 
+Updates rebuild and recreate the Maxwell container even when the image and
+Compose configuration are unchanged. Updating a bind-mounted checkout alone
+does not reload Python's imported code or stop its existing background tasks.
+REM and the context fact watcher were removed in 0.1.11; new requests using
+those prompts indicate an older running process or checkout. Update the
+checkout and recreate each affected bot, including a separate Dev installation.
+
 To update to a published release, add `--version vX.Y.Z`. The installer resolves and validates the revision before checkout. Back up `.env`, `data/`, and generated sites before an operational update; the installer preserves those files but a backup is still required for recovery.
 
 Reconfigure advanced settings:
