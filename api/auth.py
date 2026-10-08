@@ -72,6 +72,10 @@ def _needs_auth(request) -> bool:
     public per-site backends."""
     if request.path in ("/health", "/api/health"):
         return False
+    # These routes enforce Discord sessions and CSRF themselves. A dashboard
+    # cookie never authenticates /api/control, /data, or any operator route.
+    if request.path in {"/dashboard", "/dashboard/"} or request.path.startswith(("/dashboard/", "/api/dashboard/")):
+        return False
     if request.path.startswith(PUBLIC_PATH_PREFIXES):
         return False
     if PUBLIC_PATH_RE.match(request.path):

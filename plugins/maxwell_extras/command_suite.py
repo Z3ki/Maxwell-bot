@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import os
+from urllib.parse import urlsplit
 from typing import Any
 
 import discord
@@ -293,7 +295,7 @@ class _ConfigValueSelect(discord.ui.Select):
         label = (_PERSONAL_SETTINGS if panel.scope == "personal" else
                  _SERVER_SETTINGS if panel.scope == "server" else _OWNER_SETTINGS).get(self.key, ("Choose an option", ""))[0]
         options = [
-            discord.SelectOption(label=label, value=value, default=value == current, description=_CHOICE_HELP.get(value))
+            discord.SelectOption(label=label, value=value, default=value == current, description=("Follow the conversation language." if self.key == "language" and value == "auto" else _CHOICE_HELP.get(value)))
             for label, value in choices
         ]
         super().__init__(
@@ -722,6 +724,10 @@ class _ConfigPanel(discord.ui.View):
 
     def _build(self) -> None:
         self.clear_items()
+        dashboard = os.getenv("MAXWELL_DASHBOARD_URL", "").rstrip("/")
+        parsed = urlsplit(dashboard)
+        if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.path:
+            self.add_item(discord.ui.Button(label="Open web dashboard", url=dashboard + "/dashboard/", row=0))
         if self.can_choose_scope:
             for scope, label in (("personal", "My settings"), ("server", "Server settings"), ("owner", "Bot controls")):
                 if scope == "server" and not self.can_manage_server or scope == "owner" and not self.is_owner:
@@ -735,7 +741,13 @@ class _ConfigPanel(discord.ui.View):
                 "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context"} else "overview")
             self.add_item(_ConfigNavButton(self, parent, label="Back", row=4))
         if self.selected_key == "overview":
-            keys = ("style", "language", "replies", "byok") if self.scope == "personal" else tuple(
+            if self.scope == "personal":
+                for row, key in ((1, "language"), (2, "detail"), (3, "visibility")):
+                    self.add_item(_ConfigValueSelect(self, _PERSONAL_VALUE_CHOICES[key], key=key, row=row))
+                for key, label in (("style", "Personality"), ("language", "Custom language"), ("replies", "More options"), ("byok", "My AI provider")):
+                    self.add_item(_ConfigNavButton(self, key, label=label, row=4))
+                return
+            keys = tuple(
                 _SERVER_SETTINGS if self.scope == "server" else _OWNER_SETTINGS)
             for i, key in enumerate(keys):
                 self.add_item(_ConfigNavButton(self, key, label="Replies & context" if key == "replies" else None, row=1 + i // 2))
@@ -873,10 +885,10 @@ class _ConfigPanel(discord.ui.View):
             language = discord.utils.escape_markdown(str(defaults.get("language") or "Automatic"))
             visibility = _friendly_personal_value("visibility", defaults.get("visibility"))
             active = discord.utils.escape_markdown(connections.summary(self))
-            return ("## Your personal settings\nChoose what you want to change.\n\n"
+            return ("## Your personal settings\nPick language, answer length and visibility below — each choice saves immediately.\n\n"
                     f"**Personality:** {style}\n**Language:** {language}\n"
                     f"**App replies:** {visibility}\n**AI connection:** {active}\n\n"
-                    "Personality and language follow you everywhere. A saved AI connection replaces Maxwell's model for your messages. Replies & context apply to app requests.")
+                    "Personality and language follow you everywhere. My AI provider is optional and replaces Maxwell's model for your messages. More options covers app tasks, search and recent messages.\n\n" + self.notice)
         if self.scope == "server":
             guild = getattr(self.command_interaction, "guild", None)
             name = discord.utils.escape_markdown(str(getattr(guild, "name", "this server"))[:80])
@@ -932,33 +944,11 @@ class _ConfigPanel(discord.ui.View):
                 logger.warning("Could not update global control %s (%s)", key, type(exc).__name__)
                 await _send(interaction, "Could not save that global setting.")
                 return
-        elif key == "progress":
+        elif key in {"progress", "ticket"}:
             if value not in {"on", "off"}:
                 await _send(interaction, "That setting value is unavailable.")
                 return
-            enabled = value == "on"
-            enabled_set = getattr(self.bot, "_progress_servers", None)
-            disabled_set = getattr(self.bot, "_progress_servers_off", None)
-            if not isinstance(enabled_set, set):
-                enabled_set = self.bot._progress_servers = set()
-            if not isinstance(disabled_set, set):
-                disabled_set = self.bot._progress_servers_off = set()
-            (enabled_set.add if enabled else enabled_set.discard)(self.guild_id)
-            (disabled_set.discard if enabled else disabled_set.add)(self.guild_id)
-            saver = getattr(self.bot, "_save_progress_servers", None)
-            if callable(saver):
-                await asyncio.to_thread(saver)
-        elif key == "ticket":
-            if value not in {"on", "off"}:
-                await _send(interaction, "That setting value is unavailable.")
-                return
-            enabled_set = getattr(self.bot, "_ticket_greeting_servers", None)
-            if not isinstance(enabled_set, set):
-                enabled_set = self.bot._ticket_greeting_servers = set()
-            (enabled_set.add if value == "on" else enabled_set.discard)(self.guild_id)
-            saver = getattr(self.bot, "_save_ticket_greeting_servers", None)
-            if callable(saver):
-                await asyncio.to_thread(saver)
+            await self._save_server_flag(key, value if key == "progress" else value == "on")
         else:
             await _send(interaction, "That setting cannot be changed with this menu.")
             return
@@ -968,6 +958,18 @@ class _ConfigPanel(discord.ui.View):
             content=None, embed=self.embed(), view=self,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def _save_server_flag(self, key: str, value) -> None:
+        from pathlib import Path
+        from .dashboard_settings import read_json, save_server_settings
+
+        root = Path(self.bot.config.DATA_DIR)
+        await asyncio.to_thread(save_server_settings, root, self.guild_id, {key: value})
+        if key == "progress":
+            self.bot._progress_servers = set(await asyncio.to_thread(read_json, root / "progress_servers.json", list, []))
+            self.bot._progress_servers_off = set(await asyncio.to_thread(read_json, root / "progress_servers_off.json", list, []))
+        else:
+            self.bot._ticket_greeting_servers = set(await asyncio.to_thread(read_json, root / "ticket_greeting_servers.json", list, []))
 
     def set_text_value(self, key: str, value: str) -> None:
         if self.scope == "personal" and key == "language":
@@ -1044,17 +1046,8 @@ class _ConfigPanel(discord.ui.View):
                 await _send(interaction, "Server channel settings are unavailable right now.")
                 return
             await saver(mapping, self.guild_id, unblock_autonomy=True)
-        elif self.selected_key == "progress":
-            getattr(self.bot, "_progress_servers", set()).discard(self.guild_id)
-            getattr(self.bot, "_progress_servers_off", set()).discard(self.guild_id)
-            saver = getattr(self.bot, "_save_progress_servers", None)
-            if callable(saver):
-                await asyncio.to_thread(saver)
-        elif self.selected_key == "ticket":
-            getattr(self.bot, "_ticket_greeting_servers", set()).discard(self.guild_id)
-            saver = getattr(self.bot, "_save_ticket_greeting_servers", None)
-            if callable(saver):
-                await asyncio.to_thread(saver)
+        elif self.selected_key in {"progress", "ticket"}:
+            await self._save_server_flag(self.selected_key, "default" if self.selected_key == "progress" else False)
         if self.scope == "personal":
             await self._refresh_personal()
         self.notice = "**Reset.** The default is restored."

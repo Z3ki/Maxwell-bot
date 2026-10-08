@@ -14,7 +14,6 @@ import user_install as ui
 from api.state import _sanitize_control
 from control_defaults import DEFAULT_CONTROL
 from identity import configured_admin_ids
-from utils import _atomic_json_write_sync
 
 DIAGNOSTICS_COMMAND_NAME = "diagnostics"
 MAINTENANCE_COMMAND_NAME = "maintenance"
@@ -419,8 +418,10 @@ async def _set_control(bot: Any, key: str, raw_value: Any) -> tuple[Any, Any]:
     if not data_dir:
         raise RuntimeError("Maxwell DATA_DIR is unavailable")
     path = Path(data_dir) / "bot_control.json"
-    await asyncio.to_thread(_atomic_json_write_sync, path, sanitized)
-    bot._control = sanitized
+    from .dashboard_settings import merge_control_change
+
+    saved = await asyncio.to_thread(merge_control_change, path, key, after, before, sanitized)
+    bot._control = _sanitize_control(saved)
 
     loader = getattr(bot, "_load_control", None)
     if callable(loader):

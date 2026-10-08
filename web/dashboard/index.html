@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Maxwell · Settings</title>
+    <link rel="stylesheet" href="/dashboard/dashboard.css" />
+    <script src="/dashboard/dashboard.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="/dashboard/"
+        ><span class="mark">m.</span> maxwell<span class="tag"
+          >SETTINGS</span
+        ></a
+      >
+      <div id="account" hidden>
+        <span id="username"></span
+        ><button id="logout" class="quiet" type="button">Sign out</button>
+      </div>
+    </header>
+    <main>
+      <section id="login" class="welcome" hidden>
+        <p class="eyebrow">YOUR MAXWELL, YOUR WAY</p>
+        <h1>A little more<br />like you.</h1>
+        <p class="lead">
+          Choose how Maxwell replies, connect your own AI, or manage your
+          Discord servers. All in one place.
+        </p>
+        <a id="signin" class="primary" href="/api/dashboard/login"
+          >Continue with Discord <span>→</span></a
+        >
+        <p class="muted">
+          You can also change these settings with <code>/config</code> in
+          Discord.
+        </p>
+        <p id="login-note" role="status"></p>
+      </section>
+      <div id="loading" class="welcome">
+        <p class="eyebrow">MAXWELL SETTINGS</p>
+        <h1>Getting ready…</h1>
+      </div>
+      <div id="workspace" class="layout" hidden>
+        <aside>
+          <p class="eyebrow">SETTINGS FOR</p>
+          <button id="personal-nav" class="nav active" type="button">
+            My account <span>→</span>
+          </button>
+          <details id="server-picker" class="server-picker" open>
+            <summary>YOUR SERVERS</summary>
+            <label class="sr-only" for="server-search">Find a server</label
+            ><input
+              id="server-search"
+              type="search"
+              placeholder="Find a server…"
+            />
+            <div id="server-list"></div>
+            <p id="server-note" class="muted"></p>
+            <button id="refresh-servers" class="quiet" type="button">
+              Refresh servers
+            </button>
+          </details>
+          <p class="aside-note">
+            Server settings are available to owners, administrators, and members
+            with Manage Server.
+          </p>
+        </aside>
+        <section class="content">
+          <div class="heading">
+            <p class="eyebrow" id="scope-label">JUST FOR YOU</p>
+            <h1 id="page-title">My account</h1>
+            <p id="page-description">
+              Make Maxwell feel familiar. Your choices stay in sync with
+              Discord.
+            </p>
+          </div>
+          <div id="notice" role="status" aria-live="polite" hidden></div>
+          <div id="personal-content">
+            <form id="personal-form">
+              <section class="card">
+                <div class="card-heading">
+                  <span class="step">01</span>
+                  <div>
+                    <h2>How should Maxwell reply?</h2>
+                    <p>
+                      Language and personality follow you across Discord. Reply
+                      defaults apply to commands and message actions.
+                    </p>
+                  </div>
+                </div>
+                <div class="fields">
+                  <label
+                    >Language<input
+                      name="language"
+                      maxlength="80"
+                      placeholder="Automatic — follow the conversation"
+                    /><small
+                      >For example, English or Spanish. Leave blank for
+                      automatic.</small
+                    ></label
+                  ><label
+                    >Answer length<select name="detail">
+                      <option value="quick">Brief</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="deep">Detailed</option></select
+                    ><small
+                      >Choose the amount of explanation you prefer.</small
+                    ></label
+                  ><label
+                    >Who can see my app replies?<select name="visibility">
+                      <option value="public">Everyone in the channel</option>
+                      <option value="private">Only me</option></select
+                    ><small
+                      >Applies to /maxwell and message actions. You can override
+                      it per request.</small
+                    ></label
+                  >
+                </div>
+                <label
+                  >Personality<textarea
+                    name="personality"
+                    maxlength="800"
+                    rows="3"
+                    placeholder="Keep it casual, reply in Spanish, and skip emojis."
+                  ></textarea
+                  ><small
+                    >Describe the tone you like. Leave blank for Maxwell’s usual
+                    personality.</small
+                  ></label
+                >
+                <details>
+                  <summary>More reply options</summary>
+                  <div class="fields advanced">
+                    <label
+                      >Default task<select name="mode">
+                        <option value="ask">Answer normally</option>
+                        <option value="research">Research</option>
+                        <option value="summarize">Summarize</option>
+                        <option value="explain">Explain</option>
+                        <option value="rewrite">Rewrite</option>
+                        <option value="translate">Translate</option>
+                        <option value="brainstorm">Brainstorm</option>
+                        <option value="code">Write code</option>
+                      </select></label
+                    ><label
+                      >Web search<select name="web">
+                        <option value="auto">Let Maxwell decide</option>
+                        <option value="search">Always search</option>
+                        <option value="off">Off</option>
+                      </select></label
+                    ><label
+                      >Recent channel messages<select
+                        name="context"
+                        id="context-count"
+                      ></select
+                      ><small
+                        >Private app replies do not read public channel history.
+                        Long context may be trimmed.</small
+                      ></label
+                    >
+                  </div>
+                </details>
+                <div class="actions">
+                  <button class="primary" type="submit">Save my settings</button
+                  ><span id="personal-saved" class="muted"></span>
+                </div>
+              </section>
+            </form>
+            <section class="card">
+              <div class="card-heading">
+                <span class="step">02</span>
+                <div>
+                  <h2>
+                    Bring your own AI <span class="optional">OPTIONAL</span>
+                  </h2>
+                  <p>
+                    Maxwell already includes AI. Connect a provider only if you
+                    want your messages to use your own API account.
+                  </p>
+                </div>
+              </div>
+              <p id="connection-status" class="connection-status">
+                Loading connection…
+              </p>
+              <p class="muted">
+                Your provider may charge for API usage. A ChatGPT subscription
+                does not include OpenAI API credit.
+              </p>
+              <form id="connection-form">
+                <div class="fields">
+                  <label
+                    >Provider<select
+                      name="provider"
+                      id="provider"
+                    ></select></label
+                  ><label
+                    >API key<input
+                      name="api_key"
+                      type="password"
+                      maxlength="512"
+                      autocomplete="off"
+                      placeholder="Paste your provider’s API key"
+                    /><small id="key-help"
+                      >Your key is encrypted and never displayed here.</small
+                    ></label
+                  ><label
+                    >Model<input
+                      name="model"
+                      maxlength="120"
+                      required
+                      placeholder="Model ID from your provider"
+                    /><small
+                      >Copy the model ID from your provider’s model list.</small
+                    ></label
+                  >
+                </div>
+                <label id="custom-endpoint" hidden
+                  >API base URL<input
+                    name="base_url"
+                    type="url"
+                    maxlength="300"
+                    placeholder="https://api.example.com/v1"
+                  /><small
+                    >Use a public HTTPS endpoint that supports OpenAI chat
+                    completions.</small
+                  ></label
+                >
+                <details id="connection-advanced">
+                  <summary>Model capabilities & advanced settings</summary>
+                  <p class="muted">
+                    Only change these if you know what your model supports.
+                  </p>
+                  <div class="checks">
+                    <label
+                      ><input type="checkbox" name="vision" /> Accepts
+                      images</label
+                    ><label
+                      ><input type="checkbox" name="audio" /> Accepts
+                      audio</label
+                    ><label
+                      ><input type="checkbox" name="tools" checked /> Uses
+                      tools</label
+                    ><label
+                      ><input type="checkbox" name="reasoning" /> Reasoning
+                      enabled</label
+                    >
+                  </div>
+                  <div class="fields advanced">
+                    <label
+                      >Maximum reply tokens<input
+                        name="max_tokens"
+                        type="number"
+                        min="16"
+                        max="16384"
+                        value="4096"
+                        required /></label
+                    ><label
+                      >Creativity (temperature)<input
+                        name="temperature"
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        max="2"
+                        value="0.4"
+                        required /></label
+                    ><label
+                      >Reasoning effort<select name="effort">
+                        <option value="">Provider default</option>
+                        <option>none</option>
+                        <option>minimal</option>
+                        <option>low</option>
+                        <option>medium</option>
+                        <option>high</option>
+                        <option>max</option>
+                      </select></label
+                    ><label
+                      >Model context size<input
+                        name="model_context"
+                        type="number"
+                        min="1024"
+                        max="2000000"
+                        placeholder="Provider default" /></label
+                    ><label id="endpoint-override"
+                      >Custom API base URL<input
+                        name="advanced_url"
+                        type="url"
+                        maxlength="300"
+                        placeholder="Use the provider’s default"
+                    /></label>
+                  </div>
+                </details>
+                <div class="actions">
+                  <button class="primary" id="connect" type="submit">
+                    Save AI connection</button
+                  ><button
+                    id="test-connection"
+                    type="button"
+                    class="secondary"
+                    hidden
+                  >
+                    Test connection</button
+                  ><button
+                    id="remove-connection"
+                    type="button"
+                    class="danger"
+                    hidden
+                  >
+                    Remove
+                  </button>
+                </div>
+                <p class="muted" id="provider-help"></p>
+              </form>
+              <div id="remove-confirm" class="confirm" hidden>
+                <p>
+                  Remove your saved API key and return to Maxwell’s included AI?
+                </p>
+                <button id="confirm-remove" type="button" class="danger">
+                  Yes, remove connection</button
+                ><button id="cancel-remove" type="button" class="quiet">
+                  Keep connection
+                </button>
+              </div>
+            </section>
+          </div>
+          <div id="server-content" hidden>
+            <form id="server-form">
+              <section class="card">
+                <h2>Where can Maxwell reply?</h2>
+                <p>
+                  Choose all channels or one dedicated channel. Maxwell still
+                  needs permission to view and send messages there.
+                </p>
+                <label
+                  >Response channel<select name="channel" id="channels">
+                    <option value="">All channels</option>
+                  </select></label
+                >
+              </section>
+              <section class="card">
+                <h2>Keep the server comfortable</h2>
+                <div class="fields">
+                  <label
+                    >Progress updates<select name="progress">
+                      <option value="default">Use bot default</option>
+                      <option value="on">
+                        Show updates while Maxwell works
+                      </option>
+                      <option value="off">Keep the channel quiet</option>
+                    </select></label
+                  ><label
+                    >Ticket greetings<select name="ticket">
+                      <option value="off">Off</option>
+                      <option value="on">
+                        Greet people in ticket channels
+                      </option>
+                    </select></label
+                  >
+                </div>
+                <details>
+                  <summary>Allowed tools & extra tools</summary>
+                  <p>
+                    Selected tools are allowed in this server. Discord
+                    permissions still apply.
+                  </p>
+                  <div id="capability-list" class="checks"></div>
+                  <h3>Extra tools</h3>
+                  <p class="muted">
+                    Unchanged tools inherit their existing global and personal
+                    choices.
+                  </p>
+                  <div id="plugin-list" class="checks"></div>
+                </details>
+                <div class="actions">
+                  <button class="primary" type="submit">
+                    Save server settings
+                  </button>
+                </div>
+                <p class="muted">
+                  Changes are shared with /config and take effect within a few
+                  seconds.
+                </p>
+              </section>
+            </form>
+          </div>
+          <div id="install-content" class="card" hidden>
+            <h2>Add Maxwell first</h2>
+            <p>
+              You can manage this server, but Maxwell has not been added yet.
+            </p>
+            <a
+              id="invite"
+              class="primary"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Add Maxwell to this server →</a
+            >
+            <p class="muted">
+              Come back and refresh the server list after installing.
+            </p>
+          </div>
+        </section>
+      </div>
+    </main>
+    <footer>
+      Built for Discord. <code>/config</code> is always there when you need it.
+    </footer>
+  </body>
+</html>

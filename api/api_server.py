@@ -2360,6 +2360,9 @@ app = web.Application(
     middlewares=[_reliability_middleware, _auth_middleware_unless_login],
     client_max_size=256 * 1024,
 )
+from api.dashboard import register_dashboard  # noqa: E402
+
+register_dashboard(app, lambda: DATA_DIR)
 app.router.add_get("/health", health_check)
 app.router.add_get("/api/health", health_check)
 app.router.add_get("/api/github/oauth/callback", github_oauth_callback)

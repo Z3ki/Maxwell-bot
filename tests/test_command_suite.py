@@ -515,9 +515,9 @@ def test_config_home_offers_direct_controls_and_compact_embed(tmp_path):
     interaction = SimpleNamespace(user=SimpleNamespace(id=100))
     panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
     assert {child.label for child in panel.children if isinstance(child, command_suite._ConfigNavButton)} == {
-        "Personality", "Language", "Replies & context", "AI connection"
+        "Personality", "Custom language", "More options", "My AI provider"
     }
-    assert not any(isinstance(child, command_suite.discord.ui.Select) for child in panel.children)
+    assert {child.key for child in panel.children if isinstance(child, command_suite._ConfigValueSelect)} == {"language", "detail", "visibility"}
     assert panel.embed().title == "Your personal settings"
     assert "Be brief and friendly." in panel.embed().description
     assert "Spanish" in panel.embed().description

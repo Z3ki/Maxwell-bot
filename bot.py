@@ -5604,28 +5604,15 @@ class MaxwellBot(commands.Bot):
         also stops the autonomy engine picking it — otherwise Maxwell would go
         quiet on people and still start conversations by himself.
         """
-        control = dict(self._control)
-        control["guild_solo_channel"] = mapping
-        blocked = [str(x) for x in (control.get("autonomy_blocked_servers", []) or [])]
-        owned = [str(x) for x in (control.get("guild_solo_autonomy_added", []) or [])]
-        if unblock_autonomy:
-            # Only give autonomy back if solo is what took it away. A server an
-            # admin blacklisted by hand stays blacklisted.
-            if gid in owned:
-                blocked = [x for x in blocked if x != gid]
-                owned = [x for x in owned if x != gid]
-        elif gid not in blocked:
-            blocked.append(gid)
-            if gid not in owned:
-                owned.append(gid)
-        control["autonomy_blocked_servers"] = blocked
-        control["guild_solo_autonomy_added"] = owned
-        self._control = control
-        await asyncio.to_thread(
-            _atomic_json_write_sync,
-            Path(self.config.DATA_DIR) / "bot_control.json",
-            control,
+        from plugins.maxwell_extras.dashboard_settings import save_server_settings
+
+        self._control = await asyncio.to_thread(
+            save_server_settings, Path(self.config.DATA_DIR), str(gid),
+            {"channel": str(mapping.get(gid) or "")}, fallback=self._control,
         )
+        loader = getattr(self, "_load_control", None)
+        if callable(loader):
+            loader(force=True)
 
     def _get_reply_context(self, message) -> str:
         if not message.reference or not isinstance(
@@ -6333,6 +6320,7 @@ class MaxwellBot(commands.Bot):
                 self._load_admins(quiet=True)
                 self._load_auto_channels(quiet=True)
                 self._load_progress_servers(quiet=True)
+                self._load_ticket_greeting_servers(quiet=True)
                 self._load_blacklist(quiet=True)
                 self._load_sites(quiet=True)
                 self._load_control()

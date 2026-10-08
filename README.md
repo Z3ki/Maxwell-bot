@@ -125,7 +125,7 @@ docker compose down
 ./run.sh -d --build
 ```
 
-Authenticated operator API: `http://127.0.0.1:8765`. Administration is available through Discord `/config`; there is no web admin dashboard.
+Authenticated operator API: `http://127.0.0.1:8765`. Administration is available through Discord `/config`. An optional Discord-login dashboard lets users manage personal preferences and their servers; see [dashboard setup](docs/DASHBOARD.md).
 
 To update:
 
@@ -146,7 +146,7 @@ The personal-app `/maxwell` command and context-menu actions are available when 
 Private `/maxwell` replies, when selected, are sent only as ephemeral interaction follow-ups; `send_message` can answer privately, but cannot target another chat from a private request.
 `/maxwell` replies are public by default. Choose `visibility: Private` for one request, or open `/config` → **Reply visibility** → **Private** to save that choice. Explicit command options override saved preferences. Channel context offers 0, 10, 25, 50, 100, 250, 500, or 1,000 recent messages through the `context` option on `/maxwell` and `/config` → **More options** → **Channel context**. Maxwell must be able to read the channel, and very long histories are trimmed to fit the model. Your saved personality and language apply to your replies across channels, servers, and DMs, including ordinary messages, mentions, slash commands, and context-menu requests. They are isolated by Discord user ID and do not change Maxwell's shared identity or permissions. `/config` always opens privately, with a compact embed, marked current choices, reset controls, and a Close button.
 
-The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` with shared styles and the Maxwell cat icon under `/assets/`. Copy the full `web/` contents when updating the website and update the public route allowlist as shown in `examples/Caddyfile.example`. The browser admin dashboard and its Discord OAuth login have been removed. Remove any previously deployed `admin/` static files; keep the authenticated operator API on a separate origin.
+The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` with shared styles and the Maxwell cat icon under `/assets/`. Copy the full `web/` contents when updating the website and update the public route allowlist as shown in `examples/Caddyfile.example`. The user dashboard is served by the API at `/dashboard/` on a dedicated hostname. Configure Discord OAuth and routing with [docs/DASHBOARD.md](docs/DASHBOARD.md). Keep generated sites, user settings and the authenticated operator API on separate origins; remove any previously deployed `admin/` static files.
 
 Developer access is determined by configured Maxwell owner IDs. Diagnostics redact secret-like values, and maintenance refuses to edit secret controls.
 

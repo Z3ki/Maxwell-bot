@@ -1,6 +1,22 @@
 # Set MAXWELL_PUBLIC_BASE_URL=https://maxwell.example.com in .env.
 # Keep the authenticated operator API on a separate origin from generated sites.
-# The browser admin dashboard has been removed; never serve stale admin files.
+# The operator API and user settings dashboard have separate origins.
+# Replace all example hosts; set MAXWELL_DASHBOARD_URL=https://dashboard.maxwell.example.com.
+dashboard.maxwell.example.com {
+	header X-Frame-Options "DENY"
+	header X-Content-Type-Options "nosniff"
+	@settings path /dashboard /dashboard/* /api/dashboard/*
+	handle @settings {
+		reverse_proxy 127.0.0.1:8765
+	}
+	handle / {
+		redir /dashboard/ 302
+	}
+	handle {
+		respond "Not found" 404
+	}
+}
+
 admin.maxwell.example.com {
 	header X-Frame-Options "DENY"
 	header X-Content-Type-Options "nosniff"
@@ -18,6 +34,8 @@ admin.maxwell.example.com {
 }
 
 maxwell.example.com {
+	@dashboard_link path /dashboard /dashboard/*
+	redir @dashboard_link https://dashboard.maxwell.example.com/dashboard/ 302
 	root * /var/www/maxwell/bot
 	header X-Content-Type-Options "nosniff"
 	header Referrer-Policy "strict-origin-when-cross-origin"

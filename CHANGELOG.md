@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add a Discord-login web dashboard for personal reply settings, encrypted AI connections, and servers owned or managed by the signed-in user.
+- Put language, answer length and visibility directly on the first `/config` screen, with an optional dashboard link.
+- Share settings across Discord and the web, recheck server permissions on every dashboard read/save, and keep dashboard sessions separate from operator access.
+- Lock scoped settings writes to preserve other users and servers, reload web ticket changes live, and document OAuth / dedicated-host Caddy setup.
+
 ## 0.1.12 — 2026-10-08
 
 Install with `--version v0.1.12`. Release assets include source, installers,

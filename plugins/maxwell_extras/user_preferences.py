@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from utils import _atomic_json_write_sync
+from utils import FileLock, _atomic_json_write_sync
 
 _LOCK = threading.RLock()
 _DEFAULTS: dict[str, Any] = {
@@ -43,12 +43,16 @@ class UserPreferenceStore:
             self._cache = None
             self._cache_signature = None
             if for_write and not isinstance(exc, FileNotFoundError):
-                raise ValueError("Cannot read preferences safely; refusing to overwrite the file") from exc
+                raise ValueError(
+                    "Cannot read preferences safely; refusing to overwrite the file"
+                ) from exc
             return {"users": {}, "unavailable": not isinstance(exc, FileNotFoundError)}
         users = value.get("users", {}) if isinstance(value, dict) else None
         if not isinstance(users, dict):
             if for_write:
-                raise ValueError("Invalid preferences format; refusing to overwrite the file")
+                raise ValueError(
+                    "Invalid preferences format; refusing to overwrite the file"
+                )
             return {"users": {}, "unavailable": True}
         self._cache = {"users": users}
         self._cache_signature = signature
@@ -91,7 +95,7 @@ class UserPreferenceStore:
         key = str(key or "").strip()
         if not uid or key not in _ALLOWED_DEFAULTS:
             raise ValueError("invalid user preference")
-        with _LOCK:
+        with _LOCK, FileLock(self.path, timeout=5):
             root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
             row = row if isinstance(row, dict) else {}
@@ -108,7 +112,7 @@ class UserPreferenceStore:
         key = str(key or "").strip()
         if not uid or key not in _ALLOWED_DEFAULTS:
             raise ValueError("invalid user preference")
-        with _LOCK:
+        with _LOCK, FileLock(self.path, timeout=5):
             root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
             if not isinstance(row, dict):
@@ -132,8 +136,10 @@ class UserPreferenceStore:
         if not uid:
             raise ValueError("user ID is required")
         if len(text) > _PERSONALITY_LIMIT:
-            raise ValueError(f"personal style is limited to {_PERSONALITY_LIMIT} characters")
-        with _LOCK:
+            raise ValueError(
+                f"personal style is limited to {_PERSONALITY_LIMIT} characters"
+            )
+        with _LOCK, FileLock(self.path, timeout=5):
             root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
             row = row if isinstance(row, dict) else {}
@@ -148,6 +154,24 @@ class UserPreferenceStore:
                     root["users"].pop(uid, None)
             self._write(root)
         return text
+
+    def update(self, user_id: Any, defaults: dict, personality: str) -> None:
+        """Save a dashboard form atomically, sharing the Discord writer lock."""
+        uid = str(user_id or "").strip()
+        if not uid.isdigit() or not defaults.keys() <= _ALLOWED_DEFAULTS:
+            raise ValueError("invalid user preference")
+        if not isinstance(personality, str) or len(personality) > _PERSONALITY_LIMIT:
+            raise ValueError("personal style is limited to 800 characters")
+        with _LOCK, FileLock(self.path, timeout=5):
+            root = copy.deepcopy(self._read(for_write=True))
+            row = root["users"].get(uid)
+            row = dict(row) if isinstance(row, dict) else {}
+            saved = row.get("defaults")
+            saved = dict(saved) if isinstance(saved, dict) else {}
+            saved.update(defaults)
+            row.update(defaults=saved, personality=personality.strip())
+            root["users"][uid] = row
+            self._write(root)
 
 
 __all__ = ["UserPreferenceStore"]
