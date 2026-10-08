@@ -9935,7 +9935,11 @@ class MaxwellBot(commands.Bot):
             getattr(self.config, "AI_MAX_OUTPUT_TOKENS", 16384) or 16384,
             max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
         )
-        if self._is_short_live_turn(message, content):
+        byok_provider = _current_request_provider.get()
+        byok_tokens = getattr(byok_provider, "max_tokens", None) if byok_provider is not None else None
+        if isinstance(byok_tokens, int) and byok_tokens > 0:
+            max_out_tokens = max(16, min(byok_tokens, 16384))
+        elif self._is_short_live_turn(message, content):
             # Banter does not need a 16k output budget.
             max_out_tokens = min(int(max_out_tokens), 4096)
         try:
@@ -10450,6 +10454,14 @@ class MaxwellBot(commands.Bot):
                         getattr(self.config, "AI_MAX_OUTPUT_TOKENS", 16384) or 16384,
                         max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
                     )
+                    byok_provider = _current_request_provider.get()
+                    byok_tokens = (
+                        getattr(byok_provider, "max_tokens", None)
+                        if byok_provider is not None
+                        else None
+                    )
+                    if isinstance(byok_tokens, int) and byok_tokens > 0:
+                        max_out_tokens = max(16, min(byok_tokens, 16384))
                     logger.info(
                         "more_tools: reattached %d tools for follow-up",
                         len(openai_tools or []),
@@ -11478,6 +11490,11 @@ class MaxwellBot(commands.Bot):
             send_message_seen = False
             send_burst_open = False
             sleep_seen = False
+            # A previous model round in this turn already posted. That post
+            # owns the quote-reply; this round's sends go to the channel.
+            prior_delivery = bool(
+                (MaxwellBot._request_state(self, message) or {}).get("response_id")
+            )
             for call in calls:
                 if needs_result_turn and call["name"] in TURN_ENDING_TOOL_NAMES:
                     line = (
@@ -11587,15 +11604,19 @@ class MaxwellBot(commands.Bot):
                 # declared order. Consecutive send_message calls are the one
                 # exception to the usual terminal rule: Maxwell may emit a
                 # small message burst in one model response. The first
-                # successfully delivered send honors reply=True by default;
-                # every later send in this same batch is forced standalone so
-                # Discord does not show several replies to the same parent.
+                # successfully delivered send in the turn honors reply=True
+                # by default. Every later send, including one from a later
+                # model round, is a normal channel post so Discord does not
+                # show several quote-replies to the same parent.
                 dispatch_call = call
-                if call["name"] == "send_message" and send_message_seen:
+                if call["name"] == "send_message" and (
+                    send_message_seen or prior_delivery
+                ):
                     # Give consecutive messages in the same model response a
                     # tiny human-feeling beat without requiring another model
-                    # turn. This delay never affects the first reply.
-                    await asyncio.sleep(0.45)
+                    # turn. A later round already waited on the provider.
+                    if send_message_seen:
+                        await asyncio.sleep(0.45)
                     dispatch_call = dict(call)
                     dispatch_args = dict(call.get("arguments") or {})
                     dispatch_args["reply"] = False
@@ -12330,6 +12351,12 @@ class MaxwellBot(commands.Bot):
             ),
         )
         output_reserve = max(16000, raw_budget // 4)
+        provider = _current_request_provider.get()
+        window = getattr(getattr(provider, "capabilities", None), "context_window", None)
+        if isinstance(window, int) and window > 0:
+            raw_budget = min(raw_budget, max(4000, window * 4))
+            output_reserve = min(output_reserve, max(1000, raw_budget // 4))
+            return max(2000, raw_budget - output_reserve)
         return max(10000, raw_budget - output_reserve)
 
     _ECHO_OPENER_WORDS = 4

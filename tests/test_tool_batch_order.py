@@ -174,3 +174,43 @@ def test_failed_first_send_does_not_consume_the_reply_slot(monkeypatch):
 
     asyncio.run(run())
 
+
+def test_later_round_send_posts_to_the_channel(monkeypatch, tmp_path):
+    """A second model round may send again, but not as another quote-reply."""
+
+    async def run():
+        from message_pipeline import RequestJournal
+
+        executed = []
+        journal = RequestJournal(tmp_path / "requests.sqlite")
+        journal.accept(7, 99, directed=True)
+        journal.update(7, "delivered", effects_started=True, response_id="555")
+        owner = SimpleNamespace(_control={}, tools={}, _request_journal=journal)
+        message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+
+        async def execute(self, message, name, params, *_args, **_kwargs):
+            executed.append(dict(params))
+            return "__MESSAGE_SENT__\n" + str(params.get("content") or "")
+
+        monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+        monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+        calls = [
+            {
+                "id": "second-round",
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "arguments": (
+                        '{"content":"second line","reply":true,'
+                        '"reply_to":"absolutely not generating that"}'
+                    ),
+                },
+            }
+        ]
+
+        await MaxwellBot._process_native_tool_calls(owner, message, "", calls)
+
+        assert executed == [{"content": "second line", "reply": False}]
+
+    asyncio.run(run())
+

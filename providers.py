@@ -975,6 +975,10 @@ class OpenAICompatibleProvider(ChatProvider):
             if retry_attempts is None
             else max(1, min(retry_attempts, 10))
         )
+        if tools and not bool(
+            getattr(getattr(self, "capabilities", None), "native_tools", True)
+        ):
+            tools = None
         empty_budget = (
             self.empty_response_retries
             if empty_response_retries is None
@@ -992,12 +996,17 @@ class OpenAICompatibleProvider(ChatProvider):
                 timeout = max(1, min(int(timeout), 300))
             except (TypeError, ValueError):
                 timeout = 120
+            ceiling = self.policy.max_output_tokens or 4096
+            try:
+                ceiling = max(1, min(int(ceiling), 16384))
+            except (TypeError, ValueError):
+                ceiling = 4096
             try:
                 max_tokens = max(
-                    1, min(int(max_tokens or self.max_tokens or 4096), 4096)
+                    1, min(int(max_tokens or self.max_tokens or ceiling), ceiling)
                 )
             except (TypeError, ValueError):
-                max_tokens = 4096
+                max_tokens = min(4096, ceiling)
         if not self.available:
             logger.warning("Provider marked unavailable; retrying initialization")
             await self.initialize()
@@ -1014,18 +1023,17 @@ class OpenAICompatibleProvider(ChatProvider):
                 {"b64": img_b64, "mime_type": "image/png"} for img_b64 in images
             )
 
-        payload_media: list[dict] = [
-            m
-            for m in all_media
-            if m.get("b64")
-            and (
-                str(m.get("mime_type", "")).startswith(("image/", "video/"))
-                or (
-                    str(m.get("mime_type", "")).startswith("audio/")
-                    and getattr(self, "enable_audio_input", False)
-                )
-            )
-        ]
+        vision_ok = bool(getattr(getattr(self, "capabilities", None), "vision", True))
+        audio_ok = bool(getattr(self, "enable_audio_input", False))
+        payload_media: list[dict] = []
+        for item in all_media:
+            if not item.get("b64"):
+                continue
+            mime = str(item.get("mime_type", ""))
+            if mime.startswith(("image/", "video/")) and vision_ok:
+                payload_media.append(item)
+            elif mime.startswith("audio/") and audio_ok:
+                payload_media.append(item)
 
         if payload_media:
             target = None
@@ -1065,6 +1073,8 @@ class OpenAICompatibleProvider(ChatProvider):
                     b64 = m["b64"]
                     uri = f"data:{mime};base64,{b64}"
                     if mime.startswith("image/"):
+                        if not vision_ok:
+                            continue
                         parts.append({"type": "image_url", "image_url": {"url": uri}})
                     elif mime.startswith("audio/") and getattr(
                         self, "enable_audio_input", False

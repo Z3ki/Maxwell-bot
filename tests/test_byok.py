@@ -14,6 +14,7 @@ from plugins.maxwell_extras.byok import (
     CredentialVault,
     VaultUnavailable,
     make_request_provider,
+    parse_model_support,
 )
 from providers import OpenAICompatibleProvider, ProviderRequestError, _PublicOnlyResolver
 
@@ -35,6 +36,9 @@ def test_vault_encrypts_masks_rotates_and_deletes(tmp_path):
         "provider_label": "OpenAI",
         "model": "gpt-4.1-mini",
         "masked_key": "••••3456",
+        "base_url": "https://api.openai.com/v1",
+        "modalities": "text, vision, tools",
+        "generation": "reasoning=off max_tokens=4096 temperature=0.4",
     }
     assert path.stat().st_mode & 0o777 == 0o600
 
@@ -201,6 +205,165 @@ def _provider():
         {"provider": "openai", "model": "gpt-4.1-mini", "api_key": API_KEY},
     )
     return client
+
+
+def test_custom_endpoint_stores_model_support_and_rejects_private_urls(tmp_path):
+    from maxwell_core.providers.factory import openai_compat_provider
+
+    settings = parse_model_support(
+        "vision, audio",
+        "reasoning=on max_tokens=8192 temperature=0.2 effort=low context=32000",
+    )
+    vault = CredentialVault(tmp_path / "byok.sqlite3", KEY_A)
+    vault.save(
+        "123",
+        "custom",
+        "local-model",
+        API_KEY,
+        base_url="https://models.example",
+        settings=settings,
+    )
+    stored = vault.get("123")
+    assert stored["base_url"] == "https://models.example/v1"
+    assert stored["settings"]["tools"] is False
+    assert stored["settings"]["context"] == 32000
+    assert API_KEY.encode() not in (tmp_path / "byok.sqlite3").read_bytes()
+    status = vault.status("123")
+    assert status["provider_label"] == "Custom OpenAI endpoint"
+    assert status["base_url"] == "https://models.example/v1"
+    assert status["modalities"] == "text, vision, audio"
+    assert "reasoning=on" in status["generation"]
+    assert "context=32000" in status["generation"]
+
+    bot = SimpleNamespace(_make_chat_provider=openai_compat_provider)
+    client = make_request_provider(bot, stored)
+    assert client.base_url == "https://models.example/v1"
+    assert client.model == "local-model"
+    assert client.max_tokens == 8192
+    assert client.temperature == 0.2
+    assert client.capabilities.vision is True
+    assert client.capabilities.audio is True
+    assert client.capabilities.native_tools is False
+    assert client.capabilities.reasoning is True
+    assert client.capabilities.context_window == 32000
+    assert client.enable_audio_input is True
+    assert client._endpoints[0].disable_reasoning is False
+    assert client._endpoints[0].reasoning_effort == "low"
+    assert client.policy.max_output_tokens == 8192
+    assert client.policy.public_network_only is True
+    assert len(client._endpoints) == 1
+
+    for blocked in (
+        "http://models.example/v1",
+        "https://127.0.0.1/v1",
+        "https://10.0.0.8/v1",
+        "https://localhost/v1",
+        "https://gateway.local/v1",
+        "https://user:secret@models.example/v1",
+        "https://models.example/v1?key=secret",
+        "",
+    ):
+        with pytest.raises(ValueError):
+            vault.save(
+                "123",
+                "custom",
+                "local-model",
+                API_KEY,
+                base_url=blocked,
+                settings=settings,
+            )
+
+
+def test_legacy_credential_keeps_preset_endpoint_and_modalities(tmp_path):
+    import sqlite3
+
+    from maxwell_core.providers.factory import openai_compat_provider
+
+    path = tmp_path / "byok.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute(
+        """CREATE TABLE credentials (
+            user_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            nonce BLOB NOT NULL,
+            ciphertext BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        )"""
+    )
+    db.commit()
+    db.close()
+    vault = CredentialVault(path, KEY_A)
+    vault.save("123", "groq", "openai/gpt-oss-120b", API_KEY)
+    stored = vault.get("123")
+    assert stored["base_url"] == ""
+    assert stored["settings"] is None
+    client = make_request_provider(
+        SimpleNamespace(_make_chat_provider=openai_compat_provider), stored
+    )
+    assert client.base_url == "https://api.groq.com/openai/v1"
+    assert client.capabilities.vision is True
+    assert client.capabilities.audio is False
+    assert client.capabilities.native_tools is True
+    assert client._endpoints[0].disable_reasoning is True
+
+
+def test_byok_context_window_shrinks_the_prompt_budget():
+    from bot import _current_request_provider
+
+    provider = SimpleNamespace(
+        capabilities=SimpleNamespace(context_window=2048),
+        max_tokens=4096,
+    )
+    token = _current_request_provider.set(provider)
+    try:
+        budget = MaxwellBot._prompt_budget_chars(SimpleNamespace(_control={}))
+    finally:
+        _current_request_provider.reset(token)
+    assert budget < 10000
+
+
+def test_configured_modalities_gate_images_and_tools():
+    import json
+
+    def client_for(modalities: str):
+        settings = parse_model_support(modalities, "reasoning=off max_tokens=128")
+        client = make_request_provider(
+            SimpleNamespace(_make_chat_provider=lambda *, name, **kwargs: OpenAICompatibleProvider(**kwargs)),
+            {
+                "provider": "custom",
+                "model": "local-model",
+                "api_key": API_KEY,
+                "base_url": "https://models.example/v1",
+                "settings": settings,
+            },
+        )
+        client.name = "byok:custom"
+        session = _Session(_Response(200, json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "OK"}}],
+        })))
+        client._session = session
+        return client, session
+
+    text_client, text_session = client_for("tools")
+    asyncio.run(text_client.generate_chat_completion(
+        [{"role": "user", "content": "hi"}],
+        media=[{"b64": "abcd", "mime_type": "image/png"}],
+        tools=[{"type": "function", "function": {"name": "send_message"}}],
+    ))
+    text_body = text_session.calls[0][1]["json"]
+    assert "image_url" not in json.dumps(text_body)
+    assert text_body["tools"][0]["function"]["name"] == "send_message"
+
+    vision_client, vision_session = client_for("vision")
+    asyncio.run(vision_client.generate_chat_completion(
+        [{"role": "user", "content": "hi"}],
+        media=[{"b64": "abcd", "mime_type": "image/png"}],
+        tools=[{"type": "function", "function": {"name": "send_message"}}],
+    ))
+    vision_body = vision_session.calls[0][1]["json"]
+    assert "image_url" in json.dumps(vision_body)
+    assert "tools" not in vision_body
 
 
 def test_byok_rejects_redirects_and_sanitizes_provider_errors(caplog):

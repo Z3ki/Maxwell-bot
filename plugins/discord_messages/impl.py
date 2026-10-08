@@ -440,7 +440,7 @@ class SendMessageTool(Tool):
         return (
             "Send a message to the current chat. reply defaults to true. Usually send one complete message, "
             "but you may emit 2-3 send_message calls in the same model response when a short conversational burst reads more naturally. "
-            "The first successfully delivered call may quote-reply; later calls in that same response are posted standalone automatically. "
+            "The first delivered message in a turn may quote-reply. Later calls in that turn, including a later model round, are posted in the channel with no quote-reply. "
             "Do not split a normal informational answer just to create more messages. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
             "Params: content (required), reply (optional bool, default true — Discord "

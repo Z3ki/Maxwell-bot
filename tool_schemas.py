@@ -657,9 +657,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "reply": _bool(
                 "Discord quote-reply (the quoted-parent UI). Default true. "
                 "Pass false only when you explicitly want a standalone first line. "
-                "If this model response emits multiple send_message calls, the runtime "
-                "keeps this behavior for the first delivered call and automatically "
-                "posts later calls standalone. Keep reply on when the room has moved on, "
+                "The first delivered message in a turn may quote-reply. Later "
+                "send_message calls in that turn, including a later model round, "
+                "are posted in the channel with no quote-reply. Keep reply on when the room has moved on, "
                 "several people are talking, or you are answering an older line."
             ),
             "reply_to": _str(

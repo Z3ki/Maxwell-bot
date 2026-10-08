@@ -12,7 +12,13 @@ import discord
 
 import user_install as ui
 from control_defaults import GUILD_CAPABILITIES
-from .byok import PROVIDERS, VaultUnavailable, make_request_provider
+from .byok import (
+    PROVIDERS,
+    VaultUnavailable,
+    format_generation,
+    make_request_provider,
+    parse_model_support,
+)
 
 logger = logging.getLogger(__name__)
 _ACTIVE_STORE: Any = None
@@ -33,7 +39,7 @@ _PERSONAL_SETTINGS = {
     "visibility": ("Default visibility", "Choose whether /maxwell and message app replies are private or public."),
     "language": ("Response language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
-    "byok": ("Bring your own key", "Select a provider/model, save an encrypted key, test it, or delete it."),
+    "byok": ("Bring your own key", "Set an OpenAI-compatible endpoint, model, modalities, and encrypted key."),
 }
 _SERVER_SETTINGS = {
     "channels": ("Response channels", "Limit Maxwell to one channel in this server or allow all channels."),
@@ -89,7 +95,7 @@ _SETTING_HELP = {
     "visibility": "Applies to /maxwell and message app actions. Public replies appear in the channel; Private replies are only visible to you. You can override this on /maxwell. Servers must allow Use External Apps for user-installed apps to reply publicly.",
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",
-    "byok": "Your chosen provider receives your request context. Keys are encrypted at rest; custom endpoints are disabled.",
+    "byok": "Paste a public HTTPS OpenAI-compatible endpoint, the model ID, and the modalities that model accepts. The key is encrypted. Private hosts are rejected.",
     "channels": "Choose where Maxwell can respond. Clear the channel selection to allow all channels.",
     "plugins": "Select the optional tools to allow in this server. Reset inherits the existing global and personal choices.",
     "capabilities": "Selected groups are disabled. Leave a group unselected to allow its tools.",
@@ -828,25 +834,68 @@ class _ConfigTextModal(discord.ui.Modal):
 
 
 class _ByokCredentialsModal(discord.ui.Modal):
-    def __init__(self, panel: "_ConfigPanel", provider: str):
+    def __init__(self, panel: "_ConfigPanel", provider: str, status: dict | None = None):
         label = PROVIDERS[provider]["label"]
-        super().__init__(title=f"Set {label} credentials", timeout=180)
+        title = f"Set {label}"[:45]
+        super().__init__(title=title, timeout=180)
         self.panel = panel
         self.provider = provider
+        saved = status if status and status.get("provider") == provider else None
+        preset_url = PROVIDERS[provider]["base_url"]
+        endpoint_default = (saved or {}).get("base_url") or preset_url
+        model_default = (saved or {}).get("model") or PROVIDERS[provider]["suggested_model"]
+        if saved:
+            modalities_default = saved.get("modalities") or "text, tools"
+            generation_default = saved.get("generation") or format_generation({})
+        elif preset_url:
+            modalities_default = "text, vision, tools"
+            generation_default = format_generation({})
+        else:
+            modalities_default = "text, tools"
+            generation_default = format_generation({})
+        self.endpoint = discord.ui.TextInput(
+            label="Endpoint URL",
+            default=endpoint_default or None,
+            placeholder="https://api.example.com/v1 — blank keeps the official URL",
+            max_length=300,
+            required=not bool(preset_url),
+        )
         self.model = discord.ui.TextInput(
             label="Model ID",
-            default=PROVIDERS[provider]["suggested_model"],
+            default=model_default or None,
+            placeholder="The model name this endpoint expects",
             max_length=120,
             required=True,
         )
         self.api_key = discord.ui.TextInput(
             label="API key (private form)",
-            placeholder="Paste the provider key here; it is encrypted before storage",
+            placeholder=(
+                "Leave blank to keep the saved key"
+                if saved
+                else "Paste the provider key here; it is encrypted before storage"
+            ),
             max_length=512,
-            required=True,
+            required=not bool(saved),
         )
+        self.modalities = discord.ui.TextInput(
+            label="Modalities",
+            default=modalities_default,
+            placeholder="text, vision, audio, tools",
+            max_length=80,
+            required=False,
+        )
+        self.generation = discord.ui.TextInput(
+            label="Generation",
+            default=generation_default,
+            placeholder="reasoning=off max_tokens=4096 temperature=0.4 effort=low context=128000",
+            max_length=200,
+            required=False,
+        )
+        self.add_item(self.endpoint)
         self.add_item(self.model)
         self.add_item(self.api_key)
+        self.add_item(self.modalities)
+        self.add_item(self.generation)
 
     @_config_action(thinking=True)
     async def on_submit(self, interaction: Any) -> None:
@@ -863,12 +912,24 @@ class _ByokCredentialsModal(discord.ui.Modal):
             )
             return
         try:
+            settings = parse_model_support(
+                str(self.modalities.value or ""),
+                str(self.generation.value or ""),
+            )
+            secret = str(self.api_key.value or "").strip()
+            if not secret:
+                existing = await asyncio.to_thread(vault.get, self.panel.user_id)
+                if not existing or existing.get("provider") != self.provider:
+                    raise ValueError("API key is required")
+                secret = str(existing.get("api_key") or "")
             await asyncio.to_thread(
                 vault.save,
                 self.panel.user_id,
                 self.provider,
                 str(self.model.value or ""),
-                str(self.api_key.value or ""),
+                secret,
+                base_url=str(self.endpoint.value or ""),
+                settings=settings,
             )
         except ValueError as exc:
             await _send(interaction, str(exc))
@@ -895,6 +956,11 @@ class _ByokProviderSelect(discord.ui.Select):
             discord.SelectOption(
                 label=details["label"],
                 value=provider,
+                **(
+                    {"description": "Any public OpenAI-compatible HTTPS endpoint"}
+                    if provider == "custom"
+                    else {}
+                ),
                 default=provider == panel.selected_provider,
             )
             for provider, details in PROVIDERS.items()
@@ -924,7 +990,7 @@ class _ByokProviderSelect(discord.ui.Select):
 class _ByokKeyButton(discord.ui.Button):
     def __init__(self, panel: "_ConfigPanel", row: int):
         super().__init__(
-            label="Set or replace key",
+            label="Configure model",
             style=discord.ButtonStyle.primary,
             custom_id="maxwell:config:byok_key",
             row=row,
@@ -940,8 +1006,15 @@ class _ByokKeyButton(discord.ui.Button):
         if self.panel.selected_provider not in PROVIDERS:
             await _send(interaction, "Choose a supported provider first.")
             return
+        status = None
+        vault = getattr(self.panel.bot, "_byok_vault", None)
+        if vault is not None and getattr(vault, "enabled", False):
+            try:
+                status = await asyncio.to_thread(vault.status, self.panel.user_id)
+            except Exception:
+                status = None
         await interaction.response.send_modal(
-            _ByokCredentialsModal(self.panel, self.panel.selected_provider)
+            _ByokCredentialsModal(self.panel, self.panel.selected_provider, status)
         )
 
 
@@ -1177,7 +1250,8 @@ class _ConfigPanel(discord.ui.View):
                     return "No key saved"
                 return (
                     f"{status['provider_label']} / {status['model']} / "
-                    f"key {status['masked_key']}"
+                    f"{status['base_url']} / {status['modalities']} / "
+                    f"{status['generation']} / key {status['masked_key']}"
                 )
             row = self.personal
             if self.selected_key == "style":
@@ -1264,8 +1338,9 @@ class _ConfigPanel(discord.ui.View):
             value = self._current_value()
             if self.selected_key == "byok":
                 hint = (
-                    "Keys are encrypted at rest. Your selected provider receives the "
-                    "request context you send to Maxwell. Custom endpoints are disabled."
+                    "Keys are encrypted at rest. A public HTTPS OpenAI-compatible "
+                    "endpoint receives the request context you send to Maxwell. "
+                    "Set modalities to what that model actually accepts."
                 )
             if len(value) > 240:
                 value = value[:237] + "..."

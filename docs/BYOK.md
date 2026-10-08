@@ -1,10 +1,15 @@
 # Personal provider keys
 
 Users manage personal provider keys from the private `/config` menu. Choose
-**Bring your own key**, select OpenAI, OpenRouter, or Groq, then enter the model
-ID and key in the private modal. The menu shows only the provider, model, and
-last four key characters. The **Test connection** button sends a short `OK`
-request. **Delete key** removes the saved encrypted record.
+**Bring your own key**, select OpenAI, OpenRouter, Groq, or **Custom OpenAI
+endpoint**, then open **Configure model**. The private form takes the endpoint
+URL, model ID, API key, modalities (`text`, `vision`, `audio`, `tools`), and
+generation settings (`reasoning`, `max_tokens`, `temperature`, `effort`,
+`context`). Leave the endpoint blank on a named provider to keep its official
+URL. A custom provider requires a URL. Leave the key blank to keep the saved
+key. The menu shows the provider, model, endpoint, modalities, generation
+settings, and the last four key characters. The **Test connection** button
+sends a short `OK` request. **Delete key** removes the saved encrypted record.
 
 Before enabling this feature, configure a separate 32-byte encryption key as
 64 hexadecimal characters in `MAXWELL_BYOK_ENCRYPTION_KEY`. Generate one with
@@ -19,8 +24,11 @@ prompts, tools, shell containers, or logs. Each request creates a fresh client
 for the selected provider, with TLS verification, no redirects, public-address
 DNS checks, bounded responses, one retry, a 5-minute request ceiling, and at
 most eight tool calls. Maxwell-funded fallback providers are not used after a
-BYOK failure. Only the three fixed HTTPS provider endpoints are supported;
-custom endpoints are not accepted.
+BYOK failure. Named providers use their official HTTPS endpoints unless the
+user supplies another one. Custom endpoints must be public HTTPS OpenAI-compatible
+URLs with no login, query, or fragment. Loopback, private, link-local, and
+`.local` / `.internal` hosts are rejected. The provider client still checks
+DNS and blocks redirects.
 
 The selected provider receives the context Maxwell sends for that request,
 which can include the user's prompt, authorized recent context, attachments,
@@ -48,9 +56,12 @@ or the new key is lost after commit, saved credentials cannot be recovered;
 users must save their provider keys again.
 # Provider architecture
 
-Personal OpenAI, OpenRouter and Groq API keys use independent
-`OpenAICompatibleProvider` clients with a construction-time `ProviderPolicy`.
-They do not inherit Maxwell's funded fallback or vision credentials. Public
+Personal OpenAI, OpenRouter, Groq, and custom OpenAI-compatible API keys use
+independent `OpenAICompatibleProvider` clients with a construction-time
+`ProviderPolicy`. Modalities on the saved credential control image input,
+audio input, native tools, and reasoning. `max_tokens` and `context` set that
+client's output cap and prompt budget. They do not inherit Maxwell's funded
+fallback credentials. Public
 HTTPS validation, DNS pinning, TLS verification, redirect blocking, total time
 and response-size limits, and credential redaction are enforced by the client.
 See [PROVIDERS.md](PROVIDERS.md). ChatGPT login and OAuth are not implemented;
