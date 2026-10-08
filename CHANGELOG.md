@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.1.12 — 2026-10-08
+
+Install with `--version v0.1.12`. Release assets include source, installers,
+checksums, and the versioned container image digest.
+
+- Rebuild `/config` around a button-based home, direct settings screens,
+  Back/Close navigation and separate personal, server and bot-owner tabs.
+  Reply visibility and detail are editable together; language has presets
+  and a custom form. Existing personal preferences survive the upgrade.
+- Replace the five-field BYOK form with a guided provider connection using
+  an API key and model name, plus a URL only for custom providers. Keep model
+  capabilities, reasoning and response limits in Advanced. Show the active
+  connection separately from setup selection, preserve saved keys/settings
+  during edits, and confirm before removing a connection.
+- Explain OpenAI API billing and app-request scope; show actionable, redacted
+  connection-test failures. Acknowledge before storage work, cache redacted
+  status for immediate form opening, and reject stale or closed forms.
+- Make selected server tool groups mean allowed, use Discord's full channel
+  picker instead of truncating it to 24 channels, and remove retired message
+  allowance controls from the settings UI. Keep current permission checks.
+- Add regression journeys for connections, preservation, confirmation,
+  permissions, stale forms, provider failures, large servers and Discord
+  component limits.
 
 - Recreate the Maxwell container on installer updates even when the image and
   Compose configuration are unchanged, stopping tasks from older imported code.

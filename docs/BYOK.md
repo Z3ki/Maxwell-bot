@@ -1,15 +1,38 @@
 # Personal provider keys
 
-Users manage personal provider keys from the private `/config` menu. Choose
-**Bring your own key**, select OpenAI, OpenRouter, Groq, or **Custom OpenAI
-endpoint**, then open **Configure model**. The private form takes the endpoint
-URL, model ID, API key, modalities (`text`, `vision`, `audio`, `tools`), and
-generation settings (`reasoning`, `max_tokens`, `temperature`, `effort`,
-`context`). Leave the endpoint blank on a named provider to keep its official
-URL. A custom provider requires a URL. Leave the key blank to keep the saved
-key. The menu shows the provider, model, endpoint, modalities, generation
-settings, and the last four key characters. The **Test connection** button
-sends a short `OK` request. **Delete key** removes the saved encrypted record.
+Open the private `/config` menu and choose **AI connection**.
+Maxwell's default AI works without connecting an account. Personal connections
+apply to `/maxwell` and message app actions; normal bot mentions continue using
+Maxwell's AI.
+
+1. Choose OpenAI, OpenRouter, Groq, or **Other provider**. Selecting a provider
+   only changes the setup screen; it does not replace an active connection.
+2. Choose **Connect provider** and enter your API key and model name. Named
+   providers use their official URL. Other provider also asks for a public
+   HTTPS OpenAI-compatible API base URL.
+3. Save, then use **Test connection**. The test sends a small request that may
+   use provider credit. Results explain whether to check the key, model,
+   billing, rate limits or endpoint. OpenAI API billing is separate from
+   a ChatGPT subscription; this is an API-key connection, not ChatGPT login.
+
+The screen shows the active provider and model separately from the provider
+being configured. Only one personal connection is saved at a time. Saving a
+new provider replaces the old connection. **Edit connection** keeps the saved
+key when its field is blank, and preserves that provider's URL and advanced
+settings. Keys are never prefilled into a form or displayed in full.
+
+**Advanced** has normal selectors for image input, audio input, tools and
+reasoning, plus separate forms for reply limits, creativity, reasoning effort,
+context token limits and the API base URL. Enable only features the chosen
+model supports. Image and audio input do not enable image or voice generation.
+Leaving a named provider's URL blank restores its official URL; custom
+providers always require one.
+
+**Use Maxwell's AI** opens a confirmation screen. **Keep connection** cancels;
+**Remove key & use Maxwell** deletes the encrypted record and returns app
+requests to the default provider. Existing settings and keys are preserved
+when upgrading. Unavailable connection controls stay disabled, and an
+unreadable saved key can still be removed without decrypting it.
 
 Before enabling this feature, configure a separate 32-byte encryption key as
 64 hexadecimal characters in `MAXWELL_BYOK_ENCRYPTION_KEY`. Generate one with

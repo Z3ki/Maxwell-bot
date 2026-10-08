@@ -25,7 +25,7 @@ def test_prompt_edit_slash_commands_and_config_fields_are_removed():
     }
     assert set(command_suite._OWNER_SETTINGS) == {
         "diagnostics", "tools_enabled", "autonomy_enabled",
-        "message_quota_enabled", "user_quota", "reload",
+        "reload",
     }
 
 
@@ -144,7 +144,7 @@ def test_config_server_controls_are_hidden_without_manage_permissions(tmp_path):
     panel = command_suite._ConfigPanel(bot, store, interaction)
     assert not panel.can_choose_scope
     assert not any(
-        isinstance(item, command_suite._ConfigScopeSelect)
+        isinstance(item, command_suite._ConfigNavButton) and item.target_scope in {"server", "owner"}
         for item in panel.children
     )
 
@@ -268,9 +268,8 @@ def test_config_does_not_open_server_settings_after_permission_is_revoked(tmp_pa
     panel = command_suite._ConfigPanel(bot, store, opened_by)
     scope_select = next(
         item for item in panel.children
-        if isinstance(item, command_suite._ConfigScopeSelect)
+        if isinstance(item, command_suite._ConfigNavButton) and item.target_scope == "server"
     )
-    scope_select._values = ["server"]
     denied = []
 
     class Response:
@@ -308,7 +307,7 @@ def test_guild_owner_does_not_receive_application_owner_scope(tmp_path):
     panel = command_suite._ConfigPanel(bot, store, interaction)
     assert panel.can_manage_server
     assert not panel.is_owner
-    assert "Application owner" not in {option.label for option in panel.children[0].options}
+    assert not any(isinstance(item, command_suite._ConfigNavButton) and item.target_scope == "owner" for item in panel.children)
 
 
 def test_config_owner_scope_is_bound_to_configured_application_owner(tmp_path):
@@ -322,7 +321,7 @@ def test_config_owner_scope_is_bound_to_configured_application_owner(tmp_path):
     )
     panel = command_suite._ConfigPanel(bot, store, owner)
     assert panel.is_owner
-    assert isinstance(panel.children[0], command_suite._ConfigScopeSelect)
+    assert any(isinstance(item, command_suite._ConfigNavButton) and item.target_scope == "owner" for item in panel.children)
     panel.scope = "owner"
     panel.selected_key = "diagnostics"
     assert "Application owner settings" in panel.render()
@@ -373,15 +372,6 @@ def test_owner_diagnostics_sends_embed_and_export(tmp_path):
     asyncio.run(choose("data"))
     assert sent[-1]["content"] == "Redacted Maxwell diagnostics export."
     assert sent[-1]["file"].filename == "maxwell-diagnostics.json"
-
-
-def test_owner_quota_modal_labels_fit_discord_limits():
-    modal = command_suite._OwnerQuotaModal(SimpleNamespace())
-    for child in modal.children:
-        assert len(child.label) <= 45
-        placeholder = getattr(child, "placeholder", None)
-        if placeholder:
-            assert len(placeholder) <= 100
 
 
 def test_owner_global_toggle_is_fixed_and_persisted(tmp_path):
@@ -524,25 +514,26 @@ def test_config_home_offers_direct_controls_and_compact_embed(tmp_path):
     store.set_default("100", "language", "Spanish")
     interaction = SimpleNamespace(user=SimpleNamespace(id=100))
     panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
-    assert {child.label for child in panel.children if isinstance(child, command_suite._ConfigShortcutButton)} == {
-        "Personality", "Language", "Reply visibility"
+    assert {child.label for child in panel.children if isinstance(child, command_suite._ConfigNavButton)} == {
+        "Personality", "Language", "Replies & context", "AI connection"
     }
-    advanced = next(child for child in panel.children if isinstance(child, command_suite._ConfigSettingSelect))
-    assert advanced.placeholder == "More options"
-    assert {option.value for option in advanced.options} == {"mode", "web", "detail", "context", "byok"}
+    assert not any(isinstance(child, command_suite.discord.ui.Select) for child in panel.children)
     assert panel.embed().title == "Your personal settings"
     assert "Be brief and friendly." in panel.embed().description
     assert "Spanish" in panel.embed().description
     assert len(panel.embed().description) < 700
 
 
-def test_personality_shortcut_saves_and_refreshes_without_breaking_cancel(tmp_path):
+def test_personality_screen_saves_and_refreshes_without_breaking_cancel(tmp_path):
     store = UserPreferenceStore(tmp_path / "prefs.json")
     sent, edits, modals = [], [], []
 
     class Response:
         async def send_modal(self, modal):
             modals.append(modal)
+
+        async def edit_message(self, **kwargs):
+            edits.append(kwargs)
 
         async def send_message(self, text, **kwargs):
             sent.append((text, kwargs))
@@ -555,11 +546,13 @@ def test_personality_shortcut_saves_and_refreshes_without_breaking_cancel(tmp_pa
         edit_original_response=edit_original_response,
     )
     panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
-    shortcut = next(child for child in panel.children if isinstance(child, command_suite._ConfigShortcutButton) and child.key == "style")
-    original_children = list(panel.children)
+    shortcut = next(child for child in panel.children if isinstance(child, command_suite._ConfigNavButton) and child.key == "style")
     asyncio.run(shortcut.callback(interaction))
-    # Cancelling the modal leaves the displayed home buttons functional.
-    assert panel.selected_key == "overview"
+    assert panel.selected_key == "style"
+    editor = next(child for child in panel.children if isinstance(child, command_suite._ConfigEditButton))
+    original_children = list(panel.children)
+    asyncio.run(editor.callback(interaction))
+    # Cancelling the form leaves the current screen and its Back button functional.
     assert panel.children == original_children
     modal = modals[0]
     modal.field._value = "Be cheerful and concise."

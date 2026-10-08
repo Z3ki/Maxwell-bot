@@ -100,11 +100,31 @@ Blank IDs do not grant implicit ownership.
 
 ## Discord slash commands
 
-`/config` opens a private, click-through menu for personal defaults. Choose a setting, select a saved value, or open a text form for language and style. In a server, authorized managers also see tool-progress and ticket-greeting controls. Maxwell's shared prompt and server-level instructions cannot be edited through commands, plugins, or the control API. `/personality` stores a short reply-style preference under your Discord user ID; it does not change Maxwell for other users.
+`/config` opens a private settings home with four buttons:
 
-Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. `/diagnostics` and `/maintenance` replace the former owner command and independently restrict every request to configured Maxwell developers. Sensitive control values remain redacted and cannot be edited through Discord.
+- **Personality**: edit the style of your replies or restore the default.
+- **Language**: choose Automatic, English, Spanish, or enter another language.
+- **Replies & context**: set visibility and answer detail directly, then open
+  response mode, web research or recent-message settings as needed.
+- **AI connection**: optionally connect a personal provider with an API key;
+  see [BYOK.md](BYOK.md) for setup and advanced controls.
 
-The former comma-prefix commands are no longer accepted. `/help` lets you browse available slash commands by topic.
+Personal style and language follow you across channels, servers and DMs. App
+request defaults apply to `/maxwell` and message actions, and explicit command
+options can override them. Every screen has **Back** and **Close**. Changes
+show saved feedback, and the menu expires after five minutes.
+
+Members with Manage Server also see a **Server settings** tab for response
+channels, allowed tools, extra tools, moderation, progress updates and ticket
+greetings. Selecting a tool group **allows** its tools. The channel picker
+supports all server text channels, with a separate **Allow all channels**
+button. Configured application owners see **Bot controls** for diagnostics,
+global tools, automatic activity and control reloads. Permissions are rechecked
+on every action; retired message-limit controls are no longer advertised.
+
+`/cancel` cancels your active request in the current conversation. The former
+prefix commands and standalone personality/owner settings commands are retired.
+Maxwell's shared system prompt cannot be edited through `/config`.
 
 Public and self-hosted runtimes admit unlimited messages. The saved quota switch is forced off, including on upgrades from a hosted setup. Legacy allowance settings and the historical ledger remain readable but do not throttle requests. `/premium` remains optional discovery only; billing is unavailable.
 
