@@ -80,10 +80,6 @@ from plugins.media.impl import SendMediaTool  # noqa: F401
 from plugins.shell.impl import ShellTool  # noqa: F401
 from plugins.inbox.impl import InboxListTool  # noqa: F401
 from plugins.inbox.impl import InboxActTool  # noqa: F401
-from plugins.email.impl import EmailSendTool  # noqa: F401
-from plugins.email.impl import EmailReadInboxTool  # noqa: F401
-from plugins.email.impl import EmailGetMessageTool  # noqa: F401
-from plugins.email.impl import EmailSearchTool  # noqa: F401
 from plugins.chess.impl import ChessStartTool  # noqa: F401
 from plugins.chess.impl import ChessMoveTool  # noqa: F401
 from plugins.chess.impl import ChessStateTool  # noqa: F401

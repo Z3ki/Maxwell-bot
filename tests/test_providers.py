@@ -9,10 +9,16 @@ from media_payloads import merge_followup_media
 
 from maxwell_core.providers.models import ProviderPolicy
 
+from maxwell_core.providers.error_rules import (
+    forbidden_body_fields,
+    requires_greedy_top_p,
+)
 from providers import (
     OpenAICompatibleProvider,
     ProviderUsageExhaustedError,
     USAGE_EXHAUSTED_MESSAGE,
+    _GREEDY_TOP_P,
+    _REJECTED_BODY_FIELDS,
     _is_content_policy_block,
     _is_policy_block_text,
 )
@@ -336,6 +342,118 @@ def test_generate_chat_completion_falls_back_to_secondary_provider():
     )  # configured max_tokens always included
     assert session.payloads[2]["max_tokens"] == 10
     assert session.payloads[2]["reasoning"] == {"effort": "none"}
+
+
+_MISTRAL_422 = json.dumps(
+    {
+        "object": "error",
+        "message": {
+            "detail": [
+                {
+                    "type": "extra_forbidden",
+                    "loc": ["body", "reasoning"],
+                    "msg": "Extra inputs are not permitted",
+                },
+                {
+                    "type": "extra_forbidden",
+                    "loc": ["body", "thinking"],
+                    "msg": "Extra inputs are not permitted",
+                },
+            ]
+        },
+        "type": "invalid_request_error",
+    }
+)
+
+
+def test_forbidden_body_fields_reads_mistral_422_locations():
+    assert forbidden_body_fields(422, _MISTRAL_422) == ("reasoning", "thinking")
+    assert forbidden_body_fields(200, _MISTRAL_422) == ()
+    assert requires_greedy_top_p(
+        400, "top_p must be 1 when using greedy sampling."
+    )
+    assert not requires_greedy_top_p(422, _MISTRAL_422)
+
+
+def test_byok_strips_fields_a_host_rejects_and_remembers_them():
+    base = "https://labs-fields.example/v1"
+    model = "labs-leanstral-1-5-1"
+    _REJECTED_BODY_FIELDS.pop((base, model), None)
+    provider = OpenAICompatibleProvider(
+        base,
+        model,
+        4096,
+        0.4,
+        api_key="secret-key",
+        retry_attempts=1,
+        policy=ProviderPolicy(
+            sensitive_credentials=True,
+            max_request_seconds=30,
+            max_response_bytes=65536,
+            max_output_tokens=4096,
+        ),
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [FakeErrorResponse(422, _MISTRAL_422), FakeResponse()]
+    )
+    provider._session = session
+    try:
+        message = asyncio.run(
+            provider.generate_chat_completion(
+                [{"role": "user", "content": "Reply with OK."}],
+                timeout=20,
+                disable_reasoning=True,
+            )
+        )
+    finally:
+        _REJECTED_BODY_FIELDS.pop((base, model), None)
+    assert message["content"] == "ok"
+    assert "reasoning" in session.payloads[0]
+    assert "thinking" in session.payloads[0]
+    assert "reasoning" not in session.payloads[1]
+    assert "thinking" not in session.payloads[1]
+    assert session.payloads[1]["reasoning_effort"] == "none"
+    assert "secret-key" not in _MISTRAL_422
+
+
+def test_temperature_zero_retries_with_top_p_for_greedy_hosts():
+    base = "https://labs-greedy.example/v1"
+    model = "labs-leanstral-1-5-1"
+    _GREEDY_TOP_P.discard((base, model))
+    provider = OpenAICompatibleProvider(
+        base,
+        model,
+        128,
+        0,
+        api_key="secret-key",
+        disable_reasoning=False,
+        retry_attempts=1,
+        policy=ProviderPolicy(sensitive_credentials=True, max_output_tokens=128),
+    )
+    provider.available = True
+    session = FakeSequenceSession(
+        [
+            FakeErrorResponse(
+                400, "top_p must be 1 when using greedy sampling."
+            ),
+            FakeResponse(),
+        ]
+    )
+    provider._session = session
+    try:
+        message = asyncio.run(
+            provider.generate_chat_completion(
+                [{"role": "user", "content": "Reply with OK."}],
+                temperature=0,
+            )
+        )
+    finally:
+        _GREEDY_TOP_P.discard((base, model))
+    assert message["content"] == "ok"
+    assert "top_p" not in session.payloads[0]
+    assert session.payloads[1]["top_p"] == 1
+    assert session.payloads[1]["temperature"] == 0
 
 
 def test_generate_chat_completion_retries_primary_before_fallback():

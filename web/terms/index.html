@@ -6,65 +6,94 @@
 </head><body><a class="skip" href="#main">Skip to content</a>
 <header class="site-header"><div class="wrap header-inner">
 <a class="brand" href="/" aria-label="Maxwell home"><img src="/assets/maxwell.svg" width="36" height="36" alt="">maxwell<span class="brand-dot">.</span></a>
-<nav aria-label="Main navigation"><a href="/guide/">How to use it</a><a href="/#premium">Premium</a><a href="/contact/">Contact</a><a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a></nav>
-</div></header><main id="main"><div class="wrap"><div class="page-heading"><p class="eyebrow">Hosted service / Policies</p><h1>Terms of Service</h1><p class="lede">These terms cover the hosted Maxwell bot and website. The open-source software has its own MIT license.</p><p class="meta">Updated 30 September 2026</p></div><div class="document-grid"><aside class="toc" aria-label="On this page"><p>On this page</p><a href="#section-1">1. Agreement</a><a href="#section-2">2. Open source vs this host</a><a href="#section-3">3. Public Alpha, no SLA</a><a href="#section-4">4. Eligibility</a><a href="#section-5">5. What the service does</a><a href="#section-6">6. Usage limits and possible paid access</a><a href="#section-7">7. Acceptable use</a><a href="#section-8">8. Your content</a><a href="#section-9">9. AI output</a><a href="#section-10">10. Third parties</a><a href="#section-11">11. No warranty</a><a href="#section-12">12. Limitation of liability</a><a href="#section-13">13. Termination</a><a href="#section-14">14. Changes</a><a href="#section-15">15. Contact</a></aside><article class="document"><div class="notice"><strong>Public alpha.</strong> The hosted service is still changing. Features and limits may change, and data can be lost. Keep copies of important information.</div>  <h2 id="section-1">1. Agreement</h2>
-  <p>By using the hosted Maxwell service (the public Discord bot, <em>maxwell.z3ki.dev</em>, generated sites on that origin, or related APIs), you accept these Terms and the <a href="/privacy/">Privacy Policy</a>. If you do not agree, do not use the hosted service.</p>
-
-  <h2 id="section-2">2. Open source vs this host</h2>
-  <p>Maxwell the software is open source under the MIT License. You may run, modify, and self-host it under that license, for free.</p>
-  <p>These Terms cover <em>this operator's hosted instance</em> only — the public bot and site the operator actually runs. Self-hosting is not billed, not limited by these Terms, and not supported as a paid product.</p>
-
-  <h2 id="section-3">3. Public Alpha, no SLA</h2>
-  <p>The hosted instance is in Public Alpha. Features, models, and usage limits may change. Tools may fail and data may be lost during development. There is no uptime guarantee. Keep your own copies of important files and information.</p>
-
-  <h2 id="section-4">4. Eligibility</h2>
-  <p>You must be allowed to use Discord (typically 13 or older) and you must follow Discord's Terms of Service and Community Guidelines. Do not use the hosted bot if you cannot legally agree to contracts in your jurisdiction.</p>
-
-  <h2 id="section-5">5. What the service does</h2>
-  <p>Maxwell is an official Discord bot with chat, memory, and tools. Depending on configuration it may read messages directed at it, remember things, search the web, generate images, publish static sites, run sandboxed shell jobs, and process supported attachments. Maxwell does not join voice channels or listen to calls. AI output is often wrong. You are responsible for what you do with it.</p>
-
-  <p><strong>Reply visibility.</strong> /maxwell replies are public by default. You can choose Private for one request or save it in /config. Public replies are visible to people with access to that channel. Private replies are visible only to the requester in Discord, but are still processed by Maxwell and its configured providers.</p>
-  <h2 id="section-6">6. Usage limits and possible paid access</h2>
-  <p>During Public Alpha the hosted instance is free and may enforce temporary usage limits. Limits and reset windows may change as needed to manage capacity, reliability, or abuse; today's allowance is not guaranteed to remain unchanged. When available, the usage meter shows a percentage against the currently configured allowance and reset information for the current window. It is a snapshot of current usage, not a promise that the same allowance or reset window will remain in effect.</p>
-  <p>Maxwell Plus is not currently for sale, and billing is not enabled. Any future paid plan's price, usage allowance, reset rules, and other material subscription terms will be shown before purchase. Current proposals are not an offer or a price commitment. The MIT source stays free to self-host.</p>
-  <p>Unless the law says otherwise, experimental/free use is provided without refunds. If paid access launches, applicable refund terms will be shown before purchase.</p>
-
-  <h2 id="section-7">7. Acceptable use</h2>
-  <p>You may not use the hosted service to:</p>
+<nav aria-label="Main navigation"><a href="/guide/">How to use it</a><a href="/#premium">Self-host</a><a href="/contact/">Contact</a><a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a></nav>
+</div></header><main id="main"><div class="wrap"><div class="page-heading"><p class="eyebrow">Hosted service / Policies</p><h1>Terms of Service</h1><p class="lede">These terms cover the hosted Maxwell bot and website. The open-source software has its own MIT license.</p><p class="meta">Last updated 8 October 2026</p></div><div class="document-grid"><aside class="toc" aria-label="On this page"><p>On this page</p><a href="#section-1">1. Acceptance</a><a href="#section-2">2. Who is responsible</a><a href="#section-3">3. What the service is</a><a href="#section-4">4. Acceptable use</a><a href="#section-5">5. Your content</a><a href="#section-6">6. AI output</a><a href="#section-7">7. Voice and audio</a><a href="#section-8">8. Third parties</a><a href="#section-9">9. No warranty</a><a href="#section-10">10. Limitation of liability</a><a href="#section-11">11. Indemnity</a><a href="#section-12">12. Suspension and termination</a><a href="#section-13">13. Changes</a><a href="#section-14">14. General</a><a href="#section-15">15. Contact</a></aside><article class="document"><div class="notice"><strong>The short version.</strong> Five things worth knowing before you use Maxwell:
   <ul>
-    <li>break the law, Discord's rules, or someone else's rights</li>
-    <li>attack, probe, or overload this host, other users, or third-party APIs</li>
-    <li>try to extract secrets, tokens, or other users' private data</li>
-    <li>publish malware, CSAM, or content the operator reasonably refuses to host</li>
-    <li>impersonate the operator or claim Maxwell is a finished, guaranteed product</li>
+    <li><strong>The AI can be wrong.</strong> Replies are generated by third-party AI models and may be inaccurate, incomplete, or invented. They are never professional legal, medical, or financial advice.</li>
+    <li><strong>13 or older, and Discord's rules apply.</strong> You must meet Discord's minimum age and follow Discord's Terms of Service and Community Guidelines.</li>
+    <li><strong>You own your words — and you answer for them.</strong> You keep ownership of what you send and stay responsible for your input and for what you do with Maxwell's replies.</li>
+    <li><strong>Your messages leave Discord.</strong> Requests are processed by outside AI, search, and media providers as described in the <a href="/privacy/">Privacy Policy</a>.</li>
+    <li><strong>The service is provided "as is".</strong> If something goes wrong, the operator's liability is limited to the greater of USD 50 or what you paid in the last three months.</li>
   </ul>
-  <p>The operator may refuse requests, restrict usage, or suspend users and servers to protect the service, enforce these terms, or respond to abuse.</p>
+  </div>  <h2 id="section-1">1. Acceptance of terms</h2>
+  <p>These Terms of Service ("Terms") are an agreement between you and the operator of this Maxwell instance. By inviting the bot, sending it a message, running one of its commands, or using this website or its related APIs, you agree to these Terms and the <a href="/privacy/">Privacy Policy</a>. If you do not agree, please do not use the service.</p>
+  <p><strong>Minimum age.</strong> You must be at least 13 years old — Discord's own minimum age — or the higher minimum age required in your country. If you are not old enough to agree to a contract where you live, do not use the service.</p>
+  <p><strong>Discord's rules apply too.</strong> You must comply with Discord's <a href="https://discord.com/terms">Terms of Service</a> and <a href="https://discord.com/guidelines">Community Guidelines</a>. Where these Terms and Discord's rules differ, the stricter rule wins for your use of the service.</p>
 
-  <h2 id="section-8">8. Your content</h2>
-  <p>You keep whatever rights you already have in what you send. You grant the operator a license to store, process, embed, and transmit that content as needed to run Maxwell — including sending prompts and files to third-party model providers, keeping memory, and publishing sites you ask it to generate. Generated sites you publish on the public origin are public.</p>
-  <p>Do not send content you are not allowed to share. Maxwell may retain logs and memory; see the Privacy Policy.</p>
+  <h2 id="section-2">2. Who is responsible</h2>
+  <p>Maxwell is free, open-source software released under the MIT License. Anyone may download it, run it, change it, and host their own copy. These Terms do not govern self-hosted copies — if you run Maxwell yourself, you are the operator of that instance.</p>
+  <p>These Terms cover only the instance you are actually using: the Discord bot, the website, and any related APIs that this particular deployment provides. Throughout these Terms, <strong>"the operator"</strong> means whoever runs this Maxwell instance. Maxwell is self-hosted software with no single company behind every deployment, so <strong>the operator of the instance you use is the responsible party</strong> for that instance — its data, its configuration, and these Terms.</p>
 
-  <h2 id="section-9">9. AI output</h2>
-  <p>AI output can be inaccurate, biased, or invented. It does not represent professional advice or the operator’s personal views. Verify important information before acting on it.</p>
+  <h2 id="section-3">3. Description of the service</h2>
+  <p>Maxwell is an AI assistant that runs as a Discord bot. Depending on how the operator has configured it, it can answer questions, keep conversation context and memory, search the web, generate images, handle attachments, and run other tools. What is actually available on this instance may change over time.</p>
+  <p><strong>Responses are generated by third-party AI models.</strong> That means replies may be inaccurate, incomplete, biased, or simply wrong, even when they sound confident. The service is provided <strong>"as is"</strong> — see <a href="#section-9">section 9</a>.</p>
+  <p><strong>No professional advice.</strong> Nothing Maxwell says is legal, medical, financial, or other professional advice, and using it does not create any professional relationship. Always check important information with a qualified human before you act on it. Do not use Maxwell as an emergency service or as your only backup of anything that matters.</p>
+  <p>The service is free to use during its current testing phase. Usage limits may apply and may change to keep the service stable, and there is no uptime guarantee. Keep your own copies of anything important.</p>
 
-  <h2 id="section-10">10. Third parties</h2>
-  <p>The hosted bot sits on Discord and talks to AI, image, search, and media-processing providers the operator configures. Their terms apply too. Outages or policy blocks on those providers are not the operator's breach.</p>
+  <h2 id="section-4">4. Acceptable use</h2>
+  <p>You may not use the service to:</p>
+  <ul>
+    <li>break the law, violate anyone else's rights, or breach Discord's Terms of Service or Community Guidelines</li>
+    <li>create, request, share, or distribute sexual content involving minors, or any child sexual abuse material (CSAM) — this is zero tolerance. The operator will report apparent CSAM to the National Center for Missing &amp; Exploited Children (NCMEC) and to law enforcement, as required by law</li>
+    <li>harass, threaten, bully, stalk, or target abuse at any person or group</li>
+    <li>spam, flood, scrape, or manipulate people or engagement</li>
+    <li>trick, jailbreak, or pressure the model into producing prohibited content, or try to bypass the service's safety rules, filters, or limits</li>
+    <li>probe, attack, overload, or interfere with the service, its host, its users, or third-party APIs, or try to extract secrets, tokens, system prompts, or other users' private data</li>
+    <li>resell, sublicense, or redistribute access to the service, in whole or in part, without the operator's permission</li>
+    <li>generate content that infringes someone else's copyright, trademark, privacy, or other rights</li>
+    <li>clone, synthesize, or imitate the voice of any person without that person's explicit permission</li>
+  </ul>
+  <p>The operator may refuse requests, restrict usage, or suspend users and servers to protect the service, enforce these Terms, respond to abuse, or comply with the law.</p>
 
-  <h2 id="section-11">11. No warranty</h2>
-  <p>THE HOSTED SERVICE IS PROVIDED “AS IS” AND “AS AVAILABLE”, WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. No uptime or accuracy guarantee is made for the public alpha.</p>
+  <h2 id="section-5">5. Your content</h2>
+  <p>You keep ownership of the messages, files, images, audio, and other content you submit ("your content"). Maxwell does not claim it.</p>
+  <p>So the service can work, by using it you grant the operator a limited license to host, store, reproduce, process, and transmit your content <strong>only as needed to run the service for you</strong>. That includes sending prompts and attachments to the operator's configured AI provider to generate a reply, and storing a limited amount of conversation history and memory so the bot has context in later messages. This license is not a sale of your content, and it does not allow the operator to use your content for unrelated purposes.</p>
+  <p>Only submit content you have the right to share. The operator may review relevant content or logs to investigate errors, security issues, or abuse, and may delete content as described in <a href="#section-12">section 12</a>. For the details of what is stored and for how long, see the <a href="/privacy/">Privacy Policy</a>.</p>
 
-  <h2 id="section-12">12. Limitation of liability</h2>
-  <p>To the maximum extent allowed by law, the operator is not liable for indirect, incidental, special, consequential, or punitive damages, or for lost data, lost profits, or replacement compute. If there is any liability at all, it is capped at the greater of (a) the amount you paid the operator for the hosted service in the previous three months or (b) US$30. During free Public Alpha that amount is likely zero, so the cap is US$30.</p>
-  <p>Some places do not allow these limits. In those places, the limits apply to the fullest extent permitted.</p>
+  <h2 id="section-6">6. AI-generated output</h2>
+  <p>Maxwell's replies and any content it generates ("output") come from AI models, not from the operator. Output is not the operator's opinion, endorsement, or advice, and it may be inaccurate, incomplete, offensive, or similar to existing works.</p>
+  <p><strong>You are responsible for how you use output.</strong> Check it before you rely on it, publish it, or act on it, and make sure your use of it is lawful and does not infringe anyone's rights.</p>
 
-  <h2 id="section-13">13. Termination</h2>
-  <p>You can stop using the hosted service at any time. The operator can suspend or delete access, memory, and generated sites at any time, especially during Public Alpha. Surviving sections: 8–12, 14–15.</p>
+  <h2 id="section-7">7. Voice and audio</h2>
+  <p>Some configurations can generate or process audio. If you use any voice or audio feature, you represent and warrant that you own — or have documented, explicit permission to use — any reference voice, recording, or audio sample you provide.</p>
+  <p>You must not use the service to clone or imitate the voice of any real person without that person's explicit permission, and you must not impersonate anyone or present generated audio as a real person's authentic words. Voice cloning of any person without their explicit permission is prohibited.</p>
 
-  <h2 id="section-14">14. Changes</h2>
-  <p>These Terms can change. The version on this page is the current one. Changes are posted here. Continued use of the hosted service after a change means you accept the updated Terms.</p>
+  <h2 id="section-8">8. Third-party services</h2>
+  <p>Maxwell runs on top of other people's services. Depending on your request and the operator's configuration, content may be sent to:</p>
+  <ul>
+    <li><strong>Discord</strong>, which delivers your messages and displays replies</li>
+    <li>the <strong>AI/LLM providers</strong> the operator has configured to generate replies and embeddings</li>
+    <li><strong>search providers</strong> such as SearXNG, Tavily, or ddgs, when web research is used</li>
+    <li><strong>image and text-to-speech providers</strong>, when those tools are used</li>
+  </ul>
+  <p>Each of these services receives the data needed for its part of the job and processes it under its own terms and privacy policy, as described in more detail in the <a href="/privacy/">Privacy Policy</a>. Their outages, policy changes, or content blocks are not a breach of these Terms by the operator.</p>
+
+  <h2 id="section-9">9. No warranty</h2>
+  <p>To the maximum extent permitted by law, the service is provided <strong>"AS IS"</strong> and <strong>"AS AVAILABLE"</strong>, without warranties of any kind, whether express or implied, including implied warranties of merchantability, fitness for a particular purpose, non-infringement, and accuracy. The operator does not warrant that the service will be uninterrupted, error-free, secure, or that its output will be accurate, complete, or useful.</p>
+
+  <h2 id="section-10">10. Limitation of liability</h2>
+  <p>To the maximum extent permitted by law, the operator is not liable for any indirect, incidental, special, consequential, exemplary, or punitive damages, or for lost data, lost profits, lost goodwill, business interruption, or the cost of replacement services, arising out of or related to your use of (or inability to use) the service, even if the operator has been advised that such damages are possible.</p>
+  <p>If the operator is nevertheless found liable for anything, the total liability is capped at the greater of <strong>(a) USD 50</strong> or <strong>(b) the amounts you paid the operator for this service in the three months before the claim</strong>. Since the service is currently free, that amount is most likely zero, so the cap is USD 50.</p>
+  <p>Some jurisdictions do not allow certain warranty exclusions or limits on liability. In those places, the exclusions and limits above apply to the maximum extent permitted by law.</p>
+
+  <h2 id="section-11">11. Indemnity</h2>
+  <p>You agree to indemnify and hold harmless the operator from and against any claims, damages, losses, and expenses (including reasonable legal costs) arising out of your content, your use of the service or its output, your misuse of the service, or your violation of these Terms or applicable law.</p>
+
+  <h2 id="section-12">12. Suspension and termination</h2>
+  <p>You can stop using the service at any time. The operator may suspend or terminate your access — or a server's access — at any time and at the operator's discretion, for example to enforce these Terms, respond to abuse or legal requirements, protect the service, or because the instance is being changed or shut down.</p>
+  <p>On request, the operator will delete your data where feasible. There is no self-service deletion yet, so ask through the <a href="/contact/">Contact page</a> and include your Discord user ID. Some data may remain in routine backups or in logs held by third-party providers, as explained in the <a href="/privacy/">Privacy Policy</a>.</p>
+  <p>Sections 5, 6, 7, 9, 10, 11, and 14 survive termination.</p>
+
+  <h2 id="section-13">13. Changes to these terms</h2>
+  <p>The operator may update these Terms from time to time. The current version is always the one on this page, with its "Last updated" date. If you keep using the service after a change is posted, that means you accept the updated Terms. If you do not accept them, stop using the service.</p>
+
+  <h2 id="section-14">14. General</h2>
+  <p><strong>Severability.</strong> If any part of these Terms is found unenforceable, the rest stays in effect, and the unenforceable part applies to the maximum extent permitted by law.</p>
+  <p><strong>Entire agreement.</strong> These Terms and the <a href="/privacy/">Privacy Policy</a> are the entire agreement between you and the operator about the service, and replace any earlier discussions about it. If the two documents conflict, these Terms win for questions about use of the service, and the Privacy Policy wins for questions about data.</p>
+  <p><strong>Governing law.</strong> [Governing law: the law of the operator's principal place of residence. The operator must fill in their identity and confirm this clause before treating these Terms as final.]</p>
 
   <h2 id="section-15">15. Contact</h2>
-  <p>The hosted service is operated by the Maxwell-bot project. See <a href="/contact/">Contact</a> for bug reports and privacy requests, or visit the <a href="https://github.com/Z3ki/Maxwell-bot">source repository</a>.</p>
+  <p>Questions about these Terms, or requests about your data, go to the operator of this Maxwell instance through the <a href="/contact/">Contact page</a>. Public bug reports and feature suggestions belong in the <a href="https://github.com/Z3ki/Maxwell-bot">source repository</a> — please keep private information out of public issues.</p>
 
 </article></div></div></main><footer class="site-footer"><div class="wrap footer-inner"><div><a class="brand" href="/">maxwell.</a><p>A cat in your chat. Free, open source, and still in alpha.</p></div>
 <nav aria-label="Footer"><a href="/guide/">Guide</a><a href="/contact/">Contact</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="https://github.com/Z3ki/Maxwell-bot">Source ↗</a></nav></div></footer></body></html>

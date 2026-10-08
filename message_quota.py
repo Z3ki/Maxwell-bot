@@ -1,10 +1,7 @@
 """Customer-facing message quotas.
 
-Usage is counted in messages over a rolling window. There is no token-based
-usage or daily spend quota.
-
-Plus allowances are not applied. Premium is not launched, and this module
-must not grant a paid tier, start checkout, or transfer a server subscription.
+Usage is counted in messages over a rolling window. That is the only usage
+measure: there is no token, spend, or plan-based quota.
 """
 
 from __future__ import annotations
@@ -42,7 +39,7 @@ def format_window(seconds: int) -> str:
 
 
 def enforced_message_limit(control: dict | None) -> int:
-    """Free allowance only. Plus numbers are stored elsewhere and ignored."""
+    """The configured per-user message allowance."""
     raw = (control or {}).get("message_quota_limit", FREE_MESSAGE_LIMIT)
     try:
         return max(1, int(raw))

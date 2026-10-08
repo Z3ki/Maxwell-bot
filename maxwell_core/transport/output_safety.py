@@ -52,10 +52,6 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset(KNOWN_TOOLS) | frozenset(
         "search_messages",
         "update_base_personality",
         "update_server_prompt",
-        "email_send",
-        "email_read_inbox",
-        "email_get_message",
-        "email_search",
     }
 )
 
@@ -832,6 +828,7 @@ def _sanitize_visible_reply(text: str, *, scrub_repeats: bool = True) -> str:
         "__MEDIA_SENT__",
         "__FILE_SENT__",
         "__MESSAGE_SENT__",
+        "__TTS_SENT__",
         "__REASONING_RECORDED__",
     ):
         response = response.replace(marker, "")

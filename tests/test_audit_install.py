@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from conftest import clean_env
 from dotenv import dotenv_values
 
 import doctor
@@ -168,7 +170,7 @@ def test_env_writer_rejects_newline_in_key(tmp_path):
 
 
 def test_blank_env_file_and_site_dir_use_defaults(tmp_path):
-    env = dict(os.environ, MAXWELL_ENV_FILE="", MAXWELL_SITE_DIR="")
+    env = clean_env(MAXWELL_ENV_FILE="", MAXWELL_SITE_DIR="")
     # Copy only config to avoid reading a real checkout's .env.
     shutil.copyfile(ROOT / "config.py", tmp_path / "config.py")
     (tmp_path / ".env").write_text("OLLAMA_MODEL=from-file\nMAXWELL_SITE_DIR=\n")

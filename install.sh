@@ -619,8 +619,7 @@ final_summary() {
   Doctor:    docker compose -f $compose exec maxwell python3 doctor.py
              docker compose -f $compose exec maxwell python3 doctor.py --probe
   Operator API: http://127.0.0.1:8765/api (HTTP Basic authentication)
-  App cmds:  /maxwell, /config, /personality, /help, /usage, /image, /chess, /checkers
-             /moderation, /memory, /reminder, /diagnostics, /maintenance
+  App cmds:  /maxwell, /config, /help, /usage, /cancel, /diagnostics, /maintenance
   Edit config: $(pwd -P)/.env   then   docker compose -f $compose up -d
   Reconfigure: ./install.sh --local --reconfigure
   Update:      bash install.sh --dir "$(pwd -P)" --version vX.Y.Z

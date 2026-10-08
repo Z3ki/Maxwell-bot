@@ -126,7 +126,7 @@ on every action; retired message-limit controls are no longer advertised.
 prefix commands and standalone personality/owner settings commands are retired.
 Maxwell's shared system prompt cannot be edited through `/config`.
 
-Public and self-hosted runtimes admit unlimited messages. The saved quota switch is forced off, including on upgrades from a hosted setup. Legacy allowance settings and the historical ledger remain readable but do not throttle requests. `/premium` remains optional discovery only; billing is unavailable.
+Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, plan, token quota, or paid tier.
 
 ## Runtime controls
 
@@ -165,7 +165,6 @@ Frequently used controls include:
 | `message_quota_limit` | Free messages per rolling window (default 300) |
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
 | `message_quota_enabled` | Forced off for unlimited request admission |
-| `premium_billing_enabled` | Forced off. Billing is not available |
 | `store_memory` | Conversation-memory storage switch |
 | `autonomy_enabled` | Runtime autonomy switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |

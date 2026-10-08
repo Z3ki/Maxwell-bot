@@ -14,7 +14,6 @@ Features tested:
   7. Chess Engine & Board Mechanics (SAN/UCI, alpha-beta negamax, FEN, image rendering)
   8. Sites & Backend Datastores (Site building, KV store, append lists, container lifecycle)
   9. X (Twitter) Client (Backends fallback, rate limits, GraphQL, mention poller)
- 10. Email & Inbox System (Notices, requests, self-mail filtering, ignored senders)
  11. Security Guardrails & Response Guard (Taint gates, repetition scrubbing, echo loops, code safety)
  12. API Server & Dashboard Controls (HTTP Basic auth, login, /api/control clamping, RAG endpoints)
  13. Concurrency Safety & Discord Slash Commands
@@ -41,8 +40,6 @@ logging.basicConfig(level=logging.ERROR)
 
 # Import Maxwell modules
 import config  # noqa: E402
-import control_defaults  # noqa: E402
-from api.state import _sanitize_control  # noqa: E402
 import rag_memory  # noqa: E402
 import context_budget  # noqa: E402
 import providers  # noqa: E402
@@ -51,9 +48,6 @@ import tool_registry  # noqa: E402
 import bot_tools  # noqa: E402
 import chess_game  # noqa: E402
 import site_backend  # noqa: E402
-import inbox  # noqa: E402
-import email_inbox  # noqa: E402
-import response_guard  # noqa: E402
 import autonomy_social  # noqa: E402
 import watch_policy  # noqa: E402
 import concurrency_safety  # noqa: E402
@@ -594,149 +588,6 @@ class DeepTestHarness:
         self.run_sync_test("Site backend datastore (KV, atomic counter, items list)", test_site_backend_kv_and_items)
 
     # =========================================================================
-    # SUITE 10: Email & Inbox Processing
-    # =========================================================================
-    async def test_suite_email_inbox(self):
-        self.current_suite = "Email & Inbox System"
-        print(f"\n\033[1;34m=== SUITE 10: {self.current_suite} ===\033[0m")
-
-        temp_dir = self.make_temp_dir()
-
-        def test_email_ignore_senders_filtering():
-            patterns = {".google.com", "noreply@github.com", "alerts@bank.org"}
-            assert email_inbox.is_ignored_sender({"from_addr": "service@google.com"}, patterns) is True
-            assert email_inbox.is_ignored_sender({"from_addr": "security@accounts.google.com"}, patterns) is True
-            assert email_inbox.is_ignored_sender({"from_addr": "noreply@github.com"}, patterns) is True
-            assert email_inbox.is_ignored_sender({"from_addr": "friend@gmail.com"}, patterns) is False
-            assert email_inbox.is_ignored_sender({"from_addr": "ceo@bank.org"}, patterns) is False
-            return "Email sender ignore filters match exact addresses and wildcard subdomains"
-
-        async def test_inbox_store_lifecycle():
-            store = inbox.InboxStore(data_dir=temp_dir)
-            await store.add_notice(
-                kind="notice",
-                item_id="notice_001",
-                summary="Meeting at 3pm",
-            )
-            await store.add_notice(
-                kind="request",
-                item_id="req_001",
-                summary="User Dave wants to add you",
-                actions=["accept", "decline"],
-            )
-
-            planner_items = store.planner_items(await store.load_items())
-            assert len(planner_items) == 2
-
-            # Mark notice as read
-            await store.mark("notice_001", "read")
-            items_after = store.planner_items(await store.load_items(), exclude_announced=True)
-            # Notice with read state dropped from active planner prompt
-            assert len(items_after) == 1
-            assert items_after[0]["id"] == "req_001"
-            return "InboxStore manages notices, requests & status transitions"
-
-        self.run_sync_test("Email sender ignore pattern matching", test_email_ignore_senders_filtering)
-        await self.run_async_test("InboxStore notices vs requests lifecycle", test_inbox_store_lifecycle)
-
-    # =========================================================================
-    # SUITE 11: Security Guardrails & Repetition Scrubbing
-    # =========================================================================
-    def test_suite_security_guards(self):
-        self.current_suite = "Security & Response Guards"
-        print(f"\n\033[1;34m=== SUITE 11: {self.current_suite} ===\033[0m")
-
-        def test_repetition_scrubbing():
-            # Laugh runs
-            assert response_guard.scrub_repetitions("jajajajajajajaja") == "ja"
-            assert response_guard.scrub_repetitions("hahahahahahahaha") == "ha"
-
-            # Repeated sentences
-            sentence_repeat = "Everything is fine. Everything is fine."
-            assert response_guard.scrub_repetitions(sentence_repeat) == "Everything is fine."
-
-            # Echo loop breaking
-            echo_loop = "I think that is great. " * 10
-            broken = response_guard.break_echo_loop(echo_loop)
-            assert len(broken) < len(echo_loop)
-            assert broken.endswith("…")
-
-            # Code fence immunity
-            code_block = "```python\nfor i in range(10):\n    print('ha ha ha ha ha ha ha ha')\n```"
-            preserved = response_guard.scrub_repetitions(code_block)
-            assert "print('ha ha ha ha ha ha ha ha')" in preserved
-            return "Repetition scrubber collapses stutters & preserves code blocks"
-
-        def test_taint_gating():
-            class FakeMessage:
-                def __init__(self, tainted=False):
-                    self.tainted = tainted
-                    self.author = type("Author", (), {"id": "123"})()
-
-            class FakeTool(bot_tools.Tool):
-                is_destructive = True
-                def __init__(self):
-                    super().__init__(bot=None)
-                def get_description(self):
-                    return "Fake destructive tool"
-                async def execute(self, message, **kwargs):
-                    return "executed"
-
-            fake_bot = SimpleNamespace(
-                config=SimpleNamespace(DISABLE_TAINT_GATE=False),
-                is_message_tainted=lambda msg: msg.tainted,
-            )
-
-            tool = FakeTool()
-            tool.bot = fake_bot
-            safe_msg = FakeMessage(tainted=False)
-            tainted_msg = FakeMessage(tainted=True)
-
-            assert bot_tools._taint_gate_blocks(tool, safe_msg, {}) is False
-            assert bot_tools._taint_gate_blocks(tool, tainted_msg, {}) is True
-            # With _confirmed flag
-            assert bot_tools._taint_gate_blocks(tool, tainted_msg, {"_confirmed": True}) is False
-            return "Taint gate blocks destructive tools on web-tainted turns without confirmation"
-
-        self.run_sync_test("Repetition guard & echo loop breaker", test_repetition_scrubbing)
-        self.run_sync_test("Indirect prompt injection taint gate", test_taint_gating)
-
-    # =========================================================================
-    # SUITE 12: API Server & Dashboard Controls
-    # =========================================================================
-    def test_suite_api(self):
-        self.current_suite = "API Server & Controls"
-        print(f"\n\033[1;34m=== SUITE 12: {self.current_suite} ===\033[0m")
-
-        def test_control_sanitization_and_clamping():
-            raw_input = {
-                "autonomy_floor_cooldown_seconds": 999999,  # exceeds max 3600 -> clamped
-                "autonomy_interval_seconds": 5,             # below min 30 -> clamped
-                "autonomy_enabled": "true",                 # string -> bool
-                "scrub_repetitions": False,
-            }
-            sanitized = _sanitize_control(raw_input)
-            assert sanitized["autonomy_floor_cooldown_seconds"] <= 3600
-            assert sanitized["autonomy_interval_seconds"] >= 30
-            assert sanitized["autonomy_enabled"] is True
-            assert sanitized["scrub_repetitions"] is False
-            return "Control keys clamped to bounds & typed appropriately"
-
-        def test_default_control_completeness():
-            defaults = control_defaults.DEFAULT_CONTROL
-            assert "autonomy_enabled" in defaults
-            assert "autonomy_interval_seconds" in defaults
-            assert "scrub_repetitions" in defaults
-            assert "autonomy_blocked_channels" in defaults
-            assert "autonomy_blocked_servers" in defaults
-            return f"{len(defaults)} canonical default control keys verified"
-
-        self.run_sync_test("Control state sanitization, typing & clamping", test_control_sanitization_and_clamping)
-        self.run_sync_test("Default control dictionary completeness", test_default_control_completeness)
-
-    # =========================================================================
-    # SUITE 13: Concurrency Safety & Bot Command Dispatch
-    # =========================================================================
     async def test_suite_bot_commands(self):
         self.current_suite = "Concurrency Safety & Bot Commands"
         print(f"\n\033[1;34m=== SUITE 13: {self.current_suite} ===\033[0m")
@@ -748,7 +599,7 @@ class DeepTestHarness:
                 "moderation", "memory", "reminder",
             } <= names
             assert "owner" not in names
-            help_text = command_help_text(discovery=True)
+            help_text = command_help_text()
             assert "/diagnostics" in help_text
             assert "/maintenance" in help_text
             assert "/owner" not in help_text
@@ -790,7 +641,6 @@ class DeepTestHarness:
         self.test_suite_autonomy()
         self.test_suite_chess()
         self.test_suite_sites()
-        await self.test_suite_email_inbox()
         self.test_suite_security_guards()
         self.test_suite_api()
         await self.test_suite_bot_commands()

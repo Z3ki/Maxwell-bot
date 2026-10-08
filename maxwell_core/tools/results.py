@@ -67,6 +67,16 @@ def _plugin_result_needs_followup(result: str) -> bool:
     return bool(head) and tool_schemas_returns_result(head)
 
 
+def _tts_result(result: str) -> bool:
+    """A delivered voice clip stays off the next turn. Errors come back.
+
+    The model uses an error to fix the voice or the line. A success already
+    played in the channel, and feeding it back makes another clip.
+    """
+    text = str(result or "")
+    return text.startswith("Tool tts:") and "__TTS_SENT__" in text
+
+
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # First pass: does the batch contain anything that needs a model turn
     # (a follow-up tool result, or an error)? If yes, we ALWAYS loop back,
@@ -75,6 +85,8 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # model would never get to react to the shell output.
     has_followup_signal = False
     for result in tool_results:
+        if _tts_result(result):
+            continue
         # Check for error prefixes, not just the substring "Error" anywhere
         # (prevents false positives like "Error handling in Python" search results)
         if (
@@ -138,6 +150,7 @@ _VISIBLE_RESULT_MARKERS = (
     "__MEDIA_SENT__",
     "__MEME_SENT__",
     "__POLL_SENT__",
+    "__TTS_SENT__",
 )
 
 

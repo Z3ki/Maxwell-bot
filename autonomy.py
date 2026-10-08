@@ -569,6 +569,7 @@ AUTONOMY_POST_TOOLS = frozenset(
         "send_file",
         "send_meme",
         "send_media",
+        "tts",
     }
 )
 

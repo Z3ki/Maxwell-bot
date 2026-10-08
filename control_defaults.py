@@ -41,15 +41,10 @@ def audio_input_enabled(owner) -> bool:
 # If you change a value here, it changes everywhere. That's the point.
 DEFAULT_CONTROL = {
     "bot_enabled": True,
-    # Public and self-hosted runtimes both admit unlimited messages.
+    # Off until bot_control.json turns it on. A saved true is enforced.
     "message_quota_enabled": False,
     "message_quota_limit": 300,
     "message_quota_window_seconds": 5 * 60 * 60,
-    "message_quota_personal_plus_limit": 0,
-    "message_quota_server_plus_limit": 0,
-    "message_quota_server_fair_use_limit": 0,
-    "premium_discovery_enabled": False,
-    "premium_billing_enabled": False,
     "log_messages": False,
     "error_replies": True,
     # When True, the apology posted on a failed turn carries a short,
@@ -100,10 +95,6 @@ DEFAULT_CONTROL = {
     # to clear this bar on presence alone. Higher is stricter; 1.0 means
     # only hard pings.
     "conversation_watch_pressure": 0.55,
-    # How often the background IMAP poll files new unread mail as inbox
-    # notices. Only runs when ENABLE_EMAIL_TOOLS and a mailbox password are
-    # set. Floor 30s, ceiling 1h.
-    "email_inbox_poll_seconds": 120,
     "reply_to_bots": False,
     # Unused for starting turns. Reactions are stored on the message and
     # shown in context; they never kick off a live reply.
@@ -320,9 +311,17 @@ DEAD_CONTROL_KEYS = frozenset(
         "x_cache_seconds",
         "x_mention_poll_seconds",
         "x_autonomy_post",
-        # Retired token spend caps; message/request quotas are the usage measure.
+        # Retired token spend caps; message counts are the only usage measure.
         "daily_user_token_limit_enabled",
         "daily_user_token_limit",
+        # Billing, plans, and mail were removed outright. A persisted value
+        # must not resurrect any of them.
+        "premium_billing_enabled",
+        "premium_discovery_enabled",
+        "message_quota_personal_plus_limit",
+        "message_quota_server_plus_limit",
+        "message_quota_server_fair_use_limit",
+        "email_inbox_poll_seconds",
         # Voice-channel listening and speech output were removed. These keys
         # can linger in bot_control.json; strip them so they are not editable
         # and cannot turn the removed path back on.
@@ -427,10 +426,6 @@ _FALLBACK_KNOWN_TOOLS = [
     "sleep",
     "clear_sleep",
     "wait",
-    "email_send",
-    "email_read_inbox",
-    "email_get_message",
-    "email_search",
     "more_tools",
     "chess_start",
     "chess_move",
@@ -473,7 +468,6 @@ GUILD_CAPABILITIES = {
     "creative": "Images and games",
     "files": "File attachments",
     "memory": "Memory tools",
-    "email": "Email tools",
     "moderation": "Moderation and server management",
     "plugins": "Optional plugins",
 }
@@ -508,6 +502,4 @@ def guild_capability_for_tool(name: str, *, plugin_owned: bool = False) -> str |
         return "moderation"
     if tool.startswith(("ltm_", "memory_", "entity_", "knowledge_graph_")) or tool in {"recall_cross_server_memory", "search_messages", "context"}:
         return "memory"
-    if tool.startswith("email_") or tool in {"inbox_list", "inbox_act"}:
-        return "email"
     return "plugins" if plugin_owned else None

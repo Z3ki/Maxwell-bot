@@ -58,11 +58,21 @@ def test_first_notice_contains_links_and_is_sent_once(tmp_path):
     assert len(user.sent) == 1
     assert "https://maxwell.example.test/terms/" in user.sent[0]
     assert "https://maxwell.example.test/privacy/" in user.sent[0]
-    assert "agree" not in user.sent[0].lower()
+    assert "agree to those terms" in user.sent[0].lower()
     assert legal_notice.has_notice(bot, user.id)
     other = _bot(tmp_path)
     asyncio.run(legal_notice.notify_user(other, user))
     assert len(user.sent) == 1
+
+
+def test_notice_without_public_base_links_to_no_third_party_terms(tmp_path):
+    bot = _bot(tmp_path)
+    bot.config.MAXWELL_PUBLIC_BASE_URL = ""
+    user = User()
+    asyncio.run(legal_notice.notify_user(bot, user))
+    assert len(user.sent) == 1
+    assert "https://" not in user.sent[0]
+    assert "Terms of Service" in user.sent[0]
 
 
 def test_failed_dm_does_not_record_notice_and_can_retry(tmp_path, caplog):

@@ -1,7 +1,6 @@
 """Offline regressions for integration boundary and persistence failures."""
 
 import asyncio
-import importlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -61,47 +60,6 @@ def test_provider_tool_fallback_preserves_stream_callbacks(monkeypatch):
     assert kwargs.get("on_token") is token_cb
     assert kwargs.get("on_tool_call_name") is tool_cb
     assert kwargs.get("custom_tool_calls") is True
-
-
-def test_dns_spf_update_preserves_unrelated_txt_records(monkeypatch):
-    module = importlib.import_module("email_integration.setup_dns")
-    writes = []
-    records = [
-        {
-            "id": "verification",
-            "name": "z3ki.dev",
-            "type": "TXT",
-            "content": "google-site-verification=test",
-        },
-        {
-            "id": "spf",
-            "name": "z3ki.dev",
-            "type": "TXT",
-            "content": "v=spf1 include:_spf.example.test ~all",
-        },
-    ]
-
-    def request(token, method, path, body=None):
-        if method == "GET":
-            if "dns_records" not in path:
-                return {"result": {"name": "z3ki.dev"}}
-            return {"result": records}
-        writes.append((method, path, body))
-        return {"success": True}
-
-    monkeypatch.setattr(module, "_cf_request", request)
-    assert module.main(["--token", "unused", "--zone-id", "a" * 32, "--domain", "z3ki.dev"]) == 0
-    spf_writes = [
-        (path, body)
-        for _, path, body in writes
-        if body and "v=spf1" in body.get("content", "")
-    ]
-    assert len(spf_writes) == 1
-    assert spf_writes[0][0].endswith("/spf")
-    assert (
-        spf_writes[0][1]["content"]
-        == "v=spf1 include:mailgun.org include:_spf.example.test ~all"
-    )
 
 
 class _Stream:

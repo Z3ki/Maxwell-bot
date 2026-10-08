@@ -1,4 +1,4 @@
-"""Customer-facing message quotas and the not-for-sale Plus discovery copy."""
+"""Customer message quotas: message counts in a rolling window, nothing else."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +19,6 @@ from usage_commands import (
     HELP_COMMAND,
     command_help_text,
     handle_discovery_interaction,
-    premium_discovery_text,
     usage_status_text,
 )
 
@@ -70,7 +69,21 @@ def test_override_exemption_and_reset(tmp_path):
     assert quota.status("12", 100, 3600)["limit"] == 100
 
 
-def test_plus_allowances_are_not_enforced():
+def test_saved_message_quota_stays_enabled():
+    sanitized = _sanitize_control(
+        {
+            "message_quota_enabled": True,
+            "message_quota_limit": 300,
+            "message_quota_window_seconds": 18000,
+        }
+    )
+    assert sanitized["message_quota_enabled"] is True
+    assert sanitized["message_quota_limit"] == 300
+    assert sanitized["message_quota_window_seconds"] == 18000
+    assert _sanitize_control({})["message_quota_enabled"] is False
+
+
+def test_plan_and_billing_controls_are_discarded():
     control = {
         "message_quota_limit": 40,
         "message_quota_personal_plus_limit": 5000,
@@ -80,8 +93,9 @@ def test_plus_allowances_are_not_enforced():
     }
     assert enforced_message_limit(control) == 40
     sanitized = _sanitize_control(control)
-    assert sanitized["premium_billing_enabled"] is False
-    assert sanitized["message_quota_personal_plus_limit"] == 5000
+    assert "premium_billing_enabled" not in sanitized
+    assert "message_quota_personal_plus_limit" not in sanitized
+    assert "message_quota_server_plus_limit" not in sanitized
     assert enforced_message_limit(sanitized) == 40
     assert FREE_MESSAGE_LIMIT == 300
 
@@ -97,44 +111,18 @@ def test_retired_daily_token_controls_are_discarded():
     assert sanitized["message_quota_limit"] == 25
 
 
-def test_premium_copy_states_prices_and_refuses_sale():
-    text = premium_discovery_text()
-    assert "$2.99/month per user" in text
-    assert "$4.99/month per server" in text
-    assert "higher individual allowance" in text
-    assert "may change as needed" in text
-    assert "percentage" in text
-    assert "300 messages per rolling 5 hours" not in text
-    assert "not for sale" in text
-    assert "cannot be transferred" in text
-    assert "Guild Subscription" in text
-    assert "not decided" in text
-    assert "http" not in text
-    assert "buy now" not in text.lower()
-    off = premium_discovery_text(discovery=False)
-    assert off == "Plan details are turned off."
-    assert "$2.99" not in off
-
-
-def test_help_and_usage_mention_premium_only_as_discovery():
-    shown = command_help_text(discovery=True)
-    hidden = command_help_text(discovery=False)
-    assert "/usage" in shown and "/premium" in shown
-    assert "/premium" not in hidden
-    assert "$2.99" not in shown
+def test_help_and_usage_never_mention_plans_or_prices():
+    shown = command_help_text()
+    assert "/usage" in shown
+    assert "/premium" not in shown
+    assert "$" not in shown
     usage = usage_status_text(
         {"used": 3, "limit": 100, "window_seconds": 18000, "resets_in": 0},
-        discovery=True,
     )
     assert "3%" in usage
     assert "3/100" not in usage
-    assert "Plan details: /premium" in usage
-    assert "$4.99" not in usage
-    quiet = usage_status_text(
-        {"used": 3, "limit": 100, "window_seconds": 18000, "resets_in": 0},
-        discovery=False,
-    )
-    assert "/premium" not in quiet
+    assert "/premium" not in usage
+    assert "$" not in usage
 
 
 def test_help_browses_topics_and_returns_only_the_selected_section():
@@ -146,12 +134,10 @@ def test_help_browses_topics_and_returns_only_the_selected_section():
         "server",
         "owner",
     }
-    assert "/config" in command_help_text(discovery=False, topic="personal")
-    assert "Bring your own key" in command_help_text(
-        discovery=False, topic="personal"
-    )
-    assert "/personality" not in command_help_text(discovery=False, topic="personal")
-    assert "/image" not in command_help_text(discovery=False, topic="personal")
+    assert "/config" in command_help_text(topic="personal")
+    assert "Bring your own key" in command_help_text(topic="personal")
+    assert "/personality" not in command_help_text(topic="personal")
+    assert "/image" not in command_help_text(topic="personal")
 
 
 def test_help_interaction_uses_selected_topic():
@@ -182,7 +168,7 @@ def test_help_interaction_uses_selected_topic():
 
 
 def test_protocol_does_not_pitch_premium():
-    assert "Do not advertise Premium" in DISCORD_CHAT_PROTOCOL
+    assert "Do not advertise paid plans" in DISCORD_CHAT_PROTOCOL
     assert "promotional DMs" in DISCORD_CHAT_PROTOCOL
 
 
@@ -226,28 +212,3 @@ def test_live_turn_charges_one_message_not_followups(tmp_path):
     assert ledger.status("42", 100, 18000)["used"] == 1
 
 
-def test_premium_command_replies_in_place_and_does_not_dm():
-    sent = []
-
-    async def send_message(text, ephemeral=False, **kwargs):
-        sent.append((text, ephemeral))
-
-    interaction = SimpleNamespace(
-        data={"name": "premium"},
-        user=SimpleNamespace(id=9),
-        response=SimpleNamespace(is_done=lambda: False, send_message=send_message),
-        followup=None,
-    )
-    bot = SimpleNamespace(
-        _control={
-            "premium_discovery_enabled": True,
-            "message_quota_limit": 100,
-            "message_quota_window_seconds": 18000,
-        },
-        _message_quota=None,
-    )
-    assert asyncio.run(handle_discovery_interaction(bot, interaction)) is True
-    assert sent and sent[0][1] is True
-    assert "$2.99/month per user" in sent[0][0]
-    assert "not for sale" in sent[0][0]
-    assert not hasattr(interaction.user, "send") or interaction.user.send is None

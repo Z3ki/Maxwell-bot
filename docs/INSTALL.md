@@ -18,8 +18,8 @@ It asks for:
 
 The easy config uses `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`, read directly by the runtime. Existing historical `OLLAMA_*` variables and `AI_API_URL` remain accepted. An explicitly blank friendly key clears a legacy credential.
 
-Fresh self-hosted installs do not enforce message quotas, advertise premium,
-send legal notices, or apply the public bot's retired-tool restrictions.
+Fresh self-hosted installs do not enforce message quotas, advertise paid
+plans, send legal notices, or apply the public bot's retired-tool restrictions.
 An existing `data/bot_control.json` keeps any quotas the operator configured;
 turn off `message_quota_enabled` in owner controls to remove them. Hosted
 operators can opt into legal DMs with `MAXWELL_LEGAL_NOTICE=true` and retain
@@ -29,10 +29,9 @@ Optional integrations use `auto` detection. Website tools need a nonblank
 `MAXWELL_PUBLIC_BASE_URL`; `ENABLE_CREATE_SITE=true` also allows local-only
 hosting. RAG needs `MAXWELL_EMBED_MODEL` (or `EMBED_MODEL`) after you install
 that embedding model. HD images need `GEMINI_IMAGE_MODEL` supported by your
-provider. Email needs both `MAXWELL_EMAIL_USER` and `MAXWELL_EMAIL_PASSWORD`.
-Shell stays off until `--with-shell` prepares the backend. Features without
+provider. Shell stays off until `--with-shell` prepares the backend. Features without
 setup, such as keyless web search and image generation, remain available.
-Conversational autonomy is opt-in; memory agents and delegated workers have been removed, and TTS is not bundled. Generated sites do not expire
+Conversational autonomy is opt-in; memory agents and delegated workers have been removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. Generated sites do not expire
 by default; set `site_ttl_hours` in owner controls if you want expiry.
 
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
@@ -232,7 +231,7 @@ Never use a Discord user/self-bot token. Never copy a browser `Authorization` he
 
 ## App-command behavior
 
-`/help` browses slash commands by topic. `/config` opens a private settings menu for personal defaults and authorized server settings; `/personality` also edits your reply-style preference. Purpose-specific commands include `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder`. Restricted runtime status and operational controls are split between `/diagnostics` and `/maintenance`.
+`/help` browses slash commands by topic and `/usage` shows the message allowance. `/config` opens a private settings menu for personal defaults and authorized server settings, including Personality and Language. Images, games, moderation, memory, and reminders are model-driven tools rather than separate commands. Restricted runtime status and operational controls are split between `/diagnostics` and `/maintenance`.
 
 For `/maxwell`, fast answers remain in the original deferred interaction. If the command invokes a tool or remains unanswered after roughly 10 seconds, Maxwell keeps the working status and replies to it when channel replies are available; otherwise it edits the original status when possible or sends an interaction follow-up. Textual `/maxwell` replies are rendered as embeds.
 
@@ -343,10 +342,6 @@ bash install.sh --dir "$PWD"
 ```
 
 The supported runtime is Docker. Historical PM2/host files may remain in the repository for compatibility/migration, but they are not the recommended production path.
-
-## Email integration
-
-Email tools use the SMTP/IMAP settings documented in [`../email_integration/README.md`](../email_integration/README.md). The Cloudflare `setup_dns.py` helper is an optional DNS utility; it does not configure Maxwell's local SMTP/IMAP transport.
 
 ## Troubleshooting
 

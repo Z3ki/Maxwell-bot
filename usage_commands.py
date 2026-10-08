@@ -1,7 +1,8 @@
-"""Optional discovery commands for message allowance and Maxwell Plus.
+"""Discovery commands for message usage.
 
-Premium is not for sale. These commands answer only when someone asks.
-They do not check out, announce a launch, or send a DM.
+Usage is counted in messages over a rolling window. That is the only usage
+measure. These commands answer only when someone asks; they never start an AI
+turn and never send a DM.
 """
 
 from __future__ import annotations
@@ -19,9 +20,7 @@ from message_quota import (
 
 logger = logging.getLogger(__name__)
 
-PERSONAL_PLUS_PRICE = "$2.99/month per user"
-SERVER_PLUS_PRICE = "$4.99/month per server"
-DISCOVERY_COMMANDS = frozenset({"help", "usage", "premium"})
+DISCOVERY_COMMANDS = frozenset({"help", "usage"})
 
 _COMMAND_META = {
     "type": 1,
@@ -53,18 +52,6 @@ USAGE_COMMAND = {
     "description": "Show your message allowance.",
     **_COMMAND_META,
 }
-PREMIUM_COMMAND = {
-    "name": "premium",
-    "description": "Show Maxwell Plus plan details.",
-    **_COMMAND_META,
-}
-
-
-def discovery_enabled(control: dict | None) -> bool:
-    raw = (control or {}).get("premium_discovery_enabled", False)
-    if isinstance(raw, bool):
-        return raw
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 _HELP_TOPICS = {
@@ -104,7 +91,7 @@ _HELP_TOPICS = {
 }
 
 
-def command_help_text(*, discovery: bool, topic: str | None = None) -> str:
+def command_help_text(*, topic: str | None = None) -> str:
     normalized = str(topic or "").strip().lower()
     if normalized in _HELP_TOPICS:
         heading, rows = _HELP_TOPICS[normalized]
@@ -120,12 +107,10 @@ def command_help_text(*, discovery: bool, topic: str | None = None) -> str:
             "Use `/cancel` to stop your active request in the current interaction context.",
             "Use `/help topic:<category>` to see one set of commands.",
         ]
-    if discovery:
-        lines.append("`/premium` shows plan information only; it does not start a purchase.")
     return "\n".join(lines)
 
 
-def usage_status_text(state: dict, *, discovery: bool) -> str:
+def usage_status_text(state: dict) -> str:
     window = format_window(int(state.get("window_seconds") or FREE_WINDOW_SECONDS))
     limit = max(1, int(state.get("limit") or 0))
     used = max(0, int(state.get("used") or 0))
@@ -141,27 +126,7 @@ def usage_status_text(state: dict, *, discovery: bool) -> str:
         lines.append(f"The oldest counted message leaves the window in {format_window(resets_in)}.")
     else:
         lines.append("The window rolls forward as older messages age out.")
-    if discovery:
-        lines.append("Plan details: /premium")
     return "\n".join(lines)
-
-
-def premium_discovery_text(*, discovery: bool = True) -> str:
-    if not discovery:
-        return "Plan details are turned off."
-    return (
-        "Maxwell Plus is not for sale. Billing and paid restrictions are off. "
-        "This does not start a purchase.\n"
-        "During Public Alpha, message limits and reset windows may change as "
-        "needed to keep the hosted service available. Check /usage for a "
-        "percentage of your current allowance and its reset status.\n"
-        f"Personal Plus is proposed at {PERSONAL_PLUS_PRICE}. It would provide "
-        "a higher individual allowance; exact limits and reset behavior are not decided.\n"
-        f"Server Plus is proposed at {SERVER_PLUS_PRICE}. It would use Discord's "
-        "native Guild Subscription and remain associated with the purchased server. "
-        "It cannot be transferred. The shared server allowance and per-user "
-        "fair-use cap are not decided."
-    )
 
 
 def _control(bot: Any) -> dict:
@@ -174,12 +139,10 @@ def _user_id(interaction: Any) -> str:
     return str(getattr(user, "id", "") or "")
 
 
-def usage_text_for(bot: Any, user_id: str, *, discovery: bool | None = None) -> str:
+def usage_text_for(bot: Any, user_id: str) -> str:
     control = _control(bot)
     if not control.get("message_quota_enabled", False):
         return "Unlimited messages. This bot has no configured message allowance."
-    if discovery is None:
-        discovery = discovery_enabled(control)
     ledger = getattr(bot, "_message_quota", None)
     if ledger is None or not user_id:
         return "Message allowance is unavailable."
@@ -188,29 +151,20 @@ def usage_text_for(bot: Any, user_id: str, *, discovery: bool | None = None) -> 
         enforced_message_limit(control),
         enforced_window_seconds(control),
     )
-    return usage_status_text(state, discovery=discovery)
-
-
-def premium_text_for(bot: Any) -> str:
-    control = _control(bot)
-    return premium_discovery_text(discovery=discovery_enabled(control))
+    return usage_status_text(state)
 
 
 async def handle_discovery_interaction(bot: Any, interaction: Any) -> bool:
-    """Answer /help, /usage, and /premium. Never starts an AI turn or a DM."""
+    """Answer /help and /usage. Never starts an AI turn or a DM."""
     data = ui._interaction_data(interaction)
     name = str(data.get("name") or "")
     if name not in DISCOVERY_COMMANDS:
         return False
-    control = _control(bot)
-    discovery = discovery_enabled(control)
     if name == "help":
         options = dict(ui._option_pairs(data.get("options")))
-        text = command_help_text(discovery=discovery, topic=options.get("topic"))
-    elif name == "usage":
-        text = usage_text_for(bot, _user_id(interaction), discovery=discovery)
+        text = command_help_text(topic=options.get("topic"))
     else:
-        text = premium_text_for(bot)
+        text = usage_text_for(bot, _user_id(interaction))
     try:
         await ui._ephemeral(interaction, text[:1900])
     except Exception:
@@ -219,13 +173,10 @@ async def handle_discovery_interaction(bot: Any, interaction: Any) -> bool:
 
 
 def install_usage_commands(bot: Any = None) -> None:
-    """Register the discovery commands. Safe to call more than once."""
+    """Register the help and usage commands. Safe to call more than once."""
     for command in (HELP_COMMAND, USAGE_COMMAND):
         ui.register_command(command)
-    if discovery_enabled(_control(bot)):
-        ui.register_command(PREMIUM_COMMAND)
-    else:
-        ui.unregister_command("premium")
+    ui.unregister_command("premium")
     ui.register_interaction_handler(
         handle_discovery_interaction, priority=20, name="usage_discovery"
     )

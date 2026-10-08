@@ -49,7 +49,7 @@ def test_rich_interaction_store_round_trip(tmp_path):
     assert store.get(token)["prompt"] == "Explain it"
 
 
-def test_rich_message_supports_callback_and_premium_buttons(tmp_path):
+def test_rich_message_supports_callback_buttons_and_drops_sku_buttons(tmp_path):
     _bot, _manager, tool, store, _seen = _runtime(tmp_path)
     buttons = tool._link_buttons(
         json.dumps(
@@ -59,14 +59,12 @@ def test_rich_message_supports_callback_and_premium_buttons(tmp_path):
             ]
         )
     )
-    assert len(buttons) == 2
+    assert len(buttons) == 1
     callback = buttons[0]
     assert callback.style is discord.ButtonStyle.primary
     assert callback.custom_id.startswith("maxwell:rich:")
     token = callback.custom_id.rsplit(":", 1)[1]
     assert store.get(token)["prompt"] == "Explain this"
-    assert buttons[1].style is discord.ButtonStyle.premium
-    assert int(buttons[1].sku_id) == 123456789
 
 
 def test_component_click_becomes_maxwell_turn(tmp_path):

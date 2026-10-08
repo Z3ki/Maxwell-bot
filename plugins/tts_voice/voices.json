@@ -1,0 +1,422 @@
+[
+  {
+    "slug": "en_paul_sad",
+    "id": "530e2e20-58e2-45d8-b0a5-4594f4915944",
+    "speaker": "paul",
+    "emotion": "sad",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Sad",
+    "tags": [
+      "heavy",
+      "hushed",
+      "sad"
+    ]
+  },
+  {
+    "slug": "en_paul_neutral",
+    "id": "c69964a6-ab8b-4f8a-9465-ec0925096ec8",
+    "speaker": "paul",
+    "emotion": "neutral",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Neutral",
+    "tags": [
+      "relaxed",
+      "balanced",
+      "neutral"
+    ]
+  },
+  {
+    "slug": "en_paul_happy",
+    "id": "1024d823-a11e-43ee-bf3d-d440dccc0577",
+    "speaker": "paul",
+    "emotion": "happy",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Happy",
+    "tags": [
+      "sunny",
+      "easygoing",
+      "happy"
+    ]
+  },
+  {
+    "slug": "en_paul_frustrated",
+    "id": "1f017bcb-02e5-460d-989b-db065c0c6122",
+    "speaker": "paul",
+    "emotion": "frustrated",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Frustrated",
+    "tags": [
+      "edgy",
+      "snappy",
+      "frustrated"
+    ]
+  },
+  {
+    "slug": "en_paul_excited",
+    "id": "5940190b-f58a-4c3e-8264-a40d63fd6883",
+    "speaker": "paul",
+    "emotion": "excited",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Excited",
+    "tags": [
+      "bouncy",
+      "spirited",
+      "excited"
+    ]
+  },
+  {
+    "slug": "en_paul_confident",
+    "id": "98559b22-62b5-4a64-a7cd-fc78ca41faa8",
+    "speaker": "paul",
+    "emotion": "confident",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Confident",
+    "tags": [
+      "bold",
+      "punchy",
+      "confident"
+    ]
+  },
+  {
+    "slug": "en_paul_cheerful",
+    "id": "01d985cd-5e0c-4457-bfd8-80ba31a5bc03",
+    "speaker": "paul",
+    "emotion": "cheerful",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Cheerful",
+    "tags": [
+      "upbeat",
+      "breezy",
+      "cheerful"
+    ]
+  },
+  {
+    "slug": "en_paul_angry",
+    "id": "cb891218-482c-4392-9878-91e8d999d57a",
+    "speaker": "paul",
+    "emotion": "angry",
+    "gender": "male",
+    "language": "en_us",
+    "name": "Paul - Angry",
+    "tags": [
+      "raw",
+      "gruff",
+      "angry"
+    ]
+  },
+  {
+    "slug": "gb_oliver_neutral",
+    "id": "e3596645-b1af-469e-b857-f18ddedc7652",
+    "speaker": "oliver",
+    "emotion": "neutral",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Neutral",
+    "tags": [
+      "calm",
+      "even",
+      "neutral"
+    ]
+  },
+  {
+    "slug": "gb_jane_sarcasm",
+    "id": "a3e41ea8-020b-44c0-8d8b-f6cc03524e31",
+    "speaker": "jane",
+    "emotion": "sarcasm",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Sarcasm",
+    "tags": [
+      "dry",
+      "wry",
+      "sarcastic"
+    ]
+  },
+  {
+    "slug": "gb_jane_confused",
+    "id": "7d0a90a3-c211-4489-aaa0-61269299edc7",
+    "speaker": "jane",
+    "emotion": "confused",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Confused",
+    "tags": [
+      "hesitant",
+      "uncertain",
+      "confused"
+    ]
+  },
+  {
+    "slug": "gb_oliver_sad",
+    "id": "d4101b8f-12c3-450d-a812-7d700b3a3245",
+    "speaker": "oliver",
+    "emotion": "sad",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Sad",
+    "tags": [
+      "low",
+      "hollow",
+      "sad"
+    ]
+  },
+  {
+    "slug": "gb_oliver_excited",
+    "id": "e8e5b1de-493c-4061-8414-e2170f9f4b6f",
+    "speaker": "oliver",
+    "emotion": "excited",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Excited",
+    "tags": [
+      "energetic",
+      "crisp",
+      "excited"
+    ]
+  },
+  {
+    "slug": "gb_oliver_curious",
+    "id": "390c8a2b-60a6-4882-8437-c49a8bd33b63",
+    "speaker": "oliver",
+    "emotion": "curious",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Curious",
+    "tags": [
+      "thoughtful",
+      "engaged",
+      "curious"
+    ]
+  },
+  {
+    "slug": "gb_oliver_confident",
+    "id": "8169ab87-bc99-4669-a5ec-6855860ace24",
+    "speaker": "oliver",
+    "emotion": "confident",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Confident",
+    "tags": [
+      "firm",
+      "decisive",
+      "confident"
+    ]
+  },
+  {
+    "slug": "gb_oliver_cheerful",
+    "id": "5ad5d44e-6b4e-4a57-a8a8-4cae088034ed",
+    "speaker": "oliver",
+    "emotion": "cheerful",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Cheerful",
+    "tags": [
+      "bright",
+      "lively",
+      "cheerful"
+    ]
+  },
+  {
+    "slug": "gb_oliver_angry",
+    "id": "862274a7-8333-48f7-b668-f19c932999e0",
+    "speaker": "oliver",
+    "emotion": "angry",
+    "gender": "male",
+    "language": "en_gb",
+    "name": "Oliver - Angry",
+    "tags": [
+      "intense",
+      "forceful",
+      "angry"
+    ]
+  },
+  {
+    "slug": "fr_marie_sad",
+    "id": "4adeb2c6-25a3-44bc-8100-5234dfc1193b",
+    "speaker": "marie",
+    "emotion": "sad",
+    "gender": "female",
+    "language": "fr_fr",
+    "name": "Marie - Sad",
+    "tags": [
+      "muted",
+      "heavy",
+      "sad"
+    ]
+  },
+  {
+    "slug": "fr_marie_neutral",
+    "id": "5a271406-039d-46fe-835b-fbbb00eaf08d",
+    "speaker": "marie",
+    "emotion": "neutral",
+    "gender": "female",
+    "language": "fr_fr",
+    "name": "Marie - Neutral",
+    "tags": [
+      "composed",
+      "steady",
+      "neutral"
+    ]
+  },
+  {
+    "slug": "fr_marie_happy",
+    "id": "49d024dd-981b-4462-bb17-74d381eb8fd7",
+    "speaker": "marie",
+    "emotion": "happy",
+    "gender": "female",
+    "language": "fr_fr",
+    "name": "Marie - Happy",
+    "tags": [
+      "warm",
+      "radiant",
+      "happy"
+    ]
+  },
+  {
+    "slug": "fr_marie_excited",
+    "id": "2f62b1af-aea3-4079-9d10-7ca665ee7243",
+    "speaker": "marie",
+    "emotion": "excited",
+    "gender": "female",
+    "language": "fr_fr",
+    "name": "Marie - Excited",
+    "tags": [
+      "vibrant",
+      "bubbly",
+      "excited"
+    ]
+  },
+  {
+    "slug": "fr_marie_curious",
+    "id": "e0580ce5-e63c-4cbe-88c8-a983b80c5f1f",
+    "speaker": "marie",
+    "emotion": "curious",
+    "gender": "female",
+    "language": "fr_fr",
+    "name": "Marie - Curious",
+    "tags": [
+      "bright",
+      "probing",
+      "curious"
+    ]
+  },
+  {
+    "slug": "fr_marie_angry",
+    "id": "a7c07cdc-1c35-4d87-a938-c610a654f600",
+    "speaker": "marie",
+    "emotion": "angry",
+    "gender": "female",
+    "language": "fr_fr",
+    "name": "Marie - Angry",
+    "tags": [
+      "fierce",
+      "sharp",
+      "angry"
+    ]
+  },
+  {
+    "slug": "gb_jane_shameful",
+    "id": "230ccacf-8800-4aa0-8ac2-8d004f1d9fb7",
+    "speaker": "jane",
+    "emotion": "shameful",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Shameful",
+    "tags": [
+      "quiet",
+      "remorseful",
+      "ashamed"
+    ]
+  },
+  {
+    "slug": "gb_jane_sad",
+    "id": "c7a8eb83-5247-4540-89f3-6650d349100d",
+    "speaker": "jane",
+    "emotion": "sad",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Sad",
+    "tags": [
+      "soft",
+      "subdued",
+      "sad"
+    ]
+  },
+  {
+    "slug": "gb_jane_neutral",
+    "id": "82c99ee6-f932-423f-a4a3-d403c8914b8d",
+    "speaker": "jane",
+    "emotion": "neutral",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Neutral",
+    "tags": [
+      "clear",
+      "measured",
+      "neutral"
+    ]
+  },
+  {
+    "slug": "gb_jane_jealousy",
+    "id": "e7168caa-f7ed-4e1c-98a1-434251f4f2b0",
+    "speaker": "jane",
+    "emotion": "jealousy",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Jealousy",
+    "tags": [
+      "bitter",
+      "strained",
+      "jealous"
+    ]
+  },
+  {
+    "slug": "gb_jane_frustrated",
+    "id": "60844938-221d-4d1e-8233-34203f787d9f",
+    "speaker": "jane",
+    "emotion": "frustrated",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Frustrated",
+    "tags": [
+      "tense",
+      "clipped",
+      "frustrated"
+    ]
+  },
+  {
+    "slug": "gb_jane_curious",
+    "id": "5de47977-6e47-4266-a938-3bc1d76b4676",
+    "speaker": "jane",
+    "emotion": "curious",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Curious",
+    "tags": [
+      "inquisitive",
+      "open",
+      "curious"
+    ]
+  },
+  {
+    "slug": "gb_jane_confident",
+    "id": "cbe96cf0-85ec-4a10-accb-0b35c93b6dfd",
+    "speaker": "jane",
+    "emotion": "confident",
+    "gender": "female",
+    "language": "en_gb",
+    "name": "Jane - Confident",
+    "tags": [
+      "assured",
+      "poised",
+      "confident"
+    ]
+  }
+]

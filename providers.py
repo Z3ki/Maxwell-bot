@@ -88,7 +88,9 @@ from maxwell_core.providers.error_rules import (
     _required_temperature as _required_temperature,
     _is_stream_options_rejected as _is_stream_options_rejected,
     context_output_limit,
+    forbidden_body_fields,
     maximum_output_limit,
+    requires_greedy_top_p,
 )
 from maxwell_core.providers.protocol import (
     CompletionResponse,
@@ -96,6 +98,11 @@ from maxwell_core.providers.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Learned per base URL and model. BYOK builds a new client for every request,
+# so an instance dict would make every message repeat the same 422.
+_REJECTED_BODY_FIELDS: dict[tuple[str, str], set[str]] = {}
+_GREEDY_TOP_P: set[tuple[str, str]] = set()
 
 # When an endpoint returns a 429 (rate-limited / usage-exhausted), we temporarily
 # steer traffic away from it for this long instead of retrying it in the same
@@ -110,9 +117,7 @@ DEFAULT_EMPTY_RESPONSE_RETRIES = 2
 TIMING_HISTORY_MAX = 24
 
 
-USAGE_EXHAUSTED_MESSAGE = (
-    "The api is down cuz yall drained the usage and im not rich so wait like 2 hours"
-)
+USAGE_EXHAUSTED_MESSAGE = "The AI provider has reached its usage limit. Please try again later."
 
 AUDIO_FORMATS = {
     "audio/wav": "wav",
@@ -672,6 +677,11 @@ class OpenAICompatibleProvider(ChatProvider):
             # OpenAI/OpenRouter omit streaming usage unless asked. Without it
             # completion_tokens is 0 and TPS is guessed or missing.
             data["stream_options"] = {"include_usage": True}
+        constraint = (endpoint.base_url, str(data.get("model") or ""))
+        for field in _REJECTED_BODY_FIELDS.get(constraint, ()):
+            data.pop(field, None)
+        if constraint in _GREEDY_TOP_P and data.get("temperature") == 0:
+            data["top_p"] = 1
         return data
 
     async def _get_session(self):
@@ -1502,6 +1512,34 @@ class OpenAICompatibleProvider(ChatProvider):
                                 max_attempts = attempt + 1
                             recovery_endpoint = endpoint
                             continue
+                        rejected = forbidden_body_fields(resp.status, raw_error_text)
+                        if rejected:
+                            constraint = (endpoint.base_url, str(data.get("model") or ""))
+                            known = _REJECTED_BODY_FIELDS.setdefault(constraint, set())
+                            new_fields = [name for name in rejected if name not in known]
+                            if new_fields:
+                                known.update(new_fields)
+                                logger.warning(
+                                    "Provider endpoint %s rejected unsupported fields %s; resending without them",
+                                    endpoint.name,
+                                    ", ".join(new_fields),
+                                )
+                                if attempt >= max_attempts:
+                                    max_attempts = attempt + 1
+                                recovery_endpoint = endpoint
+                                continue
+                        if requires_greedy_top_p(resp.status, raw_error_text):
+                            constraint = (endpoint.base_url, str(data.get("model") or ""))
+                            if constraint not in _GREEDY_TOP_P:
+                                _GREEDY_TOP_P.add(constraint)
+                                logger.warning(
+                                    "Provider endpoint %s requires top_p=1 for temperature 0; resending",
+                                    endpoint.name,
+                                )
+                                if attempt >= max_attempts:
+                                    max_attempts = attempt + 1
+                                recovery_endpoint = endpoint
+                                continue
                         required_temp = _required_temperature(resp.status, error_text)
                         if (
                             required_temp is not None

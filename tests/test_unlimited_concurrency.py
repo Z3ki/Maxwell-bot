@@ -123,7 +123,7 @@ def test_saved_controls_cannot_restore_the_legacy_inference_pool(tmp_path):
     bot._conversation_watch_enabled = lambda: True
     bot._load_control(force=True)
     assert "ai_concurrency" not in bot._control
-    assert bot._control["message_quota_enabled"] is False
+    assert bot._control["message_quota_enabled"] is True
     for key in ("long_term_memory_enabled", "cross_context_enabled", "entity_memory_enabled", "knowledge_graph_enabled"):
         assert key not in bot._control
     assert "ai_concurrency" not in DEFAULT_CONTROL

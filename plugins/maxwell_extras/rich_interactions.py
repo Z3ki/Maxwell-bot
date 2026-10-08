@@ -122,7 +122,6 @@ def _button_style(name: Any) -> discord.ButtonStyle:
         "danger": discord.ButtonStyle.danger,
         "red": discord.ButtonStyle.danger,
         "link": discord.ButtonStyle.link,
-        "premium": getattr(discord.ButtonStyle, "premium", discord.ButtonStyle.secondary),
     }
     return mapping.get(value, discord.ButtonStyle.secondary)
 
@@ -165,17 +164,8 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
             style_key = style_name.strip().lower()
 
             if style_key == "premium" or item.get("sku_id") is not None:
-                try:
-                    sku_id = int(item.get("sku_id"))
-                except (TypeError, ValueError):
-                    continue
-                premium = getattr(discord.ButtonStyle, "premium", None)
-                if premium is None:
-                    continue
-                try:
-                    out.append(discord.ui.Button(style=premium, sku_id=sku_id))
-                except Exception:
-                    continue
+                # There is nothing for sale here. Never render a Discord
+                # purchase/SKU button.
                 continue
 
             url = str(item.get("url") or "").strip()
@@ -237,9 +227,7 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
         buttons["description"] = (
             "JSON list (max 5) of Discord buttons. Link: {label,url,emoji?}. "
             "Callback: {label,style:primary|secondary|success|danger,prompt,emoji?,"
-            "disabled?,one_shot?}; clicking becomes a new Maxwell turn. Premium: "
-            "{style:premium,sku_id}. Premium/SKU buttons open Discord purchase UI and "
-            "do not fire callbacks."
+            "disabled?,one_shot?}; clicking becomes a new Maxwell turn."
         )
         return schema
 
@@ -247,8 +235,7 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
         return (
             original_description()
             + " Callback buttons can be Primary/Secondary/Success/Danger and route "
-            "the click back into Maxwell as a conversational turn; Premium SKU buttons "
-            "are also supported when configured in Discord."
+            "the click back into Maxwell as a conversational turn."
         )
 
     tool.execute = MethodType(execute_wrapper, tool)

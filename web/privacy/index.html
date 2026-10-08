@@ -6,59 +6,91 @@
 </head><body><a class="skip" href="#main">Skip to content</a>
 <header class="site-header"><div class="wrap header-inner">
 <a class="brand" href="/" aria-label="Maxwell home"><img src="/assets/maxwell.svg" width="36" height="36" alt="">maxwell<span class="brand-dot">.</span></a>
-<nav aria-label="Main navigation"><a href="/guide/">How to use it</a><a href="/#premium">Premium</a><a href="/contact/">Contact</a><a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a></nav>
-</div></header><main id="main"><div class="wrap"><div class="page-heading"><p class="eyebrow">Hosted service / Policies</p><h1>Privacy Policy</h1><p class="lede">What the hosted Maxwell service processes, where it goes, and the choices you have.</p><p class="meta">Updated 30 September 2026</p></div><div class="document-grid"><aside class="toc" aria-label="On this page"><p>On this page</p><a href="#section-1">1. Who this covers</a><a href="#section-2">2. What we collect</a><a href="#section-3">3. Why we process it</a><a href="#section-4">4. Model providers and other processors</a><a href="#section-5">5. Where it lives</a><a href="#section-6">6. Retention</a><a href="#section-7">7. Sharing</a><a href="#section-8">8. Your choices</a><a href="#section-9">9. Children</a><a href="#section-10">10. Cookies</a><a href="#section-11">11. International</a><a href="#section-12">12. Changes</a><a href="#section-13">13. Contact</a></aside><article class="document"><div class="notice"><strong>Private reply ≠ private processing.</strong> Your request may still be sent to configured AI and tool providers. Keep secrets and sensitive personal information out of requests.</div>  <h2 id="section-1">1. Who this covers</h2>
-  <p>This policy applies when you use the hosted Maxwell Discord bot, the website at <em>maxwell.z3ki.dev</em>, or sites Maxwell generates on that origin. If you run your own Maxwell, you are the operator of that copy — this page does not bind you and does not describe your server.</p>
-
-  <h2 id="section-2">2. What we collect</h2>
-  <p>Depending on how you use the hosted bot, the operator may process:</p>
+<nav aria-label="Main navigation"><a href="/guide/">How to use it</a><a href="/#premium">Self-host</a><a href="/contact/">Contact</a><a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a></nav>
+</div></header><main id="main"><div class="wrap"><div class="page-heading"><p class="eyebrow">Hosted service / Policies</p><h1>Privacy Policy</h1><p class="lede">What the hosted Maxwell service processes, where it goes, and the choices you have.</p><p class="meta">Last updated 8 October 2026</p></div><div class="document-grid"><aside class="toc" aria-label="On this page"><p>On this page</p><a href="#section-1">1. Who this covers</a><a href="#section-2">2. What data is collected</a><a href="#section-3">3. How it is used</a><a href="#section-4">4. AI processing</a><a href="#section-5">5. Where data lives</a><a href="#section-6">6. Retention and deletion</a><a href="#section-7">7. Security</a><a href="#section-8">8. Third parties</a><a href="#section-9">9. Your rights</a><a href="#section-10">10. Children</a><a href="#section-11">11. International transfers</a><a href="#section-12">12. Cookies</a><a href="#section-13">13. Changes</a><a href="#section-14">14. Contact</a></aside><article class="document"><div class="notice"><strong>The short version.</strong> Five things worth knowing about your data:
   <ul>
-    <li>Discord user IDs, usernames, display names, and server/channel IDs</li>
-    <li>messages, attachments, stickers, and reply context when Maxwell is in the room or you talk to it</li>
-    <li>slash-command / user-install payloads if you use those surfaces</li>
-    <li>audio and other supported media attachments you explicitly send; Maxwell does not join voice channels or record calls</li>
-    <li>memory the bot stores about you and the channel (RAG/vector store, long-term facts, knowledge-graph entities)</li>
-    <li>generated sites, images, and files you ask it to publish</li>
-    <li>operational logs: request IDs, timestamps, tool traces, error reports — usually not a second full copy of private message text, but IDs and state are still personal data</li>
-    <li>usage-meter records: Discord user ID, server ID, and timestamps for counted AI use, used to calculate current usage and enforce limits; this ledger does not duplicate message text</li>
-    <li>Legal notice delivery records (Discord user ID and when the DM was sent)</li>
+    <li><strong>Your messages go to AI providers.</strong> What you send Maxwell — including attachments — is forwarded to the operator-configured AI provider so it can reply.</li>
+    <li><strong>Data stays on the operator's server.</strong> Everything is stored locally in SQLite databases and JSON files. No cloud analytics, no advertising trackers, and your data is never sold.</li>
+    <li><strong>History is kept, not forgotten.</strong> Rolling conversation history and logs stay until the operator clears them.</li>
+    <li><strong>Deleting is manual for now.</strong> There is no self-service delete button yet. Ask via the <a href="/contact/">Contact page</a> and the operator will delete your data.</li>
+    <li><strong>Not for under-13s.</strong> Discord requires users to be at least 13, and so does Maxwell.</li>
   </ul>
-  <p>Personal preferences, including language, reply style, context size, and reply visibility, are stored by Discord user ID. If you use bring your own key, your provider, model choice, and encrypted API key are stored so Maxwell can send your authorized requests to that provider. You can remove the saved key in /config. Operator login credentials and bot tokens are separate from ordinary user preferences.</p>
+  </div>  <h2 id="section-1">1. Who this covers</h2>
+  <p>This policy explains how data is handled when you use a hosted Maxwell instance: the Discord bot, its website, and any related APIs it provides. Throughout this policy, <strong>"the operator"</strong> means whoever runs this Maxwell instance — the responsible party for its data.</p>
+  <p>This policy does <em>not</em> cover copies of Maxwell that other people host themselves. If you use someone else's instance, or run your own, that operator's own policy applies instead. It also does not cover Discord itself or any third-party service Maxwell connects to; those have their own policies.</p>
 
-  <h2 id="section-3">3. Why we process it</h2>
-  <p>To run the bot you asked to talk to: generate replies, remember context, run tools, moderate abuse, debug outages, enforce these Terms, calculate usage-meter percentages, manage current limits, and (later) apply a paid plan. Legal basis where GDPR-style rules apply: you asked for the service (contract / steps at your request) and the operator's legitimate interest in operating, securing, and maintaining the service.</p>
+  <h2 id="section-2">2. What data is collected</h2>
+  <p>Depending on how you use the bot, the operator processes:</p>
+  <ul>
+    <li><strong>Discord identifiers:</strong> your user ID, username, and display name</li>
+    <li><strong>Message content the bot can see:</strong> the text of your requests and, if you enable channel context, recent messages in the channel</li>
+    <li><strong>Server, channel, and message IDs</strong> for the places Maxwell is used</li>
+    <li><strong>Attachments and media you send:</strong> images, audio, documents, and other supported files</li>
+    <li><strong>Optional saved preferences:</strong> things like language, reply style, answer detail, context size, and reply visibility, stored against your Discord user ID</li>
+    <li><strong>Bring-your-own-key (BYOK) provider keys:</strong> if you save your own AI provider key in the settings, the provider name, model choice, and the encrypted API key are stored against your Discord user ID</li>
+    <li><strong>Conversation context and memory</strong> the bot keeps so later replies make sense</li>
+    <li><strong>Content you ask Maxwell to create or publish,</strong> such as generated text, images, or sites</li>
+    <li><strong>Operator-side logs and usage counts:</strong> timestamps, request metadata, tool activity, error reports, and counted usage used to show the usage meter and enforce limits</li>
+  </ul>
 
-  <h2 id="section-4">4. Model providers and other processors</h2>
-  <p>Prompts, relevant memory, and attachments Maxwell needs for a turn are sent to whatever AI, embedding, image, search, or media-processing provider the operator has configured (for example an OpenAI-compatible API). Those companies see what the bot sends them. Discord already has the messages. Generated-site visitors hit the public origin, not Discord.</p>
-  <p>Providers have their own retention, review, and training policies, which may differ by provider and account settings. A private Discord reply does not prevent provider processing. Do not paste passwords, private keys, or other people’s private data into a request. Operators may review relevant content or logs to investigate errors, security issues, or abuse.</p>
+  <h2 id="section-3">3. How it is used</h2>
+  <p>The operator uses this data to:</p>
+  <ul>
+    <li><strong>respond to you</strong> — generate the replies and tool results you ask for</li>
+    <li><strong>keep conversation context and memory</strong> — so follow-up questions make sense and saved facts can be recalled</li>
+    <li><strong>prevent abuse and keep the service safe</strong> — enforce the <a href="/terms/">Terms of Service</a>, investigate errors, security issues, and misuse, and comply with legal obligations</li>
+    <li><strong>count usage</strong> — calculate usage-meter percentages and apply current limits</li>
+  </ul>
+  <p>Your data is not used for advertising, and it is not sold.</p>
 
-  <h2 id="section-5">5. Where it lives</h2>
-  <p>Application data lives in the operator's <em>data/</em> directory and related databases on the host that runs Maxwell. Public Alpha means backups may be incomplete and wipes may happen.</p>
+  <h2 id="section-4">4. AI processing</h2>
+  <p>Maxwell is not an AI by itself — it sends your request to a real AI model to get an answer. To produce a reply, <strong>message content is sent to the operator-configured third-party LLM provider</strong>, together with whatever context that turn needs (recent messages you enabled, saved memory, attachments, and tool results). The provider receives what the bot sends and processes it under its own terms and privacy policy.</p>
+  <p>For ordinary requests, <strong>the operator's own provider key is used</strong> — you don't need an account with the AI provider.</p>
+  <p><strong>Bring your own key.</strong> If you save your own provider key in the settings, your requests go to that provider using your key. <strong>BYOK keys are encrypted at rest and used only for that user's requests</strong> — never for anyone else's traffic, and not for the operator's own key. You can delete your saved key at any time in <code>/config</code>.</p>
+  <p><strong>A private reply is not private processing.</strong> Choosing Private in Maxwell only hides the reply in Discord. The request is still processed by Maxwell and its configured providers exactly as described here. Keep passwords, private keys, and other people's private information out of your requests.</p>
 
-  <h2 id="section-6">6. Retention</h2>
-  <p>Memory and logs are kept while they are useful to operate the bot, then deleted or overwritten as the operator rotates storage. Rolling-window usage records are deleted after they fall outside the current window when that account is next checked or uses the bot; an inactive account's expired rows may remain until then. Generated sites may expire on a timer or be deleted by you or the operator. Legal notice records are kept so we do not send duplicate DMs. There is no multi-year archive promise.</p>
+  <h2 id="section-5">5. Where data lives</h2>
+  <p>Everything above lives on <strong>the operator's own server</strong>, in Maxwell's data directory — SQLite databases and JSON files on the machine that runs the bot. There are no cloud analytics services, no advertising trackers, and no third-party dashboards holding a copy of this data. <strong>Your data is not sold</strong>, and it is not shared with advertisers or data brokers.</p>
 
-  <h2 id="section-7">7. Sharing</h2>
-  <p>We do not sell your data. We share it with processors needed to run the service (Discord, AI, image, search, and media-processing APIs, the host/network). We may share information if required by law, to stop abuse, or if the hosted project is handed to a successor who keeps this policy in spirit.</p>
+  <h2 id="section-6">6. Retention and deletion</h2>
+  <p><strong>Rolling conversation history and logs are kept until the operator clears them.</strong> Memory, preferences, usage records, and operational logs stay as long as they are useful for running the service, and are deleted or overwritten when the operator rotates or clears storage. Third-party providers may keep their own copies under their own policies.</p>
+  <p><strong>Self-service deletion is not available yet.</strong> There is no delete button or delete command at the moment. To have your data deleted, <strong>request deletion via the <a href="/contact/">Contact page</a></strong> and include your Discord user ID — that ID is how the operator finds your data. The operator will delete it. Deletion from active storage may not remove copies already held in routine backups or in third-party provider logs.</p>
 
-  <h2 id="section-8">8. Your choices</h2>
-  <p>Stop using the bot. Leave servers that have it. Contact the operator to request deletion of stored memory tied to your Discord user ID. Include that ID and enough context to identify the data. Deletion from active storage may not remove provider-held logs or copies in backups. Do not post private messages, credentials, or other sensitive information in a public GitHub issue. See the <a href="/contact/">contact page</a>.</p>
+  <h2 id="section-7">7. Security</h2>
+  <p>The operator takes reasonable precautions: saved API keys and other credentials are kept in <strong>encrypted credential storage</strong> rather than plain text, tool and shell workloads run in <strong>container sandboxing</strong>, and <strong>access controls</strong> limit who and what can reach the data directory and the bot's systems.</p>
+  <p>That said, honestly: <strong>no system is perfectly secure.</strong> No method of storage or transmission over the internet can be guaranteed to be 100% safe, so the operator cannot promise absolute security.</p>
 
-  <p><strong>Visibility controls.</strong> Choose Private in /maxwell or save it under /config → Default visibility. This controls who can see the reply in Discord. Public is the default. You can also reduce or disable recent channel context in /config or for a single command. Changing reply visibility does not remove earlier public replies or delete stored data.</p>
-  <h2 id="section-9">9. Children</h2>
-  <p>The hosted service is not directed at children under 13 (or the Discord minimum in your country). Do not use it if you are under that age.</p>
+  <h2 id="section-8">8. Third parties</h2>
+  <p>These services receive the data needed to do their part of the job, as described above:</p>
+  <ul>
+    <li><strong>Discord</strong> — delivers your messages and displays replies; Discord has your messages already</li>
+    <li><strong>AI/LLM providers</strong> — the operator-configured model provider(s), which receive prompts, context, and attachments to generate replies and embeddings</li>
+    <li><strong>Search providers</strong> — SearXNG, Tavily, or ddgs, when web research is used; they receive the search query</li>
+    <li><strong>Image and text-to-speech providers</strong>, when those tools are used</li>
+    <li><strong>The host and network</strong> that runs the bot</li>
+  </ul>
+  <p>Each processes data under its own terms and privacy policy. The operator may also disclose information if required by law, or to stop abuse or protect people from harm.</p>
 
-  <h2 id="section-10">10. Cookies</h2>
-  <p>The public site has no legal agreement storage or advertising cookies. There is no browser admin dashboard or dashboard login storage.</p>
+  <h2 id="section-9">9. Your rights</h2>
+  <p>You can <strong>access</strong> the data stored about you, ask for it to be <strong>corrected</strong> if it is wrong, ask for it to be <strong>deleted</strong>, and ask for a <strong>portable copy</strong> of it. Make any of these requests through the <a href="/contact/">Contact page</a> and include your Discord user ID. The operator will respond and act on valid requests.</p>
+  <p><strong>EU and UK (GDPR-style rules).</strong> Where these rules apply, the legal bases for processing are performing the service you asked for (and steps at your request before it) and the operator's legitimate interests in running, securing, and maintaining the service. You also have the right to object to or restrict certain processing and to lodge a complaint with your local data-protection supervisory authority.</p>
+  <p><strong>California (CCPA/CPRA notice).</strong> In the past twelve months, the service collects the categories of personal information described in <a href="#section-2">section 2</a> — identifiers (Discord user IDs, usernames), user content (your messages and attachments), and internet or network activity (usage counts and logs) — for the business purposes in <a href="#section-3">section 3</a>. <strong>Personal information is not sold and is not shared for cross-context behavioural advertising.</strong> California residents have rights to know, delete, and correct their personal information, and will not be discriminated against for exercising them.</p>
+  <p>Exercising any right does not affect your other rights, and some requests may be limited where the law requires keeping certain records.</p>
 
-  <h2 id="section-11">11. International</h2>
-  <p>The host and model providers may be in other countries. If you use the hosted bot, you understand your data may leave your country.</p>
+  <h2 id="section-10">10. Children</h2>
+  <p>The service is <strong>not directed at children under 13</strong> (or the higher minimum age in your country). Discord itself requires users to be at least 13, so you must meet that requirement to use Maxwell at all. The operator does not knowingly collect personal information from children under 13. If you believe a child under 13 has used the service, say so via the <a href="/contact/">Contact page</a> and the operator will delete that data.</p>
 
-  <h2 id="section-12">12. Changes</h2>
-  <p>This policy can change. The version on this page is current. Changes are posted here.</p>
+  <h2 id="section-11">11. International transfers</h2>
+  <p><strong>Your data may be processed wherever the operator or their AI provider operates.</strong> The server, the operator, and third-party providers may be in a different country from you, so data can leave your country and be handled under different data-protection rules than you are used to. By using the service, you understand this.</p>
 
-  <h2 id="section-13">13. Contact</h2>
-  <p>See <a href="/contact/">Contact</a> for support and privacy requests, or the <a href="https://github.com/Z3ki/Maxwell-bot">source repository</a> for public project issues. Also see the <a href="/terms/">Terms of Service</a>.</p>
+  <h2 id="section-12">12. Cookies</h2>
+  <p><strong>The static site sets no cookies</strong> — no analytics, no tracking, no advertising identifiers. The operator's API uses <strong>HTTP Basic authentication only</strong>, so it sets no session or tracking cookies either.</p>
+
+  <h2 id="section-13">13. Changes</h2>
+  <p>This policy may change from time to time. The current version is always the one on this page, with its "Last updated" date at the top. Significant changes will be posted here before they take effect where the law requires it.</p>
+
+  <h2 id="section-14">14. Contact</h2>
+  <p>Questions about privacy, or requests to access, correct, export, or delete your data, go to the operator of this Maxwell instance through the <a href="/contact/">Contact page</a>. Include your Discord user ID so the operator can find your data. For public project issues there is also the <a href="https://github.com/Z3ki/Maxwell-bot">source repository</a> — never post private data there. See also the <a href="/terms/">Terms of Service</a>.</p>
 
 </article></div></div></main><footer class="site-footer"><div class="wrap footer-inner"><div><a class="brand" href="/">maxwell.</a><p>A cat in your chat. Free, open source, and still in alpha.</p></div>
 <nav aria-label="Footer"><a href="/guide/">Guide</a><a href="/contact/">Contact</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="https://github.com/Z3ki/Maxwell-bot">Source ↗</a></nav></div></footer></body></html>

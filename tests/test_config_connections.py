@@ -374,6 +374,8 @@ def test_connection_test_reports_actionable_safe_result_and_closes_client(
     class Provider:
         async def generate_response(self, messages, **kwargs):
             assert messages == [{"role": "user", "content": "Reply with OK."}]
+            assert "temperature" not in kwargs
+            assert "max_tokens" not in kwargs
             calls.append("generate")
             if failure:
                 raise failure

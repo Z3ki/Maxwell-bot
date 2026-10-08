@@ -241,7 +241,10 @@ def test_parallel_tool_error_survives_history_reconstruction(monkeypatch):
             owner, message, "", calls
         )
         assert results == ["Tool helper: Error - RuntimeError: broken helper"]
-        assert owner._last_native_followup_messages[-1]["content"] == results[0]
+        tool_rows = [
+            m for m in owner._last_native_followup_messages if m["role"] == "tool"
+        ]
+        assert tool_rows[-1]["content"] == results[0]
 
     asyncio.run(run())
 

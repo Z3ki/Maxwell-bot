@@ -20,6 +20,7 @@ _VISIBLE_MARKERS = (
     "__MEDIA_SENT__",
     "__MEME_SENT__",
     "__POLL_SENT__",
+    "__TTS_SENT__",
 )
 _VISIBLE_TOOLS = frozenset(
     {
@@ -29,6 +30,7 @@ _VISIBLE_TOOLS = frozenset(
         "send_meme",
         "create_poll",
         "send_rich_message",
+        "tts",
     }
 )
 

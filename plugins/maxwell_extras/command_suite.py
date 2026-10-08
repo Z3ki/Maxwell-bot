@@ -876,7 +876,7 @@ class _ConfigPanel(discord.ui.View):
             return ("## Your personal settings\nChoose what you want to change.\n\n"
                     f"**Personality:** {style}\n**Language:** {language}\n"
                     f"**App replies:** {visibility}\n**AI connection:** {active}\n\n"
-                    "Personality and language follow you everywhere. Replies & context and AI connections apply to app requests.")
+                    "Personality and language follow you everywhere. A saved AI connection replaces Maxwell's model for your messages. Replies & context apply to app requests.")
         if self.scope == "server":
             guild = getattr(self.command_interaction, "guild", None)
             name = discord.utils.escape_markdown(str(getattr(guild, "name", "this server"))[:80])

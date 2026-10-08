@@ -135,3 +135,6 @@ subagents/*/tmp/
 *.orig
 *.rej
 .pi-subagents/
+
+# Local agent tooling
+.commandcode/

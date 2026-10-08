@@ -24,6 +24,41 @@ KEY_B = "22" * 32
 API_KEY = "sk-user-owned-credential-123456"
 
 
+def test_saved_connection_replaces_the_model_for_normal_chat(tmp_path):
+    vault = CredentialVault(tmp_path / "byok.sqlite3", KEY_A)
+    vault.save(
+        "123",
+        "custom",
+        "labs-leanstral-1-5-1",
+        API_KEY,
+        base_url="https://api.mistral.ai/v1",
+    )
+
+    def factory(*, name, **kwargs):
+        client = OpenAICompatibleProvider(**kwargs)
+        client.name = name
+        return client
+
+    bot = object.__new__(MaxwellBot)
+    bot._byok_vault = vault
+    bot._make_chat_provider = factory
+    chat = SimpleNamespace(
+        author=SimpleNamespace(id="123", bot=False), user_install=False
+    )
+    provider = asyncio.run(MaxwellBot._personal_provider(bot, chat))
+    try:
+        assert provider is not None
+        assert provider.model == "labs-leanstral-1-5-1"
+        assert provider.base_url == "https://api.mistral.ai/v1"
+    finally:
+        asyncio.run(provider.close())
+
+    stranger = SimpleNamespace(author=SimpleNamespace(id="999", bot=False))
+    assert asyncio.run(MaxwellBot._personal_provider(bot, stranger)) is None
+    bot_author = SimpleNamespace(author=SimpleNamespace(id="123", bot=True))
+    assert asyncio.run(MaxwellBot._personal_provider(bot, bot_author)) is None
+
+
 def test_vault_encrypts_masks_rotates_and_deletes(tmp_path):
     path = tmp_path / "private" / "byok.sqlite3"
     vault = CredentialVault(path, KEY_A)

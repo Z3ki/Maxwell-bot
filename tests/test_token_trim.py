@@ -37,7 +37,6 @@ def _live_bot(extra_tools=None):
             "create_site",
             "list_sites",
             "shell",
-            "email_send",
             "inbox_list",
             "inbox_act",
             "send_meme",
@@ -118,7 +117,7 @@ def test_every_turn_offers_every_authorized_registered_tool(operator):
     bot._is_admin = lambda _uid: operator
     expected = set(bot.tools) - {"more_tools"}
     if not operator:
-        expected -= {"email_send", "inbox_list", "inbox_act"}
+        expected -= {"inbox_list", "inbox_act"}
     for content in (
         "wyd",
         "Can you run a debugger on YOUR machine?",
@@ -169,7 +168,6 @@ def test_tool_prompt_and_native_payload_order_survive_registry_reload(native):
     assert first == second
     assert json.dumps(first_tools) == json.dumps(second_tools)
     assert "shell" not in first.split("## Tool contract")[0]
-    assert "email_send" not in first.split("## Tool contract")[0]
 
 
 def test_disabled_tools_still_hidden():

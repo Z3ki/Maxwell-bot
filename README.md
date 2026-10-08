@@ -10,14 +10,14 @@ curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.
 
 The easy installer keeps the first setup small. It asks for your Discord bot token, the AI provider/model, and optionally your Discord user ID for owner controls. It generates an operator API password, writes a compact `.env`, and then hands off to the Docker installer.
 
-Self-hosted installs have unlimited messages, no automatic terms/privacy DM,
-and no premium upsell. Owner and Discord permissions still apply. Existing
-operator settings are preserved when updating.
+Self-hosted installs have unlimited messages and no automatic terms/privacy
+DM. Owner and Discord permissions still apply. Existing operator settings are
+preserved when updating.
 
 Optional tools appear only after setup: set `MAXWELL_PUBLIC_BASE_URL` for
-websites, `GEMINI_IMAGE_MODEL` for HD images, and
-mailbox credentials for email. Add `--with-shell` for the shell backend.
-Conversational autonomy remains opt-in; TTS is not currently bundled. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
+websites and `GEMINI_IMAGE_MODEL` for HD images. Add `--with-shell` for the
+shell backend.
+Conversational autonomy remains opt-in. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
 
 The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.11`, select `--version v0.1.11`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
 
@@ -240,7 +240,6 @@ docs/PLUGINS.md         Plugin development API
 - [Changelog and release status](CHANGELOG.md)
 - [GitHub projects](docs/GITHUB_PROJECTS.md)
 - [Agent life](docs/LIVING_AGENT.md)
-- [Email integration](email_integration/README.md)
 
 `CONTEXT_MEMORY_ANALYSIS.md` and `RELIABILITY_RESEARCH.md` are retained as historical/research entry points, but their current-status sections replace obsolete architecture claims and point back to the live implementation/docs.
 

@@ -1,9 +1,10 @@
 # Personal provider keys
 
 Open the private `/config` menu and choose **AI connection**.
-Maxwell's default AI works without connecting an account. Personal connections
-apply to `/maxwell` and message app actions; normal bot mentions continue using
-Maxwell's AI.
+Maxwell's default AI works without connecting an account. A saved connection
+replaces that model for every message that person sends, including chat,
+mentions, `/maxwell`, and message app actions. Other people stay on Maxwell's
+model.
 
 1. Choose OpenAI, OpenRouter, Groq, or **Other provider**. Selecting a provider
    only changes the setup screen; it does not replace an active connection.

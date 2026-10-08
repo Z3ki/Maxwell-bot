@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from bot import _tool_results_need_followup
 from bot_tools import InboxActTool, InboxListTool
-from inbox import InboxStore, apply_inbox_action, needs_decision
+from inbox import KIND_RENDER_CAP_DEFAULT, InboxStore, apply_inbox_action, needs_decision
 from tool_schemas import TOOL_PARAMETERS
 
 
@@ -58,7 +58,7 @@ def test_notice_upsert_and_planner_budget(tmp_path):
             next(item for item in await store.load_items() if item["id"] == "email_11")
         )
         assert "Ada" in shown
-        assert "Hello" in shown
+        assert "Ada sent mail" in shown
         assert len(text) <= 900
 
     asyncio.run(run())
@@ -178,15 +178,15 @@ def test_new_tools_are_followup_and_have_schemas():
     assert "action" in TOOL_PARAMETERS["inbox_act"]["properties"]
 
 
-def test_mail_burst_is_capped():
+def test_burst_of_one_kind_is_capped():
     store = InboxStore(".")
     items = [
-        _item(f"email_{n}", "email", f"2026-08-24T10:{n:02d}:00Z")
+        _item(f"note_{n}", "notice", f"2026-08-24T10:{n:02d}:00Z")
         for n in range(20)
     ]
     ordered = store.planner_items(items)
-    assert len(ordered) == 6
-    assert ordered[0]["id"] == "email_19"
+    assert len(ordered) == KIND_RENDER_CAP_DEFAULT
+    assert ordered[0]["id"] == "note_19"
 
 
 def test_newest_first_within_a_kind():

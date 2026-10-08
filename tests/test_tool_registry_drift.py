@@ -46,6 +46,7 @@ def test_every_registered_tool_has_a_parameter_schema():
             "agent_life",
             "user_sandbox",
             "get_maxwell_updates",
+            "tts",
         }
     ]
     assert missing == []

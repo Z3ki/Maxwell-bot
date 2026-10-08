@@ -107,19 +107,23 @@ async def record_reasoning(
 
 
 def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Throw away the giant blobs (HTML bodies, file contents) for the trace.
+    """Keep the SHAPE of the params, never their content.
 
-    The trace is for humans eyeballing reasoning, not a byte-exact replay.
-    Keeping a 2MB create_site body in llm_traces.json would be insane.
+    The trace answers "what did it call and how big were the arguments" — not
+    what anyone said. Strings become a length marker and collections a count,
+    so user messages, URLs and file bodies are never copied into
+    llm_traces.json (which is served over the operator API).
     """
     out: dict[str, Any] = {}
     for k, v in (params or {}).items():
         if k == "reasoning":
             continue
-        if isinstance(v, str) and len(v) > 200:
+        if isinstance(v, str):
             out[k] = f"[{len(v)} chars]"
-        elif isinstance(v, (list, tuple)) and len(v) > 20:
+        elif isinstance(v, (list, tuple)):
             out[k] = f"[{len(v)} items]"
+        elif isinstance(v, dict):
+            out[k] = f"[{len(v)} keys]"
         else:
             out[k] = v
     from diagnostics_safety import sanitize_tool_args

@@ -14,15 +14,6 @@ from typing import Any
 _INSTALLED_ATTR = "_maxwell_taint_gate_cleanup_installed"
 
 
-def _command_name(bot: Any, message: Any) -> str:
-    prefix = str(getattr(bot, "command_prefix", None) or ",")
-    raw = str(getattr(message, "content", "") or "")
-    if not raw.startswith(prefix):
-        return ""
-    rest = raw[len(prefix) :].strip()
-    return rest.split(maxsplit=1)[0].lower() if rest else ""
-
-
 def _taint_gate_enabled(bot: Any) -> bool:
     config = getattr(bot, "config", None)
     return not bool(getattr(config, "DISABLE_TAINT_GATE", False))
@@ -41,24 +32,10 @@ def _is_tainted(bot: Any, message: Any) -> bool:
 
 
 def install_taint_gate_cleanup(bot: Any) -> None:
-    """Remove `,confirm` and keep destructive tainted turns fail-closed."""
+    """Keep destructive tool calls on a tainted turn fail-closed."""
 
     if getattr(bot, _INSTALLED_ATTR, False):
         return
-
-    original_handle_command = getattr(bot, "_handle_command", None)
-    if callable(original_handle_command):
-
-        async def handle_command(self_obj: Any, message: Any) -> Any:
-            # Treat the old command as removed. Returning a handled result keeps
-            # it from becoming an AI chat turn and avoids generating any legacy
-            # confirmation token or user-visible status.
-            if _command_name(self_obj, message) == "confirm":
-                return None
-            return await original_handle_command(message)
-
-        handle_command._maxwell_taint_gate_cleanup = True  # type: ignore[attr-defined]
-        bot._handle_command = MethodType(handle_command, bot)
 
     original_execute = getattr(bot, "_execute_tool_by_name", None)
     if callable(original_execute):

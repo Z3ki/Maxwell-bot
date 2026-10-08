@@ -189,7 +189,7 @@ class ConnectModal(discord.ui.Modal):
         await refresh_panel(
             self.panel,
             interaction,
-            "Saved. Your app requests will use this connection. Test it below.",
+            "Saved. Your messages will use this connection. Test it below.",
         )
 
 
@@ -271,15 +271,16 @@ class TestButton(discord.ui.Button):
                 await _send(interaction, "Connect the selected provider first.")
                 return
             provider = make_request_provider(self.panel.bot, credential)
+            # Saved temperature and output cap are used. Forcing temperature 0
+            # makes some hosts demand top_p, and a 16-token cap cuts off a
+            # model that thinks before it answers.
             await asyncio.wait_for(
                 provider.generate_response(
                     [{"role": "user", "content": "Reply with OK."}],
                     timeout=20,
-                    max_tokens=16,
-                    temperature=0,
                     disable_reasoning=True,
                 ),
-                timeout=25,
+                timeout=45,
             )
         except ProviderAuthenticationError:
             notice = "Key rejected. Edit the connection and check your API key and account permissions."
@@ -553,7 +554,7 @@ class DisconnectButton(discord.ui.Button):
         await refresh_panel(
             self.panel,
             interaction,
-            "Personal key removed. Your app requests now use Maxwell's default AI.",
+            "Personal key removed. Your messages now use Maxwell's default AI.",
         )
 
 
@@ -598,14 +599,14 @@ def summary(panel: Any) -> str:
         return "Your saved AI connection is unavailable"
     status = panel.connection_status
     if status:
-        return f"{status['provider_label']} · {status['model']} (app requests)"
+        return f"{status['provider_label']} · {status['model']}"
     return "Maxwell's default AI"
 
 
 def render(panel: Any) -> str:
     if panel.selected_key == "byok_remove":
         return (
-            "## Use Maxwell's AI\nRemove your personal API key and return to Maxwell's default AI for app requests?\n\n"
+            "## Use Maxwell's AI\nRemove your personal API key and return to Maxwell's default AI for your messages?\n\n"
             "You can connect again later. Choose **Keep connection** to cancel."
         )
     if panel.selected_key == "byok_advanced":
@@ -634,8 +635,8 @@ def render(panel: Any) -> str:
         if panel.connection_present:
             text += "Your saved key is still present. Remove it below to return to Maxwell's AI.\n"
     else:
-        text += "Optional: use your own provider account for `/maxwell` and message app actions. "
-        text += "Normal bot mentions keep using Maxwell's AI.\n\n"
+        text += "Optional: replace Maxwell's model with your own provider for your messages, "
+        text += "including chat, mentions, and app actions.\n\n"
         selected = PROVIDERS[panel.selected_provider]["label"]
         text += f"**1. Choose a provider**\n**2. Connect {selected}** with your API key and model name.\n"
         if status:

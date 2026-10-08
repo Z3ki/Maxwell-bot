@@ -88,9 +88,9 @@ def test_strip_tool_payload_leaks_removes_registered_tool_bodies():
     assert "hello" in strip_tool_payload_leaks(leaked)
     search = "<tool:search_messages>secret query</tool:search_messages> ok"
     assert "secret query" not in strip_tool_payload_leaks(search)
-    email = "<tool:email_send>to=evil</tool:email_send> visible"
-    assert "to=evil" not in strip_tool_payload_leaks(email)
-    assert "visible" in strip_tool_payload_leaks(email)
+    sent = "<tool:send_message>to=evil</tool:send_message> visible"
+    assert "to=evil" not in strip_tool_payload_leaks(sent)
+    assert "visible" in strip_tool_payload_leaks(sent)
 
 
 def test_strip_tool_payload_leaks_removes_glued_create_site():
@@ -316,7 +316,8 @@ def test_record_reasoning_writes_trace_and_swallows_errors():
     assert t["thoughts"] == "user wants a reply"
     # reasoning must NOT leak into the params_preview
     assert "reasoning" not in t["params_preview"]
-    assert t["params_preview"]["content"] == "hi"
+    # content is reduced to a length marker so traces hold no user text
+    assert t["params_preview"]["content"] == "[2 chars]"
 
 
 def test_record_reasoning_empty_reasoning_records_a_stub():

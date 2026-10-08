@@ -181,19 +181,6 @@ PLUGIN_SPECS: list[dict] = [
         ],
     },
     {
-        "id": "email",
-        "name": "Email",
-        "description": "Send and read email through the local mail stack.",
-        "enable": "ENABLE_EMAIL_TOOLS",
-        "permissions": ["network"],
-        "tools": [
-            ("EmailSendTool", "email_send", True, False, {"destructive": True}),
-            ("EmailReadInboxTool", "email_read_inbox", True, False, {"destructive": True}),
-            ("EmailGetMessageTool", "email_get_message", True, False, {"destructive": True}),
-            ("EmailSearchTool", "email_search", True, False, {"destructive": True}),
-        ],
-    },
-    {
         "id": "chess",
         "name": "Chess",
         "description": "Play chess against Maxwell in a channel.",

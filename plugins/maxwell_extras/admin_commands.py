@@ -249,7 +249,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                 f"\nMessage quota: **{_fmt(control.get('message_quota_limit'))}** / "
                 f"{_fmt(control.get('message_quota_window_seconds'))}s "
                 f"({'on' if control.get('message_quota_enabled') else 'off'})"
-                f"\nPlus billing: **off**"
             ),
             inline=False,
         )
@@ -575,9 +574,6 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
     if action in {"set", "enable", "disable"}:
         if not key:
             await _send(interaction, content="Provide `key` for this action.")
-            return True
-        if key == "premium_billing_enabled":
-            await _send(interaction, content="Billing, checkout, and paid restrictions are not available.")
             return True
         if action in {"enable", "disable"}:
             if key not in DEFAULT_CONTROL or not isinstance(DEFAULT_CONTROL[key], bool):

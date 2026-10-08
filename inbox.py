@@ -29,9 +29,6 @@ def needs_decision(item: dict) -> bool:
     return False
 
 
-KIND_PRIORITY = {"email": 0}
-KIND_PRIORITY_DEFAULT = 1
-KIND_RENDER_CAP = {"email": 6}
 KIND_RENDER_CAP_DEFAULT = 12
 
 
@@ -73,9 +70,8 @@ class InboxStore:
 
     @staticmethod
     def _planner_sort_key(item: dict) -> tuple:
-        kind = str(item.get("kind") or "notice")
         unread = 0 if item.get("state") == "unread" else 1
-        return (unread, KIND_PRIORITY.get(kind, KIND_PRIORITY_DEFAULT))
+        return (unread,)
 
     def planner_items(
         self, items: list[dict], *, exclude_announced: bool = False
@@ -101,9 +97,8 @@ class InboxStore:
         out: list[dict] = []
         for item in pending:
             kind = str(item.get("kind") or "notice")
-            cap = KIND_RENDER_CAP.get(kind, KIND_RENDER_CAP_DEFAULT)
             count = seen.get(kind, 0)
-            if count >= cap:
+            if count >= KIND_RENDER_CAP_DEFAULT:
                 continue
             seen[kind] = count + 1
             out.append(item)
@@ -120,26 +115,16 @@ class InboxStore:
         kind = str(item.get("kind") or "notice")
         acts = ",".join(str(action) for action in (item.get("actions") or [])[:4])
         summary = str(item.get("summary") or "")[:summary_chars]
-        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         actor = str(item.get("actor_name") or "?")
         actor_id = str(item.get("actor_id") or "")
 
-        if kind == "email":
-            # Sender, subject, and snippet are attacker-controlled. The prompt
-            # tail and autonomy context must not carry them. inbox_list and
-            # email_get_message reveal the text and taint that turn.
-            if not reveal_untrusted:
-                body = "unread message (open with email_get_message)"
-            else:
-                who = f"{actor} <{actor_id}>" if actor_id else actor
-                subject = str(payload.get("subject") or "").strip() or "(no subject)"
-                body = f'{who} — "{subject}"'
-                snippet = " ".join(str(payload.get("snippet") or "").split())
-                if snippet:
-                    body += f": {snippet[:summary_chars]}"
-        else:
+        if reveal_untrusted:
             who = f"{actor}({actor_id})" if actor_id else actor
             body = f"{who}: {summary}"
+        else:
+            # Prompt tails show only the envelope. Notice text can quote
+            # untrusted content; inbox_list reveals it and taints that turn.
+            body = "(unopened — see inbox_list)"
         return f"- [{iid}] {kind} {body} [{acts}]"
 
     def render_planner(self, items: list[dict]) -> str:

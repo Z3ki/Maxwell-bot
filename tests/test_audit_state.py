@@ -11,7 +11,6 @@ from autonomy import AutonomyStore, _truncate_keep_tail
 from autonomy_social import FloorSettings
 from concurrency_safety import ChannelWorkQueues, KeyedLocks
 from context_budget import TIER_ORDER, allocate
-from email_inbox import MailPollState, _fetch_new_sync
 from inbox import InboxStore
 from knowledge_graph import KnowledgeGraph
 from rag_memory import EMBED_DIM, EMBED_MAX_CHARS, MemoryRequester, RAGMemoryManager
@@ -326,66 +325,6 @@ def test_cancelled_last_queued_item_does_not_leak_worker():
             assert not queues._queues
         finally:
             await queues.close()
-
-    asyncio.run(run())
-
-
-class FakeIMAP:
-    def __init__(self, failed_uid=None):
-        self.failed_uid = failed_uid
-        self.readonly = False
-        self.fetched = []
-
-    def select(self, mailbox, readonly=False):
-        self.readonly = readonly
-        return "OK", [b"3"]
-
-    def uid(self, operation, *args):
-        if operation == "SEARCH":
-            return "OK", [b"1 2 3"]
-        uid = int(args[0])
-        self.fetched.append(uid)
-        if uid == self.failed_uid:
-            return "NO", []
-        return "OK", [
-            (b"HEADER", b"From: Ada <ada@example.com>\r\nSubject: Test\r\n\r\n")
-        ]
-
-    def close(self):
-        pass
-
-    def logout(self):
-        pass
-
-
-def test_mail_poll_selects_readonly_to_prevent_close_expunge(monkeypatch):
-    conn = FakeIMAP()
-    monkeypatch.setattr("email_inbox._connect", lambda *args: conn)
-    assert len(_fetch_new_sync("localhost", 993, "u", "p", 0, 8)) == 3
-    assert conn.readonly
-
-
-def test_mail_fetch_failure_cannot_skip_uid_forever(monkeypatch):
-    conn = FakeIMAP(failed_uid=2)
-    monkeypatch.setattr("email_inbox._connect", lambda *args: conn)
-    mails = _fetch_new_sync("localhost", 993, "u", "p", 0, 8)
-    assert [mail["uid"] for mail in mails] == [1]
-    assert conn.fetched == [1, 2]
-
-
-def test_failed_watermark_save_can_be_retried(tmp_path, monkeypatch):
-    def fail(*args):
-        raise OSError("disk full")
-
-    async def run():
-        state = MailPollState(tmp_path)
-        with monkeypatch.context() as patch:
-            patch.setattr("email_inbox._atomic_json_write_sync", fail)
-            with pytest.raises(OSError):
-                await state.save(10)
-        assert state.last_uid == 0
-        await state.save(10)
-        assert json.loads(state.path.read_text())["last_uid"] == 10
 
     asyncio.run(run())
 

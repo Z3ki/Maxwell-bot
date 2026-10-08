@@ -263,3 +263,42 @@ def _is_stream_options_rejected(status: int, error_text: str) -> bool:
         return False
     text = (error_text or "").lower()
     return "stream_options" in text or "include_usage" in text
+
+
+# Body fields a chat completion cannot drop and still be a chat completion.
+_REQUIRED_BODY_FIELDS = frozenset(
+    {"model", "messages", "stream", "max_tokens", "temperature", "tools", "tool_choice"}
+)
+_EXTRA_FIELD_RE = re.compile(
+    r'"loc"\s*:\s*\[\s*"body"\s*,\s*"([A-Za-z0-9_]+)"\s*\]'
+)
+
+
+def forbidden_body_fields(status: int, error_text: str) -> tuple[str, ...]:
+    """Names a host rejected as unknown body fields.
+
+    Mistral answers ``reasoning`` and ``thinking`` with HTTP 422 and
+    ``extra_forbidden`` locations. The raw body is required: personal-key
+    clients replace logged errors with a fixed sentence.
+    """
+    if status not in (400, 422):
+        return ()
+    text = error_text or ""
+    lowered = text.lower()
+    if "extra_forbidden" not in lowered and "extra inputs are not permitted" not in lowered:
+        return ()
+    found: list[str] = []
+    for match in _EXTRA_FIELD_RE.finditer(text):
+        name = match.group(1)
+        if name in _REQUIRED_BODY_FIELDS or name in found:
+            continue
+        found.append(name)
+    return tuple(found)
+
+
+def requires_greedy_top_p(status: int, error_text: str) -> bool:
+    """True when temperature 0 is rejected unless top_p is 1."""
+    if status != 400:
+        return False
+    text = (error_text or "").lower()
+    return "top_p must be 1" in text and "greedy" in text

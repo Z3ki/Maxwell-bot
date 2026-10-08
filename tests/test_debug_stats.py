@@ -2,11 +2,9 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 
-from bot import MaxwellBot
 from bot_tools import DebugTool, collect_debug_stats
 from providers import (
     _weighted_tps,
@@ -335,37 +333,3 @@ class FakeMessage:
         self.reference = None
 
 
-def test_debug_command_admin_gating_and_output():
-    bot = cast(Any, MaxwellBot.__new__(MaxwellBot))
-    bot.command_prefix = ","
-    bot._admins = set()
-    bot._control = {"disabled_commands": []}
-    rec = compute_llm_timing(
-        request_start=0.0,
-        first_token_s=0.3,
-        ended_at=1.3,
-        usage={"prompt_tokens": 80, "completion_tokens": 40, "total_tokens": 120},
-        stream=True,
-        endpoint="primary",
-        model="demo",
-    )
-    bot.ai_provider = SimpleNamespace(_timing_history=[rec], _last_timing=rec)
-    bot._reply_queue = SimpleNamespace(depth=lambda _cid: 2)
-    bot._active_requests = {}
-
-    async def run():
-        msg = FakeMessage(",debug")
-        await MaxwellBot._handle_command(bot, msg)
-        assert msg.channel.sent == ["not authorized"]
-
-        bot._admins = {"42"}
-        msg = FakeMessage(",debug")
-        await MaxwellBot._handle_command(bot, msg)
-        assert len(msg.channel.sent) == 1
-        body = msg.channel.sent[0]
-        assert body.startswith("```")
-        assert "ttft 300ms" in body
-        assert "tps 40.0" in body
-        assert "queue depth 2" in body
-
-    asyncio.run(run())

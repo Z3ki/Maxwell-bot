@@ -294,7 +294,8 @@ def test_reasoning_param_preview_redacts_and_bounds_nested_values():
     summary = _summarize_params(
         {"environment": {"DISCORD_TOKEN": "sensitive", "body": "x" * 10000}}
     )
-    assert summary["environment"]["DISCORD_TOKEN"] == "[redacted]"
+    assert summary["environment"] == "[2 keys]"
+    assert "sensitive" not in json.dumps(summary)
     assert len(json.dumps(summary)) < 1000
     encoded_env = _summarize_params(
         {"env": '{"API_KEY": "unknown-secret-with-spaces value"}'}

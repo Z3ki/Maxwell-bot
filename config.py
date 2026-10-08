@@ -3,7 +3,7 @@
 Design note — optional features
 -------------------------------
 Maxwell only *requires* two things: a Discord token and an OpenAI-compatible
-model endpoint. Everything else (YouTube, web search, email, video frames,
+model endpoint. Everything else (YouTube, web search, video frames,
 generated sites) is optional and gated behind an ``ENABLE_*`` switch. Live RAG is retired.
 
 Those switches are tri-state:
@@ -365,15 +365,6 @@ class Config:
     # Public hosted operators may retain the retired-tool restrictions.
     MAXWELL_RESTRICT_PUBLIC_RUNTIME = _bool_env("MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
 
-    # Email needs a real mailbox. Without a password the four tools could
-    # only ever answer "not configured", so auto keeps them unregistered.
-    ENABLE_EMAIL_TOOLS = _feature_env(
-        "ENABLE_EMAIL_TOOLS",
-        lambda: bool(os.getenv("MAXWELL_EMAIL_USER", "").strip()
-                     and os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()),
-        needs="MAXWELL_EMAIL_USER and MAXWELL_EMAIL_PASSWORD",
-    )
-
     # The installer enables this when --with-shell prepares the backend.
     ENABLE_SHELL = _feature_env("ENABLE_SHELL", default=False)
 
@@ -436,6 +427,10 @@ class Config:
     POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "MarcosFRG/sdxl-lightning")
 
     NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+    # tts speaks with Mistral Voxtral. Emotion is a preset voice, not a text tag.
+    # A blank key leaves the tool unable to speak.
+    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+    MISTRAL_TTS_MODEL = os.getenv("MISTRAL_TTS_MODEL", "voxtral-mini-tts-2603")
     NVIDIA_IMAGE_URL = os.getenv(
         "NVIDIA_IMAGE_URL",
         "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-dev",
@@ -494,34 +489,6 @@ class Config:
         "MAXWELL_CORS_ORIGIN", MAXWELL_PUBLIC_BASE_URL.rstrip("/")
     )
 
-    # Local mail (maxwell@z3ki.dev). Bot talks to local Postfix for
-    # outbound and local Dovecot for inbound; no third-party relay. The
-    # default host/port values match the Postfix+Dovecot setup documented
-    # in email_integration/README.md. Override the env vars only if you
-    # intentionally point the bot at a different mail server (debugging,
-    # testing against a sandbox, etc.).
-    MAXWELL_SMTP_HOST = os.getenv("MAXWELL_SMTP_HOST", "127.0.0.1").strip()
-    MAXWELL_SMTP_PORT = _int_env("MAXWELL_SMTP_PORT", 25, min_value=1, max_value=65535)
-    MAXWELL_IMAP_HOST = os.getenv("MAXWELL_IMAP_HOST", "127.0.0.1").strip()
-    MAXWELL_IMAP_PORT = _int_env("MAXWELL_IMAP_PORT", 993, min_value=1, max_value=65535)
-    MAXWELL_EMAIL_USER = os.getenv("MAXWELL_EMAIL_USER", "").strip()
-    MAXWELL_EMAIL_PASSWORD = os.getenv("MAXWELL_EMAIL_PASSWORD", "").strip()
-    # Blank From: falls back to the mailbox itself — one less thing to fill in.
-    MAXWELL_EMAIL_FROM = (
-        os.getenv("MAXWELL_EMAIL_FROM", "").strip() or MAXWELL_EMAIL_USER
-    )
-    MAXWELL_EMAIL_FROM_NAME = (
-        os.getenv("MAXWELL_EMAIL_FROM_NAME", BOT_NAME).strip() or BOT_NAME
-    )
-    # Senders whose mail is never filed as an inbox notice. Comma-separated;
-    # a full address, or a leading-dot domain (".google.com") for it and its
-    # subdomains. Empty by default: which machine mail matters is the
-    # operator's call. A DMARC aggregate report is pure telemetry, but a
-    # MAILER-DAEMON bounce means something he sent did not arrive, and a
-    # heuristic cannot tell those apart. The mail itself is untouched — it
-    # stays on the server and the email_* tools still read it.
-    MAXWELL_EMAIL_IGNORE_SENDERS = os.getenv("MAXWELL_EMAIL_IGNORE_SENDERS", "").strip()
-
     # Admin / owner allowlists. Re-exported here so Config is the single
     # source of truth; bot_tools.refresh_owner_ids() still does a runtime
     # reload but the initial parse lives here.
@@ -545,7 +512,6 @@ class Config:
         ("ENABLE_FETCH_URL", "fetch_url"),
         ("ENABLE_CREATE_SITE", "site generation"),
         ("ENABLE_AVATAR", "avatar changes"),
-        ("ENABLE_EMAIL_TOOLS", "email tools"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
         ("ENABLE_AUTONOMY", "autonomy engine"),
     )
@@ -609,14 +575,6 @@ class Config:
                 "/maintenance commands will be denied to everyone. Set your "
                 "Discord user ID in .env."
             )
-        if cls.ENABLE_EMAIL_TOOLS and not cls.MAXWELL_EMAIL_PASSWORD:
-            _log.warning(
-                "ENABLE_EMAIL_TOOLS=true but MAXWELL_EMAIL_PASSWORD is empty — "
-                "the email tools will return a 'not configured' error on every "
-                "call. Either set MAXWELL_EMAIL_PASSWORD or set "
-                "ENABLE_EMAIL_TOOLS=false."
-            )
-
         if cls.ENABLE_SHELL:
             _log.warning(
                 "ENABLE_SHELL is on — the model can run commands on this host "

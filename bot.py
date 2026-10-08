@@ -49,13 +49,7 @@ from message_quota import (
     enforced_message_limit,
     enforced_window_seconds,
 )
-from usage_commands import (
-    command_help_text,
-    discovery_enabled,
-    install_usage_commands,
-    premium_text_for,
-    usage_text_for,
-)
+from usage_commands import install_usage_commands
 
 from autonomy import AutonomyEngine  # noqa: E402
 import watch_policy  # noqa: E402
@@ -76,7 +70,6 @@ from generated_artifacts import begin_generated_files, reset_generated_files  # 
 from tooling.helpers import (  # noqa: E402
     ReasoningLogTool,
     notify_owner,
-    collect_debug_stats,
     forget_shell_progress,
     _IMAGE_FETCH_UA,
     _ALL_MOD_TOOLS,
@@ -202,7 +195,6 @@ from control_defaults import (  # noqa: E402
     guild_capability_for_tool,
     parse_bool,
 )
-from email_inbox import EmailInboxPoller  # noqa: E402
 from inbox import (  # noqa: E402
     InboxStore,
     apply_inbox_action,
@@ -1255,27 +1247,6 @@ class MaxwellBot(commands.Bot):
         self.inbox = InboxStore(self.config.DATA_DIR)
         self.thread_store = ThreadStore(self.config.DATA_DIR)
         self.thread_store.load()
-        # Mail is pull-only through the email_* tools, so an unread message is
-        # invisible until he thinks to look. The poller files new mail as inbox
-        # notices; it stays None when no mailbox password is configured.
-        self.mail_poller: EmailInboxPoller | None = None
-        if getattr(self.config, "ENABLE_EMAIL_TOOLS", False):
-            self.mail_poller = EmailInboxPoller(
-                self.inbox,
-                {
-                    "imap_host": getattr(self.config, "MAXWELL_IMAP_HOST", "127.0.0.1"),
-                    "imap_port": getattr(self.config, "MAXWELL_IMAP_PORT", 993),
-                    "user": getattr(self.config, "MAXWELL_EMAIL_USER", ""),
-                    "password": getattr(self.config, "MAXWELL_EMAIL_PASSWORD", ""),
-                    # So the poller can recognise his own mail coming back.
-                    "from_addr": getattr(self.config, "MAXWELL_EMAIL_FROM", ""),
-                    "ignore_senders": getattr(
-                        self.config, "MAXWELL_EMAIL_IGNORE_SENDERS", ""
-                    ),
-                },
-                data_dir=self.config.DATA_DIR,
-                interval=self._mail_poll_seconds(),
-            )
 
     def _setup_tools(self):
         """Load bundled and third-party plugins. Tools register themselves."""
@@ -1935,6 +1906,40 @@ class MaxwellBot(commands.Bot):
                 reason = f"fallback_failed:{type(exc).__name__}"
         self._record_request_outcome(message, "failed", reason)
 
+    async def _personal_provider(self, message):
+        """Saved personal model for this sender, including normal chat.
+
+        App commands and mentions share this path. Someone without a saved key
+        stays on Maxwell's default model. A saved key that cannot be read fails
+        the turn instead of quietly spending the operator's provider.
+        """
+        author = getattr(message, "author", None)
+        if getattr(author, "bot", False):
+            return None
+        vault = getattr(self, "_byok_vault", None)
+        author_id = str(getattr(author, "id", "") or "")
+        if vault is None or not author_id.isdigit():
+            return None
+        try:
+            has_credential = await asyncio.to_thread(vault.has_credential, author_id)
+            if not has_credential:
+                return None
+            credential = await asyncio.to_thread(vault.get, author_id)
+            if not credential:
+                raise RuntimeError("saved personal provider is unavailable")
+            from plugins.maxwell_extras.byok import make_request_provider
+
+            return make_request_provider(self, credential)
+        except Exception as exc:
+            logger.warning(
+                "Personal provider setup failed for requester %s (%s)",
+                author_id,
+                type(exc).__name__,
+            )
+            raise RuntimeError(
+                "saved personal provider configuration is unavailable"
+            ) from None
+
     async def _run_reliable_turn(self, message, content: str | None = None):
         """Own the entire turn, including preparation, cancellation and cleanup."""
         journal = getattr(self, "_request_journal", None)
@@ -1976,32 +1981,9 @@ class MaxwellBot(commands.Bot):
         request_provider = None
         try:
             timeout = self._inbound_setting("live_turn_timeout_seconds", 180, 1, 7200)
-            if is_user_install_message(message):
-                vault = getattr(self, "_byok_vault", None)
-                author_id = str(getattr(getattr(message, "author", None), "id", "") or "")
-                if vault is not None and author_id.isdigit():
-                    try:
-                        has_credential = await asyncio.to_thread(
-                            vault.has_credential, author_id
-                        )
-                        if has_credential:
-                            credential = await asyncio.to_thread(vault.get, author_id)
-                            if not credential:
-                                raise RuntimeError("saved personal provider is unavailable")
-                            from plugins.maxwell_extras.byok import make_request_provider
-
-                            request_provider = make_request_provider(self, credential)
-                            _current_request_provider.set(request_provider)
-                    except Exception as exc:
-                        logger.warning(
-                            "Personal provider setup failed for requester %s (%s)",
-                            author_id,
-                            type(exc).__name__,
-                        )
-                        raise RuntimeError(
-                            "saved personal provider configuration is unavailable"
-                        ) from None
+            request_provider = await self._personal_provider(message)
             if request_provider is not None:
+                _current_request_provider.set(request_provider)
                 timeout = min(float(timeout), 300.0)
             async with asyncio.timeout(timeout):
                 if row:
@@ -2819,21 +2801,6 @@ class MaxwellBot(commands.Bot):
             return False
         return bool(meta.get("reply_to_author_id"))
 
-    def _mail_poll_seconds(self) -> float:
-        raw = (getattr(self, "_control", None) or {}).get(
-            "email_inbox_poll_seconds", 120
-        )
-        try:
-            # Floor of 30s: IMAP login is not free and mail is not urgent.
-            return max(30.0, min(float(raw), 3600.0))
-        except (TypeError, ValueError):
-            return 120.0
-
-    async def _mail_poll_loop(self) -> None:
-        poller = getattr(self, "mail_poller", None)
-        if poller is None:
-            return
-        await poller.run()
 
     def _conversation_watch_seconds(self) -> float:
         fallback = float(DEFAULT_CONTROL["conversation_watch_seconds"])
@@ -3444,13 +3411,6 @@ class MaxwellBot(commands.Bot):
             asyncio.create_task(self._watermark_save_loop(), name="watermark-save"),
             asyncio.create_task(self._inbound_retry_loop(), name="inbound-retry"),
         ]
-        if self.mail_poller is not None and self.mail_poller.configured():
-            self._tasks.append(
-                asyncio.create_task(self._mail_poll_loop(), name="mail-poll")
-            )
-            logger.info(
-                "Mail inbox poll scheduled every %.0fs", self.mail_poller.interval
-            )
         # ENABLE_AUTONOMY was defined in config.py, listed in the feature
         # report, and documented in the README as the switch for this engine —
         # and nothing read it, so setting it to false started the loop anyway.
@@ -5567,577 +5527,6 @@ class MaxwellBot(commands.Bot):
         name = parts[0].lower() if parts else ""
         return name if name in _RETIRED_PREFIX_COMMANDS else ""
 
-    async def _handle_command(self, message):
-        prefix = str(getattr(self, "command_prefix", None) or ",")
-        raw = str(message.content or "")
-        content = (
-            raw[len(prefix) :].strip()
-            if raw.startswith(prefix)
-            else raw[1:].strip()
-        )
-        parts = content.split(maxsplit=1)
-        cmd = parts[0].lower() if parts else ""
-        args = parts[1] if len(parts) > 1 else None
-        known = {
-            "stop",
-            "clearmem",
-            "downvote",
-            "neg",
-            "context",
-            "autonomy",
-            "drug",
-            "sleep",
-            "wake",
-            "progress",
-            "ticket",
-            "admin",
-            "solo",
-            "help",
-            "usage",
-            "premium",
-            "x",
-            "shell",
-            "plugin",
-            "plugins",
-            "confirm",
-            "blacklist",
-            "unblacklist",
-            "debug",
-        }
-        if cmd not in known:
-            return False
-        if cmd in set(self._control.get("disabled_commands", []) or []):
-            return
-        MaxwellBot._mark_request_effect(self, message)
-        admin_commands = {
-            "clearmem",
-            "context",
-            "autonomy",
-            "progress",
-            "ticket",
-            "downvote",
-            "neg",
-            "solo",
-            "x",
-            "debug",
-        }
-        if cmd in admin_commands and not self._is_admin(message.author.id):
-            await message.channel.send("not authorized")
-            return
-        channel_id = str(message.channel.id)
-        try:
-            if cmd in {"context", "downvote", "neg"} and isinstance(self.memory, ConversationMemoryManager):
-                await message.channel.send("Durable memory and vector recall have been retired. Recent conversation context remains available.")
-                return
-            if cmd == "stop":
-                # `/stop` must stop everything for this room: the turn that is
-                # generating AND anything queued behind it. Cancelling only the
-                # in-flight task let the next queued reply start immediately,
-                # which reads as the bot ignoring the stop.
-                active = self._active_requests.get(channel_id)
-                self._stop_until[channel_id] = asyncio.get_running_loop().time() + 1
-                queued = self._reply_queue.depth(channel_id)
-                journal = getattr(self, "_request_journal", None)
-                if journal is not None:
-                    active_message = (
-                        getattr(self, "_active_request_messages", None) or {}
-                    ).get(channel_id)
-                    if active_message is not None:
-                        MaxwellBot._record_request_outcome(
-                            self, active_message, "superseded", "explicit_stop"
-                        )
-                    # Drain all pages: the command must also stop overflow
-                    # pings which have never entered the in-memory queue.
-                    for row in journal.pending(limit=1000000):
-                        if row["channel_id"] == channel_id and row["message_id"] != str(
-                            message.id
-                        ):
-                            journal.update(
-                                row["message_id"], "superseded", reason="explicit_stop"
-                            )
-                            queued += 1
-                stopped = self._reply_queue.cancel_channel(channel_id, clear_queue=True)
-                if active and not active.done():
-                    cancel_once(active)
-                    stopped = True
-                self._cancel_watch_debounce(channel_id)
-                if stopped or queued:
-                    await message.channel.send(
-                        "stopped" if not queued else f"stopped (+{queued} queued)"
-                    )
-                else:
-                    # Repeated `/stop` in an idle room used to answer every
-                    # single time — 29 "nothing to stop" lines in one log
-                    # window, which is the bot spamming, not the user. One
-                    # answer per 30s per room is enough to confirm it landed.
-                    now = asyncio.get_running_loop().time()
-                    last = getattr(self, "_last_nothing_to_stop", None)
-                    if not isinstance(last, dict):
-                        last = {}
-                        self._last_nothing_to_stop = last
-                    prev = last.get(channel_id)
-                    if prev is None or now - float(prev) > 30.0:
-                        last[channel_id] = now
-                        await message.channel.send("nothing to stop")
-            elif cmd == "clearmem":
-                active = self._active_requests.get(channel_id)
-                if active is not None and not active.done():
-                    cancel_once(active)
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(
-                            asyncio.shield(_await_task_done(active)), timeout=5.0
-                        )
-                await self.memory.clear_channel_memory(channel_id)
-                self._media_context.pop(channel_id, None)
-                self._emoji_grid_shown.pop(channel_id, None)
-                self._active_requests.pop(channel_id, None)
-                self._active_request_user.pop(channel_id, None)
-                self._stop_until.pop(channel_id, None)
-                self._drugged_until.pop(channel_id, None)
-                self._current_progress_by_channel.pop(channel_id, None)
-                self._reaction_seen.clear()
-                self._message_reactions.clear()
-                self._message_reactions_order.clear()
-                await message.channel.send(
-                    "Memory, media context, and channel state cleared."
-                )
-            elif cmd == "downvote":
-                # Mark a recent message as a bad RAG hit. Pass a row id
-                # (hex) or — if omitted — the message this command was
-                # replying to.
-                target_id = ""
-                if args:
-                    target_id = args.strip().split()[0]
-                elif message.reference and message.reference.message_id:
-                    target_id = str(message.reference.message_id)
-                if not target_id:
-                    await message.channel.send(
-                        "Usage: `/downvote arguments:<message_id_or_chunks_id>`  "
-                        "(or reply to the message you want to mark)"
-                    )
-                    return
-                ok = await self.memory.downvote_recent(target_id, amount=1)
-                await message.channel.send(
-                    f"✓ downvotes on `{target_id}` +1 (total: ?)"
-                    if ok
-                    else f"✗ no row with id `{target_id}`"
-                )
-            elif cmd == "neg":
-                # ,neg add <text>  →  persist a 'don't retrieve this' example
-                # ,neg list            →  show all negatives
-                # ,neg del <id>        →  remove one
-                sub = (args or "").strip().split(maxsplit=1)
-                op = sub[0].lower() if sub else ""
-                rest = sub[1] if len(sub) > 1 else ""
-                if op in ("list", ""):
-                    negs = await self.memory.list_negatives(20)
-                    if not negs:
-                        await message.channel.send("No negatives stored yet.")
-                    else:
-                        lines = [
-                            f"`{n['id']}` — {n['content'][:120]}  ({n['timestamp'][:16]})"
-                            for n in negs
-                        ]
-                        await message.channel.send(
-                            "**Negatives (won't retrieve):**\n" + "\n".join(lines)
-                        )
-                elif op == "add":
-                    if not rest:
-                        await message.channel.send("Usage: `/negative-memory arguments:add <text>`")
-                        return
-                    nid = await self.memory.add_negative(rest, reason="manual")
-                    await message.channel.send(f"✓ negative `{nid}` added.")
-                elif op in ("del", "rm", "delete"):
-                    if not rest:
-                        await message.channel.send("Usage: `/negative-memory arguments:del <id>`")
-                        return
-                    ok = await self.memory.remove_negative(rest.strip())
-                    await message.channel.send(
-                        f"✓ removed `{rest.strip()}`"
-                        if ok
-                        else f"✗ no negative with id `{rest.strip()}`"
-                    )
-                else:
-                    await message.channel.send(
-                        "Usage: `/negative-memory arguments:add <text>` · `list` · `del <id>`"
-                    )
-            elif cmd == "context":
-                await self._handle_context_command(message, args)
-            elif cmd == "autonomy":
-                await self._handle_autonomy_command(message, args)
-            elif cmd == "drug":
-                now = asyncio.get_running_loop().time()
-                arg = (args or "").strip().lower()
-                if arg in {"off", "stop", "clear", "normal"}:
-                    self._drugged_until.pop(channel_id, None)
-                    await message.channel.send("drug mode off. back to baseline")
-                elif arg in {"status", "time"}:
-                    remaining = max(
-                        0, _safe_int(self._drugged_until.get(channel_id, 0) - now, 0)
-                    )
-                    await message.channel.send(
-                        f"drug mode has {remaining // 60}m {remaining % 60}s left"
-                        if remaining
-                        else "drug mode is off"
-                    )
-                else:
-                    minutes = 10
-                    if arg:
-                        match = re.fullmatch(
-                            r"(\d{1,2})(?:\s*(m|min|mins|minute|minutes))?", arg
-                        )
-                        if match:
-                            minutes = max(1, min(_safe_int(match.group(1), 1), 60))
-                    self._drugged_until[channel_id] = now + minutes * 60
-                    await message.channel.send(
-                        f"drug mode on for {minutes}m. things are about to get more interesting"
-                    )
-            elif cmd == "sleep":
-                # Global sleep: any user can ask the bot to take a 1-60m
-                # nap. Admin-only because it shuts down public responses.
-                if not self._is_admin(message.author.id):
-                    await message.channel.send("not authorized")
-                    return
-                arg = (args or "").strip().lower()
-                if arg in {"off", "stop", "clear", "wake"}:
-                    msg = await self.clear_sleep()
-                    await message.channel.send(msg)
-                elif arg in {"status", "time"}:
-                    sleeping, secs = self._is_sleeping()
-                    if sleeping:
-                        await message.channel.send(
-                            f"max is sleeping, back in {self._format_sleep_remaining(secs)}"
-                        )
-                    else:
-                        await message.channel.send("max is not sleeping")
-                else:
-                    minutes = 30
-                    if arg:
-                        match = re.fullmatch(r"(\d{1,3})", arg)
-                        if match:
-                            minutes = max(1, min(_safe_int(match.group(1), 1), 60))
-                    msg = await self.set_sleep(minutes)
-                    await message.channel.send(
-                        f"sleeping for {minutes}m. pings will get a 'max is sleeping' note"
-                    )
-            elif cmd == "wake":
-                # Convenience alias for `/sleep arguments:off`.
-                if not self._is_admin(message.author.id):
-                    await message.channel.send("not authorized")
-                    return
-                msg = await self.clear_sleep()
-                await message.channel.send(msg)
-            elif cmd == "progress":
-                server_id = str(message.guild.id) if message.guild else "DM"
-                arg = (args or "").strip().lower()
-                # Per-server toggle. DMs never get progress messages. The
-                # MAXWELL_PROGRESS_MESSAGES env var is a global baseline
-                # a per-server setting can still override.
-                if arg in {"on", "enable", "yes", "true"}:
-                    if server_id == "DM":
-                        await message.channel.send(
-                            "progress messages are server-only — can't toggle them in DMs"
-                        )
-                    elif (
-                        self._progress_enabled(server_id)
-                        and server_id in self._progress_servers
-                    ):
-                        await message.channel.send(
-                            "progress messages are already on for this server"
-                        )
-                    else:
-                        self._progress_servers.add(server_id)
-                        self._progress_servers_off.discard(server_id)
-                        self._save_progress_servers()
-                        await message.channel.send(
-                            "progress messages ON for this server. tool calls will show a live "
-                            "'thinking: …' message in the channel."
-                        )
-                elif arg in {"off", "disable", "no", "false"}:
-                    if server_id == "DM":
-                        await message.channel.send(
-                            "progress messages are off (DMs never get progress messages)"
-                        )
-                    elif server_id in self._progress_servers_off:
-                        await message.channel.send(
-                            "progress messages were already off for this server"
-                        )
-                    else:
-                        was_env = server_id not in self._progress_servers and bool(
-                            self.config.PROGRESS_MESSAGES
-                        )
-                        self._progress_servers.discard(server_id)
-                        self._progress_servers_off.add(server_id)
-                        self._save_progress_servers()
-                        note = (
-                            " (env baseline MAXWELL_PROGRESS_MESSAGES=true had it on; now off here)"
-                            if was_env
-                            else ""
-                        )
-                        await message.channel.send(
-                            "progress messages OFF for this server. tool calls will run silently."
-                            + note
-                        )
-                elif arg in {"status", ""}:
-                    if server_id == "DM":
-                        state = "off (DMs never get progress messages)"
-                    else:
-                        state = "on" if self._progress_enabled(server_id) else "off"
-                    baseline = "on" if self.config.PROGRESS_MESSAGES else "off"
-                    await message.channel.send(
-                        f"progress messages are **{state}** for this server "
-                        f"(MAXWELL_PROGRESS_MESSAGES env baseline: {baseline})"
-                    )
-                else:
-                    await message.channel.send(
-                        "usage: `/progress arguments:on|off|status` — toggles the live "
-                        "'thinking: …' status message shown while tools run, for THIS "
-                        "server. off by default; opt in for visibility during slow tool "
-                        "calls. (admin)"
-                    )
-            elif cmd == "ticket":
-                server_id = str(message.guild.id) if message.guild else "DM"
-                arg = (args or "").strip().lower()
-                if arg in {"on", "enable", "yes", "true"}:
-                    if server_id == "DM":
-                        await message.channel.send(
-                            "ticket greetings are server-only — can't toggle them in DMs"
-                        )
-                    elif server_id in self._ticket_greeting_servers:
-                        await message.channel.send(
-                            "ticket greetings are already on for this server"
-                        )
-                    else:
-                        self._ticket_greeting_servers.add(server_id)
-                        self._save_ticket_greeting_servers()
-                        await message.channel.send(
-                            "ticket greetings ON for this server. new ticket/support "
-                            "channels get a short hello from me."
-                        )
-                elif arg in {"off", "disable", "no", "false"}:
-                    if server_id == "DM":
-                        await message.channel.send(
-                            "ticket greetings are off (DMs never get them)"
-                        )
-                    elif server_id not in self._ticket_greeting_servers:
-                        await message.channel.send(
-                            "ticket greetings were already off for this server"
-                        )
-                    else:
-                        self._ticket_greeting_servers.discard(server_id)
-                        self._save_ticket_greeting_servers()
-                        await message.channel.send(
-                            "ticket greetings OFF for this server. new ticket channels "
-                            "stay quiet."
-                        )
-                elif arg in {"status", ""}:
-                    if server_id == "DM":
-                        state = "off (DMs never get ticket greetings)"
-                    else:
-                        state = (
-                            "on"
-                            if self._ticket_greeting_enabled(server_id)
-                            else "off"
-                        )
-                    await message.channel.send(
-                        f"ticket greetings are {state} for this server "
-                            "(off by default; use `/ticket-greetings arguments:on` to greet new ticket channels)"
-                    )
-                else:
-                    await message.channel.send(
-                        "usage: `/ticket-greetings arguments:on|off|status` — when a new ticket/support "
-                        "channel is created in THIS server, post a short hello. "
-                        "off by default. (admin)"
-                    )
-            elif cmd == "admin":
-                if not self._is_admin(message.author.id):
-                    await message.channel.send("not authorized")
-                    return
-                if args is None:
-                    admins = ", ".join(f"<@{uid}>" for uid in sorted(self._admins))
-                    await message.channel.send(
-                        f"Admins: {admins}" if admins else "No admins configured."
-                    )
-                elif args.lower() == "clear":
-                    self._admins = configured_admin_ids(self.config)
-                    self._save_admins()
-                    await message.channel.send("Admin list reset to owners.")
-                else:
-                    uid = args.strip().strip("<@!>")
-                    # Numeric IDs only (17-20 digit Discord snowflake range).
-                    if not uid.isdigit() or not (17 <= len(uid) <= 20):
-                        await message.channel.send(
-                            "usage: `/admin arguments:<@user|user_id>` (a 17-20 digit Discord snowflake) or `/admin arguments:clear`"
-                        )
-                        return
-                    if uid in self._admins:
-                        self._admins.discard(uid)
-                        self._save_admins()
-                        await message.channel.send(f"Removed <@{uid}> from admins.")
-                    else:
-                        self._admins.add(uid)
-                        self._save_admins()
-                        await message.channel.send(f"Added <@{uid}> to admins.")
-            elif cmd == "solo":
-                await self._handle_solo_command(message, args)
-            elif cmd == "debug":
-                text = collect_debug_stats(self, channel_id)
-                await message.channel.send(f"```\n{text[:1900]}\n```")
-            elif cmd == "help":
-                await message.channel.send(
-                    command_help_text(discovery=discovery_enabled(self._control))
-                )
-            elif cmd == "usage":
-                await message.channel.send(
-                    usage_text_for(self, str(getattr(message.author, "id", "") or ""))
-                )
-            elif cmd == "premium":
-                await message.channel.send(premium_text_for(self))
-            elif cmd in ("shell",):
-                await message.channel.send(
-                    "Shell access is retired from the public bot runtime."
-                )
-            elif cmd in ("plugin", "plugins"):
-                author_id = str(message.author.id)
-                is_admin = self._is_admin(message.author.id)
-                pm = getattr(self, "plugin_manager", None)
-                if not pm:
-                    await message.channel.send("Plugin system is not initialized.")
-                    return
-                parts = (args or "").strip().split()
-                sub = parts[0].lower() if parts else "list"
-                if sub in ("list", "ls"):
-                    p_list = pm.list_plugins(user_id=author_id)
-                    if not p_list:
-                        await message.channel.send(
-                            "No plugins installed in `plugins/`."
-                        )
-                    else:
-                        lines = ["**Installed Maxwell Plugins:**"]
-                        for p in p_list:
-                            status_sym = (
-                                "🟢 Enabled" if p["user_active"] else "⚪ Disabled"
-                            )
-                            glob_note = " (Global)" if p["enabled_globally"] else ""
-                            lines.append(
-                                f"• **{p['name']}** v{p['version']} — {status_sym}{glob_note}\n"
-                                f"  _{p['description']}_ | Tools: {', '.join(p['tools']) or 'none'}"
-                            )
-                        await message.channel.send("\n".join(lines))
-                elif sub in ("enable", "on"):
-                    if len(parts) < 2:
-                        await message.channel.send(
-                            "Usage: `/plugins arguments:enable <name> [--global]`"
-                        )
-                        return
-                    p_name = parts[1].lower()
-                    is_global = "--global" in parts or "-g" in parts
-                    if is_global and not is_admin:
-                        await message.channel.send(
-                            "Error: Only bot admins can enable plugins globally."
-                        )
-                        return
-                    res = pm.enable_plugin(
-                        p_name,
-                        user_id=author_id if not is_global else None,
-                        is_global=is_global,
-                    )
-                    await message.channel.send(res)
-                elif sub in ("disable", "off"):
-                    if len(parts) < 2:
-                        await message.channel.send(
-                            "Usage: `/plugins arguments:disable <name> [--global]`"
-                        )
-                        return
-                    p_name = parts[1].lower()
-                    is_global = "--global" in parts or "-g" in parts
-                    if is_global and not is_admin:
-                        await message.channel.send(
-                            "Error: Only bot admins can disable plugins globally."
-                        )
-                        return
-                    res = pm.disable_plugin(
-                        p_name,
-                        user_id=author_id if not is_global else None,
-                        is_global=is_global,
-                    )
-                    await message.channel.send(res)
-                elif sub in ("reload", "refresh"):
-                    await message.channel.send(
-                        "Plugin code reload is unavailable from Discord."
-                    )
-                elif sub == "install":
-                    await message.channel.send(
-                        "Plugin code installation is unavailable from Discord."
-                    )
-                elif sub in ("uninstall", "remove"):
-                    await message.channel.send(
-                        "Plugin code removal is unavailable from Discord."
-                    )
-                else:
-                    await message.channel.send(
-                        "Usage: `/plugins arguments:<list|enable|disable>`"
-                    )
-            elif cmd == "confirm":
-                # Removed. Tainted destructive tools fail closed until a
-                # fresh user message starts a clean turn.
-                return None
-            elif cmd in ("blacklist", "unblacklist"):
-                if not self._is_admin(message.author.id):
-                    return
-                if cmd == "blacklist":
-                    if args is None:
-                        if not self._blacklist:
-                            await message.channel.send("Blacklisted users: none")
-                        else:
-                            labels = [
-                                await self._user_label(
-                                    uid, guild=getattr(message, "guild", None)
-                                )
-                                for uid in sorted(self._blacklist)
-                            ]
-                            await message.channel.send(
-                                "Blacklisted users: " + ", ".join(labels)
-                            )
-                    elif args.lower() == "clear":
-                        self._blacklist.clear()
-                        self._save_blacklist()
-                        await message.channel.send("Blacklist cleared.")
-                    else:
-                        uid = args.strip().strip("<@!>")
-                        if not uid.isdigit() or not (17 <= len(uid) <= 20):
-                            await message.channel.send(
-                                "usage: `/blacklist arguments:<user_id>` (a 17-20 digit Discord snowflake) or `/blacklist arguments:clear`"
-                            )
-                            return
-                        self._blacklist.add(uid)
-                        self._save_blacklist()
-                        label = await self._user_label(
-                            uid, guild=getattr(message, "guild", None)
-                        )
-                        await message.channel.send(f"Blacklisted {label}")
-                elif args:
-                    uid = args.strip().strip("<@!>")
-                    if not uid.isdigit() or not (17 <= len(uid) <= 20):
-                        await message.channel.send(
-                            "usage: `/unblacklist arguments:<user_id>` (a 17-20 digit Discord snowflake)"
-                        )
-                        return
-                    self._blacklist.discard(uid)
-                    self._save_blacklist()
-                    label = await self._user_label(
-                        uid, guild=getattr(message, "guild", None)
-                    )
-                    await message.channel.send(f"Unblacklisted {label}")
-        except discord.Forbidden as _exc:
-            pass
-        except Exception as e:
-            logger.error(
-                f"Command handling error for ,{cmd}: {e}\n{traceback.format_exc()}"
-            )
-            with contextlib.suppress(discord.Forbidden):
-                await message.channel.send("Something went wrong with that command.")
-
     async def _handle_solo_command(self, message, args):
         """`/solo` — lock a server to one channel, or unlock it.
 
@@ -6237,146 +5626,6 @@ class MaxwellBot(commands.Bot):
             Path(self.config.DATA_DIR) / "bot_control.json",
             control,
         )
-
-    async def _handle_context_command(self, message, args: str | None):
-        arg = (args or "").strip()
-        channel_id = str(message.channel.id)
-        guild_id = str(message.guild.id) if message.guild else ""
-        user_id = str(message.author.id)
-        is_dm = isinstance(message.channel, discord.DMChannel)
-        is_admin = self._is_admin(message.author.id)
-
-        async def send_entries(entries, title="Context facts"):
-            if not entries:
-                await message.channel.send("No shared context facts.")
-                return
-            lines = [title]
-            lines.extend(
-                f"{e.get('id')} [{e.get('scope')}/{e.get('visibility')}/i{e.get('importance')}] "
-                f"{e.get('content')}"
-                for e in entries[:20]
-            )
-            for chunk in self._split_response("\n".join(lines), limit=1900):
-                await message.channel.send(chunk)
-
-        if not arg:
-            entries = await self.memory.get_relevant_shared_context(
-                requester=MemoryRequester.from_message(
-                    message, is_admin=is_admin
-                ),
-                user_id=user_id,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                is_dm=is_dm,
-                is_admin=is_admin,
-                max_items=20,
-                budget=10000,
-            )
-            await send_entries(entries, "Relevant context facts")
-            return
-        if arg.lower() == "all":
-            await send_entries(
-                await self.memory.list_shared_context(
-                    limit=50,
-                    requester=MemoryRequester.from_message(
-                        message, is_admin=is_admin
-                    ),
-                ), "Recent context facts"
-            )
-            return
-        if arg.lower().startswith("forget "):
-            context_id = arg.split(maxsplit=1)[1].strip()
-            ok = await self.memory.remove_shared_context(
-                context_id,
-                requester=MemoryRequester.from_message(
-                    message, is_admin=is_admin
-                ),
-            )
-            await message.channel.send(
-                "Context fact removed." if ok else "Context fact not found."
-            )
-            return
-        if arg.lower().startswith("private "):
-            context_id = arg.split(maxsplit=1)[1].strip()
-            ok = await self.memory.update_shared_context(
-                context_id, {"visibility": "private"},
-                requester=MemoryRequester.from_message(
-                    message, is_admin=is_admin
-                ),
-            )
-            await message.channel.send(
-                "Context fact marked private." if ok else "Context fact not found."
-            )
-            return
-        if arg.lower().startswith("global "):
-            context_id = arg.split(maxsplit=1)[1].strip()
-            ok = await self.memory.update_shared_context(
-                context_id, {
-                    "scope": "global",
-                    "visibility": "public",
-                    "public_approved": True,
-                    "source_kind": "operator_public",
-                    "source_user_id": user_id,
-                    "source_channel_id": channel_id,
-                    "source_guild_id": guild_id,
-                    "source_is_dm": is_dm,
-                    "source_channel_public": False,
-                },
-                requester=MemoryRequester.from_message(
-                    message, is_admin=is_admin
-                ),
-            )
-            await message.channel.send(
-                "Context fact promoted globally." if ok else "Context fact not found."
-            )
-            return
-        if arg.lower().startswith("add "):
-            rest = arg.split(maxsplit=1)[1].strip()
-            scope, fact = "global", rest
-            parts = rest.split(maxsplit=1)
-            if len(parts) == 2 and (
-                parts[0] == "global"
-                or parts[0].startswith(("user:", "guild:", "channel:", "dm:"))
-            ):
-                scope, fact = parts[0], parts[1]
-            fact = " ".join(fact.split())[:1000]
-            if not fact:
-                await message.channel.send("Usage: `/context arguments:add [scope] <fact>`")
-                return
-            context_id = await self.memory.add_shared_context(
-                {
-                    "scope": scope,
-                    "visibility": "shared",
-                    "importance": 8,
-                    "content": fact,
-                    "source_user_id": user_id,
-                    "source_channel_id": channel_id,
-                    "source_guild_id": guild_id,
-                    "source_kind": (
-                        "operator_public" if scope == "global" else "admin"
-                    ),
-                    "public_approved": scope == "global",
-                    "source_is_dm": is_dm,
-                    "source_channel_public": False,
-                    "tags": ["manual"],
-                },
-                requester=MemoryRequester.from_message(
-                    message, is_admin=is_admin
-                ),
-            )
-            await message.channel.send(
-                f"Context fact saved: {context_id}"
-                if context_id
-                else "Could not save context fact."
-            )
-            return
-        await message.channel.send(
-            "Usage: `/context arguments:<summary|all|add [scope] <fact>|forget <id>|private <id>|global <id>>`"
-        )
-
-    # Tombstone: old `,auto` mode lived here. It ran an LLM decider on ambient
-    # channel chatter and then another LLM call to answer. Cute idea, awful bill.
-    # Mentions/replies still work; autonomous posting belongs to AutonomyEngine now.
 
     def _get_reply_context(self, message) -> str:
         if not message.reference or not isinstance(
@@ -7049,28 +6298,13 @@ class MaxwellBot(commands.Bot):
                 60,
                 min(_safe_int(control.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600),
             )
-            control["message_quota_enabled"] = False
-            control["premium_billing_enabled"] = False
             control["live_max_output_tokens"] = max(
                 256, min(_safe_int(control.get("live_max_output_tokens"), 4096), 32768)
             )
             control["autonomy_interval_seconds"] = max(
                 30, _safe_int(control.get("autonomy_interval_seconds", 300) or 300, 300)
             )
-            control["email_inbox_poll_seconds"] = max(
-                30,
-                min(
-                    _safe_int(control.get("email_inbox_poll_seconds", 120) or 120, 120),
-                    3600,
-                ),
-            )
             self._control = control
-            poller = getattr(self, "mail_poller", None)
-            if poller is not None:
-                # Takes effect on the next tick; the loop reads backoff_seconds
-                # fresh each time round.
-                poller.interval = float(control["email_inbox_poll_seconds"])
-                poller.max_backoff = max(poller.interval, poller.max_backoff)
             self._sync_audio_input_flags()
             # 2026-07-22: the old global progress_messages re-apply is gone —
             # progress is now per-server via _progress_servers / the env

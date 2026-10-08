@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import clean_env
+
 import config as config_module
 from providers import normalize_base_url
 from rag_memory import _embed_endpoint, _extract_embeddings
@@ -74,13 +76,7 @@ def _run(code, env=None):
     Reloading config in-process would hand every already-imported module a
     stale Config class, so the shipped defaults are checked out-of-process.
     """
-    child_env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith(
-            ("AI_", "REM_", "ENABLE_", "OLLAMA_", "OPENAI_COMPAT_", "MAXWELL_", "DISCORD_")
-        )
-    }
+    child_env = clean_env()
     child_env["MAXWELL_ENV_FILE"] = os.devnull
     child_env.update(env or {})
     result = subprocess.run(
@@ -107,7 +103,7 @@ def test_retired_memory_agent_environment_flags_are_ignored():
     ) == "False"
 
 
-@pytest.mark.parametrize("flag", ["ENABLE_CREATE_SITE", "ENABLE_HD_IMAGE", "ENABLE_RAG", "ENABLE_EMAIL_TOOLS", "ENABLE_SHELL", "ENABLE_AUTONOMY", "MAXWELL_RESTRICT_PUBLIC_RUNTIME"])
+@pytest.mark.parametrize("flag", ["ENABLE_CREATE_SITE", "ENABLE_HD_IMAGE", "ENABLE_RAG", "ENABLE_SHELL", "ENABLE_AUTONOMY", "MAXWELL_RESTRICT_PUBLIC_RUNTIME"])
 def test_unconfigured_integrations_are_off(flag):
     assert _config_value(flag) == "False"
 
@@ -115,21 +111,16 @@ def test_unconfigured_integrations_are_off(flag):
 @pytest.mark.parametrize("flag,settings", [
     ("ENABLE_CREATE_SITE", {"MAXWELL_PUBLIC_BASE_URL": "https://bot.example.test"}),
     ("ENABLE_HD_IMAGE", {"GEMINI_IMAGE_MODEL": "my-image-model"}),
-    ("ENABLE_EMAIL_TOOLS", {"MAXWELL_EMAIL_USER": "bot@example.test", "MAXWELL_EMAIL_PASSWORD": "test"}),
 ])
 def test_configured_integrations_enable_and_respect_explicit_off(flag, settings):
     assert _config_value(flag, settings) == "True"
     assert _config_value(flag, {**settings, flag: "false"}) == "False"
 
 
-def test_mailbox_password_alone_does_not_enable_email():
-    assert _config_value("ENABLE_EMAIL_TOOLS", {"MAXWELL_EMAIL_PASSWORD": "test"}) == "False"
-
-
 @pytest.mark.parametrize("template", [".env.example", ".env.simple.example"])
 def test_shipped_templates_do_not_enable_unconfigured_integrations(template):
     code = "from config import Config; print(any(getattr(Config, name) for name in " \
-           "['ENABLE_CREATE_SITE','ENABLE_HD_IMAGE','ENABLE_RAG','ENABLE_EMAIL_TOOLS','ENABLE_SHELL']))"
+           "['ENABLE_CREATE_SITE','ENABLE_HD_IMAGE','ENABLE_RAG','ENABLE_SHELL']))"
     assert _run(code, {"MAXWELL_ENV_FILE": str(Path(__file__).resolve().parents[1] / template)}) == "False"
 
 

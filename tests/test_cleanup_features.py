@@ -74,13 +74,11 @@ def test_autonomy_reply_must_stay_in_source_channel():
     assert "channel 100" in reason
 
 
-def test_confirm_command_is_removed_and_tainted_destructive_tool_is_blocked():
+def test_tainted_destructive_tool_is_blocked_and_confirm_state_is_cleared():
     async def run():
-        original_command = AsyncMock(return_value="handled")
         original_execute = AsyncMock(return_value="Tool shell: executed")
         bot = SimpleNamespace(
             command_prefix=",",
-            _handle_command=original_command,
             _execute_tool_by_name=original_execute,
             tools={"shell": SimpleNamespace(is_destructive=True)},
             config=SimpleNamespace(DISABLE_TAINT_GATE=False),
@@ -90,8 +88,6 @@ def test_confirm_command_is_removed_and_tainted_destructive_tool_is_blocked():
         taint_gate_cleanup.install_taint_gate_cleanup(bot)
 
         message = SimpleNamespace(content=",confirm")
-        assert await bot._handle_command(message) is None
-        original_command.assert_not_awaited()
         assert bot._destructive_confirm == {}
 
         result = await bot._execute_tool_by_name(
@@ -113,7 +109,6 @@ def test_clean_turn_still_runs_destructive_tool_normally():
         original_execute = AsyncMock(return_value="Tool shell: executed")
         bot = SimpleNamespace(
             command_prefix=",",
-            _handle_command=AsyncMock(return_value="handled"),
             _execute_tool_by_name=original_execute,
             tools={"shell": SimpleNamespace(is_destructive=True)},
             config=SimpleNamespace(DISABLE_TAINT_GATE=False),

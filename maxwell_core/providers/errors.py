@@ -31,7 +31,7 @@ class ProviderRateLimitError(ProviderError):
 
 
 class ProviderUsageExhaustedError(ProviderError):
-    user_message = "The api is down cuz yall drained the usage and im not rich so wait like 2 hours"
+    user_message = "The AI provider has reached its usage limit. Please try again later."
     cooldown = True
 
 

@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 NOTICE_FILE = "legal_notice.json"
 LEGACY_CONSENT_FILE = "tos_consent.json"
-DEFAULT_PUBLIC_BASE = "https://maxwell.z3ki.dev"
 
 def enabled() -> bool:
     raw = os.getenv("MAXWELL_LEGAL_NOTICE", "false").strip().lower()
@@ -24,10 +23,16 @@ def enabled() -> bool:
 
 
 def legal_urls(bot: Any | None = None) -> tuple[str, str]:
+    """Terms and privacy links for THIS operator's deployment.
+
+    No default host: pointing users at somebody else's terms is worse than
+    pointing at none. An install without MAXWELL_PUBLIC_BASE_URL gets a
+    link-free notice instead of the wrong contract.
+    """
     cfg = getattr(bot, "config", None) if bot is not None else None
-    base = str(
-        getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or DEFAULT_PUBLIC_BASE
-    ).rstrip("/")
+    base = str(getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or "").rstrip("/")
+    if not base:
+        return "", ""
     return f"{base}/terms/", f"{base}/privacy/"
 
 
@@ -99,14 +104,24 @@ async def notify_user(bot: Any, user: Any) -> None:
             return
         terms, privacy = legal_urls(bot)
         send = getattr(user, "send", None)
+        if terms and privacy:
+            notice = (
+                "Hi! Here are Maxwell's [Terms of Service]"
+                f"({terms}) and [Privacy Policy]({privacy}). "
+                "Replies are AI-generated and may be wrong. "
+                "By continuing to use Maxwell you agree to those terms."
+            )
+        else:
+            notice = (
+                "Hi! By continuing to use Maxwell you agree to this "
+                "instance's Terms of Service and Privacy Policy. Ask the "
+                "server operator for the links. Replies are AI-generated and "
+                "may be wrong."
+            )
         try:
             if not callable(send):
                 raise TypeError("Discord user has no DM send method")
-            await send(
-                "Hi! Here are Maxwell's [Terms of Service]"
-                f"({terms}) and [Privacy Policy]({privacy}). "
-                "You can keep using Maxwell as usual."
-            )
+            await send(notice)
         except Exception:
             logger.warning("Could not DM legal notice to user %s", uid, exc_info=True)
             return

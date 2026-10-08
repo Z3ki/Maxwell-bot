@@ -75,9 +75,9 @@ Maxwell supports the normal bot conversation path plus Discord app-command/user-
 
 - `/maxwell` is the personal app-command surface when user install is enabled.
 - `/config` opens a private settings menu for personal defaults and server settings to authorized server administrators.
-- `/personality` stores a personal reply-style preference.
+- `/help` and `/usage` show the command list and the message allowance.
 - `/diagnostics` and `/maintenance` are restricted to configured Maxwell developers.
-- `/image`, `/chess`, `/checkers`, `/moderation`, `/memory`, and `/reminder` provide focused request paths.
+- Images, games, moderation, memory, and reminders are model-driven tools instead of separate commands.
 - Message/user context-menu actions are registered through the user-install layer.
 
 The `maxwell_extras` plugin adds the current `/maxwell` presentation behavior: textual slash-command replies use clean branded embeds. Fast responses stay in the original deferred interaction. A tool-backed or >10-second request keeps its working status visible and replies to that message when channel replies are available; otherwise Maxwell edits the status when possible or sends an interaction follow-up.

@@ -1,0 +1,36 @@
+{
+  "id": "tts_voice",
+  "name": "Text to Speech",
+  "version": "1.2.0",
+  "description": "Speak in the channel with Mistral Voxtral voices. A reference clip is cloned for one line and never saved.",
+  "author": "Maxwell",
+  "api_version": 1,
+  "bundled": true,
+  "enabled_globally": true,
+  "enabled_by_default": true,
+  "protected": false,
+  "uninstallable": true,
+  "permissions": [
+    "network",
+    "messages.send"
+  ],
+  "optional_dependencies": [],
+  "platforms": [
+    "discord"
+  ],
+  "tools": [
+    {
+      "name": "tts",
+      "returns_result": false,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    }
+  ],
+  "prompt": {
+    "position": "tools",
+    "priority": 80,
+    "requires_tools": ["tts"],
+    "text": "tts speaks one Discord voice message of any length. A success returns nothing: do not call tts again, and do not send_message the same line. An error is returned: fix the voice or emotion and retry once. A cooldown error means wait, do not retry in this turn. voice= paul, oliver, jane, or marie. emotion= applies to those presets (happy, sad, angry, frustrated, excited, confident, cheerful, neutral, sarcastic, curious, confused, jealous, ashamed). reference= clones an audio attachment for that one line only. Clones are never saved, and there is no saved-voice list."
+  }
+}

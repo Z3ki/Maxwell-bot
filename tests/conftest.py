@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -17,7 +18,6 @@ _MIRROR_MODULES = (
     "plugins.discord_guild.impl",
     "plugins.discord_moderation.impl",
     "plugins.discord_presence.impl",
-    "plugins.email.impl",
     "plugins.inbox.impl",
     "plugins.runtime_controls.impl",
     "plugins.personality.impl",
@@ -61,3 +61,26 @@ def _mirror_bot_tools_monkeypatches(monkeypatch):
 
     monkeypatch.setattr = wrapped  # type: ignore[method-assign]
     return monkeypatch
+
+
+# config.py deliberately loads the operator's real .env into os.environ at
+# import time (override=True). Subprocess-based tests must not inherit those
+# values or they observe the operator's provider settings instead of the
+# shipped defaults they assert on.
+_CONFIG_LEAKED_PREFIXES = (
+    "AI_", "AUTONOMY_", "AVATAR_", "BG_", "BOT_", "CF_", "DATA_DIR", "DISCORD_",
+    "EMBED_", "ENABLE_", "GEMINI_", "GPT_", "LOG_LEVEL", "LOGS_", "MAXWELL_",
+    "MEMORY_", "MISTRAL_", "NVIDIA_", "OLLAMA_", "OPENAI_COMPAT_", "POLLINATIONS_",
+    "REM_", "TAVILY_",
+)
+
+
+def clean_env(**overrides):
+    """A child-process env with config.py's .env leak removed."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(_CONFIG_LEAKED_PREFIXES)
+    }
+    env.update(overrides)
+    return env

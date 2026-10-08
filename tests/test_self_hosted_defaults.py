@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+from conftest import clean_env
 
 import legal_notice
 from bot import MaxwellBot
@@ -22,7 +23,7 @@ from usage_commands import install_usage_commands, usage_text_for
 
 def test_self_hosted_defaults_have_no_hosted_allowance():
     assert DEFAULT_CONTROL["message_quota_enabled"] is False
-    assert DEFAULT_CONTROL["premium_discovery_enabled"] is False
+    assert "premium_discovery_enabled" not in DEFAULT_CONTROL
     assert DEFAULT_CONTROL["site_ttl_hours"] == 0
     ledger = SimpleNamespace(status=lambda *a: pytest.fail("disabled quota was queried"))
     assert "Unlimited" in usage_text_for(SimpleNamespace(_control={}, _message_quota=ledger), "1")
@@ -38,7 +39,7 @@ def test_no_legal_dm_without_operator_opt_in(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_premium_command_only_registered_when_operator_enables_it(monkeypatch):
+def test_only_help_and_usage_are_registered_and_premium_is_removed(monkeypatch):
     registered, removed = [], []
     monkeypatch.setattr("user_install.register_command", lambda c: registered.append(c["name"]))
     monkeypatch.setattr("user_install.unregister_command", removed.append)
@@ -48,7 +49,7 @@ def test_premium_command_only_registered_when_operator_enables_it(monkeypatch):
     assert removed == ["premium"]
     registered.clear()
     install_usage_commands(SimpleNamespace(_control={"premium_discovery_enabled": True}))
-    assert registered == ["help", "usage", "premium"]
+    assert registered == ["help", "usage"]
 
 
 def test_fresh_bot_startup_preserves_extension_commands_and_hides_optional_tools(tmp_path):
@@ -75,7 +76,7 @@ assert str(bot.plugin_manager.data_dir) == bot.config.DATA_DIR
 asyncio.run(bot.plugin_manager.teardown())
 """
     result = subprocess.run([sys.executable, "-c", code], cwd=root,
-                            env={**os.environ, "MAXWELL_ENV_FILE": str(env_file)},
+                            env=clean_env(MAXWELL_ENV_FILE=str(env_file)),
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
 

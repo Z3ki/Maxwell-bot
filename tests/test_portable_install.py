@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from conftest import clean_env
 from dotenv import dotenv_values
 
 from concurrency_safety import ToolConcurrency
@@ -66,8 +68,7 @@ def test_configure_only_needs_no_docker_and_does_not_start_services(tmp_path):
     docker.write_text('#!/bin/sh\ntouch "$DOCKER_CALLED"\nexit 99\n')
     docker.chmod(0o755)
     marker = tmp_path / "docker-called"
-    env = dict(
-        os.environ,
+    env = clean_env(
         PATH=str(bindir) + os.pathsep + os.environ["PATH"],
         DOCKER_CALLED=str(marker),
         DISCORD_BOT_TOKEN="test-token",
