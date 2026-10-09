@@ -2,6 +2,7 @@
 
 ## Unreleased — 2026-10-08
 
+- Keep the audio bytes on app-command replies when the bot cannot post in that server. A refused channel upload is rewound before the interaction follow-up, and an empty TTS attachment is removed.
 - Add a native AI DJ plugin with shared guild music queues, on-demand voice context, permission-checked playback, slash commands and Now Playing buttons.
 - Stream YouTube videos, Music links and playlists through pinned DAVE-compatible Lavalink 4.2.2 / Lavalink.py 5.11.0 / YouTube Source 1.18.2. Provide private authenticated Docker audio deployment, reconnect recovery and idle cleanup.
 - Accept direct public audio/video reference URLs in TTS without requiring message attachments. Support `reference_audio_url` and URLs in `reference`; preserve SSRF and redirect protections, remove local audio byte/duration caps and send the full reference for provider validation.

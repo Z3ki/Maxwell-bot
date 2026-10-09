@@ -35,6 +35,30 @@ def _key(interaction: Any) -> str:
     return str(value if value is not None else id(interaction))
 
 
+def _rewind_upload(file: Any) -> None:
+    """Seek a Discord upload back to the start.
+
+    A refused channel send reads the file while building the request.
+    Webhook follow-ups do not seek on their first attempt, so the same
+    file would be stored as an empty attachment.
+    """
+    reset = getattr(file, "reset", None)
+    if not callable(reset):
+        return
+    try:
+        reset(seek=True)
+    except Exception:
+        return
+
+
+def _rewind_uploads(file: Any = None, files: Any = None) -> None:
+    if file is not None:
+        _rewind_upload(file)
+    if isinstance(files, (list, tuple)):
+        for item in files:
+            _rewind_upload(item)
+
+
 class _InteractionProgressState:
     def __init__(self, interaction: Any):
         self.interaction = interaction
@@ -402,6 +426,8 @@ def _patch_session() -> None:
                     )
                 except Exception:
                     sent = None
+                if sent is None:
+                    _rewind_uploads(reply_file, reply_kwargs.get("files"))
                 if sent is not None:
                     self._sent = int(getattr(self, "_sent", 0) or 0) + 1
                     self._last = sent

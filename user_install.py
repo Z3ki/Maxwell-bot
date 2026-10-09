@@ -25,6 +25,48 @@ from utils import _coerce_utc_datetime, render_discord_context_text
 
 logger = logging.getLogger(__name__)
 
+
+def _rewind_upload(file: Any) -> None:
+    """Move an upload back to the start.
+
+    A failed channel send reads the buffer while it builds the multipart body.
+    discord.py skips the seek on webhook attempt 0, so the follow-up would
+    store a 0-byte file unless the buffer is rewound first.
+    """
+    if file is None or isinstance(file, (str, bytes)):
+        return
+    reset = getattr(file, "reset", None)
+    if callable(reset):
+        try:
+            reset(seek=True)
+            return
+        except TypeError:
+            try:
+                reset()
+                return
+            except Exception:
+                return
+        except Exception:
+            return
+    fp = getattr(file, "fp", None)
+    seek = getattr(fp, "seek", None)
+    if callable(seek):
+        try:
+            seek(0)
+        except Exception:
+            return
+
+
+def _rewind_uploads(*groups: Any) -> None:
+    for group in groups:
+        if group is None:
+            continue
+        if isinstance(group, (list, tuple)):
+            for item in group:
+                _rewind_upload(item)
+            continue
+        _rewind_upload(group)
+
 USER_INSTALL_COMMAND_NAME = "maxwell"
 USER_INSTALL_MESSAGE_ASK = "Ask Maxwell"
 USER_INSTALL_MESSAGE_SUMMARIZE = "Summarize"
@@ -799,6 +841,9 @@ class UserInstallSession:
         payload["ephemeral"] = self.ephemeral
         if not payload:
             payload["content"] = "\u200b"
+        # A failed channel send reads this buffer, and webhook attempt 0
+        # does not seek. Rewind or the follow-up is stored as 0 bytes.
+        _rewind_uploads(payload.get("file"), payload.get("files"))
         sent = await send(**payload)
         self._sent += 1
         self._last = sent

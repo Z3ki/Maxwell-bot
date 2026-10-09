@@ -407,6 +407,7 @@ async def _modern_session_send(
     if not payload:
         payload["content"] = "\u200b"
     payload["ephemeral"] = bool(getattr(self, "ephemeral", True))
+    ui._rewind_uploads(payload.get("file"), payload.get("files"))
     sent = await send(**payload)
     self._sent += 1
     self._last = sent

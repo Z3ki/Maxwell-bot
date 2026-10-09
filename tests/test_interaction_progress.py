@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from types import SimpleNamespace
 
 from plugins.maxwell_extras import interaction_progress as mod
@@ -53,6 +54,15 @@ class _Channel:
 
     async def send(self, content=None, **payload):
         if self.fail_send:
+            # A refused Discord upload reads the body before returning 403.
+            file = payload.get("file")
+            fp = getattr(file, "fp", None)
+            if fp is not None:
+                fp.read()
+            for item in payload.get("files") or []:
+                item_fp = getattr(item, "fp", None)
+                if item_fp is not None:
+                    item_fp.read()
             raise RuntimeError("channel send unavailable")
         msg = _Message(str(content or ""))
         recorded = {"content": content, **payload}
@@ -229,6 +239,50 @@ def test_interaction_tool_status_is_kept_as_reply_parent():
         assert interaction.channel.sent[0][0]["reference"] is interaction.original
         assert sent is interaction.channel.sent[0][1]
         assert interaction.followup.sent == []
+
+    asyncio.run(run())
+
+
+def test_failed_channel_file_send_rewinds_before_the_followup():
+    """A rejected channel upload must not make the follow-up a 0-byte file."""
+
+    class _Clip:
+        def __init__(self, data: bytes):
+            self.fp = io.BytesIO(data)
+            self._original_pos = 0
+            self.filename = "voice.mp3"
+
+        def reset(self, *, seek=True):
+            if seek:
+                self.fp.seek(self._original_pos)
+
+    class _DrainingChannel(_Channel):
+        async def send(self, content=None, **payload):
+            upload = payload.get("file")
+            if upload is not None:
+                upload.fp.read()
+            raise RuntimeError("missing access")
+
+    class _ReadingFollowup(_Followup):
+        def __init__(self):
+            super().__init__()
+            self.bodies = []
+
+        async def send(self, **payload):
+            upload = payload.get("file")
+            self.bodies.append(upload.fp.read() if upload is not None else b"")
+            return await super().send(**payload)
+
+    async def run():
+        mod._patch_session()
+        interaction = _Interaction(11)
+        interaction.channel = _DrainingChannel()
+        interaction.followup = _ReadingFollowup()
+        _state(interaction, age=11.0)
+        session = UserInstallSession(interaction, visibility="public")
+        clip = _Clip(b"ID3real-audio")
+        await session.send(file=clip)
+        assert interaction.followup.bodies == [b"ID3real-audio"]
 
     asyncio.run(run())
 

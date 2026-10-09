@@ -427,6 +427,34 @@ def test_zero_byte_voice_message_is_deleted_and_rejected(monkeypatch):
     assert any(path.endswith("/messages/{message_id}") for path in deleted)
 
 
+def test_zero_byte_mp3_fallback_is_deleted_and_rejected(monkeypatch):
+    from plugins.tts_voice.impl import deliver_speech
+
+    deleted = []
+
+    async def transcode(_mp3):
+        return None
+
+    async def deliver(_message, file, *, label):
+        assert label == "voice"
+        assert file.fp.read() == b"ID3hello"
+
+        async def delete():
+            deleted.append(8)
+
+        return SimpleNamespace(
+            id=8,
+            attachments=[SimpleNamespace(size=0)],
+            delete=delete,
+        ), None
+
+    monkeypatch.setattr("plugins.tts_voice.impl.transcode_voice", transcode)
+    monkeypatch.setattr("tooling.helpers.deliver_attachment", deliver)
+    with pytest.raises(RuntimeError, match="0-byte"):
+        asyncio.run(deliver_speech(SimpleNamespace(), SimpleNamespace(), b"ID3hello"))
+    assert deleted == [8]
+
+
 def test_failed_voice_upload_sends_the_original_mp3(monkeypatch):
     from plugins.tts_voice.impl import deliver_speech
 
@@ -452,6 +480,49 @@ def test_failed_voice_upload_sends_the_original_mp3(monkeypatch):
     assert sent.id == 4
     assert captured["name"] == "voice.mp3"
     assert captured["bytes"] == audio
+
+
+def test_app_command_outside_the_guild_sends_the_mp3(monkeypatch):
+    from plugins.tts_voice.impl import deliver_speech
+
+    async def transcode(_mp3):
+        raise AssertionError("voice transcode is not used outside the guild")
+
+    async def send_voice(*_args, **_kwargs):
+        raise AssertionError("voice upload is not used outside the guild")
+
+    captured = {}
+
+    async def deliver(_message, file, *, label):
+        assert label == "voice"
+        captured["bytes"] = file.fp.read()
+        return SimpleNamespace(id=4, attachments=[SimpleNamespace(size=8)]), None
+
+    monkeypatch.setattr("plugins.tts_voice.impl.transcode_voice", transcode)
+    monkeypatch.setattr("plugins.tts_voice.impl._send_voice_message", send_voice)
+    monkeypatch.setattr("tooling.helpers.deliver_attachment", deliver)
+    message = SimpleNamespace(user_install=True, guild=SimpleNamespace(id=99))
+    bot = SimpleNamespace(get_guild=lambda _guild_id: None)
+    sent = asyncio.run(deliver_speech(bot, message, b"ID3hello"))
+    assert sent.id == 4
+    assert captured["bytes"] == b"ID3hello"
+
+
+def test_app_command_in_the_bots_guild_still_uses_voice(monkeypatch):
+    from plugins.tts_voice.impl import deliver_speech
+
+    async def transcode(_mp3):
+        return b"OggSxxxx", 1.0, "wave"
+
+    async def send_voice(*_args, **_kwargs):
+        return SimpleNamespace(id=6, attachments=[SimpleNamespace(size=8)])
+
+    monkeypatch.setattr("plugins.tts_voice.impl.transcode_voice", transcode)
+    monkeypatch.setattr("plugins.tts_voice.impl._send_voice_message", send_voice)
+    message = SimpleNamespace(user_install=True, guild=SimpleNamespace(id=99))
+    bot = SimpleNamespace(get_guild=lambda _guild_id: object())
+    sent = asyncio.run(deliver_speech(bot, message, b"ID3hello"))
+    assert sent.id == 6
 
 
 def test_empty_audio_is_not_sent():

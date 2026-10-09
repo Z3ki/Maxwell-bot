@@ -374,21 +374,56 @@ def _message_id(sent: Any) -> Any:
     return getattr(sent, "id", None)
 
 
+def _bot_shares_guild(bot: Any, message: Any) -> bool:
+    """Voice messages need the bot token. App commands often run elsewhere."""
+    if not getattr(message, "user_install", False):
+        return True
+    guild = getattr(message, "guild", None)
+    if guild is None:
+        guild = getattr(getattr(message, "interaction", None), "guild", None)
+    guild_id = getattr(guild, "id", None)
+    if not guild_id:
+        return True
+    get_guild = getattr(bot, "get_guild", None)
+    if not callable(get_guild):
+        return True
+    try:
+        found = get_guild(int(guild_id))
+    except (TypeError, ValueError):
+        found = get_guild(guild_id)
+    return found is not None
+
+
+async def _discard_empty_attachment(sent: Any) -> None:
+    """Remove a message whose stored attachment has no bytes."""
+    delete = getattr(sent, "delete", None)
+    if not callable(delete):
+        return
+    try:
+        await delete()
+    except Exception as exc:
+        logger.warning(
+            "TTS could not remove the empty voice file (%s)",
+            type(exc).__name__,
+        )
+
+
 async def deliver_speech(bot: Any, message: Any, audio: bytes) -> Any:
     """Post a voice message, or an mp3 attachment when voice upload is unavailable."""
     if not audio:
         raise RuntimeError("Error: Mistral TTS returned no audio")
-    converted = await transcode_voice(audio)
-    if converted is not None and converted[0]:
-        ogg, duration, waveform = converted
-        try:
-            return await _send_voice_message(bot, message, ogg, duration, waveform)
-        except Exception as exc:
-            logger.warning(
-                "TTS voice-message upload failed (%s: %s)",
-                type(exc).__name__,
-                _safe_reason(exc),
-            )
+    if _bot_shares_guild(bot, message):
+        converted = await transcode_voice(audio)
+        if converted is not None and converted[0]:
+            ogg, duration, waveform = converted
+            try:
+                return await _send_voice_message(bot, message, ogg, duration, waveform)
+            except Exception as exc:
+                logger.warning(
+                    "TTS voice-message upload failed (%s: %s)",
+                    type(exc).__name__,
+                    _safe_reason(exc),
+                )
     from discord import File
     from tooling.helpers import deliver_attachment
 
@@ -400,6 +435,7 @@ async def deliver_speech(bot: Any, message: Any, audio: bytes) -> Any:
     if error or sent is None or not _message_id(sent):
         raise RuntimeError(error or "Error: could not send the voice message")
     if _attachment_size(sent) == 0:
+        await _discard_empty_attachment(sent)
         raise RuntimeError("Error: Discord stored a 0-byte voice file")
     logger.info("TTS delivered mp3 bytes=%s", len(audio))
     return sent
