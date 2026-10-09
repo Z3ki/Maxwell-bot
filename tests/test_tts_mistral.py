@@ -268,28 +268,31 @@ def test_reference_clones_one_attachment_and_does_not_save_it(tmp_path, monkeypa
     TtsTool._last_tts.clear()
 
 
-def test_reference_refuses_a_url_that_is_not_attached(tmp_path, monkeypatch):
-    def refuse(_url):
-        raise AssertionError("fetched a url that was not attached")
-
-    monkeypatch.setattr("plugins.tts_voice.impl.download_cdn_audio", refuse)
-    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+@pytest.mark.parametrize("parameter", ["reference", "reference_audio_url"])
+def test_reference_accepts_url_without_attachment(tmp_path, monkeypatch, parameter):
+    seen = {}
+    async def download(url):
+        seen['url'] = url
+        return b'raw-audio'
+    async def prepare(raw):
+        assert raw == b'raw-audio'
+        return b'ID3sample'
+    def synth(text, voice_id, api_key, model, ref_audio=''):
+        seen['ref_audio'] = ref_audio
+        assert not voice_id
+        return b'mp3'
+    async def deliver(*_args):
+        return SimpleNamespace(id=4)
+    monkeypatch.setattr('plugins.tts_voice.impl.download_reference_audio', download)
+    monkeypatch.setattr('plugins.tts_voice.impl.prepare_sample', prepare)
+    monkeypatch.setattr('plugins.tts_voice.impl.synthesize_speech', synth)
+    monkeypatch.setattr('plugins.tts_voice.impl.deliver_speech', deliver)
     TtsTool._last_tts.clear()
-    tool = TtsTool(_bot(tmp_path))
-    message = SimpleNamespace(
-        channel=SimpleNamespace(id=23),
-        attachments=[],
-        reference=None,
-    )
-    result = asyncio.run(
-        tool.execute(
-            message,
-            text="hello there",
-            reference="https://cdn.discordapp.com/attachments/9/9/nope.mp3",
-        )
-    )
-    assert result.startswith("Error: attach a short voice clip")
-    assert not (tmp_path / "plugins" / "tts_voice").exists()
+    message = SimpleNamespace(channel=SimpleNamespace(id=23), attachments=[])
+    result = asyncio.run(TtsTool(_bot(tmp_path)).execute(message, text='hello', **{parameter: 'https://example.com/voice.wav'}))
+    assert result.startswith('__TTS_SENT__')
+    assert seen['url'] == 'https://example.com/voice.wav' and seen['ref_audio']
+    assert not (tmp_path / 'plugins' / 'tts_voice').exists()
     TtsTool._last_tts.clear()
 
 
@@ -471,7 +474,7 @@ def test_upload_url_must_be_public_https():
         _put_upload("https://cdn.discordapp.com/up", b"")
 
 
-def test_prepare_sample_rejects_a_short_clip_and_trims_a_long_one():
+def test_prepare_sample_keeps_short_and_full_length_clips():
     import shutil
     import subprocess
 
@@ -500,7 +503,12 @@ def test_prepare_sample_rejects_a_short_clip_and_trims_a_long_one():
         )
         return completed.stdout
 
-    with pytest.raises(ValueError, match="too short"):
-        asyncio.run(prepare_sample(sine(0.4)))
+    assert asyncio.run(prepare_sample(sine(0.4)))
     sample = asyncio.run(prepare_sample(sine(3)))
     assert sample.startswith(b"ID3") or sample[0] == 0xFF
+
+    long_sample = asyncio.run(prepare_sample(sine(23)))
+    _duration = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', '-i', 'pipe:0'], input=long_sample, capture_output=True)
+    # Pipe MP3 duration can be N/A; measure decoded PCM samples instead.
+    decoded = subprocess.run(['ffmpeg', '-v', 'error', '-i', 'pipe:0', '-f', 's16le', '-ac', '1', '-ar', '24000', 'pipe:1'], input=long_sample, capture_output=True, check=True)
+    assert len(decoded.stdout) / (24000 * 2) > 22.5

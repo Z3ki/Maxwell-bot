@@ -17,7 +17,7 @@ preserved when updating.
 Optional tools appear only after setup: set `MAXWELL_PUBLIC_BASE_URL` for
 websites and `GEMINI_IMAGE_MODEL` for HD images. Add `--with-shell` for the
 shell backend.
-Conversational autonomy remains opt-in. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
+Conversational autonomy remains opt-in. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` accepts an attachment or a direct public HTTP(S) audio/video URL; `reference_audio_url` is an explicit URL alias. URLs need not be attached and can be found online. Use permitted voice samples. The full sample is sent without local byte/duration caps, and the provider validates it. References are never saved. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
 
 The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.11`, select `--version v0.1.11`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
 
@@ -281,3 +281,7 @@ docker compose logs -f maxwell
 ```
 
 If the Discord token is rejected, regenerate/copy the **bot token from the Discord Developer Portal**. Do not copy an authorization header or user token from a logged-in Discord client.
+
+## AI-controlled music
+
+Maxwell can join your voice channel and play or queue YouTube songs from normal conversation. The AI tools, `/music` subcommands and Now Playing buttons use one permission-checked service per server. Audio is streamed by a separate, authenticated Lavalink node with DAVE support. See [Music setup and verification](docs/MUSIC.md) for deployment, controls, permissions and limitations.

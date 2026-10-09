@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-10-08
+
+- Add a native AI DJ plugin with shared guild music queues, on-demand voice context, permission-checked playback, slash commands and Now Playing buttons.
+- Stream YouTube videos, Music links and playlists through pinned DAVE-compatible Lavalink 4.2.2 / Lavalink.py 5.11.0 / YouTube Source 1.18.2. Provide private authenticated Docker audio deployment, reconnect recovery and idle cleanup.
+- Accept direct public audio/video reference URLs in TTS without requiring message attachments. Support `reference_audio_url` and URLs in `reference`; preserve SSRF and redirect protections, remove local audio byte/duration caps and send the full reference for provider validation.
+- Keep provider model-awareness routing compatible with providers that do not expose a model field.
+
 ## 0.1.13 — 2026-10-08
 
 Install with `--version v0.1.13`. Release assets include source, installers, checksums and the versioned container image digest.

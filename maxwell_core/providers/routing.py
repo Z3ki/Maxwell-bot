@@ -163,8 +163,8 @@ class ProviderRouter(ChatProvider):
             # Keep model identity at the end of the prompt, leaving the
             # stable cached prefix untouched. Each retry gets its own snapshot.
             effective_model = (
-                (options.get("model") or selected.model)
-                if selected is self.primary else selected.model
+                (options.get("model") or getattr(selected, "model", "unknown"))
+                if selected is self.primary else getattr(selected, "model", "unknown")
             )
             attempt_messages = copy.deepcopy(messages)
             model_context = {

@@ -9,3 +9,4 @@ jsonschema>=4.25.0         # validate model supplied tool arguments before execu
 python-chess>=1.999        # chess_* tools: board state, legal moves, engine
 pillow>=10.0.0             # chess board PNG rendering (also used by HD image)
 ddgs>=9.16.0               # keyless live web search fallback
+lavalink==5.11.0          # DAVE-compatible Lavalink v4 client; audio stays on node

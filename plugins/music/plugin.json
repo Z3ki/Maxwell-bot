@@ -1,0 +1,15 @@
+{
+  "id": "music",
+  "name": "music",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "Native AI DJ, guild music queues, shared slash and button controls, DAVE-compatible Lavalink audio.",
+  "author": "Maxwell",
+  "bundled": true,
+  "enabled_by_default": true,
+  "permissions": ["messages.send", "network", "discord.channels"],
+  "tools": [
+    {"name": "music_control", "returns_result": true, "is_destructive": true, "transports": ["discord"]},
+    {"name": "music_info", "returns_result": true, "transports": ["discord"]}
+  ]
+}
