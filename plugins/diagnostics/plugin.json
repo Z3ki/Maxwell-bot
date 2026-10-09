@@ -2,7 +2,7 @@
   "id": "diagnostics",
   "name": "Diagnostics",
   "version": "1.0.0",
-  "description": "Usage, debug latency, and owner reports.",
+  "description": "Personal message usage, debug latency, and owner reports.",
   "author": "Maxwell",
   "api_version": 1,
   "bundled": true,
@@ -21,7 +21,7 @@
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
-      "requires_admin": true
+      "requires_admin": false
     },
     {
       "name": "report",

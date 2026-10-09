@@ -94,7 +94,6 @@ source, secrets, or databases. See [SITE_BACKEND_MIGRATION.md](SITE_BACKEND_MIGR
 | `COMMAND_PREFIX` | `,` when unset | Internal compatibility prefix used by slash-command handlers; public text-prefix commands are retired. |
 | `BOT_BIRTHDAY` | `2026-05-21` | ISO persona birthday. |
 | `BOT_INVITE_URL` | blank | Optional public invite URL. |
-| `MAXWELL_USAGE_URL` | blank | Optional provider usage/quota endpoint. |
 
 Blank IDs do not grant implicit ownership.
 

@@ -75,7 +75,7 @@ Maxwell supports the normal bot conversation path plus Discord app-command/user-
 
 - `/maxwell` is the personal app-command surface when user install is enabled.
 - `/config` opens a private settings menu for personal defaults and server settings to authorized server administrators.
-- `/help` and `/usage` show the command list and the message allowance.
+- `/help` and `/usage` show the command list and the message allowance. Users can also ask Maxwell about their current usage; the `usage` tool reads their own message allowance locally and reports percentages used and remaining, plus when the oldest counted message ages out. Disabled quotas and exempt users are reported as unlimited.
 - `/diagnostics` and `/maintenance` are restricted to configured Maxwell developers.
 - Images, games, moderation, memory, and reminders are model-driven tools instead of separate commands.
 - Message/user context-menu actions are registered through the user-install layer.

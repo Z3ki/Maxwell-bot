@@ -114,7 +114,6 @@ def test_config_identity_defaults_are_empty_without_env():
         "    ('BOT_NAME', Config.BOT_NAME, 'Maxwell'),\n"
         "    ('COMMAND_PREFIX', Config.COMMAND_PREFIX, ','),\n"
         "    ('BOT_INVITE_URL', Config.BOT_INVITE_URL, ''),\n"
-        "    ('MAXWELL_USAGE_URL', Config.MAXWELL_USAGE_URL, ''),\n"
         "]\n"
         "for name, got, expected in checks:\n"
         "    if got != expected:\n"

@@ -88,7 +88,7 @@ async def run_custom_tool_harness():
     # 1. usage tool
     res = await bot.tools["usage"].execute(fake_msg)
     print(f"[PASS] usage tool returned: {str(res)[:60]}...")
-    assert "usage" in str(res).lower() or "tokens" in str(res).lower() or "cost" in str(res).lower() or "call" in str(res).lower()
+    assert "message" in str(res).lower()
 
     # 2. wait tool
     res = await bot.tools["wait"].execute(fake_msg, seconds=0.01)

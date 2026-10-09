@@ -361,7 +361,6 @@ class Config:
     BOT_INVITE_URL = os.getenv(
         "BOT_INVITE_URL", os.getenv("OFFICIAL_INVITE", "")
     ).strip()
-    MAXWELL_USAGE_URL = os.getenv("MAXWELL_USAGE_URL", "").strip()
     # Public hosted operators may retain the retired-tool restrictions.
     MAXWELL_RESTRICT_PUBLIC_RUNTIME = _bool_env("MAXWELL_RESTRICT_PUBLIC_RUNTIME", False)
 

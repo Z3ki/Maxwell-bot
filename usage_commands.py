@@ -111,16 +111,16 @@ def command_help_text(*, topic: str | None = None) -> str:
 
 
 def usage_status_text(state: dict) -> str:
+    if state.get("exempt"):
+        return "Unlimited messages. This account is exempt from the message limit."
     window = format_window(int(state.get("window_seconds") or FREE_WINDOW_SECONDS))
     limit = max(1, int(state.get("limit") or 0))
     used = max(0, int(state.get("used") or 0))
     percent_used = int((used * 100 / limit) + 0.5)
     lines = [
         f"Usage: {percent_used}% of your current message allowance used "
-        f"in the last {window}."
+        f"in the last {window}; {max(0, 100 - percent_used)}% remaining."
     ]
-    if state.get("exempt"):
-        lines.append("This account is exempt from the message limit.")
     resets_in = int(state.get("resets_in") or 0)
     if resets_in > 0:
         lines.append(f"The oldest counted message leaves the window in {format_window(resets_in)}.")

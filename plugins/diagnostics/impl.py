@@ -17,171 +17,31 @@ for _name in dir(_helpers):
 del _name
 
 class UsageTool(Tool):
-    """Query the configured usage/quota endpoint with the API key in env."""
+    """Read the requesting user's current Maxwell message allowance."""
+
     tool_name = 'usage'
     returns_result = True
     ends_turn = False
-    requires_admin = True
-
+    side_effects = False
 
     def get_description(self):
         return (
-            "Fetch current API usage and remaining quota from the configured "
-            "usage endpoint using the API key already configured in env. "
-            "Returns usage percentages, reset times, and account counts so you "
-            "can report how much budget is left. Operator only."
+            "Check the requesting user's current Maxwell message usage. No params. "
+            "Use when they ask about their usage, remaining allowance, or reset time. "
+            "Returns percentages used and remaining in the rolling window, or "
+            "whether messages are unlimited. Only checks the user who sent the "
+            "request; cannot look up other users or provider accounts."
         )
-
-    def _url(self) -> str:
-        cfg = getattr(self.bot, "config", None)
-        return (
-            str(getattr(cfg, "MAXWELL_USAGE_URL", "") or "").strip()
-            or (os.environ.get("MAXWELL_USAGE_URL", "") or "").strip()
-        )
-
-    def _api_key(self) -> str:
-        return (
-            os.environ.get("AI_API_KEY", os.environ.get("OLLAMA_API_KEY",
-                os.environ.get("OPENAI_COMPAT_API_KEY", "")))
-        ).strip()
 
     async def execute(self, message: Message, **kwargs) -> str:
-        url = self._url()
-        if not url:
-            return "Error: MAXWELL_USAGE_URL is not configured"
-        key = self._api_key()
-        if not key:
-            return "Error: no API key configured (AI_API_KEY or OPENAI_COMPAT_API_KEY)."
-        session = await _get_shared_session()
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Accept": "application/json",
-        }
-        try:
-            async with session.get(
-                url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                body = await resp.text()
-                if resp.status != 200:
-                    return f"Error: usage endpoint returned HTTP {resp.status}"
-        except asyncio.TimeoutError:
-            return "Error: usage endpoint timed out."
-        except Exception as exc:
-            return f"Error: could not reach usage endpoint: {exc}"
+        from usage_commands import usage_text_for
 
-        # Summarize quota fields only. The upstream body can carry account
-        # identifiers, so it is not appended.
-        try:
-            data = json.loads(body)
-        except ValueError:
-            return "Error: usage endpoint returned a non-JSON body"
+        author = getattr(message, "author", None) or getattr(message, "user", None)
+        user_id = str(getattr(author, "id", "") or "")
+        if not user_id:
+            return "Message allowance is unavailable: the requesting user is unknown."
+        return await asyncio.to_thread(usage_text_for, self.bot, user_id)
 
-        lines: list[str] = ["API usage:"]
-        accounts = data.get("accounts")
-        if accounts is not None:
-            lines.append(f"Accounts: {accounts}")
-        combined = data.get("combined") or {}
-        if isinstance(combined, dict):
-            for family, limits in combined.items():
-                if not isinstance(limits, dict):
-                    continue
-                parts: list[str] = []
-                for window in ("5h", "weekly"):
-                    info = limits.get(window)
-                    if not isinstance(info, dict):
-                        continue
-                    pct = info.get("remaining_pct")
-                    reset = str(info.get("reset_time", ""))[:16]
-                    name = info.get("display_name", window)
-                    if pct is not None:
-                        parts.append(f"{window}: {pct:.1f}% left (resets {reset})")
-                    else:
-                        parts.append(f"{window}: {name} (resets {reset})")
-                if parts:
-                    lines.append(f"- {family}: " + " · ".join(parts))
-        # Antigravity pooled accounts: summarize rate-limited models WITHOUT leaking emails.
-        # Previously the raw payload included per_account[].email and rate_limited[].email
-        # which the LLM then echoed into the channel, exposing owner addresses.
-        # We now redact emails and only show counts / anonymized summaries.
-        rate_limited = data.get("rate_limited")
-        # Filter to *active* limits only — antigravity-manager keeps stale entries for ~1m after expiry
-        # and marks weekly 0% as rate_limited even when 5h is 100% (not actually blocked for 5h). That was
-        # the "one acc always marked as rate limited" false positive (zequielwolf weekly 0% but 5h 100%).
-        active_limited = []
-        stale_count = 0
-        if isinstance(rate_limited, list) and rate_limited:
-            now_ts = int(time.time())
-            for entry in rate_limited:
-                if not isinstance(entry, dict):
-                    continue
-                until = entry.get("until")
-                # until is epoch seconds; if in the past it's stale, ignore
-                try:
-                    until_int = int(until) if until is not None else 0
-                except (ValueError, TypeError):
-                    until_int = 0
-                if until_int and until_int < now_ts - 5:
-                    stale_count += 1
-                    continue
-                active_limited.append(entry)
-        if active_limited:
-            from collections import Counter
-
-            models = Counter()
-            for entry in active_limited:
-                m = str(entry.get("model") or entry.get("reason") or "unknown")
-                models[m] += 1
-            summary = ", ".join(
-                f"{model} x{cnt}" if cnt > 1 else model for model, cnt in models.items()
-            )
-            lines.append(
-                f"Rate-limited models (pooled, {len(active_limited)} active): {summary}"
-            )
-            lines.append(
-                "Note: single-model QuotaExhausted on one pooled account is NOT global exhaustion — other accounts still serve."
-            )
-            if stale_count:
-                lines.append(
-                    f"({stale_count} stale/expired rate-limit entries ignored)"
-                )
-        elif isinstance(rate_limited, list) and rate_limited:
-            # All entries were stale/weekly-only — not actually rate limited for current window
-            if stale_count:
-                lines.append(
-                    f"Rate-limited: none (currently) — {stale_count} stale entry expired, pooled quota still available"
-                )
-            else:
-                lines.append("Rate-limited: none")
-        else:
-            lines.append("Rate-limited: none")
-        # Per-account remainings are useful but must not expose emails. Anonymize to Account 1..N.
-        per_account = data.get("per_account")
-        if isinstance(per_account, list) and per_account:
-            lines.append(
-                f"Per-account pools: {len(per_account)} accounts (emails redacted)"
-            )
-            # Optionally show anonymized quota spread without emails
-            for idx, acct in enumerate(per_account[:5], start=1):
-                if not isinstance(acct, dict):
-                    continue
-                tier = acct.get("tier", "")
-                live = acct.get("live_limited") or []
-                lim_str = f" live_limited={live}" if live else ""
-                # Show only remaining %s anonymized
-                rem = acct.get("remaining") or {}
-                parts = []
-                if isinstance(rem, dict):
-                    for k, v in list(rem.items())[:2]:
-                        if isinstance(v, dict) and "remaining_pct" in v:
-                            parts.append(f"{k}:{v['remaining_pct']:.0f}%")
-                extra = " " + " ".join(parts) if parts else ""
-                lines.append(f"  - Account {idx} ({tier}){lim_str}{extra}")
-            if len(per_account) > 5:
-                lines.append(f"  … +{len(per_account) - 5} more")
-
-        return "\n".join(lines)
 
 class ReportTool(Tool):
     """DM the configured owner with a report or error."""
