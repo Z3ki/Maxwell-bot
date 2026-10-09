@@ -160,8 +160,31 @@ class ProviderRouter(ChatProvider):
             )
             if empty_recoveries:
                 options["stream"] = False
+            # Keep model identity at the end of the prompt, leaving the
+            # stable cached prefix untouched. Each retry gets its own snapshot.
+            effective_model = (
+                (options.get("model") or selected.model)
+                if selected is self.primary else selected.model
+            )
+            attempt_messages = copy.deepcopy(messages)
+            model_context = {
+                "role": "system",
+                "content": (
+                    "Runtime model for this request: "
+                    f"{effective_model}. Route: {selected.name}. "
+                    "This is the active model for the current response, "
+                    "even if earlier turns used a different model. "
+                    "Do not claim another model is currently running."
+                ),
+            }
+            insert_at = (
+                len(attempt_messages) - 1
+                if attempt_messages and attempt_messages[-1].get("role") == "user"
+                else len(attempt_messages)
+            )
+            attempt_messages.insert(insert_at, model_context)
             try:
-                result = await selected.generate_response(messages, **options)
+                result = await selected.generate_response(attempt_messages, **options)
                 self._cooldowns.pop(selected.name, None)
                 self.available = True
                 if result.timing:
