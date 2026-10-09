@@ -302,6 +302,175 @@ def test_download_rejects_clips_that_are_not_discord_attachments():
         download_cdn_audio("https://user:pass@cdn.discordapp.com/clip.mp3")
 
 
+def test_voice_upload_uses_the_attachment_slot_without_channel_state(monkeypatch):
+    from plugins.tts_voice.impl import _send_voice_message
+
+    calls = []
+
+    class HTTP:
+        async def request(self, route, **kwargs):
+            calls.append((route.method, route.path, kwargs.get("json")))
+            if route.path.endswith("/attachments"):
+                return {
+                    "attachments": [
+                        {
+                            "upload_url": "https://cdn.discordapp.com/upload/slot",
+                            "upload_filename": "stored.ogg",
+                        }
+                    ]
+                }
+            return {
+                "id": "99",
+                "attachments": [{"filename": "voice-message.ogg", "size": 12}],
+            }
+
+    def fake_put(url, payload):
+        calls.append(("PUT", url, payload))
+
+    monkeypatch.setattr("plugins.tts_voice.impl._put_upload", fake_put)
+    ogg = b"OggS" + b"x" * 8
+    sent = asyncio.run(
+        _send_voice_message(
+            SimpleNamespace(http=HTTP()),
+            SimpleNamespace(channel=SimpleNamespace(id="55")),
+            ogg,
+            1.25,
+            "waveform",
+        )
+    )
+
+    assert sent["id"] == "99"
+    assert calls[0][0] == "POST"
+    assert calls[0][1].endswith("/attachments")
+    assert calls[0][2]["files"][0]["file_size"] == len(ogg)
+    assert calls[1] == ("PUT", "https://cdn.discordapp.com/upload/slot", ogg)
+    posted = calls[2][2]
+    assert posted["flags"] == 8192
+    assert posted["attachments"][0]["uploaded_filename"] == "stored.ogg"
+    assert posted["attachments"][0]["duration_secs"] == 1.25
+    assert posted["attachments"][0]["waveform"] == "waveform"
+
+
+def test_live_channel_http_is_used_before_the_bot_client(monkeypatch):
+    from plugins.tts_voice.impl import _send_voice_message
+
+    seen = {}
+
+    class HTTP:
+        def __init__(self, name):
+            self.name = name
+
+        async def request(self, route, **kwargs):
+            seen["client"] = self.name
+            if route.path.endswith("/attachments"):
+                return {
+                    "attachments": [
+                        {
+                            "upload_url": "https://cdn.discordapp.com/upload/slot",
+                            "upload_filename": "stored.ogg",
+                        }
+                    ]
+                }
+            return {"id": "5", "attachments": [{"size": 8}]}
+
+    monkeypatch.setattr("plugins.tts_voice.impl._put_upload", lambda *_args: None)
+    message = SimpleNamespace(
+        channel=SimpleNamespace(id=5, _state=SimpleNamespace(http=HTTP("channel")))
+    )
+    asyncio.run(
+        _send_voice_message(
+            SimpleNamespace(http=HTTP("bot")),
+            message,
+            b"OggSxxxx",
+            1.0,
+            "wave",
+        )
+    )
+    assert seen["client"] == "channel"
+
+
+def test_zero_byte_voice_message_is_deleted_and_rejected(monkeypatch):
+    from plugins.tts_voice.impl import _send_voice_message
+
+    deleted = []
+
+    class HTTP:
+        async def request(self, route, **_kwargs):
+            if route.method == "DELETE":
+                deleted.append(route.path)
+                return None
+            if route.path.endswith("/attachments"):
+                return {
+                    "attachments": [
+                        {
+                            "upload_url": "https://cdn.discordapp.com/upload/slot",
+                            "upload_filename": "stored.ogg",
+                        }
+                    ]
+                }
+            return {"id": "7", "attachments": [{"size": 0}]}
+
+    monkeypatch.setattr("plugins.tts_voice.impl._put_upload", lambda *_args: None)
+    with pytest.raises(RuntimeError, match="0-byte"):
+        asyncio.run(
+            _send_voice_message(
+                SimpleNamespace(http=HTTP()),
+                SimpleNamespace(channel=SimpleNamespace(id=3)),
+                b"OggSxxxx",
+                1.0,
+                "wave",
+            )
+        )
+    assert any(path.endswith("/messages/{message_id}") for path in deleted)
+
+
+def test_failed_voice_upload_sends_the_original_mp3(monkeypatch):
+    from plugins.tts_voice.impl import deliver_speech
+
+    async def transcode(_mp3):
+        return b"OggSxxxx", 1.0, "wave"
+
+    async def send_voice(*_args, **_kwargs):
+        raise RuntimeError("voice message transport unavailable")
+
+    captured = {}
+
+    async def deliver(_message, file, *, label):
+        assert label == "voice"
+        captured["name"] = file.filename
+        captured["bytes"] = file.fp.read()
+        return SimpleNamespace(id=4, attachments=[]), None
+
+    monkeypatch.setattr("plugins.tts_voice.impl.transcode_voice", transcode)
+    monkeypatch.setattr("plugins.tts_voice.impl._send_voice_message", send_voice)
+    monkeypatch.setattr("tooling.helpers.deliver_attachment", deliver)
+    audio = b"ID3hello"
+    sent = asyncio.run(deliver_speech(SimpleNamespace(), SimpleNamespace(), audio))
+    assert sent.id == 4
+    assert captured["name"] == "voice.mp3"
+    assert captured["bytes"] == audio
+
+
+def test_empty_audio_is_not_sent():
+    from plugins.tts_voice.impl import deliver_speech
+
+    with pytest.raises(RuntimeError, match="no audio"):
+        asyncio.run(deliver_speech(SimpleNamespace(), SimpleNamespace(), b""))
+
+
+def test_upload_url_must_be_public_https():
+    from plugins.tts_voice.impl import _put_upload
+
+    with pytest.raises(RuntimeError, match="rejected"):
+        _put_upload("http://cdn.discordapp.com/up", b"OggS")
+    with pytest.raises(RuntimeError, match="rejected"):
+        _put_upload("https://127.0.0.1/up", b"OggS")
+    with pytest.raises(RuntimeError, match="rejected"):
+        _put_upload("https://localhost/up", b"OggS")
+    with pytest.raises(RuntimeError, match="empty"):
+        _put_upload("https://cdn.discordapp.com/up", b"")
+
+
 def test_prepare_sample_rejects_a_short_clip_and_trims_a_long_one():
     import shutil
     import subprocess
