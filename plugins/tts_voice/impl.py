@@ -24,12 +24,12 @@ from tools import Tool
 
 from .clones import download_cdn_audio, prepare_sample, select_audio
 from .voices import prepare_line, resolve_voice
+from .url_audio import download_reference_audio
 
 logger = logging.getLogger("maxwell.tts")
 
 SPEECH_URL = "https://api.mistral.ai/v1/audio/speech"
 DEFAULT_MODEL = "voxtral-mini-tts-2603"
-MAX_AUDIO_BYTES = 8 * 1024 * 1024
 _COOLDOWN_SECONDS = 8.0
 
 
@@ -95,7 +95,7 @@ def synthesize_speech(
     )
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
-            body = response.read(MAX_AUDIO_BYTES + 1)
+            body = response.read()
             status = getattr(response, "status", 200)
     except urllib.error.HTTPError as exc:
         detail = exc.read(2000).decode("utf-8", "replace")
@@ -104,8 +104,6 @@ def synthesize_speech(
         raise SpeechError(exc.code, message) from None
     except urllib.error.URLError as exc:
         raise SpeechError(0, "Mistral TTS could not be reached") from exc
-    if len(body) > MAX_AUDIO_BYTES:
-        raise SpeechError(status, "Mistral TTS audio was too large")
     if body.startswith((b"ID3", b"\xff\xfb")):
         return body
     try:
@@ -119,7 +117,7 @@ def synthesize_speech(
         audio = base64.b64decode(encoded, validate=True)
     except (ValueError, TypeError) as exc:
         raise SpeechError(status, "Mistral TTS returned no audio") from exc
-    if not audio or len(audio) > MAX_AUDIO_BYTES:
+    if not audio:
         raise SpeechError(status, "Mistral TTS returned no audio")
     return audio
 
@@ -305,8 +303,11 @@ async def _pick_voice(
 ) -> tuple[str, str, str]:
     """Return voice_id, one-shot ref_audio base64, and a log label."""
     if str(reference or "").strip():
-        _filename, url = select_audio(message, reference)
-        raw = await asyncio.to_thread(download_cdn_audio, url)
+        if str(reference).strip().lower().startswith(('https://', 'http://')):
+            raw = await download_reference_audio(str(reference).strip())
+        else:
+            _filename, url = select_audio(message, reference)
+            raw = await asyncio.to_thread(download_cdn_audio, url)
         sample = await prepare_sample(raw)
         encoded = base64.b64encode(sample).decode("ascii")
         return "", encoded, "reference"
@@ -363,16 +364,21 @@ class TtsTool(Tool):
                 "type": "string",
                 "description": "Optional hint: english, british, or french.",
             },
+            "reference_audio_url": {
+                "type": "string",
+                "description": "Direct public HTTP(S) audio/video URL for one-shot voice cloning, no attachment required. Same as a URL in reference; use only one source. Use voices you own or have permission to clone.",
+            },
             "reference": {
                 "type": "string",
                 "description": (
-                    "Clone an audio attachment for this one line. "
-                    "Filename, or 'attachment'. Never saved. Only use this "
+                    "Clone a direct public HTTP(S) audio/video URL, audio filename, or 'attachment' for one line. "
+                    "The URL need not be attached and may be found with web search. Never saved. Only use this "
                     "for a voice the person asking owns or has permission to "
                     "clone — never to imitate a real person without consent."
                 ),
             },
         },
+        "additionalProperties": False,
         "required": ["text"],
     }
     _last_tts: ClassVar[dict[str, float]] = {}
@@ -383,9 +389,12 @@ class TtsTool(Tool):
             "Text length is unlimited. "
             "voice= paul, oliver, jane, or marie. "
             "emotion= applies to those presets only. "
-            "reference= clones one of the requester's own audio attachments for this "
-            "one line and never saves it. Never clone a voice to imitate someone who "
-            "did not agree to it; only the requester's own clips are accepted. "
+            "reference= attachment filename, attachment, or a public direct HTTP(S) audio/video URL; "
+            "reference_audio_url= is an explicit URL alias. No attachment is needed for links; "
+            "you may find a suitable permitted reference online with web search. "
+            "Ordinary webpage/YouTube watch links are not direct media files. "
+            "The complete clip is prepared for this line with no local size/duration cap; the API validates it. Never saved. "
+            "Only clone voices the requester owns or has permission to use; do not impersonate deceptively. "
             "A success returns nothing; do not call it again in the same turn. "
             "An error is returned so you can fix the voice or emotion and retry once. "
             "On a cooldown error, wait. Do not retry in this turn."
@@ -400,13 +409,16 @@ class TtsTool(Tool):
         language: str | None = None,
         lang: str | None = None,
         reference: str | None = None,
+        reference_audio_url: str | None = None,
         **kwargs: Any,
     ) -> str:
         spoken, tagged = prepare_line(text)
         if not spoken:
             return "Error: text parameter is required"
         feeling = emotion or tagged or kwargs.get("mood") or ""
-        reference = reference or kwargs.get("ref") or kwargs.get("sample") or ""
+        if reference_audio_url and reference and reference_audio_url != reference:
+            return "Error: choose one reference source, reference or reference_audio_url"
+        reference = reference_audio_url or reference or kwargs.get("ref") or kwargs.get("sample") or ""
         try:
             voice_id, ref_audio, label = await _pick_voice(
                 message,

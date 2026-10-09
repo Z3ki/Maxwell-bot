@@ -1,4 +1,4 @@
-"""One-shot voice clips from an attachment already on the message.
+"""One-shot voice clip preparation and legacy attachment selection.
 
 The clip is prepared and sent as ref_audio for that single line. Nothing
 is stored on disk or at Mistral.
@@ -28,9 +28,6 @@ _AUDIO_EXTS = {
     ".aac",
     ".mp4",
 }
-_MIN_SECONDS = 2.0
-_MAX_SECONDS = 20.0
-_MAX_DOWNLOAD = 8 * 1024 * 1024
 
 
 def _audio_attachment(attachment: object) -> tuple[str, str] | None:
@@ -125,14 +122,10 @@ def download_cdn_audio(url: str) -> bytes:
     try:
         with opener.open(request, timeout=20) as response:
             chunks: list[bytes] = []
-            size = 0
             while True:
                 block = response.read(65536)
                 if not block:
                     break
-                size += len(block)
-                if size > _MAX_DOWNLOAD:
-                    raise ValueError("that clip is too large")
                 chunks.append(block)
     except urllib.error.HTTPError as exc:
         raise ValueError(f"could not read that clip (HTTP {exc.code})") from None
@@ -158,35 +151,12 @@ async def _run(args: list[str], timeout: float) -> tuple[int, bytes, bytes]:
 
 
 async def prepare_sample(audio: bytes) -> bytes:
-    """Re-encode a clip to a short mono mp3 Mistral can clone for this line."""
+    """Re-encode the full clip to mono mp3; the API validates size and duration."""
     with tempfile.TemporaryDirectory(prefix="maxwell-clone-") as directory:
         folder = Path(directory)
         source = folder / "in.bin"
         target = folder / "sample.mp3"
         source.write_bytes(audio)
-        code, probe_out, _err = await _run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(source),
-            ],
-            15,
-        )
-        if code != 0:
-            raise ValueError("could not read that audio")
-        try:
-            duration = float(probe_out.decode().strip())
-        except ValueError as exc:
-            raise ValueError("could not read that audio") from exc
-        if duration < _MIN_SECONDS:
-            raise ValueError(
-                "that clip is too short. Use at least a couple of seconds."
-            )
         code, _stdout, _stderr = await _run(
             [
                 "ffmpeg",
@@ -194,10 +164,10 @@ async def prepare_sample(audio: bytes) -> bytes:
                 "-loglevel",
                 "error",
                 "-y",
+                "-protocol_whitelist", "file,pipe",
+                "-format_whitelist", "wav,mp3,ogg,flac,mov,matroska,webm,aac,amr,asf,aiff,ape",
                 "-i",
                 str(source),
-                "-t",
-                str(int(_MAX_SECONDS)),
                 "-vn",
                 "-ac",
                 "1",

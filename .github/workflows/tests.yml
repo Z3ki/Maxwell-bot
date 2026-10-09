@@ -38,3 +38,35 @@ jobs:
       - name: Benchmark uncapped inbound admission
         if: matrix.python-version == '3.12'
         run: python scripts/benchmark_inbound_queue.py --servers 100 500 1000 --iterations 10 --max-outstanding 0
+
+  music-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LAVALINK_PASSWORD: ci-only-music-node-secret
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare deployment environment
+        run: cp .env.simple.example .env
+      - name: Validate host and bridge music deployment configuration
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.music.yml config --quiet
+          LAVALINK_HOST=lavalink docker compose -f docker-compose.bridge.yml -f docker-compose.music.yml config --quiet
+      - name: Build and start pinned audio image; require authenticated node health
+        run: docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build --wait --wait-timeout 180 lavalink
+      - name: Verify pinned server and YouTube plugin versions
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.music.yml exec -T lavalink sh -c 'curl -fsS -H "Authorization: $LAVALINK_PASSWORD" http://127.0.0.1:2333/v4/info' > /tmp/music-info.json
+          python - <<'PYCODE'
+          import json
+          info = json.load(open('/tmp/music-info.json'))
+          assert info['version']['semver'] == '4.2.2', info
+          assert any(p['name'].lower() == 'youtube-plugin' and p['version'] == '1.18.2' for p in info['plugins']), info
+          print('Pinned DAVE audio node and YouTube plugin are healthy')
+          PYCODE
+      - name: Audio node diagnostics
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.music.yml logs --tail=100 lavalink
+      - name: Stop audio node
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.music.yml down --remove-orphans

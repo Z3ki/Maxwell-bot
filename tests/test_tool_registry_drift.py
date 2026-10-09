@@ -50,6 +50,8 @@ def test_every_registered_tool_has_a_parameter_schema():
             "configure",
             "open_configuration",
             "tts",
+            "music_control",
+            "music_info",
         }
     ]
     assert missing == []

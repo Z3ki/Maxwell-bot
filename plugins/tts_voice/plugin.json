@@ -1,7 +1,7 @@
 {
   "id": "tts_voice",
   "name": "Text to Speech",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Speak in the channel with Mistral Voxtral voices. A reference clip is cloned for one line and never saved.",
   "author": "Maxwell",
   "api_version": 1,
@@ -30,7 +30,9 @@
   "prompt": {
     "position": "tools",
     "priority": 80,
-    "requires_tools": ["tts"],
-    "text": "tts speaks one Discord voice message of any length. A success returns nothing: do not call tts again, and do not send_message the same line. An error is returned: fix the voice or emotion and retry once. A cooldown error means wait, do not retry in this turn. voice= paul, oliver, jane, or marie. emotion= applies to those presets (happy, sad, angry, frustrated, excited, confident, cheerful, neutral, sarcastic, curious, confused, jealous, ashamed). reference= clones an audio attachment for that one line only. Clones are never saved, and there is no saved-voice list."
+    "requires_tools": [
+      "tts"
+    ],
+    "text": "tts speaks one Discord voice message of any length. A success returns nothing: do not call tts again, and do not send_message the same line. An error is returned: fix the voice or emotion and retry once. A cooldown error means wait, do not retry in this turn. voice= paul, oliver, jane, or marie. emotion= applies to those presets (happy, sad, angry, frustrated, excited, confident, cheerful, neutral, sarcastic, curious, confused, jealous, ashamed). reference= clones an attachment or direct public HTTP(S) audio/video URL for one line; reference_audio_url is a URL alias. URLs can be supplied by the user or found online and need not be attached. Use permitted voice samples; never impersonate deceptively. A webpage or YouTube watch URL is not a direct audio file. No local audio size or duration caps are applied; the provider validates the complete sample. Clones are never saved, and there is no saved-voice list."
   }
 }

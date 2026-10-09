@@ -1,0 +1,41 @@
+# Linux/host-network Maxwell: docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build
+services:
+  lavalink:
+    build:
+      context: .
+      dockerfile: docker/music/Dockerfile
+    image: maxwell-lavalink:4.2.2
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:2333:2333"
+    environment:
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a strong LAVALINK_PASSWORD in .env}
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx768m"
+    volumes:
+      - ./docker/music/application.yml:/opt/Lavalink/application.yml:ro
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: "1.5"
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", 'curl -fsS -H "Authorization: $$LAVALINK_PASSWORD" http://127.0.0.1:2333/v4/info >/dev/null']
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  maxwell:
+    environment:
+      LAVALINK_HOST: ${LAVALINK_HOST:-127.0.0.1}
+      LAVALINK_PORT: "2333"
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a strong LAVALINK_PASSWORD in .env}
+    depends_on:
+      lavalink:
+        condition: service_healthy
