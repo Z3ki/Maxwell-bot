@@ -19,8 +19,6 @@ _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/@+-]{1,180}$")
 _IMAGE = "maxwell-github-workspace:1"
 _API = "https://api.github.com"
-_MAX_OUTPUT = 120_000
-_MAX_DIFF = 90_000
 _PAT_RE = re.compile(r"^(ghp_|github_pat_|gho_|ghu_)[A-Za-z0-9_]{20,}$")
 _ALLOWED_SCOPES = frozenset({
     "repo","public_repo","repo:status","repo_deployment","workflow",
@@ -157,9 +155,9 @@ def _ref(raw: Any, *, default: str = "") -> str:
     return value
 
 
-def _clip(value: Any, limit: int = _MAX_OUTPUT) -> str:
-    text = str(value or "")
-    return text if len(text) <= limit else text[:limit] + f"\n… [truncated {len(text)-limit:,} chars]"
+def _clip(value: Any) -> str:
+    """Keep complete repository output (historical helper name)."""
+    return str(value or "")
 
 
 def _json_atomic(path: Path, data: Any) -> None:
@@ -467,7 +465,7 @@ class GitHubProjectService:
         res = await self._trusted_git(uid, repo, policy, commands, checkout=True, timeout=600)
         if res.code!=0: raise RuntimeError(res.render())
         head=await self.inspect_repository(uid,repo,"checkout_head",timeout=60)
-        await self.knowledge.update(uid,repo,event="checkout/sync",workspace=str(target),head=head.stdout[:1000]); return _clip(head.render(),8000)
+        await self.knowledge.update(uid,repo,event="checkout/sync",workspace=str(target),head=head.stdout[:1000]); return _clip(head.render())
 
     async def checkout_pr(self,uid:str,repo:str,policy:dict[str,Any],number:int)->str:
         if number<=0: raise ValueError("PR number must be positive")
@@ -572,7 +570,7 @@ class GitHubRepoTool(Tool):
             cur=await self.service.policy.get(uid,r); candidate=dict(cur); candidate.update(changes)
             try:
                 status,text,data=await self.service._api(uid,candidate,"GET",f"/repos/{r}")
-                if status!=200:return f"Error: GitHub access check failed HTTP {status}: {_clip(text,1000)}"
+                if status!=200:return f"Error: GitHub access check failed HTTP {status}: {_clip(text)}"
                 if isinstance(data,dict):
                     perms=data.get("permissions") if isinstance(data.get("permissions"),dict) else {}; wanted=self.service.mode(candidate)
                     if wanted in {"write","admin"} and not perms.get("push"):return "Error: selected credential lacks push permission"
@@ -581,7 +579,7 @@ class GitHubRepoTool(Tool):
             row=await self.service.policy.set(uid,r,changes); return "Policy saved and access verified:\n"+json.dumps(row,indent=2,ensure_ascii=False)
         if action=="list":
             pol={"identity":str(kw.get("identity") or "user")}; status,text,data=await self.service._api(uid,pol,"GET","/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member")
-            if status!=200 or not isinstance(data,list):return f"Error: GitHub HTTP {status}: {_clip(text,2000)}"
+            if status!=200 or not isinstance(data,list):return f"Error: GitHub HTTP {status}: {_clip(text)}"
             return "Accessible repos:\n"+"\n".join(f"{x.get('full_name')} private={bool(x.get('private'))} default={x.get('default_branch')} pushed={x.get('pushed_at')}" for x in data[:100])
         r=_repo(repo); pol=await self.service.policy.get(uid,r)
         if not pol:return "Error: repository has no policy yet. Run policy_set first."
@@ -594,7 +592,7 @@ class GitHubRepoTool(Tool):
                 if not cmd:return "Error: command is required"
                 return (await self.service.run(uid,r,cmd,timeout=int(kw.get("timeout") or 900))).render()
             if action=="diff":
-                ref=_ref(kw.get("ref")); return _clip((await self.service.inspect_repository(uid,r,"diff",ref=ref,timeout=120)).render(),_MAX_DIFF)
+                ref=_ref(kw.get("ref")); return _clip((await self.service.inspect_repository(uid,r,"diff",ref=ref,timeout=120)).render())
             if action=="verify":return await self.service.verify(uid,r,str(kw.get("command") or ""))
             if action=="commit":
                 self.service.require_mode(pol,"write"); msg=str(kw.get("commit_message") or "").strip()
@@ -610,32 +608,32 @@ class GitHubRepoTool(Tool):
                 self.service.require_mode(pol,"write"); title=str(kw.get("title") or "").strip(); body=str(kw.get("body") or "").strip(); head=_ref(kw.get("head")); base=_ref(kw.get("base"))
                 if not(title and head and base):return "Error: title, head, and base are required"
                 status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/pulls",json_body={"title":title,"body":body,"head":head,"base":base})
-                if status not in {200,201}:return f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
+                if status not in {200,201}:return f"Error: GitHub HTTP {status}: {_clip(text)}"
                 await self.service.knowledge.update(uid,r,event=f"created PR #{data.get('number')}"); return json.dumps({k:data.get(k) for k in ("number","html_url","state","title")},indent=2)
             if action=="pr_get":
                 n=int(kw.get("number") or 0); status,text,data=await self.service._api(uid,pol,"GET",f"/repos/{r}/pulls/{n}")
-                if status!=200:return f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
-                keep={k:data.get(k) for k in ("number","title","body","state","draft","mergeable","mergeable_state","html_url","updated_at")}; keep.update(head=(data.get("head") or {}).get("ref"),head_sha=(data.get("head") or {}).get("sha"),base=(data.get("base") or {}).get("ref")); return _clip(json.dumps(keep,indent=2,ensure_ascii=False),25000)
+                if status!=200:return f"Error: GitHub HTTP {status}: {_clip(text)}"
+                keep={k:data.get(k) for k in ("number","title","body","state","draft","mergeable","mergeable_state","html_url","updated_at")}; keep.update(head=(data.get("head") or {}).get("ref"),head_sha=(data.get("head") or {}).get("sha"),base=(data.get("base") or {}).get("ref")); return _clip(json.dumps(keep,indent=2,ensure_ascii=False))
             if action=="pr_diff":
-                n=int(kw.get("number") or 0); status,text,_=await self.service._api(uid,pol,"GET",f"/repos/{r}/pulls/{n}",accept="application/vnd.github.v3.diff"); return _clip(text,_MAX_DIFF) if status==200 else f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
+                n=int(kw.get("number") or 0); status,text,_=await self.service._api(uid,pol,"GET",f"/repos/{r}/pulls/{n}",accept="application/vnd.github.v3.diff"); return _clip(text) if status==200 else f"Error: GitHub HTTP {status}: {_clip(text)}"
             if action=="pr_checkout":return await self.service.checkout_pr(uid,r,pol,int(kw.get("number") or 0))
             if action=="review":
                 self.service.require_mode(pol,"write"); n=int(kw.get("number") or 0); event=str(kw.get("event") or "COMMENT").upper(); body=str(kw.get("body") or "").strip()
                 if event not in {"COMMENT","APPROVE","REQUEST_CHANGES"}:return "Error: invalid review event"
-                status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/pulls/{n}/reviews",json_body={"event":event,"body":body}); return f"Review submitted: {event} {data.get('html_url','')}" if status in {200,201} else f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
+                status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/pulls/{n}/reviews",json_body={"event":event,"body":body}); return f"Review submitted: {event} {data.get('html_url','')}" if status in {200,201} else f"Error: GitHub HTTP {status}: {_clip(text)}"
             if action=="merge":
                 self.service.require_mode(pol,"admin"); n=int(kw.get("number") or 0); method=str(kw.get("merge_method") or pol.get("merge_method") or "squash")
                 status,text,data=await self.service._api(uid,pol,"PUT",f"/repos/{r}/pulls/{n}/merge",json_body={"merge_method":method})
-                if status!=200:return f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
+                if status!=200:return f"Error: GitHub HTTP {status}: {_clip(text)}"
                 await self.service.knowledge.update(uid,r,event=f"merged PR #{n} via {method}"); return json.dumps(data,indent=2,ensure_ascii=False)
             if action=="issue_get":
                 n=int(kw.get("number") or 0); status,text,data=await self.service._api(uid,pol,"GET",f"/repos/{r}/issues/{n}")
-                if status!=200 or not isinstance(data,dict):return f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
-                keep={k:data.get(k) for k in ("number","title","body","state","html_url","updated_at","comments")}; keep["user"]=(data.get("user") or {}).get("login"); keep["labels"]=[x.get("name") for x in (data.get("labels") or []) if isinstance(x,dict)]; return _clip(json.dumps(keep,indent=2,ensure_ascii=False),25000)
+                if status!=200 or not isinstance(data,dict):return f"Error: GitHub HTTP {status}: {_clip(text)}"
+                keep={k:data.get(k) for k in ("number","title","body","state","html_url","updated_at","comments")}; keep["user"]=(data.get("user") or {}).get("login"); keep["labels"]=[x.get("name") for x in (data.get("labels") or []) if isinstance(x,dict)]; return _clip(json.dumps(keep,indent=2,ensure_ascii=False))
             if action=="issue_reply":
                 self.service.require_mode(pol,"write"); n=int(kw.get("number") or 0); body=str(kw.get("body") or "").strip()
                 if not body:return "Error: body is required"
-                status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/issues/{n}/comments",json_body={"body":body}); return f"Issue reply posted: {data.get('html_url','')}" if status in {200,201} else f"Error: GitHub HTTP {status}: {_clip(text,3000)}"
+                status,text,data=await self.service._api(uid,pol,"POST",f"/repos/{r}/issues/{n}/comments",json_body={"body":body}); return f"Issue reply posted: {data.get('html_url','')}" if status in {200,201} else f"Error: GitHub HTTP {status}: {_clip(text)}"
             if action=="knowledge":return json.dumps(await self.service.knowledge.get(uid,r),indent=2,ensure_ascii=False)
             return "Error: unknown action"
         except (PermissionError,FileNotFoundError,ValueError,RuntimeError,OSError) as exc:return f"Error: {exc}"

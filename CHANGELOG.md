@@ -2,6 +2,8 @@
 
 ## Unreleased — 2026-10-08
 
+- Preserve full textual tool results through shell capture, repository inspection, plugin reads/diffs, web reads, backend logs, and follow-up rounds. Retire shell command/output size caps and pass large scripts over stdin. Provider context windows, Discord payload limits, and sandbox resource boundaries still apply.
+- Share the site route contract across runtime and tool guidance. Resolve frontend endpoints against the same-origin site API mount so nested pages work; reject literal public mounts in Python route declarations before overwriting source.
 - Keep app-action options out of stored user text, apply shared response/search defaults once, and clean legacy prompt wrappers without rewriting stored source material.
 - Record every send_message chunk under its real Discord message ID; compact legacy tool/synthetic echoes while retaining intentional repeated sends, failures and cross-channel receipts.
 - Deduplicate signed media URLs in generated context, emit one historical timestamp, reference retained reply parents by message ID, and use budgeted speaker mappings after the cacheable transcript.

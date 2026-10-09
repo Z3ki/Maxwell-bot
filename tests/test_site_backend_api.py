@@ -309,7 +309,8 @@ def test_proxy_refuses_a_malformed_slug(data_dir):
     assert resp.status == 404
 
 
-def test_proxy_only_ever_targets_loopback(data_dir, monkeypatch):
+@pytest.mark.parametrize("local_path", ["notes/5", "api/notes", "files/a%20b"])
+def test_proxy_only_ever_targets_loopback(data_dir, monkeypatch, local_path):
     """The registry picks the destination — a slug can't steer it elsewhere."""
     seen = {}
     monkeypatch.setattr(api.site_server, "port_for", lambda dd, slug: 8801)
@@ -343,14 +344,14 @@ def test_proxy_only_ever_targets_loopback(data_dir, monkeypatch):
     resp = run(
         api.site_proxy(
             FakeRequest(
-                match={"slug": "guest", "path": "notes/5"},
+                match={"slug": "guest", "path": local_path},
                 query={"q": "x"},
                 method="GET",
             )
         )
     )
     assert resp.status == 200
-    assert seen["url"] == "http://127.0.0.1:8801/notes/5?q=x"
+    assert seen["url"] == f"http://127.0.0.1:8801/{local_path}?q=x"
     # The backend is told where it really lives and who is really calling.
     assert seen["headers"]["X-Site-Slug"] == "guest"
     assert seen["headers"]["X-Forwarded-Prefix"] == "/bot/guest/api"

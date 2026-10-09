@@ -73,6 +73,15 @@ network access remains allowed; this pool is a resource/isolation boundary,
 not an outbound egress allowlist. Site backend administrative/source operations
 are restricted to the site owner or Maxwell admin.
 
+Define backend routes as local paths: `/notes` is exposed at
+`/bot/<slug>/api/notes`. Do not put the public mount in Python routes or router
+prefixes. Literal public mounts in framework declarations are rejected before
+source is overwritten; dynamic route generation still needs runtime testing.
+Use `const apiBase = new URL('/bot/<slug>/api/', location.origin)` and
+`fetch(new URL('notes', apiBase))` in the frontend. This also works from nested
+pages and with HTML `<base>` tags. The built-in KV store at `/api/site/<slug>/kv`
+is separate from custom Python routes.
+
 Admission is based on actual Docker containers by `maxwell.site` label or
 `maxwell-site-` name, not just `site_servers.json`. Registry locks and a separate
 cross-process lifecycle lock serialize operations sharing the same deployment's

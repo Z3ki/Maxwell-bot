@@ -111,8 +111,7 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                             selector.unregister(key.fileobj)
                             continue
                         output = captured[key.data]
-                        room = 120000 - len(output)
-                        output.extend(chunk[:max(0, room)])
+                        output.extend(chunk)
             code = process.wait()
         except BaseException:
             process.kill()
@@ -497,8 +496,8 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                 if actual[0] == "commit":
                     actual.insert(1, "--no-gpg-sign")
                 code, out, err = command(argv + actual, worktree, network_env if actual[0] in {"fetch", "push"} else env)
-                output = (output + out)[:120000]
-                error = (error + err)[:120000]
+                output += out
+                error += err
                 if code:
                     break
             check_object_budget(gitdir)

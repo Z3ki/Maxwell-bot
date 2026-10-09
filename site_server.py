@@ -42,6 +42,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from site_routes import client_guide, route_mount_errors, server_path
 from utils import FileLock, FileLockTimeout, _atomic_json_write_sync, docker_bind_path
 
 logger = logging.getLogger(__name__)
@@ -659,6 +660,9 @@ def write_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
     # Stage and validate the complete replacement before touching live source.
     # A disk/encoding failure must not leave an otherwise working backend with
     # half of its modules deleted.
+    errors = route_mount_errors(slug, checked)
+    if errors:
+        raise SiteServerError("Invalid backend route mount:\n" + "\n".join(errors))
     stage = target / f".staging-{uuid.uuid4().hex}"
     backup = target / f".backup-{uuid.uuid4().hex}"
     try:
@@ -749,6 +753,9 @@ def merge_code(data_dir, slug: str, files: dict[str, str]) -> list[str]:
             f"server code too large ({kept_bytes + new_bytes} bytes, max {MAX_CODE_BYTES})"
         )
 
+    errors = route_mount_errors(slug, checked)
+    if errors:
+        raise SiteServerError("Invalid backend route mount:\n" + "\n".join(errors))
     for rel, content in checked.items():
         dest = (target / rel).resolve()
         if target.resolve() not in dest.parents:
@@ -992,7 +999,7 @@ async def _start_unlocked(
         "-v", f"{docker_bind_path(persistent.resolve())}:/data:rw",
         "-e", f"PORT={CONTAINER_PORT}",
         "-e", f"SITE_SLUG={slug}",
-        "-e", f"SITE_BASE_PATH=/bot/{slug}/api",
+        "-e", f"SITE_BASE_PATH={server_path(slug)}",
     ]
     for key, value in (env or {}).items():
         args.extend(["-e", f"{key}={value}"])
@@ -1104,19 +1111,19 @@ async def destroy(data_dir, slug: str) -> None:
         await _destroy_unlocked(data_dir, slug)
 
 
-async def logs(data_dir, slug: str, lines: int = 40) -> str:
+async def logs(data_dir, slug: str, lines: int = 0) -> str:
     try:
-        lines = int(lines or 40)
+        lines = int(lines or 0)
     except (TypeError, ValueError):
-        lines = 40
-    lines = max(1, min(lines, 200))
+        lines = 0
+    tail = str(lines) if lines > 0 else "all"
     code, out, err = await _docker(
-        "logs", "--tail", str(lines), container_name(slug), timeout=20
+        "logs", "--tail", tail, container_name(slug), timeout=20
     )
     if code != 0:
         return "(no container — the backend is not running)"
     text = (out + err).strip()
-    return text[-4000:] if text else "(no output yet)"
+    return text if text else "(no output yet)"
 
 
 async def status(data_dir, slug: str) -> str:
@@ -1139,7 +1146,7 @@ async def status(data_dir, slug: str) -> str:
     ) or "none (baked-in toolkit only)"
     return (
         f"container {live} on 127.0.0.1:{entry.get('port')} "
-        f"(public path /bot/{slug}/api/...)\nfiles: {files}\nenv: {secrets}\n"
+        f"(public path {server_path(slug)}/...)\nfiles: {files}\nenv: {secrets}\n"
         f"extra packages: {extra}\n"
         f"new/restarted runtime: gVisor runsc, uid {SITE_UID}, no capabilities; "
         f"{MEMORY} RAM/no swap, {CPUS} CPU, {PIDS} PIDs, 32MiB tmpfs, 4MiB logs\n"
@@ -1220,16 +1227,8 @@ def contract(slug: str) -> str:
     """The rules a site backend has to follow, handed back in tool results."""
     return (
         f"Backend server for {slug}:\n"
-        f"  Public path : /bot/{slug}/api/...  ->  your routes, with /bot/{slug}/api stripped.\n"
-        f"                A route defined as /notes is reached at /bot/{slug}/api/notes.\n"
-        "  One mount   : define each route ONCE (/ws, /notes). NEVER register the same\n"
-        "                route under several prefixes (/ws plus /api/ws plus\n"
-        "                /bot/<slug>/api/ws) — the proxy strips the prefix for you.\n"
-        "  Frontend calls: the page lives under /bot/<slug>/, so the frontend MUST\n"
-        "                call you with RELATIVE paths (fetch('api/notes')), NEVER\n"
-        "                absolute (fetch('/api/notes') hits the domain root and 404s).\n"
-        "                WebSocket: new WebSocket(location.origin.replace('http', 'ws')\n"
-        f"                + '/bot/{slug}/api/ws'). Never hardcode another slug.\n"
+        + client_guide(slug) + "\n"
+        "  One mount   : define each local route once; do not duplicate router prefixes.\n"
         "  Entry       : app.py, listening on 0.0.0.0:$PORT (the runtime sets PORT).\n"
         "  Standard    : Python 3.12 + FastAPI/Uvicorn + stdlib sqlite3; one worker, "
         "no reload, limit_concurrency=32, backlog=64. Flask/waitress remain "

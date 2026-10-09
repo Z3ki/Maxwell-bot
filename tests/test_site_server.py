@@ -336,13 +336,12 @@ def test_tool_failure_preserves_actual_backend_running_state(tool, monkeypatch, 
     assert tool.bot._sites["demo"]["server"] is still_running
 
 
-def test_server_read_windows_a_huge_file_and_refuses_a_repeat(tool):
+def test_server_read_returns_a_huge_file_and_refuses_a_repeat(tool):
     huge = "print(1)\n" + ("#x\n" * 12_000)
     msg = _msg()
     run(tool.execute(msg, name="demo", action="write", files={"app.py": huge}))
     out = run(tool.execute(msg, name="demo", action="read"))
-    assert huge not in out
-    assert "start_line" in out
+    assert huge in out
     second = run(tool.execute(msg, name="demo", action="read"))
     assert "Already returned" in second
 

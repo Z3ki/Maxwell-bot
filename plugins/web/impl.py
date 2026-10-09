@@ -213,9 +213,6 @@ class FetchUrlTool(Tool):
     side_effects = False
 
 
-    MAX_CONTENT = 15000
-    MAX_BYTES = 1024 * 1024
-
     def get_description(self):
         return (
             "Fetch a public http(s) URL and return readable text (HTML, JSON, "
@@ -225,14 +222,14 @@ class FetchUrlTool(Tool):
             "Direct videos: see_video. Audio/video bytes are media, not text. "
             "YouTube: youtube. A URL #fragment starts at that source section. "
             "Params: url (required), max_length (optional, "
-            "default 15000)."
+            "0 or omitted returns the full text)."
         )
 
     async def execute(
         self,
         message: Message,
         url: str | None = None,
-        max_length: str = "15000",
+        max_length: str = "0",
         **kwargs,
     ) -> str:
         if not url:
@@ -283,16 +280,16 @@ class FetchUrlTool(Tool):
             self.bot.mark_message_tainted(message)
 
         try:
-            max_len = max(1, min(int(max_length), self.MAX_CONTENT))
+            max_len = max(0, int(max_length))
         except (ValueError, TypeError):
-            max_len = self.MAX_CONTENT
+            max_len = 0
 
         try:
             fragment = urlparse(url).fragment
             fetch_timeout = getattr(getattr(self.bot, "config", None), "WEB_FETCH_TIMEOUT", 12.0)
             deadline = time.monotonic() + fetch_timeout
             url, content_type, raw = await _fetch_public_url(
-                url, max_bytes=self.MAX_BYTES, timeout=fetch_timeout
+                url, max_bytes=None, timeout=fetch_timeout
             )
         except ValueError as e:
             msg = str(e)
@@ -302,7 +299,7 @@ class FetchUrlTool(Tool):
                     if remaining <= 0:
                         return "Error: source page deadline exceeded"
                     url, content_type, raw = await _fetch_via_jina_reader(
-                        url, max_bytes=self.MAX_BYTES, timeout=remaining
+                        url, max_bytes=None, timeout=remaining
                     )
                 except Exception as jina_exc:
                     detail = str(jina_exc).strip() or type(jina_exc).__name__
@@ -368,7 +365,7 @@ class FetchUrlTool(Tool):
             return f"Error parsing content: {e}"
 
         text = text.strip()
-        if len(text) > max_len:
+        if max_len and len(text) > max_len:
             text = text[:max_len] + "\n... (truncated)"
 
         return text

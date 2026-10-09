@@ -177,14 +177,29 @@ def test_fetch_url_taints_on_untrusted_page(monkeypatch):
     assert tainted.get("ok") is True
 
 
-def test_fetch_url_too_large_falls_back_to_jina(monkeypatch):
+def test_fetch_url_returns_complete_multi_megabyte_text(monkeypatch):
+    text = "HEAD\n" + "x" * (2 * 1024 * 1024) + "\nTAIL"
+    session = FakeSession({"https://ex.com/large": FakeResp(
+        200, headers={"Content-Type": "text/plain", "Content-Length": str(len(text))},
+        body=text.encode(),
+    )})
+
+    async def get_session():
+        return session
+
+    monkeypatch.setattr("bot_tools._get_shared_session", get_session)
+    message = SimpleNamespace(id=1, channel=SimpleNamespace(id=2))
+    assert _run(FetchUrlTool(None).execute(message, url="https://ex.com/large")) == text
+
+
+def test_fetch_url_forbidden_source_falls_back_to_jina(monkeypatch):
     monkeypatch.setenv("JINA_API_KEY", "jina-secret")
     page = "https://ex.com/huge"
     jina = _jina_reader_url(page)
     session = FakeSession(
         {
             page: FakeResp(
-                200,
+                403,
                 headers={
                     "Content-Type": "text/html",
                     "Content-Length": str(2 * 1024 * 1024),
@@ -230,7 +245,7 @@ def test_fetch_url_jina_fallback_failure_is_clean(monkeypatch):
     session = FakeSession(
         {
             page: FakeResp(
-                200,
+                403,
                 headers={
                     "Content-Type": "text/html",
                     "Content-Length": str(2 * 1024 * 1024),
@@ -253,7 +268,7 @@ def test_fetch_url_jina_fallback_failure_is_clean(monkeypatch):
         )
     )
     assert result.startswith("Error:")
-    assert "too large" in result.lower()
+    assert "403" in result
     assert "jina" in result.lower()
     assert "traceback" not in result.lower()
     assert "HTTP 502" in result

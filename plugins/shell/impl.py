@@ -55,16 +55,6 @@ class ShellTool(Tool):
     # is replaced instead of reused.
     _SANDBOX_INIT = "6"
 
-    # Limits are hard bounded. Operator configuration can lower these values,
-    # but cannot disable the cap.
-    _MAX_OUTPUT_DEFAULT = 100_000
-    _MAX_COMMAND_LENGTH_DEFAULT = 65_536
-    # Channel post cap. Captured stdout can be 100k for the model, but posting
-    # that as Discord ```ansi``` chunks floods the chat. Visible dump is ~300
-    # chars (one short codeblock); the LLM still gets the longer capture.
-    _CHANNEL_MAX_CHARS_DEFAULT = 300
-    _CHANNEL_MAX_CHUNKS = 1
-
     # Operator configuration may lower this limit, but cannot remove it.
     _TIMEOUT_CEILING_SECONDS = 900
 
@@ -93,39 +83,13 @@ class ShellTool(Tool):
 
     @classmethod
     def _max_output(cls) -> int:
-        """Captured stdout+stderr cap, bounded at 1 MiB."""
-        raw = os.environ.get("MAXWELL_SHELL_MAX_OUTPUT", "").strip()
-        if not raw:
-            return cls._MAX_OUTPUT_DEFAULT
-        try:
-            v = int(raw)
-        except ValueError:
-            return cls._MAX_OUTPUT_DEFAULT
-        return max(1, min(v, 1_000_000))
+        """Compatibility accessor: shell output is no longer clipped."""
+        return 0
 
     @classmethod
     def _max_command_length(cls) -> int:
-        """Max chars in a single shell command, bounded at 64 KiB."""
-        raw = os.environ.get("MAXWELL_SHELL_MAX_COMMAND_LENGTH", "").strip()
-        if not raw:
-            return cls._MAX_COMMAND_LENGTH_DEFAULT
-        try:
-            v = int(raw)
-        except ValueError:
-            return cls._MAX_COMMAND_LENGTH_DEFAULT
-        return max(1, min(v, 65_536))
-
-    @classmethod
-    def _channel_max_chars(cls) -> int:
-        """Max chars posted to the chat for one shell call. 0 = unlimited."""
-        raw = os.environ.get("MAXWELL_SHELL_CHANNEL_MAX_CHARS", "").strip()
-        if not raw:
-            return cls._CHANNEL_MAX_CHARS_DEFAULT
-        try:
-            v = int(raw)
-        except ValueError:
-            return cls._CHANNEL_MAX_CHARS_DEFAULT
-        return max(1, min(v, 1_900))
+        """Compatibility accessor: command text has no application size cap."""
+        return 0
 
     @classmethod
     def _timeout_seconds(cls) -> int:
@@ -159,13 +123,7 @@ class ShellTool(Tool):
     def get_description(self):
         # Surface live limits so the model doesn't have to guess. Pulled at
         # description-build time, which happens per-turn on tool registration.
-        max_out = self._max_output()
-        max_cmd = self._max_command_length()
         to = self._timeout_seconds()
-        max_out_str = f"{max_out:,} chars"
-        max_cmd_str = f"{max_cmd:,} chars"
-        chan = self._channel_max_chars()
-        chan_str = "unlimited" if chan == 0 else f"{chan} chars"
         idle = self._idle_seconds()
         if idle:
             persist_note = (
@@ -175,8 +133,8 @@ class ShellTool(Tool):
         else:
             persist_note = "Container persists across calls."
         limits_note = (
-            f"Limits: command <= {max_cmd_str}, output <= {max_out_str}, "
-            f"channel preview <= {chan_str}, timeout {to}s. {persist_note}"
+            "Command text and captured stdout/stderr have no application size cap. "
+            f"Channel progress shows status only. Timeout {to}s. {persist_note}"
         )
         how = (
             "To write a file, put the redirect on the opener line: "
@@ -557,7 +515,7 @@ class ShellTool(Tool):
         if not command:
             return "empty command"
         max_len = self._max_command_length()
-        if len(command) > max_len:
+        if max_len and len(command) > max_len:
             return f"command too long (max {max_len} chars)"
         # Multi-line commands & heredocs are allowed.
         if "\n" in command:
@@ -601,31 +559,34 @@ class ShellTool(Tool):
                     # `docker exec` client does not kill a child command; pipelines,
                     # background jobs, and `sleep` would otherwise survive every
                     # timeout and accumulate in the persistent sandbox.
-                    inner = f"trap 'rm -f {shlex.quote(pid_file)}' EXIT; {sanitized}"
+                    script_file = pid_file + ".sh"
                     wrapped = (
-                        f"echo $$ > {shlex.quote(pid_file)}; exec bash -lc {shlex.quote(inner)}"
+                        f"echo $$ > {shlex.quote(pid_file)}\n"
+                        f"rm -f {shlex.quote(script_file)}\n"
+                        f"trap 'rm -f {shlex.quote(pid_file)} {shlex.quote(script_file)}' EXIT\n{sanitized}\n"
+                    )
+                    bootstrap = (
+                        f"umask 077; cat > {shlex.quote(script_file)} && "
+                        f"exec setsid --wait bash -l {shlex.quote(script_file)} </dev/null"
                     )
                     proc = await asyncio.create_subprocess_exec(
                         "docker",
                         "exec",
+                        "-i",
                         "--workdir",
                         "/workspace",
                         "--user",
                         "root",
                         tenant.container_name,
-                        "setsid",
-                        "--wait",
                         "bash",
                         "-lc",
-                        wrapped,
+                        bootstrap,
+                        stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
                     stdout_buf = bytearray()
                     stderr_buf = bytearray()
-                    max_output = self._max_output()
-                    captured = 0
-                    output_truncated = False
                     started = time.monotonic()
                     last_tick = 0.0
 
@@ -655,15 +616,19 @@ class ShellTool(Tool):
                             chunk = await stream.read(4096)
                             if not chunk:
                                 break
-                            nonlocal captured, output_truncated
-                            remaining = max_output - captured
-                            if remaining > 0:
-                                kept = chunk[:remaining]
-                                buf.extend(kept)
-                                captured += len(kept)
-                            if len(kept if remaining > 0 else b"") < len(chunk):
-                                output_truncated = True
+                            buf.extend(chunk)
                             await _emit()
+
+                    async def _feed() -> None:
+                        # Stdin avoids the OS's per-argument size limit for
+                        # large scripts, without changing the sandbox boundary.
+                        try:
+                            proc.stdin.write(wrapped.encode())
+                            await proc.stdin.drain()
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
+                        finally:
+                            proc.stdin.close()
 
                     async def _heartbeat() -> None:
                         try:
@@ -680,6 +645,7 @@ class ShellTool(Tool):
                         await _emit(force=True)
                         await asyncio.wait_for(
                             asyncio.gather(
+                                _feed(),
                                 _pump(proc.stdout, stdout_buf),
                                 _pump(proc.stderr, stderr_buf),
                                 proc.wait(),
@@ -723,8 +689,6 @@ class ShellTool(Tool):
                             except Exception as e:
                                 # Usually means the process already exited.
                                 logger.debug("shell zombie cleanup: %s", e)
-                    if output_truncated:
-                        stderr_buf.extend(b"\n[output truncated at MAXWELL_SHELL_MAX_OUTPUT]")
                     return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
                 finally:
                     type(self)._active_tenants.discard(tenant.container_name)
@@ -759,61 +723,6 @@ class ShellTool(Tool):
                 cleanup,
                 timeout=10,
             )
-
-    def _shell_echo_text(self, command: str, *suffixes: str) -> str:
-        """Build the body for a ```ansi block: a (truncated) command echo + suffix lines.
-
-        The command can be a long multi-line script; echoing it verbatim blows
-        past Discord's 2000-char limit once wrapped in a codeblock. Cap the
-        echo so the actual error/output — the useful part — always fits.
-        """
-        max_echo = 80
-        echo = (
-            command
-            if len(command) <= max_echo
-            else command[:max_echo] + " …(truncated)"
-        )
-        parts = [f"$ {echo}"]
-        parts.extend(s for s in suffixes if s)
-        return "\n".join(parts)
-
-    def _shell_running_text(
-        self, command: str, stdout: bytes, stderr: bytes, elapsed: float
-    ) -> str:
-        secs = int(elapsed)
-        status = "… running" if secs < 1 else f"… running {secs}s"
-        out = stdout.decode(errors="replace").strip()
-        err = stderr.decode(errors="replace").strip()
-        body = out
-        if err:
-            body = f"{body}\n[stderr] {err}" if body else f"[stderr] {err}"
-        if body:
-            return self._shell_echo_text(command, status, body)
-        return self._shell_echo_text(command, status)
-
-    def _truncate_shell_preview(self, text: str, limit: int) -> str:
-        """Keep `$ cmd` / running status plus the newest tail when truncating."""
-        notice = "\n... (truncated for channel)"
-        if limit <= 0 or len(text) <= limit:
-            return text
-        keep = max(0, limit - len(notice))
-        if keep <= 0:
-            return notice[-limit:]
-        first_nl = text.find("\n")
-        header_end = first_nl if first_nl >= 0 else min(len(text), keep)
-        if first_nl >= 0:
-            second_nl = text.find("\n", first_nl + 1)
-            second = text[first_nl + 1 : second_nl if second_nl >= 0 else len(text)]
-            if second.startswith("… "):
-                header_end = second_nl if second_nl >= 0 else len(text)
-        header = text[:header_end]
-        body = text[header_end:]
-        if len(header) >= keep:
-            return header[:keep] + notice
-        room = keep - len(header)
-        if len(body) <= room:
-            return header + body
-        return header + notice + body[-room:]
 
     def _format_ansi_message(self, text: str) -> str:
         """Format shell status message under Discord's 2000 cap."""
@@ -969,10 +878,6 @@ class ShellTool(Tool):
             combined += f"[stderr] {err.strip()}"
         if exit_code != 0:
             combined += f"\n[exit code: {exit_code}]"
-
-        max_out = self._max_output()
-        if max_out and len(combined) > max_out:
-            combined = combined[:max_out] + "\n... (truncated)"
 
         result = combined if combined else "(command produced no output)"
 

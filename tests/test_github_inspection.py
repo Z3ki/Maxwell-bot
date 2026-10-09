@@ -248,13 +248,13 @@ def test_symbolic_metadata_is_refused(tmp_path, metadata):
     assert result.returncode == 2
 
 
-def test_large_diff_output_is_bounded_and_process_is_drained(tmp_path):
+def test_large_diff_output_is_complete_and_process_is_drained(tmp_path):
     worktree = repository(tmp_path)
     (worktree / "app.txt").write_text("new data line\n" * 50000, encoding="utf-8")
     result = inspect(worktree, "diff")
     assert result.returncode == 0, result.stderr
-    assert "[inspection output truncated]" in result.stdout
-    assert len(result.stdout) < 120100
+    assert "[inspection output truncated]" not in result.stdout
+    assert result.stdout.count("+new data line\n") == 50000
 
 
 def test_packed_refs_and_split_index_are_preserved(tmp_path):

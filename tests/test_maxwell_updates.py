@@ -8,6 +8,8 @@ from plugins.maxwell_extras import updates
 
 def test_updates_keep_running_revision_separate_from_main(tmp_path, monkeypatch):
     old, new = "a" * 40, "b" * 40
+    patch = "+ real change\n" * 10_000
+    changelog = "Unreleased changes\n" * 10_000
     monkeypatch.setattr(updates, "_running_snapshot", lambda root: {"commit": old, "changelog": "running changes", "source": "startup_checkout"})
     tool = updates.MaxwellUpdatesTool(SimpleNamespace(), root=tmp_path)
     schema = tool.get_parameters()
@@ -20,9 +22,9 @@ def test_updates_keep_running_revision_separate_from_main(tmp_path, monkeypatch)
         if path == "/commits":
             return [{"sha": new, "commit": {"message": "new feature", "committer": {"date": "2026-10-03"}}}]
         if path == f"/commits/{old}":
-            return {"sha": old, "commit": {"message": "old version"}, "files": [{"filename": "bot.py", "status": "modified", "additions": 5, "patch": "+ real change"}]}
+            return {"sha": old, "commit": {"message": "old version"}, "files": [{"filename": "bot.py", "status": "modified", "additions": 5, "patch": patch}]}
         assert params == {"ref": new}
-        return {"encoding": "base64", "content": base64.b64encode(b"Unreleased changes").decode()}
+        return {"encoding": "base64", "content": base64.b64encode(changelog.encode()).decode()}
 
     monkeypatch.setattr(tool, "_fetch_json", fetch)
     result = json.loads(asyncio.run(tool.execute(SimpleNamespace(), commit=old, include_diff=True)))
@@ -30,8 +32,9 @@ def test_updates_keep_running_revision_separate_from_main(tmp_path, monkeypatch)
     assert result["main_commit"] == new
     assert not result["running_commit_matches_main"]
     assert result["selected_commit"]["files"][0]["filename"] == "bot.py"
-    assert result["selected_commit"]["files"][0]["patch"] == "+ real change"
-    assert result["main_changelog"] == "Unreleased changes"
+    assert result["selected_commit"]["files"][0]["patch"] == patch
+    assert result["selected_commit"]["files"][0]["patch_available"] is True
+    assert result["main_changelog"] == changelog
     assert "not be deployed" in result["note"]
 
 

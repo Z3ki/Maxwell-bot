@@ -141,6 +141,7 @@ from api.config import (  # noqa: E402
 )
 import site_backend  # noqa: E402
 import site_server  # noqa: E402
+from site_routes import SITE_MOUNT, server_path  # noqa: E402
 
 from api.auth import (  # noqa: E402
     _auth_middleware_unless_login,
@@ -1019,7 +1020,7 @@ async def _proxy_websocket(request, slug: str, target: str):
         and not k.lower().startswith("sec-websocket-")
     }
     headers["X-Forwarded-For"] = _get_client_ip(request)
-    headers["X-Forwarded-Prefix"] = f"/bot/{slug}/api"
+    headers["X-Forwarded-Prefix"] = server_path(slug)
     headers["X-Site-Slug"] = slug
 
     session = aiohttp.ClientSession(
@@ -1151,7 +1152,7 @@ async def _site_proxy_request(request, slug: str):
     }
     # The backend gets to know where it really is, and who is really calling.
     headers["X-Forwarded-For"] = _get_client_ip(request)
-    headers["X-Forwarded-Prefix"] = f"/bot/{slug}/api"
+    headers["X-Forwarded-Prefix"] = server_path(slug)
     headers["X-Site-Slug"] = slug
 
     # Reject an oversize upload from its Content-Length instead of streaming
@@ -2411,7 +2412,7 @@ app.router.add_options("/api/site/{slug}/items/{name}", _options_handler)
 site_app = web.Application(client_max_size=SITE_UPLOAD_MAX)
 site_app.router.add_route("*", "/{slug}/api", site_proxy)
 site_app.router.add_route("*", "/{slug}/api/{path:.*}", site_proxy)
-app.add_subapp("/bot/", site_app)
+app.add_subapp(SITE_MOUNT + "/", site_app)
 app.router.add_get("/api/control", control_get)
 app.router.add_put("/api/control", control_put)
 app.router.add_delete("/api/control", control_reset)

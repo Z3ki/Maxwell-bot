@@ -333,16 +333,15 @@ def test_refuses_to_publish_a_history_placeholder_as_the_page(bot, tmp_path):
     assert marker not in page
 
 
-def test_edit_site_read_windows_a_page_over_60k(bot, tmp_path):
+def test_edit_site_read_returns_complete_page_over_60k(bot, tmp_path):
     huge = "<!DOCTYPE html><html><body>" + ("x" * 63_199) + "</body></html>"
     msg = _msg()
     run(CreateSiteTool(bot).execute(msg, name="big", title="Big", body=huge))
     out = run(EditSiteTool(bot).execute(msg, name="big", action="read"))
     assert "too big to return" not in out
     assert str(len(huge)) in out
-    assert huge not in out
-    assert "start_line" in out
-    assert out.count("x") <= 8_000
+    assert huge in out
+    assert "omitted" not in out
 
 
 def test_edit_site_refuses_a_second_identical_read(bot):

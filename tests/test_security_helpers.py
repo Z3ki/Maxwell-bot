@@ -154,20 +154,16 @@ PY"""
         ):
             assert tool._validate_command(command) is None
 
-    def test_rejects_long_command(self, monkeypatch):
-        # Default cap is 65,536 (set at the start of this session; was 4000).
-        # To trigger rejection in a unit test we set the env var low.
-        # See MAXWELL_SHELL_MAX_COMMAND_LENGTH in .env.example.
+    def test_long_command_ignores_retired_size_setting(self, monkeypatch):
         monkeypatch.setenv("MAXWELL_SHELL_MAX_COMMAND_LENGTH", "2000")
         tool = ShellTool(None)  # type: ignore[arg-type]
-        assert tool._validate_command("x" * 5000) is not None
+        assert tool._validate_command("x" * 200_000) is None
 
     def test_command_length_unlimited_with_zero(self, monkeypatch):
-        # Invalid/zero values clamp to the hard one-character minimum.
         monkeypatch.setenv("MAXWELL_SHELL_MAX_COMMAND_LENGTH", "0")
         tool = ShellTool(None)  # type: ignore[arg-type]
         assert tool._validate_command("x") is None
-        assert tool._validate_command("xx") is not None
+        assert tool._validate_command("x" * 200_000) is None
 
     def test_sandbox_runs_root_with_limited_guest_capabilities_and_no_host_mounts(self):
         from plugins.shell.isolation import GUEST_CAPABILITIES, docker_run_args

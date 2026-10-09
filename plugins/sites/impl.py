@@ -95,7 +95,7 @@ class CreateSiteTool(Tool):
             getattr(
                 bot.config, "MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"
             ).rstrip("/")
-            + "/bot"
+            + site_routes.SITE_MOUNT
         )
 
     def _control(self) -> dict:
@@ -403,7 +403,7 @@ class CreateSiteTool(Tool):
             if len(written) > 1:
                 result += f"\nFiles: {', '.join(written)}"
             if wants_backend:
-                result += "\n" + site_backend.client_guide(f"/api/site/{slug}")
+                result += "\n" + site_backend.client_guide(site_routes.store_path(slug))
                 result += "\nFor custom routes, auth, server-side secrets, or WebSockets, use site_server."
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
             # Placeholders shipped in the HTML are invisible in a 200 response
@@ -506,8 +506,8 @@ class EditSiteTool(_SiteOwnedTool):
             "to keep working on the frontend (HTML/CSS/JS) — do not recreate "
             "the site. "
             "action=list (files + sizes; notes a Python backend if one is running), "
-            "read (one file; large files return a numbered window — pass "
-            "start_line= to page; do not re-read a file you already have), "
+            "read (complete file; optional start_line= skips preceding lines; "
+            "do not re-read a file you already have), "
             "write (replace or add a file — path defaults to index.html; or pass "
             "files={...} to write several at once), "
             "replace (swap `find` with `replace` in one file; all=true for every "
@@ -739,7 +739,7 @@ class EditSiteTool(_SiteOwnedTool):
             if not enabled:
                 return f"Backend off for {slug} (data kept; /api/site/{slug} now 404s)."
             return f"Backend on for {slug}.\n" + site_backend.client_guide(
-                f"/api/site/{slug}"
+                site_routes.store_path(slug)
             )
 
         if act in {"extend", "renew", "keep"}:
@@ -825,8 +825,8 @@ class SiteServerTool(_SiteOwnedTool):
             "Use this when the site needs server-side logic: accounts, WebSockets, "
             "a hidden API key, anything a static page cannot enforce. "
             "Keep working on a live backend with these actions instead of recreating it: "
-            "list (source files), read (one file; large files return a numbered "
-            "window — pass start_line= to page; do not re-read a file you already "
+            "list (source files), read (complete file; optional start_line= skips "
+            "preceding lines; do not re-read a file you already "
             "have), write (merge files — helpers stay; "
             "pass path+content for one file or files={...} for several), replace "
             "(exact-text patch in one file, like edit_site), deploy (full snapshot, "
@@ -835,8 +835,11 @@ class SiteServerTool(_SiteOwnedTool):
             "New apps use Python 3.12, FastAPI and Uvicorn with one worker and no "
             "reload; app.py listens on 0.0.0.0:$PORT. Use SQLite at /data/app.db. "
             "Only /data is writable and persists. Existing Flask apps remain supported. "
-            "Frontend calls use relative api/... URLs; routes in Python omit the "
-            "/bot/<name>/api prefix. Secrets belong in env, never frontend files. "
+            "Frontend calls resolve endpoint names against the same-origin mount "
+            "/bot/<name>/api/. Define Python routes without that public prefix. "
+            "Use new URL('/bot/<name>/api/', location.origin) as apiBase, then "
+            "fetch(new URL('notes', apiBase)); this works on nested pages too. "
+            "Secrets belong in env, never frontend files. "
             "Backend source, secrets, and lifecycle are owner/admin-only. "
             "Frontend pages: edit_site. This tool is the server."
         )
@@ -855,7 +858,7 @@ class SiteServerTool(_SiteOwnedTool):
         replace: str | None = None,
         all: Any = None,
         replace_all: Any = None,
-        lines: int = 40,
+        lines: int = 0,
         start_line: Any = None,
         **kwargs,
     ) -> str:
@@ -1160,7 +1163,7 @@ class ListSitesTool(Tool):
                     marks.append("BROKEN: " + reason[:80])
             tail = f" [{', '.join(marks)}]" if marks else ""
             lines.append(
-                f"  • {slug} — {base_url}/bot/{slug}/ — '{title}' "
+                f"  • {slug} — {base_url}{site_routes.page_path(slug)} — '{title}' "
                 f"({site_expiry_label(data, control)}){owner_label}{tail}"
             )
         header = (

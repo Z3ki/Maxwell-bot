@@ -538,8 +538,8 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "backend": _str("For backend: true | false | status | clear"),
             "permanent": _bool("For extend: stop this site expiring"),
             "start_line": _int(
-                "For read of a large file: 1-based line to start the window. "
-                "Omit to see the top (or the whole file if it is small)."
+                "For read: optional 1-based starting line. "
+                "Omit to return the complete file."
             ),
         },
         ["name", "action"],
@@ -560,7 +560,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "stdlib; put the database at /data/app.db. Only /data is writable "
                 "and survives a restart. Existing Flask applications are supported. "
                 "Routes are served under /bot/<name>/api/; define routes without "
-                "that prefix and call relative api/... URLs from the frontend."
+                "that prefix. Frontend: apiBase = new URL('/bot/<name>/api/', "
+                "location.origin); fetch(new URL('notes', apiBase)). Endpoint names "
+                "have no leading slash. This works from nested pages too."
             ),
             "path": _str(
                 "For read/replace/rm/write-one-file: which server file (default app.py)"
@@ -578,10 +580,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "the site directory, never served and never echoed back; read "
                 "them with os.environ. Setting env restarts the server."
             ),
-            "lines": _int("For logs: how many lines (default 40, max 200)"),
+            "lines": _int("For logs: requested last lines; 0 or omitted returns all retained logs"),
             "start_line": _int(
-                "For read of a large file: 1-based line to start the window. "
-                "Omit to see the top (or the whole file if it is small)."
+                "For read: optional 1-based starting line. "
+                "Omit to return the complete file."
             ),
         },
         ["name", "action"],
@@ -718,7 +720,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     "fetch_url": _obj(
         {
             "url": _str("URL to fetch"),
-            "max_length": _int("Optional max characters of returned text"),
+            "max_length": _int("Optional requested preview length; 0 or omitted returns full text"),
         },
         ["url"],
     ),
@@ -1877,15 +1879,10 @@ def recover_text_tool_calls(
     return calls, leftover
 
 
-# ── tool-loop transcript bounds ──────────────────────────────────────────
-# Every agent loop in this repo (Discord, Telegram) replays the
-# whole assistant/tool transcript on every round, so an unbounded tail is how a
-# turn walks off the end of the context window mid-loop. Per-result truncation
-# is not enough on its own: 24 rounds of a 32k-capped result is still ~768k
-# chars riding on top of an already-full prompt.
-TOOL_TAIL_MAX_MESSAGES = 12
-TOOL_TAIL_MAX_CHARS = 36_000
-TOOL_RESULT_COMPACT_CHARS = 4_000
+# Tool output is complete by default. Explicit callers may still choose a
+# round budget, but results inside a retained round are never clipped.
+TOOL_TAIL_MAX_MESSAGES = 0
+TOOL_TAIL_MAX_CHARS = 0
 
 
 def message_chars(message: dict) -> int:
@@ -1942,7 +1939,7 @@ def trim_tool_tail(
     max_messages: int = TOOL_TAIL_MAX_MESSAGES,
     max_chars: int = TOOL_TAIL_MAX_CHARS,
 ) -> list[dict]:
-    """Bound a tool-loop tail by size AND count, oldest round first.
+    """Preserve the tail unless a caller explicitly requests a round budget.
 
     Never slices mid-round: a plain ``tail[-24:]`` can cut an assistant message
     away from the ``role: "tool"`` replies carrying its tool_call_ids, which
@@ -1950,39 +1947,19 @@ def trim_tool_tail(
     Whole rounds are dropped instead, and the newest round always survives so
     the model still sees what it just ran.
     """
+    if max_messages <= 0 and max_chars <= 0:
+        return list(tail)
     groups = tool_tail_groups(tail)
     used = sum(message_chars(m) for m in tail)
     count = len(tail)
-    while len(groups) > 1 and (count > max_messages or used > max_chars):
+    while len(groups) > 1 and (
+        (max_messages > 0 and count > max_messages)
+        or (max_chars > 0 and used > max_chars)
+    ):
         dropped = groups.pop(0)
         count -= len(dropped)
         used -= sum(message_chars(m) for m in dropped)
-    _compact_old_tool_results(groups)
     return [msg for group in groups for msg in group]
-
-
-def _compact_old_tool_results(groups: list[list[dict]]) -> None:
-    """Shrink older tool results so a huge dump cannot evict the other file.
-
-    The newest round stays intact (the model just produced it). Earlier
-    rounds already got a follow-up turn; keeping a 40k HTML dump of them
-    only inflates the tail until trim_tool_tail drops the sibling read.
-    """
-    if len(groups) < 2:
-        return
-    marker_prefix = "\n… ["
-    for group in groups[:-1]:
-        for msg in group:
-            if msg.get("role") != "tool":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, str) or len(content) <= TOOL_RESULT_COMPACT_CHARS:
-                continue
-            omitted = len(content) - TOOL_RESULT_COMPACT_CHARS
-            msg["content"] = (
-                content[:TOOL_RESULT_COMPACT_CHARS]
-                + f"{marker_prefix}{omitted} chars truncated from earlier tool result]"
-            )
 
 
 # Site tools carry the page itself in arguments. Replacing that with

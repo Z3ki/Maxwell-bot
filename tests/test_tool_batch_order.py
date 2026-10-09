@@ -15,6 +15,23 @@ def _call(name):
     }
 
 
+def test_long_tool_output_reaches_native_followup_without_middle_clipping(monkeypatch):
+    output = "HEAD\n" + "x" * 200_000 + "\nTAIL"
+
+    async def execute(*args, **kwargs):
+        return output
+
+    monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+    monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+    owner = SimpleNamespace(_control={}, tools={})
+    message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+    _, results = asyncio.run(MaxwellBot._process_native_tool_calls(
+        owner, message, "", [_call("shell")],
+    ))
+    assert results == [output]
+    assert owner._last_native_followup_messages[-1]["content"] == output
+
+
 def test_mutations_finish_before_a_batched_reply_is_deferred(monkeypatch):
     async def run():
         events = []

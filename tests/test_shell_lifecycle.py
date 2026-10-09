@@ -3,11 +3,54 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
 from plugins.shell.impl import ShellTool
 from plugins.shell.isolation import ShellTenant
+
+
+def test_large_script_and_both_output_streams_survive_capture(monkeypatch):
+    tenant = ShellTenant("7", "guild:9", "mwsh-" + "a" * 24)
+    tool = ShellTool(None)
+    create_process = asyncio.create_subprocess_exec
+    script_paths = []
+
+    async def local_process(*args, **kwargs):
+        assert args[:3] == ("docker", "exec", "-i")
+        bootstrap = args[-1]
+        assert len(bootstrap) < 1000
+        script_paths.extend(re.findall(r"/tmp/maxwell-exec-[a-f0-9]+\.pid(?:\.sh)?", bootstrap))
+        # Test the actual stdin transport and concurrent pipe pumps without
+        # needing Docker. Only this fixed test script executes locally.
+        return await create_process("bash", "-c", bootstrap, **kwargs)
+
+    async def ensure_container(_tenant):
+        return None
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", local_process)
+    monkeypatch.setattr(tool, "_ensure_container", ensure_container)
+    monkeypatch.setattr(ShellTool, "_schedule_idle_reaper", classmethod(lambda cls: None))
+    monkeypatch.setattr(ShellTool, "_global_slots", asyncio.Semaphore(1))
+    for name in ("_tenant_locks", "_user_slots", "_last_used_by_tenant"):
+        monkeypatch.setattr(ShellTool, name, {})
+    for name in ("_active_tenants", "_active_owners", "_prepared_tenants"):
+        monkeypatch.setattr(ShellTool, name, set())
+    monkeypatch.setattr(ShellTool, "_tenants", {tenant.container_name: tenant})
+    command = "# large source\n" * 20_000 + """cat
+python3 - <<'PY'
+import sys
+sys.stdout.write('O' * 1_100_000 + 'END-OUT')
+sys.stderr.write('E' * 1_100_000 + 'END-ERR')
+PY
+"""
+    stdout, stderr, code = asyncio.run(tool._run_shell_command_inner(command, tenant))
+    assert code == 0
+    assert stdout == b"O" * 1_100_000 + b"END-OUT"
+    assert stderr == b"E" * 1_100_000 + b"END-ERR"
+    from pathlib import Path
+    assert script_paths and all(not Path(path).exists() for path in script_paths)
 
 
 def test_shell_fails_closed_before_docker_if_host_policy_is_missing(monkeypatch):
@@ -78,6 +121,11 @@ def test_command_timeout_destroys_the_tenant_container(monkeypatch):
             self.returncode = None
             self.stdout = None
             self.stderr = None
+            self.stdin = type("Input", (), {
+                "write": lambda self, data: None,
+                "drain": lambda self: asyncio.sleep(0),
+                "close": lambda self: None,
+            })()
             self.killed = False
 
         async def wait(self):

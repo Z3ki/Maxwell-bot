@@ -138,7 +138,9 @@ provision a host without the script.
   published ports, no host namespaces, no bind mounts, and no Docker socket.
 - Each guest is limited to 2 GiB RAM, 1 CPU, 256 processes, 6 GiB writable
   container layer (where supported by the storage driver), 512 MiB workspace,
-  256 MiB `/tmp`, 1,024 open files, 15 minutes per command, and bounded output.
+  256 MiB `/tmp`, 1,024 open files, and 15 minutes per command.
+  Command text and captured stdout/stderr have no application size cap;
+  large scripts are delivered over stdin rather than a command-line argument.
   The host cgroup limits all shell guests together to 50% of host RAM, two CPU
   cores, no swap, and 1,024 tasks. A user may have one running command and two
   cached workspaces; the host has at most four cached guests, bounding shell

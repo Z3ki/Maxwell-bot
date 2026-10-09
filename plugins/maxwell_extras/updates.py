@@ -137,19 +137,16 @@ class MaxwellUpdatesTool(Tool):
                         detail = await self._fetch_json(session, f"/commits/{commit}")
                         result["selected_commit"] = {**self._commit_summary(detail), "files": [
                             {key: row.get(key) for key in ("filename", "status", "additions", "deletions")}
-                            for row in detail.get("files", [])[:30]
+                            for row in detail.get("files", [])
                         ], "stats": detail.get("stats")}
                         if include_diff:
-                            remaining = 10000
                             for summary, file_row in zip(result["selected_commit"]["files"], detail.get("files", [])):
                                 patch = str(file_row.get("patch") or "")
-                                budget = min(3000, remaining)
-                                summary["patch"] = patch[:budget]
-                                summary["patch_truncated"] = len(patch) > budget
-                                remaining -= min(len(patch), budget)
+                                summary["patch"] = patch
+                                summary["patch_available"] = "patch" in file_row
                     changelog = await self._fetch_json(session, "/contents/CHANGELOG.md", {"ref": head})
                     if changelog.get("encoding") == "base64":
-                        result["main_changelog"] = base64.b64decode(changelog["content"]).decode("utf-8")[:6000]
+                        result["main_changelog"] = base64.b64decode(changelog["content"]).decode("utf-8")
                         result["main_changelog_url"] = f"{_WEB}/blob/{head}/CHANGELOG.md"
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError) as error:
                 result["github_status"] = f"Unavailable ({type(error).__name__}); use only returned evidence."

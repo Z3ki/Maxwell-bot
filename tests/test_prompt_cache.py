@@ -155,7 +155,7 @@ def test_trim_conversation_tail_keeps_tool_calls_paired():
         ]
 
     tail = [m for i in range(30) for m in round_msgs(i)]
-    trimmed = trim_tool_tail(tail)
+    trimmed = trim_tool_tail(tail, max_messages=24)
     assert len(trimmed) <= 24
     # Every tool message still has its assistant message ahead of it.
     open_ids = set()
@@ -184,16 +184,14 @@ def test_trim_conversation_tail_enforces_char_budget():
             {"role": "tool", "tool_call_id": f"call_{i}", "content": "x" * 32_000},
         ]
 
-    trimmed = trim_tool_tail(tail)
+    trimmed = trim_tool_tail(tail, max_chars=96_000)
     used = sum(MaxwellBot._message_content_chars(m) for m in trimmed)
     assert used <= 96_000
     # The newest round always survives, even on its own.
     assert trimmed[-1]["tool_call_id"] == "call_9"
 
 
-def test_trim_tool_tail_compacts_older_tool_results():
-    from tool_schemas import TOOL_RESULT_COMPACT_CHARS
-
+def test_tool_tail_preserves_full_results_without_default_caps():
     tail = []
     for i in range(3):
         tail += [
@@ -207,14 +205,13 @@ def test_trim_tool_tail_compacts_older_tool_results():
                     }
                 ],
             },
-            {"role": "tool", "tool_call_id": f"c{i}", "content": "y" * 8_000},
+            {"role": "tool", "tool_call_id": f"c{i}", "content": "y" * 200_000},
         ]
     trimmed = trim_tool_tail(tail)
     old = next(m for m in trimmed if m.get("tool_call_id") == "c0")
     newest = next(m for m in trimmed if m.get("tool_call_id") == "c2")
-    assert len(newest["content"]) == 8_000
-    assert "truncated from earlier tool result" in old["content"]
-    assert len(old["content"]) <= TOOL_RESULT_COMPACT_CHARS + 80
+    assert trimmed == tail
+    assert len(newest["content"]) == len(old["content"]) == 200_000
 
 
 def test_is_connected_uses_the_gateway_websocket():

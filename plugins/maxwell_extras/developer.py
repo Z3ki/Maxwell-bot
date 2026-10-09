@@ -306,13 +306,13 @@ class PluginWorkbenchTool(Tool):
             if not dest.is_file() or dest.is_symlink():
                 return "Error: plugin file not found."
             text = dest.read_text("utf-8")
-            return text[:28_000] + (f"\n...[truncated {len(text)-28_000} chars]" if len(text) > 28_000 else "")
+            return text
         if action in {"show", "apply", "reject"}:
             row = await self.store.get(str(proposal_id or ""))
             if not row:
                 return "Error: proposal not found."
             if action == "show":
-                diff = str(row.get("diff") or "")[:12_000]
+                diff = str(row.get("diff") or "")
                 return f"Plugin proposal {row['id']} [{row['status']}]\nPlugin: {row['plugin_name']}\nSummary: {row['summary']}\n\n```diff\n{diff}\n```"
             if action == "reject":
                 await self.store.update(str(proposal_id), status="rejected", decided_at=time.time(), decided_by=str(uid))
@@ -338,7 +338,7 @@ class PluginWorkbenchTool(Tool):
             "created_message_id": str(getattr(message, "id", "") or ""),
             "before_hashes": {rel: (_sha(text) if text is not None else None) for rel, text in before.items()},
             "edits": _as_list(edits, "edits"), "new_files": _as_list(new_files, "new_files"),
-            "delete_files": _as_list(delete_files, "delete_files"), "diff": diff[:40_000],
+            "delete_files": _as_list(delete_files, "delete_files"), "diff": diff,
         }
         await self.store.put(row)
         send = getattr(getattr(message, "channel", None), "send", None)

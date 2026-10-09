@@ -23,7 +23,6 @@ INSPECTION_SCRIPT = dedent(
 
     MAX_METADATA_BYTES = 64 * 1024 * 1024
     MAX_METADATA_FILES = 10000
-    MAX_OUTPUT_BYTES = 120000
     COMMAND_TIMEOUT = 90
     REF_PATTERN = re.compile(r"^[A-Za-z0-9._/@+-]{1,180}$")
     OPERATIONS = {"status", "diff", "verify", "checkout_head"}
@@ -39,14 +38,12 @@ INSPECTION_SCRIPT = dedent(
         return value
 
     def command(argv, cwd, env):
-        # Drain both pipes even after the capture limit, so a large diff cannot
-        # deadlock or grow the inspector's memory without bound.
+        # Drain both pipes concurrently so large diffs remain complete.
         process = subprocess.Popen(
             argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
-        truncated = {"stdout": False, "stderr": False}
         deadline = time.monotonic() + COMMAND_TIMEOUT
         try:
             with selectors.DefaultSelector() as selector:
@@ -62,10 +59,7 @@ INSPECTION_SCRIPT = dedent(
                             selector.unregister(key.fileobj)
                             continue
                         kind = key.data
-                        room = MAX_OUTPUT_BYTES - len(buffers[kind])
-                        buffers[kind].extend(chunk[:room])
-                        if len(chunk) > room:
-                            truncated[kind] = True
+                        buffers[kind].extend(chunk)
             code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
         except BaseException:
             process.kill()
@@ -77,8 +71,6 @@ INSPECTION_SCRIPT = dedent(
         text = {}
         for kind in buffers:
             text[kind] = buffers[kind].decode("utf-8", errors="replace")
-            if truncated[kind]:
-                text[kind] += "\n[inspection output truncated]\n"
         return code, text["stdout"], text["stderr"]
 
     def copy_file(source, destination, budget):

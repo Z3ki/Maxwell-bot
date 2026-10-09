@@ -20,6 +20,7 @@ import re
 import shlex
 import shutil
 import socket
+import site_routes
 import tempfile
 import time
 import traceback
@@ -220,10 +221,10 @@ async def close_shared_session():
 
 
 async def _read_response_limited(
-    response: aiohttp.ClientResponse, max_bytes: int
+    response: aiohttp.ClientResponse, max_bytes: int | None
 ) -> bytes:
     content_length = response.headers.get("Content-Length")
-    if content_length:
+    if content_length and max_bytes is not None:
         try:
             if int(content_length) > max_bytes:
                 raise ValueError(f"response too large (max {max_bytes} bytes)")
@@ -234,7 +235,7 @@ async def _read_response_limited(
     total = 0
     async for chunk in response.content.iter_chunked(64 * 1024):
         total += len(chunk)
-        if total > max_bytes:
+        if max_bytes is not None and total > max_bytes:
             raise ValueError(f"response too large (max {max_bytes} bytes)")
         chunks.append(chunk)
     return b"".join(chunks)
@@ -2859,12 +2860,7 @@ SITE_BLOCKED_SUFFIXES = {
 }
 
 
-# Site `action=read` used to dump the whole file into the tool result. A 30–40k
-# index.html is larger than the tool-loop tail budget, so the previous round
-# (the other file) is dropped, the model re-reads that one, and we ping-pong
-# until max_tool_iterations. Window large files and refuse duplicate reads.
-SITE_READ_FULL_CHARS = 8_000
-SITE_READ_WINDOW_CHARS = 6_000
+# Return complete site files; duplicate-read guards still prevent loops.
 SITE_IDLE_READ_LIMIT = 6
 SITE_TEST_REPEAT_LIMIT = 2
 SITE_READ_LOOP_MARKER = "__SITE_READ_LOOP__"
@@ -2936,66 +2932,14 @@ def _site_start_line(raw: Any) -> int:
 
 
 def format_site_file_read(rel: str, text: str, *, start_line: int = 1) -> str:
-    """Return a file without blowing the tool-loop tail budget.
-
-    Small files come back whole. Larger ones get a numbered window; pass
-    ``start_line`` to page. A minified one-liner is paged by character so it
-    cannot dump 40k into the tool loop (that is what hung Maxwell).
-    """
-    start_line = _site_start_line(start_line)
+    """Return the complete file, or its remaining lines at an explicit offset."""
     raw = text or ""
-    n = len(raw)
-    if n <= SITE_READ_FULL_CHARS and start_line <= 1:
-        return f"{rel} ({n} chars):\n{raw}"
+    start_line = _site_start_line(start_line)
+    if start_line == 1:
+        return f"{rel} ({len(raw)} chars):\n{raw}"
     lines = raw.splitlines(keepends=True)
-    total = len(lines)
-    if total == 0:
-        return f"{rel} (0 chars):\n"
-    # One giant line (minified HTML/JS): page by start_line as a char window.
-    if total == 1 and n > SITE_READ_FULL_CHARS:
-        offset = (start_line - 1) * SITE_READ_WINDOW_CHARS
-        if offset >= n:
-            offset = max(0, n - SITE_READ_WINDOW_CHARS)
-        chunk = raw[offset : offset + SITE_READ_WINDOW_CHARS]
-        more = ""
-        if offset + len(chunk) < n:
-            more = (
-                f" Chars {offset + len(chunk) + 1}–{n} omitted — "
-                f"pass start_line={start_line + 1} to continue."
-            )
-        return (
-            f"{rel} ({n} chars, 1 line) showing chars "
-            f"{offset + 1}–{offset + len(chunk)}.{more}\n"
-            "Do not re-read this file unless you need another slice. "
-            "Patch with action=replace (exact text from this window) or "
-            "action=write.\n" + chunk
-        )
-    start = min(start_line, total)
-    out: list[str] = []
-    used = 0
-    last = start - 1
-    for i in range(start - 1, total):
-        raw_line = lines[i]
-        numbered = f"{i + 1}|{raw_line if raw_line.endswith(chr(10)) else raw_line + chr(10)}"
-        if not out and len(numbered) > SITE_READ_WINDOW_CHARS:
-            numbered = numbered[:SITE_READ_WINDOW_CHARS] + "\n"
-            out.append(numbered)
-            last = i + 1
-            break
-        if out and used + len(numbered) > SITE_READ_WINDOW_CHARS:
-            break
-        out.append(numbered)
-        used += len(numbered)
-        last = i + 1
-    more = ""
-    if last < total:
-        more = f" Lines {last + 1}–{total} omitted — pass start_line={last + 1} to continue."
-    return (
-        f"{rel} ({n} chars, {total} lines) showing {start}–{last}.{more}\n"
-        "Do not re-read this file unless you need another slice. "
-        "Patch with action=replace (exact text from this window) or action=write.\n"
-        + "".join(out)
-    )
+    suffix = "".join(lines[start_line - 1:])
+    return f"{rel} ({len(raw)} chars, from line {start_line}):\n{suffix}"
 
 
 def site_read_loop_guard(
@@ -3229,8 +3173,8 @@ def _site_api_path_warnings(slug: str, body: str | None, extra_files: list[dict]
     """Frontend calls that can never reach this site's backend.
 
     The page is served under /bot/<slug>/, so fetch('/api/...') resolves
-    to the domain root and 404s — the frontend must call its backend with
-    RELATIVE paths ('api/...'). A hardcoded /bot/<other>/api/... is the
+    to the domain root. Use the same-origin site mount, which also works on
+    nested pages. A hardcoded /bot/<other>/api/... is the
     same bug with a different slug. Reported, not blocking: same rationale
     as _site_placeholder_warnings.
     """
@@ -3250,8 +3194,9 @@ def _site_api_path_warnings(slug: str, body: str | None, extra_files: list[dict]
             continue
         if _FETCH_ABS_API_RE.search(text):
             found.append(
-                f"{label}: absolute fetch('/api/...') 404s under /bot/{slug}/ — "
-                "call the backend with relative paths ('api/...')"
+                f"{label}: fetch('/api/...') uses the domain root — "
+                f"set apiBase = new URL('{site_routes.server_path(slug)}/', location.origin) "
+                "and resolve relative endpoint names with new URL('notes', apiBase)"
             )
         if _WS_HARDCODED_RE.search(text):
             found.append(
@@ -3260,11 +3205,18 @@ def _site_api_path_warnings(slug: str, body: str | None, extra_files: list[dict]
             )
         found.extend(
             f"{label}: calls /bot/{match.group(1)}/api/... but this site "
-            f"is {slug} — use relative 'api/...' instead"
+            f"is {slug} — use {site_routes.server_path(slug)}/ and relative endpoint names"
             for match in _BOT_API_SLUG_RE.finditer(text)
             if match.group(1) != slug
         )
-    return found[:12]
+        for match in re.finditer(r"['\"`](/bot/[^'\"`\s]+)", text):
+            path = match.group(1)
+            if path.count('/bot/') > 1:
+                found.append(
+                    f"{label}: duplicated site prefix in {path!r}; "
+                    f"start at {site_routes.server_path(slug)}/ exactly once"
+                )
+    return found
 
 
 async def _write_site_file(site_dir: str, rel: str, blob: bytes) -> str:
@@ -3539,7 +3491,7 @@ class SiteTestTool(_SiteOwnedTool):
                 log_text = await site_server.logs(
                     self.bot.config.DATA_DIR, slug, lines=20
                 )
-                clipped = (log_text or "").strip()[:2000]
+                clipped = (log_text or "").strip()
                 if clipped:
                     backend_bits.append("Recent logs:\n" + clipped)
             except Exception as e:
@@ -4170,7 +4122,7 @@ def _jina_reader_url(url: str) -> str:
 async def _fetch_via_jina_reader(
     url: str,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     timeout: float = 30.0,
 ) -> tuple[str, str, bytes]:
     """Retry a public URL through Jina Reader (extracted markdown).
@@ -4199,7 +4151,7 @@ async def _fetch_via_jina_reader(
 async def _fetch_public_url(
     url: str,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     timeout: float = 30.0,
     extra_headers: dict | None = None,
 ) -> tuple[str, str, bytes]:

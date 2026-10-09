@@ -321,21 +321,21 @@ def format_report(probe: dict[str, Any]) -> str:
 
     if errors:
         lines.append("Console errors:")
-        lines.extend(f"  • {item}" for item in errors[:20])
+        lines.extend(f"  • {item}" for item in errors)
     else:
         lines.append("Console errors: none")
     if page_errors:
         lines.append("Uncaught exceptions:")
-        lines.extend(f"  • {item}" for item in page_errors[:10])
+        lines.extend(f"  • {item}" for item in page_errors)
     if warnings:
         lines.append("Console warnings:")
-        lines.extend(f"  • {item}" for item in warnings[:8])
+        lines.extend(f"  • {item}" for item in warnings)
     if failed:
         lines.append("Failed requests:")
-        lines.extend(f"  • {item}" for item in failed[:15])
+        lines.extend(f"  • {item}" for item in failed)
     if assets:
         lines.append("Broken linked assets:")
-        lines.extend(f"  • {item}" for item in assets[:15])
+        lines.extend(f"  • {item}" for item in assets)
     if backend:
         lines.append("Backend:")
         lines.append(backend)

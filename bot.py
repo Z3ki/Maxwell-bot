@@ -9738,9 +9738,7 @@ class MaxwellBot(commands.Bot):
                             + "\n=== END ===\nUse these results to continue. Tool images are attached for inspection, not automatically sent to chat. Decide whether to send_media, use them elsewhere, regenerate, or reply normally.",
                         }
                     )
-                # Keep the tail bounded by size as well as count, dropping
-                # whole rounds so an assistant turn is never separated from
-                # the role=tool messages holding its tool_call_ids.
+                # Preserve full tool rounds and their call/result pairing.
                 conversation_tail = trim_tool_tail(conversation_tail)
                 result_messages = MaxwellBot._apply_prompt_budget(
                     self, [dict(m) for m in messages] + list(conversation_tail)
@@ -10902,17 +10900,10 @@ class MaxwellBot(commands.Bot):
         # the next turn received the full base64 string in the tool
         # message AND got the image attached separately — a 10MB
         # string + 10MB vision attachment per image, which OOMed the
-        # provider. Now: strip base64 from the LLM-facing content,
-        # only attach the decoded image as vision. Also cap each
-        # tool result at 32KB to keep context size bounded.
+        # provider. Strip base64 from text and attach it as media instead;
+        # preserve the full textual result.
         _IMG_RE = re.compile(r"__IMAGE_B64__(?:data:(image/[A-Za-z0-9.+-]+);base64,)?([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__")
         _AUDIO_RE = re.compile(r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__")
-        _MAX_TOOL_RESULT_CHARS = 32_000
-        _SITE_RESULT_TOOLS = {
-            "create_site",
-            "edit_site",
-            "site_server",
-        }
         seen_images: set[str] = set()
         seen_audio: set[str] = set()
         for tr in list(result_by_id.values()) + list(tool_results):
@@ -10945,21 +10936,8 @@ class MaxwellBot(commands.Bot):
                         }
                     )
 
-        def _truncate_tool_result(tr: str, tool_name: str = "") -> str:
-            tr = strip_media_payloads(tr).strip()
-            # Site file contents must come back whole. Truncating the middle
-            # with a marker is how "[large content omitted, N chars]" ended
-            # up as the published page.
-            if tool_name in _SITE_RESULT_TOOLS:
-                return tr
-            if len(tr) > _MAX_TOOL_RESULT_CHARS:
-                half = _MAX_TOOL_RESULT_CHARS // 2
-                return f"{tr[:half]}\n\n[...truncated {len(tr) - _MAX_TOOL_RESULT_CHARS} chars...]\n\n{tr[-half:]}"
-            return tr
-
-        name_by_id = {c["id"]: c["name"] for c in calls}
-        truncated_by_id = {
-            cid: _truncate_tool_result(tr, name_by_id.get(cid, ""))
+        text_by_id = {
+            cid: strip_media_payloads(tr).strip()
             for cid, tr in result_by_id.items()
         }
 
@@ -10971,7 +10949,7 @@ class MaxwellBot(commands.Bot):
         }
         followup_msgs: list[dict] = [assistant_msg]
         for call in calls:
-            line = truncated_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
+            line = text_by_id.get(call["id"], f"Tool {call['name']}: (no result)")
             followup_msgs.append(
                 {
                     "role": "tool",
@@ -10982,8 +10960,7 @@ class MaxwellBot(commands.Bot):
         self._last_native_followup_messages = followup_msgs
         self._last_native_tool_media = tool_media
         # Return results in original emission order, paired by tool_call_id.
-        truncated_results = [truncated_by_id.get(c["id"], "") for c in calls]
-        tool_results = truncated_results
+        tool_results = [text_by_id.get(c["id"], "") for c in calls]
         return (
             (cleaned, tool_results, tool_images)
             if include_images

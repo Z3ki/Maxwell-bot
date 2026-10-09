@@ -376,7 +376,7 @@ def test_shell_tool_runs_without_author_gate():
     asyncio.run(run())
 
 
-def test_shell_tool_truncates_captured_output_to_max_output(monkeypatch):
+def test_shell_tool_keeps_output_despite_retired_limit(monkeypatch):
     monkeypatch.setenv("MAXWELL_SHELL_MAX_OUTPUT", "100")
     class FakeBot:
         def _is_admin(self, user_id):
@@ -384,7 +384,7 @@ def test_shell_tool_truncates_captured_output_to_max_output(monkeypatch):
 
     tool = ShellTool(bot=FakeBot())
     message = FakeMessage()
-    blob = ("line of shell output\n" * 80).encode()
+    blob = ("line of shell output\n" * 80_000).encode()
 
     async def run():
         async def fake_run_shell(command, tenant, on_progress=None):
@@ -392,9 +392,7 @@ def test_shell_tool_truncates_captured_output_to_max_output(monkeypatch):
 
         tool._run_shell_command = fake_run_shell
         result = await tool.execute(message, command="cat huge.log")
-        assert "line of shell output" in result
-        assert "... (truncated)" in result
-        assert len(result) <= 150
+        assert result == blob.decode().strip()
         assert len(message.channel.sent) == 1
         posted = message.channel.sent[0]
         assert posted.content == "working on it…"
