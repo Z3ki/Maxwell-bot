@@ -541,8 +541,9 @@ def _attachment_from_resolved(raw: Any) -> Any:
 
 
 def _memory_row_from_message(message: Any) -> dict[str, Any]:
+    from maxwell_core.prompts.history import compact_media_annotations
     author = getattr(message, "author", None)
-    content = render_discord_context_text(message, str(getattr(message, "content", "") or ""))
+    content = compact_media_annotations(render_discord_context_text(message, str(getattr(message, "content", "") or ""), include_timestamp=False))
     atts = list(getattr(message, "attachments", None) or [])
     if atts and not content:
         names = ", ".join(str(getattr(a, "filename", "file") or "file") for a in atts[:4])
@@ -561,6 +562,7 @@ def _memory_row_from_message(message: Any) -> dict[str, Any]:
         "content": content,
         "message_id": str(getattr(message, "id", "") or ""),
         "timestamp": timestamp,
+        "prompt_format_version": 2,
         "mentions": [{"id": str(getattr(user, "id", "")), "name": str(getattr(user, "display_name", "unknown"))}
                      for user in list(getattr(message, "mentions", None) or [])[:20]],
         "reply_to_author": str(getattr(getattr(getattr(getattr(message, "reference", None), "resolved", None), "author", None), "display_name", "")),
@@ -886,6 +888,7 @@ class UserInstallMessageAdapter:
         reference: Any | None = None,
         history: list[dict] | None = None,
         note: str = "",
+        request_instructions: str = "",
         search_query: str | None = None,
         web_mode: str = "auto",
         mode: str = "ask",
@@ -944,6 +947,7 @@ class UserInstallMessageAdapter:
         )
         self.user_install_source_kind = interaction_source_context(interaction)["kind"]
         self.user_install_note = note
+        self.user_install_request_instructions = request_instructions
         self.user_install_message_action = bool(message_action)
         self.user_install_search_query = str(search_query or "")
         self.user_install_web_mode = str(web_mode or "auto").strip().lower()
@@ -1058,6 +1062,7 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         history=history,
         history_limit=history_limit,
         note=note,
+        request_instructions=str(turn.get("request_instructions") or ""),
         message_action=bool(turn.get("message_action")),
         search_query=turn.get("search_query") or str(turn["prompt"]),
         web_mode=turn.get("web") or "auto",

@@ -2,6 +2,10 @@
 
 ## Unreleased — 2026-10-08
 
+- Keep app-action options out of stored user text, apply shared response/search defaults once, and clean legacy prompt wrappers without rewriting stored source material.
+- Record every send_message chunk under its real Discord message ID; compact legacy tool/synthetic echoes while retaining intentional repeated sends, failures and cross-channel receipts.
+- Deduplicate signed media URLs in generated context, emit one historical timestamp, reference retained reply parents by message ID, and use budgeted speaker mappings after the cacheable transcript.
+- Play the video from YouTube watch/Mix links containing list=; keep explicit playlist-only links supported. Make /music status report current playback, pause state, channel, position, volume, repeat and queue length, including idle/offline status.
 - Keep the audio bytes on app-command replies when the bot cannot post in that server. A refused channel upload is rewound before the interaction follow-up, and an empty TTS attachment is removed.
 - Add a native AI DJ plugin with shared guild music queues, on-demand voice context, permission-checked playback, slash commands and Now Playing buttons.
 - Stream YouTube videos, Music links and playlists through pinned DAVE-compatible Lavalink 4.2.2 / Lavalink.py 5.11.0 / YouTube Source 1.18.2. Provide private authenticated Docker audio deployment, reconnect recovery and idle cleanup.

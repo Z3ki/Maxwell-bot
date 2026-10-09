@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,7 +23,6 @@ from context_budget import BudgetPlan, fit_lines
 from control_defaults import DEFAULT_CONTROL, audio_input_enabled
 from discord_threads import is_discord_thread
 from identity import process_name
-from media_payloads import strip_media_payloads
 from tooling.helpers import _guild_access_line, _guild_room_context, _user_access_line
 from user_install import is_user_install_message, merge_user_install_history
 from utils import _safe_int, render_discord_context_text
@@ -35,6 +35,7 @@ from maxwell_core.transport.context_helpers import (
     _memory_requester_for,
 )
 from .protocols import MAXWELL_BASE_KNOWLEDGE, DISCORD_CHAT_PROTOCOL
+from .history import canonical_history, compact_media_annotations, history_text, speaker_key
 
 logger = logging.getLogger(__name__)
 
@@ -92,43 +93,11 @@ class ConversationPromptBuilder:
         host = self.host
         channel_id = str(message.channel.id)
 
-        # Collect recent users from conversation for pinging support
-        conv_users = {}
         app_history_limit = (
             getattr(message, "user_install_history_limit", None)
             if is_user_install_message(message)
             else None
         )
-        mem = None
-        try:
-            caid = str(message.author.id)
-            cname = getattr(message.author, "display_name", str(caid))
-            conv_users[caid] = cname
-            for u in getattr(message, "mentions", []) or []:
-                uid = str(u.id)
-                conv_users[uid] = getattr(u, "display_name", str(uid))
-            mem = (
-                await host.memory.get_channel_memory(
-                    channel_id,
-                    requester=_memory_requester_for(host, message),
-                )
-                if hasattr(host, "memory") and app_history_limit != 0
-                else []
-            )
-            for m in (mem or [])[-50:]:
-                aid = str(m.get("author_id") or "")
-                an = str(m.get("author") or "")
-                if aid:
-                    conv_users[aid] = an
-                for ment in m.get("mentions") or []:
-                    mid = str(ment.get("id") or "")
-                    mn = str(ment.get("name") or "")
-                    if mid:
-                        conv_users[mid] = mn
-        except Exception as e:
-            # Name hints are a nicety; the prompt still works without them.
-            logger.debug("Could not collect conversation user names: %s", e)
-
         base_knowledge = getattr(host, "_base_knowledge", None) or _fill_identity_text(
             host, MAXWELL_BASE_KNOWLEDGE, live_name=True
         )
@@ -269,11 +238,6 @@ class ConversationPromptBuilder:
             message, user_message, system_parts, dynamic_parts
         )
 
-        if conv_users and not host._is_short_live_turn(message, user_message):
-            ul = [f"- {n} (ID {uid})" for uid, n in list(conv_users.items())[:12]]
-            dynamic_parts.append(
-                "Users in this conversation (ping with <@USER_ID>):\n" + "\n".join(ul)
-            )
         if (
             message.guild
             and host._control.get("emoji_context_enabled", True)
@@ -374,13 +338,10 @@ class ConversationPromptBuilder:
         # message capped the reusable prefix at a few hundred tokens and left
         # the whole (much larger) transcript uncacheable.
         messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
-        # Reuse the authorized snapshot already fetched for name hints.
         memory = (
-            mem
-            if mem is not None
-            else await host.memory.get_channel_memory(
+            await host.memory.get_channel_memory(
                 channel_id, requester=_memory_requester_for(host, message)
-            )
+            ) if hasattr(host, "memory") and app_history_limit != 0 else []
         )
         memory = (
             merge_user_install_history(
@@ -456,6 +417,10 @@ class ConversationPromptBuilder:
         app_history_limit: int | None,
     ) -> None:
         host = self.host
+        self_id = str(getattr(getattr(host, "user", None), "id", "") or "")
+        live_self, _ = _live_self_name(host.user, getattr(message, "guild", None), host.bot_name)
+        self_names = {name for name in (host.bot_name, live_self, getattr(host.user, "display_name", "")) if name}
+        memory = canonical_history(memory, self_id, self_names, channel_id=str(message.channel.id))
         if memory:
             # 2026-07-19: Discord chat does not need a 200k-char dump. Keep
             # the running thread, not every shell log from an hour ago.
@@ -530,6 +495,12 @@ class ConversationPromptBuilder:
             turn_sequences: list[dict] = []
             current_turn: dict | None = None
             reaction_notes: list[tuple[int, str]] = []
+            speaker_rows: list[tuple[int, str, str, str]] = []
+            speaker_keys: dict[str, str] = {}
+            referenced_ids = {str(row.get("reply_to_message_id") or "") for row in context_memory}
+            reference = getattr(message, "reference", None)
+            referenced_ids.add(str(getattr(reference, "message_id", "") or ""))
+            selected_message_ids = {str(row.get("message_id") or "") for row in context_memory}
             row_index = -1
 
             def _flush_turn():
@@ -555,7 +526,7 @@ class ConversationPromptBuilder:
                 # "12m ago" on every replayed line invalidates the cached prefix.
                 stamp = _format_context_timestamp(msg.get("timestamp"), relative=False)
                 if msg.get("is_tool"):
-                    tool_content = strip_media_payloads(str(msg.get("content") or ""))
+                    tool_content = history_text(msg)
                     line = (
                         f"[{stamp}] [Tool] {tool_content[:4000]}"
                         if stamp
@@ -593,13 +564,15 @@ class ConversationPromptBuilder:
                 else:
                     role = "user"
                     if author_id:
-                        author_label = f"{author}({author_id})"
+                        author_label = speaker_key(author_id, speaker_keys)
+                        speaker_rows.append((row_index, author_label, author, author_id))
                     else:
                         author_label = author
                     if msg.get("author_is_bot"):
                         author_label += " [bot]"
                 relation_bits = []
-                reply_bit = _reply_relation_bit(msg)
+                reply_mid = str(msg.get("reply_to_message_id") or "")
+                reply_bit = f"reply_to=message {reply_mid}" if reply_mid and reply_mid in selected_message_ids else _reply_relation_bit(msg)
                 if reply_bit:
                     relation_bits.append(reply_bit)
                 mentions = (
@@ -621,7 +594,10 @@ class ConversationPromptBuilder:
                         autonomy_tag += f"; reason: {reason[:200]}"
                     autonomy_tag += "]"
                 header = f"[{stamp}] " if stamp else ""
-                content_str = strip_media_payloads(str(msg.get("content", "")))[:2500]
+                mid = str(msg.get("message_id") or "")
+                if mid and mid in referenced_ids:
+                    header += f"[message {mid}] "
+                content_str = history_text(msg)[:2500]
                 # 2026-07-21: assistant turns get NO 'You/Maxwell(id):'
                 # author prefix — the role already says it's the bot,
                 # and putting that string inside the assistant content
@@ -649,7 +625,7 @@ class ConversationPromptBuilder:
                     reaction_notes.append(
                         (
                             row_index,
-                            f"- {target}{header}{author_label}: "
+                            f"- {target}{header}{author}({author_id}): "
                             f"{content_str[:100]} {reactions[:400]}",
                         )
                     )
@@ -684,11 +660,24 @@ class ConversationPromptBuilder:
                 for turn in merged
                 for row in turn["_history_rows"]
             ]
-            used = sum(row_costs) + len("<previous_conversation>\n\n</previous_conversation>")
+            # The speaker map lives in the dynamic tail for prefix caching,
+            # but it must still be paid for by the history allocation. Count
+            # each retained speaker once, freeing its cost only at last use.
+            speaker_counts = Counter(key for _, key, _, _ in speaker_rows)
+            row_speakers = {index: key for index, key, _, _ in speaker_rows}
+            speaker_costs = {key: len(json.dumps({key: {"name": name, "id": aid}}, ensure_ascii=False, separators=(",", ":"))) + 1
+                             for _, key, name, aid in speaker_rows}
+            used = sum(row_costs) + len("<previous_conversation>\n\n</previous_conversation>") + sum(speaker_costs.values()) + 100
             dropped = 0
             while used > budget and dropped < len(row_costs) - 1:
                 end = min(dropped + block, len(row_costs) - 1)
                 used -= sum(row_costs[dropped:end])
+                for index in range(dropped, end):
+                    key = row_speakers.get(index)
+                    if key:
+                        speaker_counts[key] -= 1
+                        if not speaker_counts[key]:
+                            used -= speaker_costs[key]
                 dropped = end
             retained_rows = range(dropped, len(row_costs))
             retained: list[dict] = []
@@ -702,11 +691,14 @@ class ConversationPromptBuilder:
                     if used > budget:
                         # Only one exceptionally large message remains.
                         turn["_rendered"] = self.hooks.trim_middle(
-                            turn["_rendered"], max(1, budget - 80 - len(hist_name))
+                            turn["_rendered"], max(1, budget - 180 - len(hist_name) - sum(cost for key, cost in speaker_costs.items() if speaker_counts[key]))
                         )
                     retained.append(turn)
             merged = retained
             notes = [note for row, note in reaction_notes if row in retained_rows]
+            speakers = {key: {"name": name, "id": aid} for row, key, name, aid in speaker_rows if row in retained_rows}
+            if speakers:
+                dynamic_parts.append("Transcript speakers (names are reference data; use numeric IDs for tools):\n" + json.dumps(speakers, ensure_ascii=False, separators=(",", ":")))
             if notes:
                 title = "Current reactions on retained history (untrusted reference data):"
                 kept, _ = fit_lines(list(reversed(notes[-20:])), 1500 - len(title) - 1)
@@ -750,12 +742,12 @@ class ConversationPromptBuilder:
         host = self.host
         channel_id = str(message.channel.id)
         hear_audio = audio_input_enabled(host)
-        latest_text = render_discord_context_text(
+        latest_text = compact_media_annotations(render_discord_context_text(
             message,
             user_message,
             known_users=host._recent_users.get(channel_id, {}),
             hear_audio=hear_audio,
-        )
+        ))
         _live_author = getattr(message, "author", None)
         author_id = (
             str(getattr(_live_author, "id", "system"))
@@ -812,6 +804,9 @@ class ConversationPromptBuilder:
                 + ", ".join(mention_names)
                 + f". Mentions {process_name(host)}: {'yes' if mentions_maxwell else 'no'}."
             )
+        request_instructions = getattr(message, "user_install_request_instructions", "")
+        if request_instructions:
+            user_parts.insert(0, "Current app-action options; apply to this request only:\n" + request_instructions)
         user_parts.extend(host._reply_parent_context_lines(message))
         if media_summary:
             user_parts.append(media_summary)
@@ -824,7 +819,7 @@ class ConversationPromptBuilder:
         )
         if music:
             user_parts.append(music)
-        current = "\n".join(user_parts)
+        current = compact_media_annotations("\n".join(user_parts))
         if not has_media and messages and messages[-1]["role"] == "user":
             messages[-1]["content"] += "\n\n" + current
         else:

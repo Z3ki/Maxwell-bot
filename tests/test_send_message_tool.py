@@ -81,6 +81,46 @@ def test_send_message_tool_non_reply_sends_all_chunks_to_channel():
     asyncio.run(run())
 
 
+def test_delivered_chunks_and_identical_sends_keep_real_ids_without_tool_echoes():
+    from bot import MaxwellBot
+
+    async def run():
+        rows = []
+
+        async def remember(_cid, row, _request):
+            rows.append(row)
+
+        class Channel(FakeChannel):
+            async def send(self, text):
+                self.sent.append(text)
+                return SimpleNamespace(id=100 + len(self.sent), content=text, created_at=None)
+
+        message = FakeMessage()
+        message.id = 10
+        message.channel = Channel()
+
+        async def reply(text):
+            return await message.channel.send(text)
+
+        message.reply = reply
+        bot = SimpleNamespace(_control={"store_memory": True}, memory=object(),
+                              bot_name="Maxwell", user=SimpleNamespace(id=1),
+                              add_message_to_memory=remember)
+        bot._remember_sent_message = lambda *args: MaxwellBot._remember_sent_message(bot, *args)
+        tool = SendMessageTool(bot)
+        result = await tool.execute(message, content="x" * 4100)
+        await MaxwellBot._remember_tool_call(bot, message, "send_message", {"content": "x" * 4100}, result)
+        for _ in range(2):
+            result = await tool.execute(message, content="same")
+            await MaxwellBot._remember_tool_call(bot, message, "send_message", {"content": "same"}, result)
+        assert [row["message_id"] for row in rows] == ["101", "102", "103", "104", "105"]
+        assert "".join(row["content"] for row in rows[:3]) == "x" * 4100
+        assert [row["content"] for row in rows[-2:]] == ["same", "same"]
+        assert all(row["origin_request_id"] == "10" and not row.get("is_tool") for row in rows)
+
+    asyncio.run(run())
+
+
 def test_send_message_partial_failure_keeps_sent_marker():
     class FlakyChannel:
         def __init__(self):

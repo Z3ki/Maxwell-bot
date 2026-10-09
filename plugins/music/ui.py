@@ -53,12 +53,31 @@ def safe(text):
 
 
 def format_result(result):
-    if result.get('error'):
+    if result.get('error') and 'connected' not in result:
         return result['error']
     if 'results' in result:
         return '\n'.join(f"{i + 1}. {safe(t['title'])} — {safe(t['artist'])}\n{t['url']}" for i, t in enumerate(result['results']))[:1900]
     if 'settings' in result:
         return 'Music settings' + (' saved' if result.get('saved') else '') + ':\n```json\n' + json.dumps(result['settings'], indent=2) + '\n```'
+    if 'connected' in result:
+        channel = result.get('voice_channel')
+        current = result.get('current')
+        if not result['connected']:
+            status = 'Disconnected from voice. Nothing is playing.'
+        elif current:
+            state = 'Paused' if result.get('paused') else 'Playing'
+            seconds = max(0, int(result.get('position_seconds') or 0))
+            status = f"{state} **{safe(current['title'])}** · {seconds // 60}:{seconds % 60:02d}."
+        else:
+            status = 'Connected; nothing is playing.'
+        if channel:
+            status += f"\nVoice channel: **{safe(channel['name'])}** (<#{channel['id']}>)."
+        status += f"\nVolume {result.get('volume', 50)}% · Repeat {safe(result.get('repeat', 'off'))} · {result.get('queue_length', 0)} queued."
+        if result.get('error'):
+            status += '\n' + safe(result['error'])
+        if result.get('audio_available') is False:
+            status += '\nThe audio node is unavailable.'
+        return status[:1900]
     if 'queue' in result and 'state' not in result:
         return ('\n'.join(f"{i + 1 + result.get('offset', 0)}. {safe(t['title'])} · requested by <@{t['requester_id']}>\nID: `{t['id']}`"
                           for i, t in enumerate(result['queue'])) or 'The queue is empty.')[:1900]

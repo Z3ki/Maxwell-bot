@@ -13,7 +13,7 @@ from tooling.helpers import _chess_record
 
 
 @pytest.mark.parametrize("guild_id", ["555", ""])
-@pytest.mark.parametrize("writer", ["tool", "chess", "autonomy"])
+@pytest.mark.parametrize("writer", ["tool", "chess", "autonomy", "send"])
 def test_generated_history_is_visible_only_in_its_origin_scope(tmp_path, guild_id, writer):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
@@ -33,6 +33,11 @@ def test_generated_history_is_visible_only_in_its_origin_scope(tmp_path, guild_i
                 await bot._remember_tool_call(message, "web_search", {"query": "x"}, "3 results")
             elif writer == "chess":
                 await _chess_record(bot, message, "chess move: e4")
+            elif writer == "send":
+                bot._connection = SimpleNamespace(user=SimpleNamespace(id=99, display_name="Maxwell"))
+                bot.bot_name = "Maxwell"
+                sent = SimpleNamespace(id=100, content="delivered reply", created_at=None)
+                await bot._remember_sent_message(message, sent, "draft reply", channel)
             else:
                 engine = AutonomyEngine(SimpleNamespace(
                     config=SimpleNamespace(DATA_DIR=str(tmp_path)),
@@ -51,6 +56,11 @@ def test_generated_history_is_visible_only_in_its_origin_scope(tmp_path, guild_i
             elif writer == "chess":
                 assert rows[0]["is_tool"] is True
                 assert rows[0]["content"] == "chess move: e4"
+            elif writer == "send":
+                assert rows[0]["message_id"] == "100"
+                assert rows[0]["origin_request_id"] == "1"
+                assert rows[0]["content"] == "delivered reply"
+                assert rows[0]["prompt_format_version"] == 2
             else:
                 assert rows[0]["autonomy"] is True
                 assert rows[0]["content"] == "my autonomous reply"

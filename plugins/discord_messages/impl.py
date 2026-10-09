@@ -616,6 +616,12 @@ class SendMessageTool(Tool):
                         record_delivery = getattr(self.bot, "_record_delivery", None)
                         if callable(record_delivery):
                             record_delivery(message, sent)
+                        remember = getattr(self.bot, "_remember_sent_message", None)
+                        if callable(remember):
+                            try:
+                                await remember(message, sent, chunk, target_channel)
+                            except Exception as exc:
+                                logger.warning("Could not record delivered message %s (%s)", getattr(sent, "id", "?"), type(exc).__name__)
                     except Exception as exc:
                         if sent_any:
                             logger.warning(

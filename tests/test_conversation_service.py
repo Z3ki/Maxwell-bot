@@ -245,3 +245,53 @@ def test_enabled_audio_input_still_asks_the_model_to_inspect_it():
     joined = "\n".join(row["content"] for row in messages)
     assert "Audio input is off" not in joined
     assert "don't claim you can't see/hear them" in joined
+
+
+def test_request_options_apply_only_to_live_turn_and_leave_prefix_stable():
+    builder, message, memory = service()
+    message.user_install_request_instructions = "Give a thorough answer. Respond in Spanish."
+    messages = build(builder, message)
+    assert "thorough answer" in messages[-1]["content"]
+    assert not any("thorough answer" in row["content"] for row in messages[:-1])
+    message.user_install_request_instructions = "Do not use web_search or fetch_url for this request."
+    changed = build(builder, message)
+    assert messages[:2] == changed[:2]
+    assert "thorough answer" not in changed[-1]["content"]
+    assert memory.rows[0]["content"] == "older message"
+
+
+def test_speaker_mapping_keeps_duplicate_names_and_append_only_transcript():
+    builder, message, memory = service()
+    memory.rows.append({"author": "Alice", "author_id": "43", "content": "other Alice", "message_id": "7"})
+    before = build(builder, message)
+    history = before[1]["content"]
+    assert "u1: older message" in history and "u2: other Alice" in history
+    mapping = before[2]["content"]
+    assert '"u1":{"name":"Alice","id":"42"}' in mapping
+    assert '"u2":{"name":"Alice","id":"43"}' in mapping
+    memory.rows.append({"author": "Bob", "author_id": "44", "content": "new participant", "message_id": "8"})
+    after = build(builder, message)
+    assert before[0] == after[0]
+    assert history.removesuffix("\n</previous_conversation>") in after[1]["content"]
+
+
+def test_selected_reply_target_is_named_by_message_id_inside_history():
+    builder, message, memory = service()
+    memory.rows.append({"author": "Alice", "author_id": "42", "content": "this one", "message_id": "7", "reply_to_message_id": "5", "reply_to_author": "Alice", "reply_to_author_id": "42", "reply_to_content": "older message"})
+    messages = build(builder, message)
+    history = messages[1]["content"]
+    assert "[message 5]" in history
+    assert "reply_to=message 5" in history
+    assert history.count("older message") == 1
+
+
+def test_live_media_manifest_and_attachments_share_one_signed_url():
+    from datetime import datetime, timezone
+
+    builder, message, _ = service()
+    url = "https://cdn.discordapp.com/attachments/1/2/sample.mp3?ex=1&is=2&hm=signed&"
+    message.created_at = datetime(2026, 10, 9, tzinfo=timezone.utc)
+    message.attachments = [SimpleNamespace(filename="sample.mp3", url=url, content_type="audio/mpeg", duration=18)]
+    messages = build(builder, message, has_media=True, media_summary="Audio available:\n1. sample.mp3 (audio/mpeg, new) — " + url)
+    assert messages[-1]["content"].count(url) == 1
+    assert "18s" in messages[-1]["content"]

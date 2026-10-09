@@ -182,8 +182,8 @@ def _context_limit(interaction: Any, *, options: dict[str, Any] | None = None) -
             opts["context"] = 0
     return ui.normalize_context_limit(opts.get("context", ui.USER_INSTALL_HISTORY_LIMIT))
 
-def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
-    """Add explicit per-command intent without changing the user's text."""
+def _slash_instructions(options: dict[str, Any]) -> str:
+    """Return only current-request overrides; defaults live in the system prompt."""
 
     mode = str(options.get("mode") or "ask").strip().lower()
     web = str(options.get("web") or "auto").strip().lower()
@@ -237,21 +237,8 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
             "Do not use web_search or fetch_url for this request; work from the supplied "
             "conversation, attachments, and local context."
         )
-    else:
-        instructions.append(
-            "Decide whether this request needs current web evidence. Latest products, "
-            "device compatibility, prices and software/API changes can require search "
-            "even when the user does not say 'search'. Verify changing facts before "
-            "answering; cite sources actually used and acknowledge unavailable evidence."
-        )
 
-    if detail == "quick":
-        instructions.append(
-            "Keep the final answer concise and focused on the result. Usually use 1-3 short "
-            "sentences. Skip introductions, repeated points, and unnecessary explanation. "
-            "Use more space only when the request needs it or the user asks for detail."
-        )
-    elif detail == "balanced":
+    if detail == "balanced":
         instructions.append("Give a focused answer with enough explanation to be useful.")
     elif detail == "deep":
         instructions.append(
@@ -264,9 +251,13 @@ def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
         else:
             instructions.append(f"Respond in {language}.")
 
-    if not instructions:
-        return prompt
-    return "\n".join(instructions) + "\n\nUser request:\n" + prompt
+    return "\n".join(instructions)
+
+
+def _slash_prompt(prompt: str, options: dict[str, Any]) -> str:
+    """Compatibility formatter; persistence uses raw text and separate overrides."""
+    instructions = _slash_instructions(options)
+    return instructions + "\n\nUser request:\n" + prompt if instructions else prompt
 
 
 def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any] | None:
@@ -314,7 +305,8 @@ def _enhanced_build_turn(interaction: Any, original_build: Any) -> dict[str, Any
     raw_prompt = str(turn.get("prompt") or "")
     target = getattr(turn.get("reference"), "resolved", None)
     turn["search_query"] = str(getattr(target, "content", "") or raw_prompt)
-    turn["prompt"] = _slash_prompt(raw_prompt, opts)
+    turn["prompt"] = raw_prompt
+    turn["request_instructions"] = _slash_instructions(opts)
     turn["history_limit"] = _context_limit(interaction, options=opts)
     turn["visibility"] = ui.resolve_response_visibility(interaction, defaults=opts)
     turn["mode"] = str(opts.get("mode") or "ask").strip().lower()

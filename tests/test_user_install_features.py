@@ -62,10 +62,7 @@ def test_slash_prompt_applies_research_web_detail_and_language():
 
 def test_slash_prompt_auto_mode_does_not_force_search():
     text = mod._slash_prompt("hello", {})
-    assert "Decide whether" in text
-    assert "current/latest" not in text
-    assert "web_search" not in text
-    assert text.endswith("User request:\nhello")
+    assert text == "hello"
 
 
 def test_context_limit_is_user_selectable_and_sanitized():
@@ -97,8 +94,9 @@ def test_enhanced_slash_turn_keeps_core_attachments():
 
     turn = mod._enhanced_build_turn(interaction, original)
     assert turn is not None
-    assert "coding/technical task" in turn["prompt"]
-    assert "concise" in turn["prompt"]
+    assert turn["prompt"] == "debug it"
+    assert "coding/technical task" in turn["request_instructions"]
+    assert "concise" not in turn["request_instructions"]
     assert turn["attachments"][0].filename == "log.txt"
     assert turn["history_limit"] == 10
     assert turn["search_query"] == "debug it"
@@ -150,7 +148,7 @@ def test_fact_check_context_action_targets_selected_message(monkeypatch):
     turn = mod._enhanced_build_turn(interaction, mod.ui.build_user_install_turn)
     assert turn is not None
     assert "Fact-check" in turn["prompt"]
-    assert "search the web" in turn["prompt"].lower()
+    assert "search the web" in turn["request_instructions"].lower()
     assert turn["reference"].resolved is target
     assert turn["search_query"] == "current claim"
     assert turn["mode"] == "research"
@@ -301,7 +299,7 @@ def test_ask_maxwell_starts_selected_message_without_a_form(tmp_path, monkeypatc
     message, = received
     assert message.reference.resolved is selected
     assert message.user_install_mode == "ask"
-    assert "thorough" in message.content
+    assert "thorough" in message.user_install_request_instructions
     assert message.response_visibility == "private"
     assert interaction.response.deferred_ephemeral
 
@@ -348,8 +346,8 @@ def test_rewrite_modal_preserves_request_options_and_prevents_duplicate_submissi
     assert message.id == submission.id
     assert message.reference.resolved is selected
     assert "Explain why this failed." in message.content
-    assert "thorough" in message.content
-    assert "Respond in Spanish" in message.content
+    assert "thorough" in message.user_install_request_instructions
+    assert "Respond in Spanish" in message.user_install_request_instructions
     assert message.response_visibility == "private"
     assert submission.response.deferred_ephemeral
     assert submission.followup.payloads[-1]["content"] == "plain answer"
@@ -377,11 +375,13 @@ def test_app_menu_and_slash_share_brief_default_and_saved_preferences(tmp_path, 
     original = lambda _: {"prompt": "hello", "attachments": [], "note": ""}
     slash = mod._enhanced_build_turn(_interaction(), original)
     summary = mod._enhanced_build_turn(_interaction(name="Summarize", cmd_type=3), original)
-    assert "1-3 short sentences" in slash["prompt"]
-    assert "1-3 short sentences" in summary["prompt"]
+    assert slash["prompt"] == "hello"
+    assert "1-3 short sentences" not in summary["prompt"]
+    from maxwell_core.prompts.protocols import DISCORD_CHAT_PROTOCOL
+    assert "1-3 short sentences" in DISCORD_CHAT_PROTOCOL
     assert summary["mode"] == "summarize"
     store.set_default(1, "detail", "deep")
-    assert "thorough" in mod._enhanced_build_turn(_interaction(name="Explain", cmd_type=3), original)["prompt"]
+    assert "thorough" in mod._enhanced_build_turn(_interaction(name="Explain", cmd_type=3), original)["request_instructions"]
     commands = mod.modern_user_install_commands()
     assert len([command for command in commands if command["type"] == 3]) == 5
     assert (mod.MESSAGE_TRANSFORM, 3) in {(command["name"], command["type"]) for command in commands}

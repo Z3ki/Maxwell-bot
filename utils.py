@@ -1147,6 +1147,7 @@ def render_discord_context_text(
     known_users: dict | None = None,
     *,
     hear_audio: bool = True,
+    include_timestamp: bool = True,
 ) -> str:
     """Make Discord tokens readable for prompts/logged context without mutating the real message.
     known_users: optional {user_id: display_name} from conversation history to resolve pings.
@@ -1216,7 +1217,7 @@ def render_discord_context_text(
     # Timestamp of the message itself — the model needs to know WHEN each
     # message happened (recency, "yesterday vs now", dead conversations).
     created = _coerce_utc_datetime(getattr(message, "created_at", None))
-    if created is not None:
+    if created is not None and include_timestamp:
         ts = created.strftime("%Y-%m-%d %H:%M:%S UTC")
         text = f"[at {ts}] {text}" if text else f"[at {ts}]"
 

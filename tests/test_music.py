@@ -10,7 +10,7 @@ from jsonschema import validate, ValidationError
 
 from plugins.music.service import MusicError, MusicService, Track, identifier
 from plugins.music.tools import MusicControlTool, MusicInfoTool, perform
-from plugins.music.ui import install, uninstall, update_panel, command_definition
+from plugins.music.ui import install, uninstall, update_panel, command_definition, format_result
 
 
 class Backend:
@@ -90,6 +90,61 @@ def test_music_rejects_arbitrary_urls(url):
                                  'https://www.youtube.com/shorts/abcdefghijk', 'youtube.com/watch?v=abcdefghijk'])
 def test_normalizes_youtube_links(url):
     assert identifier(url) == 'https://www.youtube.com/watch?v=abcdefghijk'
+
+
+@pytest.mark.parametrize('url', [
+    'https://www.youtube.com/watch?v=abcdefghijk&list=RDabcdefghijk&start_radio=1',
+    'https://youtu.be/abcdefghijk?list=PLtest1234567890',
+    'https://music.youtube.com/watch?v=abcdefghijk&list=PLtest1234567890',
+    'https://www.youtube.com/shorts/abcdefghijk?list=PLtest1234567890',
+    'https://www.youtube.com/live/abcdefghijk?list=PLtest1234567890',
+])
+def test_video_links_keep_the_video_even_with_playlist_parameters(url):
+    assert identifier(url) == 'https://www.youtube.com/watch?v=abcdefghijk'
+
+
+@pytest.mark.parametrize('path', ['/playlist', '/watch'])
+def test_explicit_playlist_only_links_still_load_playlists(path):
+    assert identifier('https://www.youtube.com' + path + '?list=PLtest1234567890') == 'https://www.youtube.com/playlist?list=PLtest1234567890'
+
+
+@pytest.mark.parametrize('path', ['/watch?v=bad&', '/shorts/bad?', '/unknown?'])
+def test_invalid_video_or_unknown_path_cannot_silently_load_a_playlist(path):
+    with pytest.raises(MusicError, match='not a supported'):
+        identifier('https://www.youtube.com' + path + 'list=PLtest1234567890')
+
+
+def test_watch_mix_queues_one_track_and_status_reports_playback(tmp_path):
+    service, backend, msg, _ = fixture(tmp_path)
+
+    async def journey():
+        await service.execute(msg, 'play', query='https://www.youtube.com/watch?v=abcdefghijk&list=RDabcdefghijk')
+        assert backend.calls[0] == ('load', 'https://www.youtube.com/watch?v=abcdefghijk')
+        assert not service.sessions[10].queue
+        status = format_result(await service.execute(msg, 'status'))
+        assert 'Playing' in status and 'Lounge' in status and '0:12' in status
+        assert 'Volume 50%' in status and 'Repeat off' in status and '0 queued' in status
+        assert 'queue is empty' not in status
+        await service.execute(msg, 'pause')
+        assert 'Paused' in format_result(await service.execute(msg, 'status'))
+        assert format_result(await service.execute(msg, 'queue')) == 'The queue is empty.'
+
+    asyncio.run(journey())
+
+
+def test_idle_status_and_queue_have_distinct_responses(tmp_path):
+    service, backend, msg, _ = fixture(tmp_path)
+
+    async def journey():
+        status = format_result(await service.execute(msg, 'status'))
+        assert 'Disconnected' in status and 'Nothing is playing' in status
+        assert format_result(await service.execute(msg, 'queue')) == 'The queue is empty.'
+        with pytest.raises(MusicError, match='offset'):
+            await service.execute(msg, 'queue', offset=-1)
+        backend.available = False
+        assert 'audio node is unavailable' in format_result(await service.execute(msg, 'status'))
+
+    asyncio.run(journey())
 
 
 def test_auto_join_queue_next_now_and_stale_events(tmp_path):

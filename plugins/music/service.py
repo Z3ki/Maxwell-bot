@@ -50,11 +50,10 @@ def identifier(query: str) -> str:
     elif url.path.startswith(('/shorts/', '/live/')):
         video = url.path.split('/')[2]
     playlist = (params.get('list') or [''])[0]
-    if playlist and re.fullmatch(r'[A-Za-z0-9_-]{10,100}', playlist):
-        # Playlists are explicit; a watch URL with list loads that playlist.
-        return 'https://www.youtube.com/playlist?list=' + playlist
     if video and re.fullmatch(r'[A-Za-z0-9_-]{11}', video):
         return 'https://www.youtube.com/watch?v=' + video
+    if (url.path == '/playlist' or url.path == '/watch' and 'v' not in params) and playlist and re.fullmatch(r'[A-Za-z0-9_-]{10,100}', playlist):
+        return 'https://www.youtube.com/playlist?list=' + playlist
     raise MusicError('This YouTube link is not a supported video or playlist.')
 
 
@@ -245,7 +244,13 @@ class MusicService:
             return await self.configure(guild, member, settings)
         session = self.sessions.get(guild.id)
         if action in {'status', 'queue'} and session is None:
-            return {'connected': False, 'current': None, 'queue': [], 'audio_available': self.backend.available}
+            if action == 'queue':
+                if type(offset) is not int or not 0 <= offset <= 1000:
+                    raise MusicError('Queue offset must be between 0 and 1000.')
+                return {'queue': [], 'offset': offset, 'total': 0}
+            return {'connected': False, 'voice_channel': None, 'current': None,
+                    'paused': False, 'volume': 50, 'repeat': 'off', 'position_seconds': 0,
+                    'queue_length': 0, 'queue': [], 'audio_available': self.backend.available}
         if session is None:
             if action not in {'play', 'join'}:
                 raise MusicError('There is no music session here. Ask me to join or play a song.')
