@@ -18,6 +18,7 @@ import urllib.request
 from io import BytesIO
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urljoin, urlsplit
 
 from process_utils import communicate_process
 from tools import Tool
@@ -247,51 +248,244 @@ def _waveform(pcm: bytes) -> str:
     return base64.b64encode(bytes(peaks[:256])).decode("ascii")
 
 
+def _safe_reason(exc: BaseException) -> str:
+    words = []
+    for word in str(exc).split():
+        if word.startswith(("http://", "https://")):
+            words.append("[url]")
+        else:
+            words.append(word)
+    return " ".join(words)[:180]
+
+
+def _channel_id(message: Any) -> int | None:
+    raw = getattr(getattr(message, "channel", None), "id", None)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _http_client(bot: Any, message: Any) -> Any:
+    """Discord HTTP client for this turn.
+
+    User-install adapters and message snapshots have a channel id but no
+    ``_state``. The bot client still has the gateway HTTP session.
+    """
+    channel = getattr(message, "channel", None)
+    for state in (
+        getattr(channel, "_state", None),
+        getattr(message, "_state", None),
+        getattr(bot, "_connection", None),
+    ):
+        http = getattr(state, "http", None)
+        if http is not None and hasattr(http, "request"):
+            return http
+    http = getattr(bot, "http", None)
+    if http is not None and hasattr(http, "request"):
+        return http
+    return None
+
+
+def _attachment_size(sent: Any) -> int | None:
+    attachments = (
+        sent.get("attachments")
+        if isinstance(sent, dict)
+        else getattr(sent, "attachments", None)
+    )
+    if not attachments:
+        return None
+    first = attachments[0]
+    raw = first.get("size") if isinstance(first, dict) else getattr(first, "size", None)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _upload_url_ok(url: str) -> bool:
+    from tooling.helpers import _is_safe_url
+
+    if not _is_safe_url(url):
+        return False
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and not parsed.username and not parsed.password
+
+
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirect blocked", headers, fp
+        )
+
+
+def _put_upload(url: str, payload: bytes) -> None:
+    """PUT the ogg to the slot Discord just issued.
+
+    A 307 or 308 is retried with the same body. Any other redirect is refused.
+    """
+    if not payload:
+        raise RuntimeError("voice audio was empty")
+    current = url
+    for _hop in range(3):
+        if not _upload_url_ok(current):
+            raise RuntimeError("voice upload url was rejected")
+        request = urllib.request.Request(
+            current,
+            data=payload,
+            method="PUT",
+            headers={"Content-Type": "audio/ogg"},
+        )
+        opener = urllib.request.build_opener(_RejectRedirect)
+        try:
+            with opener.open(request, timeout=30) as response:
+                status = getattr(response, "status", 200)
+        except urllib.error.HTTPError as exc:
+            try:
+                if exc.code in {307, 308}:
+                    location = exc.headers.get("Location") if exc.headers else ""
+                    if not location:
+                        raise RuntimeError(
+                            f"voice upload failed (HTTP {exc.code})"
+                        ) from None
+                    current = urljoin(current, location)
+                    continue
+                raise RuntimeError(
+                    f"voice upload failed (HTTP {exc.code})"
+                ) from None
+            finally:
+                exc.close()
+        except urllib.error.URLError as exc:
+            raise RuntimeError("voice upload could not be reached") from exc
+        if status >= 300:
+            raise RuntimeError(f"voice upload failed (HTTP {status})")
+        return
+    raise RuntimeError("voice upload url was rejected")
+
+
+def _message_id(sent: Any) -> Any:
+    if isinstance(sent, dict):
+        return sent.get("id")
+    return getattr(sent, "id", None)
+
+
 async def deliver_speech(bot: Any, message: Any, audio: bytes) -> Any:
     """Post a voice message, or an mp3 attachment when voice upload is unavailable."""
+    if not audio:
+        raise RuntimeError("Error: Mistral TTS returned no audio")
     converted = await transcode_voice(audio)
-    if converted is not None:
+    if converted is not None and converted[0]:
         ogg, duration, waveform = converted
         try:
-            return await _send_voice_message(message, ogg, duration, waveform)
+            return await _send_voice_message(bot, message, ogg, duration, waveform)
         except Exception as exc:
-            logger.warning("TTS voice-message upload failed (%s)", type(exc).__name__)
-    from tooling.helpers import deliver_attachment
+            logger.warning(
+                "TTS voice-message upload failed (%s: %s)",
+                type(exc).__name__,
+                _safe_reason(exc),
+            )
     from discord import File
+    from tooling.helpers import deliver_attachment
 
+    payload = BytesIO(audio)
+    payload.seek(0)
     sent, error = await deliver_attachment(
-        message, File(BytesIO(audio), filename="voice.mp3"), label="voice"
+        message, File(payload, filename="voice.mp3"), label="voice"
     )
-    if error:
-        raise RuntimeError(error)
+    if error or sent is None or not _message_id(sent):
+        raise RuntimeError(error or "Error: could not send the voice message")
+    if _attachment_size(sent) == 0:
+        raise RuntimeError("Error: Discord stored a 0-byte voice file")
+    logger.info("TTS delivered mp3 bytes=%s", len(audio))
     return sent
 
 
 async def _send_voice_message(
-    message: Any, ogg: bytes, duration: float, waveform: str
+    bot: Any, message: Any, ogg: bytes, duration: float, waveform: str
 ) -> Any:
-    from discord import File
-    from discord.flags import MessageFlags
-    from discord.http import handle_message_parameters
+    """Upload the ogg, then post it as a voice message.
 
-    class VoiceMessageFile(File):
-        def to_dict(self, index: int) -> dict[str, Any]:
-            payload = super().to_dict(index)
-            payload["duration_secs"] = duration
-            payload["waveform"] = waveform
-            return payload
+    A multipart file plus the voice flag is not enough. Discord only keeps
+    the bytes that were PUT to the attachment slot. Without that slot the
+    message is a voice bubble whose file is 0 bytes.
+    """
+    from discord.http import Route
 
-    channel = getattr(message, "channel", None)
-    state = getattr(channel, "_state", None) or getattr(message, "_state", None)
-    http = getattr(state, "http", None)
-    channel_id = getattr(channel, "id", None)
-    if http is None or channel_id is None or not hasattr(http, "send_message"):
+    if not ogg.startswith(b"OggS"):
+        raise RuntimeError("voice audio was empty")
+    channel_id = _channel_id(message)
+    http = _http_client(bot, message)
+    if channel_id is None or http is None:
         raise RuntimeError("voice message transport unavailable")
-    flags = MessageFlags._from_value(0)
-    flags.voice = True
-    voice_file = VoiceMessageFile(BytesIO(ogg), filename="voice-message.ogg")
-    with handle_message_parameters(file=voice_file, flags=flags) as params:
-        return await http.send_message(channel_id, params=params)
+    slot = await http.request(
+        Route(
+            "POST",
+            "/channels/{channel_id}/attachments",
+            channel_id=channel_id,
+        ),
+        json={
+            "files": [
+                {
+                    "id": "0",
+                    "filename": "voice-message.ogg",
+                    "file_size": len(ogg),
+                }
+            ]
+        },
+    )
+    rows = slot.get("attachments") if isinstance(slot, dict) else None
+    row = rows[0] if rows else None
+    upload_url = str((row or {}).get("upload_url") or "")
+    uploaded_filename = str((row or {}).get("upload_filename") or "")
+    if not upload_url or not uploaded_filename:
+        raise RuntimeError("voice upload slot was empty")
+    await asyncio.to_thread(_put_upload, upload_url, ogg)
+    sent = await http.request(
+        Route(
+            "POST",
+            "/channels/{channel_id}/messages",
+            channel_id=channel_id,
+        ),
+        json={
+            "flags": 8192,
+            "attachments": [
+                {
+                    "id": "0",
+                    "filename": "voice-message.ogg",
+                    "uploaded_filename": uploaded_filename,
+                    "duration_secs": round(float(duration), 3),
+                    "waveform": waveform,
+                }
+            ],
+        },
+    )
+    if _attachment_size(sent) == 0:
+        message_id = _message_id(sent)
+        if message_id:
+            try:
+                await http.request(
+                    Route(
+                        "DELETE",
+                        "/channels/{channel_id}/messages/{message_id}",
+                        channel_id=channel_id,
+                        message_id=message_id,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "TTS could not remove the empty voice message (%s)",
+                    type(exc).__name__,
+                )
+        raise RuntimeError("Discord stored a 0-byte voice message")
+    if not _message_id(sent):
+        raise RuntimeError("voice message was not created")
+    logger.info("TTS delivered voice-message bytes=%s", len(ogg))
+    return sent
 
 
 async def _pick_voice(
@@ -478,5 +672,10 @@ class TtsTool(Tool):
                     if stamp > cutoff
                 }
         _record(self.bot, message, sent)
-        logger.info("TTS provider: mistral voice=%s chars=%s", label, len(spoken))
+        logger.info(
+            "TTS provider: mistral voice=%s chars=%s bytes=%s",
+            label,
+            len(spoken),
+            len(audio),
+        )
         return f"__TTS_SENT__ Voice message sent ({label})."
