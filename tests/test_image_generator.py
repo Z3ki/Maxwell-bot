@@ -40,12 +40,19 @@ class _Response:
         return json.dumps({"choices": [{"message": {"content": image}}]})
 
 
-def _generation(tmp_path, monkeypatch, hd, image_bytes, mime):
+def _generation(tmp_path, monkeypatch, hd, image_bytes, mime, *, attachments=None, image=None):
     response = _Response(image_bytes, mime)
+    calls = []
+
+    def get(*_args, **_kwargs):
+        raise AssertionError("image generation must not GET an image host")
+
+    def post(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("url"))
+        return response
 
     async def session():
-        return SimpleNamespace(get=lambda *_args, **_kwargs: response,
-                               post=lambda *_args, **_kwargs: response)
+        return SimpleNamespace(get=get, post=post)
 
     monkeypatch.setattr("plugins.images.impl._get_shared_session", session)
     sends = []
@@ -60,25 +67,31 @@ def _generation(tmp_path, monkeypatch, hd, image_bytes, mime):
     bot = SimpleNamespace(
         config=SimpleNamespace(
             AI_BASE_URL="https://example.invalid/v1",
-            POLLINATIONS_MODEL="flux",
+            GEMINI_IMAGE_MODEL="gemini-3.1-flash-image",
             MAXWELL_SITE_DIR=str(tmp_path),
             MAXWELL_PUBLIC_BASE_URL="https://example.com",
         ),
         _record_delivery=record_delivery,
     )
-    message = SimpleNamespace(channel=SimpleNamespace(id=42, send=send), attachments=[])
+    message = SimpleNamespace(
+        channel=SimpleNamespace(id=42, send=send),
+        attachments=attachments or [],
+    )
     tool = HDImageGeneratorTool(bot) if hd else ImageGeneratorTool(bot)
-    result = asyncio.run(tool.execute(message, prompt="a red fox"))
+    result = asyncio.run(tool.execute(message, prompt="a red fox", image=image))
     assert sends == []
+    assert calls == ["https://example.invalid/v1/chat/completions"]
+    assert "pollinations" not in result
     payload = re.search(r"__IMAGE_B64__data:([^;]+);base64,(.*?)__END_IMAGE_B64__", result)
     assert payload is not None, result
     persisted, = (tmp_path / "_images").iterdir()
     assert persisted.read_bytes() == image_bytes
+    assert persisted.name.startswith("hd" if hd else "image")
     assert f"https://example.com/bot/_images/{persisted.name}" in result
     return payload.group(1), payload.group(2), persisted
 
 
-@pytest.mark.parametrize("hd", [False, True], ids=["pollinations", "hd"])
+@pytest.mark.parametrize("hd", [False, True], ids=["image", "hd"])
 @pytest.mark.parametrize("format,mime,ext", [
     ("PNG", "image/png", ".png"),
     ("JPEG", "image/jpeg", ".jpg"),
@@ -94,7 +107,7 @@ def test_generation_returns_model_image_without_discord_delivery(tmp_path, monke
     assert persisted.suffix == ext
 
 
-@pytest.mark.parametrize("hd", [False, True], ids=["pollinations", "hd"])
+@pytest.mark.parametrize("hd", [False, True], ids=["image", "hd"])
 def test_oversized_generation_preserves_full_file_and_attaches_bounded_preview(tmp_path, monkeypatch, hd):
     buffer = BytesIO()
     Image.new("RGB", (1600, 1200), "red").save(buffer, format="PNG")
@@ -113,6 +126,25 @@ def test_generation_requires_a_prompt(tool_class):
     tool = tool_class(SimpleNamespace())
     result = asyncio.run(tool.execute(SimpleNamespace()))
     assert result.startswith("Error:")
+
+
+def test_image_generator_ignores_input_images(tmp_path, monkeypatch):
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), "red").save(buffer, format="PNG")
+    attachment = SimpleNamespace(
+        content_type="image/png",
+        filename="photo.png",
+        url="https://cdn.discordapp.com/attachments/1/2/photo.png",
+    )
+    _generation(
+        tmp_path,
+        monkeypatch,
+        False,
+        buffer.getvalue(),
+        "image/png",
+        attachments=[attachment],
+        image="https://example.com/reference.png",
+    )
 
 
 def test_generated_image_can_be_delivered_without_public_hosting_or_shell(tmp_path):

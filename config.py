@@ -323,8 +323,8 @@ class Config:
     ENABLE_AVATAR = _feature_env("ENABLE_AVATAR")
 
     ENABLE_AUTONOMY = _feature_env("ENABLE_AUTONOMY", default=False)
-    # Keyless image generation is available without setup. HD generation
-    # needs a model explicitly configured on the operator's provider.
+    # image_generator is text-to-image on the Gemini image model. hd_image
+    # is that same model plus edits, and stays off until a model is set.
     ENABLE_IMAGE_GEN = _feature_env("ENABLE_IMAGE_GEN")
     ENABLE_HD_IMAGE = _feature_env(
         "ENABLE_HD_IMAGE",
@@ -420,10 +420,6 @@ class Config:
     # ~12% of stream time vs ~88% for native. OFF by default to keep native
     # behavior; turn on with MAXWELL_CUSTOM_TOOL_CALLS=true in .env.
     CUSTOM_TOOL_CALLS = _bool_env("MAXWELL_CUSTOM_TOOL_CALLS", False)
-
-    # image_generator runs on Pollinations. SDXL-Lightning is fast (~1-2s) and
-    # high quality; the old default (flux) was both slower and less consistent.
-    POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "MarcosFRG/sdxl-lightning")
 
     NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
     # tts speaks with Mistral Voxtral. Emotion is a preset voice, not a text tag.

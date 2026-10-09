@@ -57,93 +57,6 @@ def _generated_image_result(bot, image_bytes: bytes, *, prefix: str, summary: st
     return result + f"\n__IMAGE_B64__data:{mime};base64,{payload}__END_IMAGE_B64__"
 
 
-class ImageGeneratorTool(Tool):
-    """Fast image generation using Pollinations (SDXL-Lightning)."""
-    tool_name = 'image_generator'
-    returns_result = True
-    ends_turn = False
-
-
-    def get_description(self):
-        return (
-            "Generate an AI image (~2-5s) — the DEFAULT image tool, text-to-image only. "
-            "It CANNOT take an input image: to edit/modify/restyle an existing image, use hd_image. "
-            "Params: prompt (required). Returns the image for inspection and a request-local attachment path. "
-            "Does not send it to chat. Use send_file with that path to deliver it, or send_media with its URL when hosting is configured."
-        )
-
-    async def execute(
-        self, message: Message, prompt: str | None = None, **kwargs
-    ) -> str:
-        if not prompt:
-            return "Error: prompt parameter is required"
-        # Pollinations is the primary generator — keyless, fast, always up.
-        # The long-dead NVIDIA Flux route was dropped (it hung ~6 min per
-        # request before timing out).
-        return await self._pollinations_generate(message, prompt)
-
-
-    async def _pollinations_generate(self, message: Message, prompt: str) -> str:
-        # Model comes solely from config — which reads POLLINATIONS_MODEL from
-        # .env (config default applies only when unset). No hardcoded fallback
-        # here so we never silently shift models across code edits.
-        model = str(getattr(self.bot.config, "POLLINATIONS_MODEL", "") or "").strip()
-        seed = random.randint(0, 999999)
-        url = (
-            "https://image.pollinations.ai/prompt/"
-            f"{quote(prompt[:1500], safe='')}"
-            f"?width=1024&height=1024&nologo=true&model={quote(model, safe='')}"
-            f"&seed={seed}"
-        )
-        session = await _get_shared_session()
-        try:
-            async with session.get(
-                url,
-                headers={"User-Agent": _IMAGE_FETCH_UA, "Accept": "image/*"},
-                timeout=aiohttp.ClientTimeout(total=90),
-                allow_redirects=True,
-            ) as response:
-                if response.status != 200:
-                    body = await response.text()
-                    logger.error(
-                        "Pollinations image error: %s - %s",
-                        response.status,
-                        body[:300],
-                    )
-                    return f"Error generating image: Pollinations returned {response.status}."
-                ctype = (
-                    (response.headers.get("Content-Type") or "")
-                    .split(";")[0]
-                    .strip()
-                    .lower()
-                )
-                raw = await _read_response_limited(response, 12 * 1024 * 1024)
-        except asyncio.TimeoutError:
-            return "Error: Pollinations image generation timed out."
-        except Exception as e:
-            logger.warning("Pollinations image error: %s", e)
-            return f"Error generating image: {e}"
-        looks_like_image = bool(
-            raw
-            and (
-                raw.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF"))
-                or ctype.startswith("image/")
-            )
-        )
-        if not looks_like_image:
-            logger.error(
-                "Pollinations returned non-image payload (%s, %s bytes)",
-                ctype,
-                len(raw or b""),
-            )
-            return "Error: Pollinations did not return an image."
-        logger.info(
-            "Pollinations image generated successfully, size: %s bytes", len(raw)
-        )
-        return _generated_image_result(
-            self.bot, raw, prefix="pollinations", summary=f"Image generated: {prompt[:100]}"
-        )
-
 class HDImageGeneratorTool(Tool):
     """HD image generation and editing via the Gemini image model.
 
@@ -154,6 +67,9 @@ class HDImageGeneratorTool(Tool):
     tool_name = 'hd_image'
     returns_result = True
     ends_turn = False
+    accepts_input_images = True
+    file_prefix = "hd"
+    file_label = "HD image"
 
 
     # Discord's own limit is 25MB; inputs get downscaled well below it.
@@ -307,7 +223,7 @@ class HDImageGeneratorTool(Tool):
 
         api_url, api_key, model = self._endpoint()
         if not api_url or api_url == "/chat/completions":
-            return "Error: HD image generation is not configured (no GEMINI_IMAGE_BASE_URL or AI_BASE_URL)"
+            return "Error: image generation is not configured (no GEMINI_IMAGE_BASE_URL or AI_BASE_URL)"
 
         # Normalize the image param: a single ref, a list, or a
         # comma/newline-separated string all mean the same thing.
@@ -335,7 +251,7 @@ class HDImageGeneratorTool(Tool):
                     for part in re.split(r",\s*(?=https?://|/)", line)
                     if part.strip()
                 ]
-        if not refs:
+        if not refs and self.accepts_input_images:
             refs = self._attached_images(message)
         refs = refs[:4]  # keep the payload (and the latency) sane
 
@@ -388,8 +304,7 @@ class HDImageGeneratorTool(Tool):
                         )
                         if "quota" in body.lower():
                             return (
-                                f"Error: the HD image model ({model}) has no quota "
-                                "right now. Use image_generator instead."
+                                f"Error: the image model ({model}) has no quota right now."
                             )
                         last_error = (
                             "Error generating HD image: API returned status "
@@ -451,15 +366,11 @@ class HDImageGeneratorTool(Tool):
                 return last_error
             if loaded:
                 return (
-                    "Error: the HD image model returned no image. It silently "
+                    "Error: the image model returned no image. It silently "
                     "refuses to edit photos of real people — say so if that is "
-                    "what was asked. Otherwise reword the edit, or use "
-                    "image_generator to make a fresh image."
+                    "what was asked. Otherwise reword the edit."
                 )
-            return (
-                "Error: the HD image model returned no image. Reword the prompt, "
-                "or use image_generator instead."
-            )
+            return "Error: the image model returned no image. Reword the prompt."
 
         ext, b64 = found[0]
         try:
@@ -469,7 +380,37 @@ class HDImageGeneratorTool(Tool):
             return "Error: HD image data was not decodable"
 
         verb = "Edited" if loaded else "Generated"
-        summary = f"HD image {verb.lower()} successfully: {prompt[:100]}"
+        summary = f"{self.file_label} {verb.lower()} successfully: {prompt[:100]}"
         if loaded:
             summary += f" (from {loaded} input image{'s' if loaded > 1 else ''})"
-        return _generated_image_result(self.bot, image_bytes, prefix="hd", summary=summary)
+        return _generated_image_result(
+            self.bot, image_bytes, prefix=self.file_prefix, summary=summary
+        )
+
+
+class ImageGeneratorTool(HDImageGeneratorTool):
+    """Text-to-image generation on the configured Gemini image model.
+
+    Edits stay on hd_image. This tool never sends an input image, including
+    attachments on the triggering message.
+    """
+
+    tool_name = "image_generator"
+    accepts_input_images = False
+    file_prefix = "image"
+    file_label = "Image"
+
+    def get_description(self):
+        return (
+            "Generate an AI image — the DEFAULT image tool, text-to-image only. "
+            "It CANNOT take an input image: to edit/modify/restyle an existing image, use hd_image. "
+            "Params: prompt (required). Returns the image for inspection and a request-local attachment path. "
+            "Does not send it to chat. Use send_file with that path to deliver it, or send_media with its URL when hosting is configured."
+        )
+
+    async def execute(
+        self, message: Message, prompt: str | None = None, **kwargs
+    ) -> str:
+        if not prompt:
+            return "Error: prompt parameter is required"
+        return await super().execute(message, prompt=prompt, image=None)
