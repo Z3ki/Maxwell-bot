@@ -1,7 +1,7 @@
 {
   "name": "maxwell_extras",
-  "version": "1.3.0",
-  "description": "Rich Discord UI, persistent reminders, media inspection, and tool-call disclosure.",
+  "version": "1.4.0",
+  "description": "Conversational settings, private configuration forms, rich Discord UI, reminders and media inspection.",
   "enabled_globally": true,
   "allowed_users": [],
   "denied_users": [],
@@ -29,6 +29,27 @@
     {
       "name": "get_maxwell_updates",
       "returns_result": true
+    },
+    {
+      "name": "get_configuration",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false,
+      "is_destructive": false
+    },
+    {
+      "name": "configure",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false,
+      "is_destructive": true
+    },
+    {
+      "name": "open_configuration",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false,
+      "is_destructive": false
     }
   ]
 }

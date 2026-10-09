@@ -7,6 +7,7 @@ def setup(bot, ctx):
     from .command_suite import install_command_suite
     from .interaction_progress import install_interaction_progress
     from .updates import MaxwellUpdatesTool
+    from .config_tools import ConfigureTool, GetConfigurationTool, OpenConfigurationTool
     from .rich_interactions import install_rich_interactions
     from .user_install_features import (
         install_user_install_features,
@@ -61,6 +62,9 @@ def setup(bot, ctx):
 
     return [
         MaxwellUpdatesTool(bot),
+        GetConfigurationTool(bot),
+        ConfigureTool(bot),
+        OpenConfigurationTool(bot),
         ReminderTool(bot, store),
         rich_tool,
         InspectMediaUrlTool(bot),

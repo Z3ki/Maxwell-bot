@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.13 — 2026-10-08
 
+Install with `--version v0.1.13`. Release assets include source, installers, checksums and the versioned container image digest.
+
+- Let Maxwell inspect, change and reset personal and authorized server settings through conversation, sharing storage with Discord /config and the dashboard. Keep global controls limited to configured application owners.
+- Add requester-bound buttons for the existing private configuration and AI connection forms; keys never enter conversational tool arguments. Recheck user, server context and permissions on each action and menu click.
+- Teach Maxwell to use live settings, tools, usage and running revision data when explaining its own capabilities; confirm changes only after saving.
 - Replace the external provider usage URL with a caller-only `usage` tool that reads Maxwell's local message allowance, reports used/remaining percentages and rolling-window recovery, and recognizes unlimited accounts.
 - Add a Discord-login web dashboard for personal reply settings, encrypted AI connections, and servers owned or managed by the signed-in user.
 - Put language, answer length and visibility directly on the first `/config` screen, with an optional dashboard link.
