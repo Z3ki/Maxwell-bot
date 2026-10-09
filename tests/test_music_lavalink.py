@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp import web
 import lavalink
+import discord
+from discord.ext import commands
 
-from plugins.music.backend import LavalinkBackend, ManagedPlayer
+from plugins.music.backend import LavalinkBackend, ManagedPlayer, LavalinkVoiceProtocol
 from plugins.music.service import MusicService, MusicError
 from test_music import fixture
 
@@ -21,8 +23,8 @@ def audio_track(title='test song'):
 
 def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
     async def journey():
-        _, _, msg, _ = fixture(tmp_path)
-        sockets, requests, listeners = [], [], {}
+        _, _, msg, voice = fixture(tmp_path)
+        sockets, requests = [], []
         ready = asyncio.Event()
         async def socket(request):
             assert request.headers['Authorization'] == 'test-secret'
@@ -67,19 +69,31 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
         monkeypatch.setenv('LAVALINK_PASSWORD', 'test-secret')
         monkeypatch.setenv('LAVALINK_HOST', '127.0.0.1')
         monkeypatch.setenv('LAVALINK_PORT', str(port))
-        bot = SimpleNamespace(user=SimpleNamespace(id=777), _control={},
-            add_listener=lambda callback, event: listeners.__setitem__(event, callback),
-            remove_listener=lambda callback, event: listeners.pop(event, None))
+        bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
+        await bot._async_setup_hook()
+        bot._control = {}
+        bot._connection.user = SimpleNamespace(id=777)
+        class GuildContext(SimpleNamespace):
+            @property
+            def voice_client(self):
+                return bot._connection._get_voice_client(self.id)
+        guild = GuildContext(**vars(msg.guild))
+        guild._update_voice_state = lambda data, channel_id: (None, None, None)
+        msg.guild, voice.guild = guild, guild
+        bot._connection._guilds[guild.id] = guild
+        voice._state = bot._connection
+        voice._get_voice_client_key = lambda: (guild.id, guild.id)
+        voice.connect = lambda **kwargs: discord.abc.Connectable.connect(voice, **kwargs)
         backend = LavalinkBackend(bot)
         service = MusicService(bot, backend, tmp_path / 'settings.json')
         async def change_voice(*, channel, **kwargs):
             gid = str(msg.guild.id)
-            await listeners['on_socket_response']({'t': 'VOICE_STATE_UPDATE', 'd': {
+            bot._connection.parse_voice_state_update({
                 'guild_id': gid, 'user_id': '777', 'channel_id': str(channel.id) if channel else None,
-                'session_id': 'discord-session'}})
+                'session_id': 'discord-session'})
             if channel:
-                await listeners['on_socket_response']({'t': 'VOICE_SERVER_UPDATE', 'd': {
-                    'guild_id': gid, 'endpoint': 'voice.example.test', 'token': 'discord-secret'}})
+                bot._connection.parse_voice_server_update({
+                    'guild_id': gid, 'endpoint': 'voice.example.test', 'token': 'discord-secret'})
         msg.guild.change_voice_state = change_voice
         try:
             await backend.start()
@@ -90,6 +104,12 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
             voice_payload = next(d['voice'] for kind, d in requests if kind == 'player' and 'voice' in d)
             assert voice_payload['channelId'] == '11'  # Mandatory DAVE field.
             assert voice_payload['sessionId'] == 'discord-session'
+            assert isinstance(guild.voice_client, LavalinkVoiceProtocol)
+            # Same Discord session ID while moving must still refresh DAVE channelId.
+            voice.id = 22
+            await backend.join(guild, voice)
+            moved = [d['voice'] for kind, d in requests if kind == 'player' and 'voice' in d][-1]
+            assert moved['channelId'] == '22'
             await service.execute(msg, 'play', query='second')
             session_state = service.sessions[10]
             advanced = asyncio.Event()
@@ -110,8 +130,9 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
             assert not backend.client.node_manager._player_queue and not service.sessions
         finally:
             await service.close()
+            await bot.close()
             await runner.cleanup()
-        assert not listeners
+        assert not any(bot.extra_events.values())
     asyncio.run(journey())
 
 

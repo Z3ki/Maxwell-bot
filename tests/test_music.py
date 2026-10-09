@@ -259,8 +259,8 @@ def test_playlists_repeat_pause_seek_shuffle_and_cleanup(tmp_path):
         assert session.current.title == 'playlist B'
         assert [t.title for t in session.queue] == ['playlist C', 'playlist A']
         # Directly test helper to avoid this journey's user rate limit.
-        session.last_active = 0
-        session.empty_since = 0
+        session.last_active = asyncio.get_running_loop().time() - 3600
+        session.empty_since = session.last_active
         await service.tick()
         assert not service.sessions
         await service.close()

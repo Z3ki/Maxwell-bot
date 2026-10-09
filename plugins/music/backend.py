@@ -6,11 +6,51 @@ import logging
 import os
 
 import aiohttp
+import discord
 import lavalink
 
 from .service import MusicError, Track
 
 log = logging.getLogger(__name__)
+
+
+class LavalinkVoiceProtocol(discord.VoiceProtocol):
+    """Supported discord.py voice gateway bridge, without a local audio client."""
+    def __init__(self, client, channel, backend):
+        super().__init__(client, channel)
+        self.backend = backend
+
+    async def on_voice_server_update(self, data):
+        await self.backend.voice_update({'t': 'VOICE_SERVER_UPDATE', 'd': data})
+
+    async def on_voice_state_update(self, data):
+        await self.backend.voice_update({'t': 'VOICE_STATE_UPDATE', 'd': data})
+        channel_id = data.get('channel_id')
+        if channel_id:
+            self.channel = self.channel.guild.get_channel(int(channel_id)) or self.channel
+        else:
+            gid = self.channel.guild.id
+            self.cleanup()
+            await self.backend.service.disconnected(gid)
+
+    async def connect(self, *, timeout, reconnect, self_deaf=False, self_mute=False):
+        try:
+            await self.backend.connect_voice(self.channel.guild, self.channel, timeout=timeout,
+                                             self_deaf=self_deaf, self_mute=self_mute)
+        except BaseException:
+            self.cleanup()
+            raise
+
+    async def move_to(self, channel):
+        await self.backend.connect_voice(channel.guild, channel)
+        self.channel = channel
+
+    async def disconnect(self, *, force=False):
+        try:
+            await self.channel.guild.change_voice_state(channel=None)
+        finally:
+            self.cleanup()
+
 
 
 class MusicClient(lavalink.Client):
@@ -69,7 +109,6 @@ class LavalinkBackend:
             self.node = self.client.add_node(os.getenv('LAVALINK_HOST', '127.0.0.1'),
                                             int(os.getenv('LAVALINK_PORT', '2333')), password, 'us',
                                             name='music', ssl=os.getenv('LAVALINK_TLS', '').lower() == 'true')
-            self.bot.add_listener(self.voice_update, 'on_socket_response')
             self.bot.add_listener(self.voice_state, 'on_voice_state_update')
             self.bot.add_listener(self.guild_removed, 'on_guild_remove')
 
@@ -96,13 +135,22 @@ class LavalinkBackend:
     async def join(self, guild, channel):
         await self.ready()
         player = self.client.player_manager.create(guild.id)
-        if player.channel_id == channel.id and {'sessionId', 'endpoint', 'token', 'channelId'} <= player._voice_state.keys():
-            return
+        protocol = getattr(guild, 'voice_client', None)
+        if protocol is not None and not isinstance(protocol, LavalinkVoiceProtocol):
+            raise MusicError('Another voice feature is already connected in this server.')
+        if protocol is not None:
+            if player.channel_id != channel.id:
+                await protocol.move_to(channel)
+        else:
+            await channel.connect(cls=lambda client, target: LavalinkVoiceProtocol(client, target, self),
+                                  timeout=15, reconnect=True, self_deaf=True)
+
+    async def connect_voice(self, guild, channel, *, timeout=15, self_deaf=True, self_mute=False):
         event = self._voice_events.setdefault(guild.id, asyncio.Event())
         event.clear()
-        await guild.change_voice_state(channel=channel, self_deaf=True)
+        await guild.change_voice_state(channel=channel, self_deaf=self_deaf, self_mute=self_mute)
         try:
-            async with asyncio.timeout(15):
+            async with asyncio.timeout(timeout):
                 await event.wait()
         except TimeoutError:
             await guild.change_voice_state(channel=None)
@@ -115,6 +163,15 @@ class LavalinkBackend:
         if not self.client:
             return
         try:
+            # Lavalink.py 5.11 refreshes channelId only when sessionId changes.
+            # Discord can move channels without changing sessionId; refresh DAVE's
+            # channel binding before forwarding that payload.
+            if payload.get('t') == 'VOICE_STATE_UPDATE' and int(payload['d']['user_id']) == self.bot.user.id:
+                data = payload['d']
+                player = self.client.player_manager.get(int(data['guild_id']))
+                if player and data.get('channel_id') and player._voice_state.get('sessionId') == data.get('session_id'):
+                    player._voice_state['channelId'] = str(data['channel_id'])
+                    await player._dispatch_voice_update()
             await self.client.voice_update_handler(payload)
             if payload.get('t') in {'VOICE_STATE_UPDATE', 'VOICE_SERVER_UPDATE'}:
                 gid = int(payload['d']['guild_id'])
@@ -246,13 +303,16 @@ class LavalinkBackend:
                 log.warning('Music player cleanup failed guild=%s type=%s', gid, type(exc).__name__)
 
     async def leave(self, guild):
-        await guild.change_voice_state(channel=None)
+        protocol = getattr(guild, 'voice_client', None)
+        if isinstance(protocol, LavalinkVoiceProtocol):
+            await protocol.disconnect(force=True)
+        else:
+            await guild.change_voice_state(channel=None)
         await self.destroy(guild.id)
 
     async def close(self):
         self._closed = True
         if self.client:
-            self.bot.remove_listener(self.voice_update, 'on_socket_response')
             self.bot.remove_listener(self.voice_state, 'on_voice_state_update')
             self.bot.remove_listener(self.guild_removed, 'on_guild_remove')
             for _, future in self.pending.values():

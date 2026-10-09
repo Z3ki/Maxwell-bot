@@ -430,6 +430,8 @@ class MusicService:
         session = self.sessions.get(gid)
         if session:
             async with session.lock:
+                if self.sessions.get(gid) is not session:
+                    return
                 await self.backend.destroy(gid)
                 session.current = None
                 session.queue.clear()
