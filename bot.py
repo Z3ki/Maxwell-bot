@@ -174,6 +174,7 @@ from maxwell_core.tools.results import (
 from maxwell_core.tools.dispatch import (
     ToolCircuitBreaker as ToolCircuitBreaker,
     _prepare_tool_params as _prepare_tool_params,
+    is_permission_denied_result,
 )
 
 from config import Config  # noqa: E402
@@ -10391,7 +10392,8 @@ class MaxwellBot(commands.Bot):
                     )
                     head = result_text.lstrip().upper()
                     if head.startswith(("ERROR", "COULD NOT")):
-                        self._tool_breaker.record_failure(name)
+                        if not is_permission_denied_result(result_text):
+                            self._tool_breaker.record_failure(name)
                     else:
                         self._tool_breaker.record_success(name)
                     if hooks is not None:
@@ -10413,6 +10415,13 @@ class MaxwellBot(commands.Bot):
                             )
                         except Exception:
                             logger.exception("after_tool hook failed")
+        except (discord.Forbidden, PermissionError) as e:
+            # Expected access denials are scoped to this request/channel. They
+            # must not disable a tool globally or generate owner crash alerts.
+            logger.warning("Tool %s denied access (%s)", name, type(e).__name__)
+            result_text = f"Error - permission denied ({name})"
+            if isinstance(e, discord.Forbidden):
+                result_text += "; check Maxwell's Discord permissions in this channel."
         except Exception as e:
             logger.error(
                 f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
@@ -10422,8 +10431,6 @@ class MaxwellBot(commands.Bot):
             # Keep the traceback in private logs; give the model a category only.
             if isinstance(e, (ValueError, TypeError)):
                 category = "invalid tool arguments"
-            elif isinstance(e, PermissionError):
-                category = "permission denied"
             elif isinstance(e, (TimeoutError, asyncio.TimeoutError)):
                 category = "tool timed out"
             elif isinstance(e, ImportError):

@@ -7,6 +7,13 @@ from collections.abc import Callable
 logger = logging.getLogger(__name__)
 
 
+def is_permission_denied_result(result: str) -> bool:
+    """Channel/user access denials do not indicate a globally broken tool."""
+    return str(result).lstrip().upper().startswith(
+        ("ERROR: MISSING PERMISSIONS", "ERROR - PERMISSION DENIED")
+    )
+
+
 class ToolCircuitBreaker:
     """Track tool failures and temporarily disable failing tools."""
 

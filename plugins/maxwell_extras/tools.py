@@ -359,6 +359,7 @@ class SendRichMessageTool(Tool):
             "Send a polished Discord message in the current channel. Supports classic "
             "embeds, fields, image/thumbnail/footer, link buttons, and Components V2 "
             "(LayoutView/Container/TextDisplay) when the installed discord.py supports it. "
+            "Falls back to plain text when embeds are not permitted. "
             "Use this only when rich presentation is useful; normal replies should stay plain."
         )
 
@@ -450,11 +451,86 @@ class SendRichMessageTool(Tool):
             )
             view = layout_cls(timeout=None)
             view.add_item(container)
-            await message.channel.send(view=view)
-            return True
-        except Exception:
-            logger.exception("Components V2 send failed; falling back to embed")
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("Components V2 layout unavailable; falling back to embed")
             return False
+
+        try:
+            await message.channel.send(
+                view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.HTTPException as exc:
+            # Only an explicit payload rejection is safe to retry as an embed.
+            # Permission errors go straight to the plain-text fallback; an
+            # uncertain network/server failure must not duplicate a delivery.
+            if exc.status == 400 and exc.code == 50035:
+                logger.warning("Components V2 payload rejected; falling back to embed")
+                return False
+            raise
+        return True
+
+    def _channel_permissions(self, message: Any) -> Any:
+        channel = message.channel
+        guild = getattr(message, "guild", None) or getattr(channel, "guild", None)
+        member = getattr(guild, "me", None)
+        permissions_for = getattr(channel, "permissions_for", None)
+        if member is not None and callable(permissions_for):
+            return permissions_for(member)
+        return None
+
+    async def _send_plain(
+        self,
+        message: Any,
+        *,
+        title: str,
+        description: str,
+        footer: str | None,
+        image_url: str | None,
+        thumbnail_url: str | None,
+        fields: Any,
+        buttons: Any,
+    ) -> str:
+        parts = [f"**{title}**" if title else "", description]
+        for item in _json_list(fields):
+            name = str(item.get("name") or "\u200b")
+            value = str(item.get("value") or "\u200b")
+            parts.append(f"**{name}**\n{value}")
+        if footer:
+            parts.append(str(footer))
+        parts.extend(
+            str(url)
+            for url in (image_url, thumbnail_url)
+            if url and str(url).startswith(("https://", "http://"))
+        )
+        text = "\n\n".join(part for part in parts if part)
+        link_buttons = self._link_buttons(buttons)
+        view = None
+        if link_buttons:
+            view = discord.ui.View(timeout=None)
+            for button in link_buttons:
+                view.add_item(button)
+        # Split for Discord's content limit without truncating the fallback.
+        sent = 0
+        try:
+            for start in range(0, len(text), 2000):
+                await message.channel.send(
+                    content=text[start : start + 2000],
+                    view=view if start + 2000 >= len(text) else None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                sent += 1
+        except (discord.Forbidden, discord.NotFound):
+            if sent:
+                return (
+                    f"Sent {sent} plain-text fallback messages, but Discord denied "
+                    "access to the remaining content. Do not resend the delivered content."
+                )
+            return (
+                "Error: missing permissions or channel access to send this message. "
+                "Ask a server admin to check Maxwell's View Channel and Send Messages "
+                "permissions (Send Messages in Threads for a thread)."
+            )
+        return "Sent plain-text fallback message (rich messages were unavailable)."
 
     async def execute(
         self,
@@ -475,15 +551,52 @@ class SendRichMessageTool(Tool):
         if not title_s and not desc_s:
             return "Error: title or description is required."
 
+        permissions = self._channel_permissions(message)
+        is_thread = isinstance(message.channel, discord.Thread) or getattr(
+            message.channel, "type", None
+        ) in {
+            discord.ChannelType.news_thread,
+            discord.ChannelType.public_thread,
+            discord.ChannelType.private_thread,
+        }
+        send_permission = "send_messages_in_threads" if is_thread else "send_messages"
+        missing = [
+            name
+            for name in ("view_channel", send_permission)
+            if getattr(permissions, name, None) is False
+        ]
+        if missing:
+            return (
+                f"Error: missing permissions to send in this channel: {', '.join(missing)}. "
+                "Ask a server admin to update Maxwell's channel permissions."
+            )
+
+        plain_args = {
+            "title": title_s,
+            "description": desc_s,
+            "footer": footer,
+            "image_url": image_url,
+            "thumbnail_url": thumbnail_url,
+            "fields": fields,
+            "buttons": buttons,
+        }
+        if getattr(permissions, "embed_links", None) is False:
+            return await self._send_plain(message, **plain_args)
+
         mode_s = str(mode or "auto").strip().lower()
         if mode_s in {"components_v2", "auto"}:
-            sent = await self._send_v2(
-                message,
-                title=title_s,
-                description=desc_s,
-                color=str(color or ""),
-                buttons=buttons,
-            )
+            try:
+                sent = await self._send_v2(
+                    message,
+                    title=title_s,
+                    description=desc_s,
+                    color=str(color or ""),
+                    buttons=buttons,
+                )
+            except discord.Forbidden:
+                return await self._send_plain(message, **plain_args)
+            except discord.NotFound:
+                return "Error: missing permissions or channel access; the channel is unavailable."
             if sent:
                 return "Sent Components V2 rich message."
 
@@ -509,7 +622,16 @@ class SendRichMessageTool(Tool):
             view = discord.ui.View(timeout=None)
             for button in link_buttons:
                 view.add_item(button)
-        await message.channel.send(embed=embed, view=view)
+        if len(embed) > 6000:
+            return await self._send_plain(message, **plain_args)
+        try:
+            await message.channel.send(
+                embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.Forbidden:
+            return await self._send_plain(message, **plain_args)
+        except discord.NotFound:
+            return "Error: missing permissions or channel access; the channel is unavailable."
         return "Sent rich embed message."
 
 

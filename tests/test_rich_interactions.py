@@ -116,3 +116,34 @@ def test_plugin_context_allows_interactions_after_ui_upgrade(tmp_path):
 
     ctx.on_event("on_interaction", handler)
     assert manager._listeners["on_interaction"][-1] == ("demo", handler)
+
+
+def test_callback_buttons_and_context_survive_plain_text_fallback(tmp_path):
+    _bot, _manager, tool, store, _seen = _runtime(tmp_path)
+    calls = []
+
+    async def send(**kwargs):
+        calls.append(kwargs)
+
+    message = SimpleNamespace(
+        guild=SimpleNamespace(me=object()),
+        channel=SimpleNamespace(
+            send=send,
+            permissions_for=lambda _member: SimpleNamespace(
+                view_channel=True, send_messages=True, embed_links=False
+            ),
+        ),
+    )
+    result = asyncio.run(tool.execute(
+        message, title="Choose", description="Pick an action",
+        buttons=json.dumps([
+            {"label": "Explain", "style": "primary", "prompt": "Explain this"}
+        ]),
+    ))
+    assert result.startswith("Sent plain-text fallback")
+    assert len(calls) == 1
+    button = calls[0]["view"].children[0]
+    row = store.get(button.custom_id.rsplit(":", 1)[1])
+    assert row["prompt"] == "Explain this"
+    assert row["title"] == "Choose"
+    assert row["description"] == "Pick an action"
