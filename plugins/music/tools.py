@@ -37,7 +37,7 @@ class MusicControlTool(Tool):
     tool_name = 'music_control'
     returns_result = True
     is_destructive = True
-    transports = ('discord',)
+    transports = ('discord', 'user_install')
     timeout_seconds = 60
 
     def __init__(self, bot, service):

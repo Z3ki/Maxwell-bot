@@ -129,7 +129,22 @@ class MusicService:
         user = getattr(message, 'author', None) or getattr(message, 'user', None)
         if guild is None or not user or getattr(user, 'bot', False):
             raise MusicError('Music requires a request in a server where Maxwell is installed.')
-        member = guild.get_member(user.id)
+        member = None
+        get_member = getattr(guild, 'get_member', None)
+        if callable(get_member):
+            try:
+                member = get_member(getattr(user, 'id', None))
+            except Exception:
+                member = None
+        if member is None and getattr(user, 'guild', None) is guild and hasattr(user, 'voice'):
+            member = user
+        if member is None:
+            fetch_member = getattr(guild, 'fetch_member', None)
+            if callable(fetch_member):
+                try:
+                    member = await fetch_member(getattr(user, 'id', None))
+                except Exception:
+                    member = None
         if member is None:
             raise MusicError('Your membership in this server could not be verified.')
         manager = getattr(self.bot, 'plugin_manager', None)

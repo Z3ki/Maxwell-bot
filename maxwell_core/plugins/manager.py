@@ -36,6 +36,8 @@ from maxwell_core.prompts.manager import PromptManager
 from maxwell_core.services import ServiceContainer
 from maxwell_core.tools.registry import ToolRegistry, set_global_registry
 from maxwell_core.tools.publication import publish_plugin_tools
+from maxwell_core.tools.spec import platform_allowed
+from runtime_lifecycle import begin_inflight, end_inflight
 
 logger = logging.getLogger("maxwell.plugins")
 
@@ -406,6 +408,13 @@ class PluginManager:
     ) -> asyncio.Task:
         if not inspect.isawaitable(awaitable):
             raise TypeError("ctx.spawn() expects a coroutine/awaitable")
+        if getattr(self.bot, "_draining", False):
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError(
+                "plugin background tasks are not accepted during shutdown"
+            )
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:
@@ -517,6 +526,8 @@ class PluginManager:
         return sorted(name for name, entries in self._listeners.items() if entries)
 
     async def dispatch_event(self, event: str, *args: Any, **kwargs: Any) -> int:
+        if getattr(self.bot, "_draining", False):
+            return 0
         entries = list(self._listeners.get(event) or [])
         if not entries:
             return 0
@@ -631,8 +642,11 @@ class PluginManager:
         if not spec.get("run_immediately"):
             await asyncio.sleep(interval)
         while True:
+            if getattr(self.bot, "_draining", False):
+                return
             started = time.monotonic()
             row = self._stats(plugin_name)
+            begin_inflight(self.bot, "plugin_job")
             try:
                 if self.is_plugin_enabled_for_user(plugin_name, None):
                     row["job_calls"] += 1
@@ -655,6 +669,8 @@ class PluginManager:
                 row["last_error"] = f"{type(exc).__name__}: {exc}"[:1000]
                 row["last_error_at"] = time.time()
                 logger.exception("Plugin %r scheduled job failed", plugin_name)
+            finally:
+                end_inflight(self.bot, "plugin_job")
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(1.0, interval - elapsed))
 
@@ -1336,7 +1352,7 @@ class PluginManager:
                     if spec is not None and not spec.available_on(platform):
                         continue
                     t_plat = getattr(tobj, "platform", "any")
-                    if spec is None and t_plat not in ("any", platform):
+                    if spec is None and not platform_allowed((t_plat,), platform):
                         continue
                     tools[tname] = tobj
         return tools

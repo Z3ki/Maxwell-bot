@@ -9,7 +9,7 @@
   "enabled_by_default": true,
   "permissions": ["messages.send", "network", "discord.channels"],
   "tools": [
-    {"name": "music_control", "returns_result": true, "is_destructive": true, "transports": ["discord"]},
-    {"name": "music_info", "returns_result": true, "transports": ["discord"]}
+    {"name": "music_control", "returns_result": true, "is_destructive": true, "transports": ["discord", "user_install"]},
+    {"name": "music_info", "returns_result": true, "transports": ["discord", "user_install"]}
   ]
 }

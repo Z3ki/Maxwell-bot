@@ -25,6 +25,11 @@ from discord_threads import is_discord_thread
 from identity import process_name
 from tooling.helpers import _guild_access_line, _guild_room_context, _user_access_line
 from user_install import is_user_install_message, merge_user_install_history
+from context_hydration import (
+    hydration_value,
+    is_pointer_only,
+    message_text_without_mentions,
+)
 from utils import _safe_int, render_discord_context_text
 from maxwell_core.transport.context_helpers import (
     CONTEXT_TIMEZONE,
@@ -489,6 +494,25 @@ class ConversationPromptBuilder:
             tool_history = tool_rows[-tool_limit:] if tool_limit else []
             selected_ids = {id(row) for row in recent_memory + tool_history}
             context_memory = [row for row in memory if id(row) in selected_ids]
+            pin_ids: set[str] = set()
+            live_reference = getattr(message, "reference", None)
+            live_reference_id = str(getattr(live_reference, "message_id", "") or "")
+            if live_reference_id:
+                pin_ids.add(live_reference_id)
+            hydrated_id = str(
+                hydration_value(host, message, "hydrated_target_id", "") or ""
+            )
+            if hydrated_id:
+                pin_ids.add(hydrated_id)
+            if pin_ids:
+                already = {str(row.get("message_id") or "") for row in context_memory}
+                context_memory.extend(
+                    row
+                    for row in memory
+                    if str(row.get("message_id") or "") in pin_ids
+                    and str(row.get("message_id") or "") not in already
+                    and not row.get("is_tool")
+                )
             self_user_id = str(getattr(host.user, "id", "")) if host.user else ""
             # Group chronological rows by speaker role before flattening.
             # User rows keep author IDs; bot groups receive a Maxwell label.
@@ -808,6 +832,16 @@ class ConversationPromptBuilder:
         if request_instructions:
             user_parts.insert(0, "Current app-action options; apply to this request only:\n" + request_instructions)
         user_parts.extend(host._reply_parent_context_lines(message))
+        hydrated = str(
+            hydration_value(host, message, "hydrated_context", "") or ""
+        ).strip()
+        if hydrated:
+            user_parts.append(hydrated)
+        elif is_pointer_only(message_text_without_mentions(message)):
+            user_parts.append(
+                "The pointer's reference could not be loaded. "
+                "Do not invent the missing message."
+            )
         if media_summary:
             user_parts.append(media_summary)
         elif has_media:

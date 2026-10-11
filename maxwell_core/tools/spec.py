@@ -15,6 +15,25 @@ CONTRACT_RESULT = "result"
 CONTRACT_ENDING = "ending"
 CONTRACT_SILENT = "silent"
 
+# User-install /maxwell runs the same Discord tools as a server message.
+_DISCORD_FAMILY = frozenset({"discord", "user_install"})
+
+
+def platform_allowed(transports: Any, platform: str) -> bool:
+    """True when a tool may run on this transport.
+
+    ``any`` matches everything. ``discord`` and ``user_install`` match each
+    other so a server tool is offered inside /maxwell and the reverse.
+    """
+    raw = transports if transports is not None else ()
+    if isinstance(raw, str):
+        raw = (raw,)
+    allowed = {str(item) for item in raw} or {"any"}
+    name = str(platform or "")
+    if "any" in allowed or name in allowed:
+        return True
+    return name in _DISCORD_FAMILY and bool(allowed & _DISCORD_FAMILY)
+
 _CONTRACT_LABELS = {
     CONTRACT_RESULT: " [returns output]",
     CONTRACT_ENDING: " [ends the turn]",
@@ -54,8 +73,7 @@ class ToolSpec:
         return CONTRACT_SILENT
 
     def available_on(self, platform: str) -> bool:
-        allowed = set(self.transports) or {"any"}
-        return "any" in allowed or platform in allowed
+        return platform_allowed(self.transports, platform)
 
     def schema(self) -> dict[str, Any]:
         params = deepcopy(self.parameters or {})

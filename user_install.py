@@ -11,6 +11,7 @@ clicked message (Discord's official way to point at channel content).
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import asyncio
 import logging
@@ -750,7 +751,10 @@ class UserInstallChannelAdapter:
     def typing(self):
         return _NoopTyping()
 
-    def permissions_for(self, _member):
+    def permissions_for(self, member):
+        delegate = getattr(self._real, "permissions_for", None)
+        if callable(delegate):
+            return delegate(member)
         return SimpleNamespace(
             send_messages=True,
             embed_links=True,
@@ -758,6 +762,15 @@ class UserInstallChannelAdapter:
             mention_everyone=False,
             use_external_emojis=True,
         )
+
+    def __getattr__(self, name: str):
+        real = object.__getattribute__(self, "_real")
+        if real is None:
+            raise AttributeError(name)
+        try:
+            return getattr(real, name)
+        except AttributeError:
+            raise AttributeError(name) from None
 
     async def send(self, content: str | None = None, file=None, **kwargs):
         return await self._session.send(content=content, file=file, **kwargs)
@@ -908,6 +921,9 @@ class UserInstallMessageAdapter:
         )
         self.id = getattr(interaction, "id", 0)
         private_channel_id = private_channel_key(interaction)
+        # Private only changes delivery and the memory key. Server tools still
+        # see the guild the command was run in, when Maxwell is a member.
+        source_guild = self._session.guild
         self.channel = UserInstallChannelAdapter(
             self._session,
             channel_id=(
@@ -915,17 +931,9 @@ class UserInstallMessageAdapter:
                 if self.response_visibility == "private"
                 else self._session.channel_id
             ),
-            guild=(
-                None
-                if self.response_visibility == "private"
-                else self._session.guild
-            ),
+            guild=source_guild,
         )
-        self.guild = (
-            None
-            if self.response_visibility == "private"
-            else self._session.guild
-        )
+        self.guild = source_guild
         self.author = getattr(interaction, "user", None) or SimpleNamespace(
             id=0, name="unknown", display_name="unknown", bot=False
         )
@@ -972,6 +980,33 @@ class UserInstallMessageAdapter:
 
     async def send(self, content: str | None = None, file=None, **kwargs):
         return await self._session.send(content=content, file=file, **kwargs)
+
+
+async def bind_user_install_author(message: Any) -> None:
+    """Use the guild Member when Discord has one, so voice tools can see them."""
+    guild = getattr(message, "guild", None)
+    author = getattr(message, "author", None)
+    if guild is None or author is None:
+        return
+    if hasattr(author, "voice") and getattr(author, "guild", None) is not None:
+        return
+    uid = getattr(author, "id", None)
+    member = None
+    get_member = getattr(guild, "get_member", None)
+    if callable(get_member):
+        try:
+            member = get_member(uid)
+        except Exception:
+            member = None
+    if member is None:
+        fetch = getattr(guild, "fetch_member", None)
+        if callable(fetch):
+            try:
+                member = await fetch(uid)
+            except Exception:
+                member = None
+    if member is not None:
+        message.author = member
 
 
 async def _ephemeral(interaction: Any, text: str) -> None:
@@ -1069,6 +1104,8 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         mode=turn.get("mode") or "ask",
         visibility=visibility,
     )
+    with contextlib.suppress(Exception):
+        await bind_user_install_author(message)
     spawn = getattr(bot, "_spawn_detached", None)
     on_message = getattr(bot, "on_message", None)
     if callable(spawn) and callable(on_message):

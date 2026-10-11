@@ -99,7 +99,11 @@ class LavalinkBackend:
                 return
             password = os.getenv('LAVALINK_PASSWORD', '')
             if not password:
-                raise MusicError('Music is not configured. The operator must set LAVALINK_PASSWORD and start the audio node.')
+                raise MusicError(
+                    'Music is not configured. The operator must set LAVALINK_PASSWORD '
+                    'and start the audio node '
+                    '(docker compose -f docker-compose.yml -f docker-compose.music.yml up -d).'
+                )
             if not getattr(self.bot, 'user', None):
                 raise MusicError('Maxwell is not connected to Discord yet.')
             self.client = MusicClient(self.bot.user.id, player=ManagedPlayer,

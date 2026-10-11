@@ -501,6 +501,13 @@ class SendMessageTool(Tool):
                     "Error: sending to another channel or server is not "
                     "available in DMs. Reply in this chat instead."
                 )
+            if cross_chat and getattr(message, "user_install", False) and str(
+                getattr(message, "response_visibility", "") or ""
+            ) == "private":
+                return (
+                    "Error: sending to another channel or server is not "
+                    "available for a private reply. Reply in this chat instead."
+                )
             if cross_chat and not _caller_is_admin(self.bot, message):
                 return (
                     "Error: sending to another channel or DM is restricted "

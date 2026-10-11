@@ -16,6 +16,7 @@ from user_install import (
     UserInstallMessageAdapter,
     UserInstallSession,
     _ephemeral,
+    bind_user_install_author,
     build_user_install_turn,
     handle_user_install_interaction,
     is_user_install_command,
@@ -358,6 +359,54 @@ def test_private_maxwell_can_send_ephemeral_reply_but_not_to_another_channel():
     assert interaction.followup.payloads[0]["content"] == "Hello!"
     assert interaction.followup.payloads[0]["ephemeral"] is True
     assert len(interaction.followup.payloads) == 1
+
+
+def test_private_maxwell_keeps_the_source_guild_for_server_tools():
+    interaction = _interaction(user_id=2, prompt="play a song")
+    member = SimpleNamespace(
+        id=2,
+        name="admin",
+        display_name="admin",
+        bot=False,
+        voice=SimpleNamespace(channel=None),
+        guild=None,
+    )
+    guild = SimpleNamespace(id=777, get_member=lambda uid: member if uid == 2 else None)
+    member.guild = guild
+    interaction.guild = guild
+    interaction.channel = SimpleNamespace(
+        name="general",
+        id=555,
+        permissions_for=lambda _member: SimpleNamespace(send_messages=False),
+    )
+    message = UserInstallMessageAdapter(interaction, "play a song", visibility="private")
+    assert message.response_visibility == "private"
+    assert message.guild is guild
+    assert message.channel.guild is guild
+    assert str(message.channel.id).startswith("private:")
+    assert message.channel.permissions_for(member).send_messages is False
+    bot = object.__new__(MaxwellBot)
+    bot._control = {"tools_enabled": True, "disabled_tools": []}
+    bot.plugin_manager = None
+    bot._last_bot_send = {}
+    bot._is_admin = lambda _uid: False
+    tool = SendMessageTool(bot)
+
+    async def run():
+        await bind_user_install_author(message)
+        await interaction.response.defer(ephemeral=True)
+        return await MaxwellBot._invoke_request_tool(
+            bot,
+            message,
+            "send_message",
+            tool,
+            content="nope",
+            channel_id="123456789012345678",
+        )
+
+    blocked = asyncio.run(run())
+    assert message.author is member
+    assert "private reply" in blocked
 
 
 def test_public_visibility_is_set_before_defer_and_keeps_server_scope():

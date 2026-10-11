@@ -277,6 +277,20 @@ from utils import (  # fd-safe, single source of truth  # noqa: E402
     message_reference_is_forward,
     render_discord_context_text,
 )
+from context_hydration import (  # noqa: E402
+    hydrate_turn_context,
+    hydration_value,
+    is_pointer_only,
+    message_text_without_mentions,
+    reference_payload_usable,
+)
+from runtime_lifecycle import (  # noqa: E402
+    begin_inflight,
+    drain_inflight,
+    drain_timeout_seconds,
+    end_inflight,
+    shard_launch_kwargs,
+)
 
 
 logger = logging.getLogger("maxwell")
@@ -528,7 +542,12 @@ _RETIRED_PREFIX_COMMANDS = frozenset(
 )
 
 
-class MaxwellBot(commands.Bot):
+# discord.py 2.6+ shards itself. Older interpreters used by some local test
+# runs only have commands.Bot; those stay on one gateway connection.
+_BotBase = getattr(commands, "AutoShardedBot", commands.Bot)
+
+
+class MaxwellBot(_BotBase):
     """AI-powered Discord bot."""
 
     def __init__(self, *, account_kind: str = "bot", planned_kinds: set[str] | None = None):
@@ -553,6 +572,13 @@ class MaxwellBot(commands.Bot):
         intents = bot_intents()
         if intents is not None:
             init_kwargs["intents"] = intents
+        if _BotBase is not commands.Bot:
+            shard_kwargs = shard_launch_kwargs()
+            init_kwargs.update(shard_kwargs)
+            if shard_kwargs:
+                logger.info("Discord sharding: %s", shard_kwargs)
+            else:
+                logger.info("Discord sharding: automatic")
         try:
             super().__init__(**init_kwargs)
         except TypeError:
@@ -663,6 +689,13 @@ class MaxwellBot(commands.Bot):
         self._typing_users: dict[str, dict[str, dict]] = {}
         self._active_requests: dict[str, asyncio.Task] = {}
         self._active_request_user: dict[str, str] = {}
+        # Shutdown stops new work, then waits for turns already running.
+        self._draining = False
+        self._background_workers_armed = False
+        self._inflight_counts: dict[str, int] = {}
+        self._shard_resync_tasks: dict[int, asyncio.Task] = {}
+        self._recovery_task: asyncio.Task | None = None
+        self._hydration: dict[str, dict] = {}
         # discord.Message uses slots, so per-message admission flags must live
         # on the bot rather than being attached to Discord model objects.
         self._same_user_interrupts: dict[str, None] = {}
@@ -2103,6 +2136,14 @@ class MaxwellBot(commands.Bot):
                 self, message, "failed", "missing_channel"
             )
             return "dropped"
+        if getattr(self, "_draining", False):
+            MaxwellBot._record_request_outcome(self, message, "suppressed", "draining")
+            return "dropped"
+        if hydration_value(self, message, "hydration_failed", False):
+            MaxwellBot._record_request_outcome(
+                self, message, "suppressed", "unresolved_pointer"
+            )
+            return "dropped"
         same_user_check = getattr(self, "_is_same_user_interrupt", None)
         same_user_interrupt = bool(same_user_check(message)) if callable(same_user_check) else False
         if same_user_interrupt:
@@ -2768,7 +2809,27 @@ class MaxwellBot(commands.Bot):
         )
         ref = snapshot or ref
         if not ref or not hasattr(ref, "author"):
-            return {}
+            target = hydration_value(self, message, "hydrated_target", None)
+            if isinstance(target, dict) and (
+                target.get("message_id") or target.get("content")
+            ):
+                author = str(target.get("author") or "unknown")
+                author_id = str(target.get("author_id") or "")
+                quoted = " ".join(str(target.get("content") or "").split())[:240]
+                self_id = getattr(getattr(self, "user", None), "id", None)
+                return {
+                    "reply_to_message_id": str(target.get("message_id") or ""),
+                    "reply_to_author": author,
+                    "reply_to_author_id": author_id,
+                    "reply_to_self": bool(
+                        self_id is not None and author_id == str(self_id)
+                    ),
+                    "reply_to_content": quoted,
+                }
+            if target is not None and hasattr(target, "author"):
+                ref = target
+            else:
+                return {}
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         rendered = render_discord_context_text(
             ref,
@@ -3285,6 +3346,8 @@ class MaxwellBot(commands.Bot):
         )
         if not bucket:
             return
+        if getattr(self, "_draining", False):
+            return
         target = bucket.get("latest_directed") or bucket.get("latest")
         if target is None:
             return
@@ -3443,13 +3506,26 @@ class MaxwellBot(commands.Bot):
             )
 
     def is_connected(self) -> bool:
-        """True while the Discord gateway websocket is open.
+        """True while any Discord gateway websocket is open.
 
-        discord.py-self's Client has is_ready/is_closed but no is_connected.
-        The gateway watchdog used to crash on AttributeError and never force
-        a PM2 restart of a dead socket.
+        AutoShardedBot keeps sockets on ``shards``, not ``self.ws``. A single
+        closed shard does not make the whole process look disconnected.
         """
         if self.is_closed():
+            return False
+        shards = None
+        try:
+            shards = getattr(self, "shards", None)
+        except Exception:
+            shards = None
+        if isinstance(shards, dict) and shards:
+            for info in shards.values():
+                ws = getattr(info, "ws", None)
+                try:
+                    if ws is not None and bool(getattr(ws, "open", False)):
+                        return True
+                except Exception:
+                    continue
             return False
         ws = getattr(self, "ws", None)
         if ws is None:
@@ -3458,6 +3534,63 @@ class MaxwellBot(commands.Bot):
             return bool(ws.open)
         except Exception:
             return False
+
+    def _schedule_recovery(self) -> None:
+        """One missed-message scan at a time, including after a shard resume."""
+        current = getattr(self, "_recovery_task", None)
+        if isinstance(current, asyncio.Task) and not current.done():
+            return
+        try:
+            task = asyncio.create_task(
+                self._recover_missed_messages(), name="missed-recovery"
+            )
+        except RuntimeError:
+            return
+        self._recovery_task = task
+        if getattr(self, "_tasks", None) is not None:
+            self._track_task(task)
+
+    def _schedule_shard_resync(self, shard_id: int) -> None:
+        tasks = getattr(self, "_shard_resync_tasks", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._shard_resync_tasks = tasks
+        current = tasks.get(int(shard_id))
+        if isinstance(current, asyncio.Task) and not current.done():
+            return
+        try:
+            task = asyncio.create_task(
+                self._resync_shard_state(int(shard_id)),
+                name=f"shard-resync-{int(shard_id)}",
+            )
+        except RuntimeError:
+            return
+        tasks[int(shard_id)] = task
+        if getattr(self, "_tasks", None) is not None:
+            self._track_task(task)
+
+    async def _resync_shard_state(self, shard_id: int) -> None:
+        """Refresh saved guild state for one shard without starting workers."""
+        logger.info("Resyncing Discord state for shard %s", shard_id)
+        await self._save_discord_state()
+
+    async def _arm_background_workers(self) -> None:
+        """Start slash sync and plugin on_ready once per process."""
+        if getattr(self, "_background_workers_armed", False):
+            return
+        self._background_workers_armed = True
+        if getattr(self, "user", None) is not None:
+            self._spawn_detached(self._sync_slash_commands())
+        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
+            self._dispatch_plugin_event("on_ready")
+
+    async def _drain_then_close(self) -> None:
+        """Let running turns finish, then close the gateway."""
+        timeout = drain_timeout_seconds()
+        logger.info("Draining in-flight work for up to %.0fs", timeout)
+        await drain_inflight(self, timeout)
+        with contextlib.suppress(Exception):
+            await self.close()
 
     async def on_disconnect(self):
         self._capture_recovery_snapshot()
@@ -3470,9 +3603,22 @@ class MaxwellBot(commands.Bot):
         logger.info("discord gateway resumed; checking for missed messages")
         self._gateway_last_disconnect = None
         self._gateway_last_ok = time.monotonic()
-        self._spawn_detached(self._recover_missed_messages())
-        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
-            self._dispatch_plugin_event("on_ready")
+        self._schedule_recovery()
+        ws = getattr(self, "ws", None)
+        shard_id = getattr(ws, "shard_id", None) if ws is not None else None
+        self._schedule_shard_resync(0 if shard_id is None else int(shard_id))
+
+    async def on_shard_ready(self, shard_id: int):
+        logger.info("discord shard %s ready", shard_id)
+        self._gateway_last_ok = time.monotonic()
+        self._schedule_shard_resync(int(shard_id))
+
+    async def on_shard_resumed(self, shard_id: int):
+        logger.info("discord shard %s resumed", shard_id)
+        self._gateway_last_ok = time.monotonic()
+        self._gateway_last_disconnect = None
+        self._schedule_recovery()
+        self._schedule_shard_resync(int(shard_id))
 
     async def on_ready(self):
         self._capture_recovery_snapshot()
@@ -3505,7 +3651,6 @@ class MaxwellBot(commands.Bot):
                 self.bot_name,
                 self.user.id,
             )
-            self._spawn_detached(self._sync_slash_commands())
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
         await self._save_discord_state()
@@ -3517,9 +3662,9 @@ class MaxwellBot(commands.Bot):
                 self._current_status = current
         # A fresh ready event can follow a restart or non-resumable session.
         # Reconcile history to find any messages missing from durable receipt.
-        self._spawn_detached(self._recover_missed_messages())
-        if not getattr(self.config, "MAXWELL_DEV_MODE", False):
-            self._dispatch_plugin_event("on_ready")
+        # Plugin on_ready and slash sync run once, not on every shard.
+        self._schedule_recovery()
+        await self._arm_background_workers()
 
     def _dev_scope_allows(self, context, *, guild_id=None) -> bool:
         """Fail closed outside configured Dev guilds, including DMs."""
@@ -3545,6 +3690,8 @@ class MaxwellBot(commands.Bot):
         return str(guild_id or "") in getattr(cfg, "MAXWELL_DEV_GUILD_IDS", frozenset())
 
     async def on_interaction(self, interaction):
+        if getattr(self, "_draining", False):
+            return
         if not MaxwellBot._dev_scope_allows(self, interaction):
             return
         await legal_notice.notify_user(self, getattr(interaction, "user", None))
@@ -3897,6 +4044,8 @@ class MaxwellBot(commands.Bot):
     async def _inbound_retry_loop(self):
         await self.wait_until_ready()
         while not self.is_closed():
+            if getattr(self, "_draining", False):
+                return
             await asyncio.sleep(5)
             try:
                 await self._retry_pending_inbound()
@@ -4985,6 +5134,8 @@ class MaxwellBot(commands.Bot):
         never answered. It also had no dedup, so a gateway resume that
         redelivered MESSAGE_CREATE produced a second full reply.
         """
+        if getattr(self, "_draining", False):
+            return
         if not MaxwellBot._dev_scope_allows(self, message):
             return
         message_id = str(getattr(message, "id", "") or "")
@@ -5120,6 +5271,8 @@ class MaxwellBot(commands.Bot):
             )
 
     async def _on_message_impl(self, message):
+        if getattr(self, "_draining", False):
+            return "draining"
         try:
             self._load_control()
         except Exception as e:
@@ -5280,7 +5433,16 @@ class MaxwellBot(commands.Bot):
             # sees it as context.
             return "self_message"
 
-        if not message_has_visible_payload(message):
+        pointer_only = is_pointer_only(message_text_without_mentions(message))
+        reference = getattr(message, "reference", None)
+        has_reference = bool(
+            reference
+            and getattr(reference, "message_id", None)
+            and not message_reference_is_forward(message)
+        )
+        # A bare Discord reply has no text yet. Fetch it before treating the
+        # event as empty. Pointer-only lines are visible and resolved below.
+        if not message_has_visible_payload(message) and not has_reference:
             return "empty_payload"
 
         # Resolve the referenced message before acquiring the channel lock so
@@ -5298,9 +5460,9 @@ class MaxwellBot(commands.Bot):
                     timeout=10,
                 )
             except Exception as e:
-                # Unknown parent may be a reply to us. Retry boundedly rather
-                # than classifying a hard ping as ambient chatter.
-                if not self._directly_addressed(message):
+                # A caret or "this" can still use the previous channel message.
+                # Other unpinged replies keep the bounded unresolved retry.
+                if not pointer_only and not self._directly_addressed(message):
                     journal = getattr(self, "_request_journal", None)
                     if journal is not None:
                         journal.begin(message.id)
@@ -5314,6 +5476,16 @@ class MaxwellBot(commands.Bot):
                     return "unresolved_reply"
         with contextlib.suppress(Exception):
             await self._ensure_reply_chain_resolved(message)
+        with contextlib.suppress(Exception):
+            await hydrate_turn_context(self, message)
+        hydrated = str(hydration_value(self, message, "hydrated_context", "") or "")
+        parent_ok = reference_payload_usable(self._reply_parent(message))
+        if (
+            not message_has_visible_payload(message)
+            and not hydrated
+            and not parent_ok
+        ):
+            return "empty_payload"
 
         # Serialize only the memory/bookkeeping write for this room. Reply
         # generation happens AFTER the lock is released, through the reply
@@ -6397,7 +6569,12 @@ class MaxwellBot(commands.Bot):
     async def _command_queue_loop(self):
         path = Path(self.config.DATA_DIR) / "bot_commands.json"
         while True:
+            if getattr(self, "_draining", False):
+                return
             await asyncio.sleep(2)
+            if getattr(self, "_draining", False):
+                return
+            begin_inflight(self, "command")
             try:
                 if not path.exists():
                     continue
@@ -6724,6 +6901,8 @@ class MaxwellBot(commands.Bot):
                         )
             except Exception as e:
                 logger.error(f"Command queue error: {e}")
+            finally:
+                end_inflight(self, "command")
 
     async def _memory_cleanup_loop(self):
         # Active cleanup of stale channel rows on a 10-minute cadence.
@@ -11361,7 +11540,11 @@ class MaxwellBot(commands.Bot):
         dynamic_parts: list[str] | None = None,
     ) -> str:
         # Keep this compatible with the same lightweight bot doubles accepted
-        # by _turn_tool_names and _build_openai_tools.
+        # by _turn_tool_names and _build_openai_tools. /maxwell sets
+        # tool_platform on the message; the prompt must use that catalog.
+        detected_platform = str(getattr(message, "tool_platform", "") or "").strip()
+        if detected_platform:
+            platform = detected_platform
         tools = MaxwellBot._tools_for_turn(self, platform, message)
         if not tools or not self._control.get("tools_enabled", True):
             return ""
@@ -11452,6 +11635,14 @@ class MaxwellBot(commands.Bot):
                 dynamic_parts.extend(prompts.collect(request, rendered=True, **kwargs))
             if collected:
                 extra = "\n\n" + "\n\n".join(collected)
+        if platform == "user_install":
+            header += (
+                "\n\nThis turn is a /maxwell app command. Delivery tools post "
+                "through the app response. Server tools (music, moderation, "
+                "channels) use the server this command was run in when Maxwell "
+                "is a member of it. A private reply stays visible only to the "
+                "requester and must not be sent to another channel."
+            )
         return header + "\n\n" + TOOL_PROTOCOL + extra
 
     def _thread_prompt_block(self, message) -> str:
@@ -11870,9 +12061,17 @@ async def main():
             logger.warning(f"Received signal {sig}; shutdown already in progress")
             return
         _shutdown_called = True
-        logger.info(f"Received signal {sig}, initiating graceful shutdown...")
+        bot._draining = True
+        pause = getattr(getattr(bot, "_reply_queue", None), "pause_new", None)
+        if callable(pause):
+            pause()
+        logger.info(
+            "Received signal %s, draining in-flight work for up to %.0fs",
+            sig,
+            drain_timeout_seconds(),
+        )
         with contextlib.suppress(RuntimeError):
-            _spawn_background(bot.close())
+            _spawn_background(bot._drain_then_close())
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _request_shutdown, sig)
