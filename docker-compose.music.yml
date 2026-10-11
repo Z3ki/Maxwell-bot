@@ -11,6 +11,7 @@ services:
       - "127.0.0.1:2333:2333"
     environment:
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a strong LAVALINK_PASSWORD in .env}
+      YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
       JAVA_TOOL_OPTIONS: "-Xms128m -Xmx768m"
     volumes:
       - ./docker/music/application.yml:/opt/Lavalink/application.yml:ro

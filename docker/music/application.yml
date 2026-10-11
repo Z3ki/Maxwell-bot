@@ -3,8 +3,10 @@ server:
   address: 0.0.0.0
 lavalink:
   plugins:
-    - dependency: dev.lavalink.youtube:youtube-plugin:1.18.2
-      snapshot: false
+    # 1.18.2 fails this host with "requires login" and a broken WEB signature
+    # extractor. This snapshot restores iOS playback and the cipher fetch.
+    - dependency: dev.lavalink.youtube:youtube-plugin:2be8e542d3f6f178e048dca565892684c2e40177
+      snapshot: true
   server:
     password: ${LAVALINK_PASSWORD}
     sources:
@@ -28,9 +30,17 @@ plugins:
     allowDirectVideoIds: true
     allowDirectPlaylistIds: true
     clients:
-      - MUSIC
+      - IOS
+      - TV
       - ANDROID_VR
       - WEB
+      - TVHTML5_SIMPLY
+      - MUSIC
+    # TV playback needs a signed-in account. Leave the refresh token blank to
+    # print a one-time device code. Store the resulting token only in .env.
+    oauth:
+      enabled: true
+      refreshToken: ${YOUTUBE_OAUTH_REFRESH_TOKEN:}
 logging:
   level:
     root: INFO

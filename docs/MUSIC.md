@@ -8,9 +8,9 @@ Pinned dependencies:
 
 - Lavalink server **4.2.2**: DAVE E2EE support, introduced in 4.2.0.
 - Python `lavalink==5.11.0`: sends the mandatory DAVE `channelId` voice field.
-- YouTube Source plugin **1.18.2**: current source clients and playlist support.
+- YouTube Source plugin snapshot `2be8e54` (September 2026, after 1.18.2): iOS playback and the cipher fetch fix. 1.18.2 answers many videos with "requires login" and cannot extract the WEB signature on this host.
 
-References: [Lavalink changelog](https://lavalink.dev/changelog/v4), [Python client releases](https://github.com/Devoxin/Lavalink.py/releases), [YouTube plugin configuration](https://github.com/lavalink-devs/youtube-source/tree/1.18.2#plugin).
+References: [Lavalink changelog](https://lavalink.dev/changelog/v4), [Python client releases](https://github.com/Devoxin/Lavalink.py/releases), [YouTube plugin configuration](https://github.com/lavalink-devs/youtube-source/blob/2be8e542d3f6f178e048dca565892684c2e40177/README.md#plugin).
 
 For the Linux host-network Compose deployment, set a **strong random `LAVALINK_PASSWORD`** in `.env` and run:
 
@@ -63,7 +63,7 @@ The Lavalink client reconnects with exponential backoff. Session resuming is req
 
 Queue persistence across a complete Maxwell process restart is **not implemented**. The separate Dev/production bots need separate Discord identities and may share an audio node with its capacity adjusted. The supported discord.py VoiceProtocol forwards voice gateway state by guild ID (including channel moves that keep the same Discord session ID), so no audio passes through Discord shards. Gateway connections may be sharded. Guild locks and music sessions stay keyed by guild id, and a shard ready or resume only resyncs that shard. Redis or cross-process session ownership is not claimed.
 
-YouTube/YouTube Music HTTPS video and playlist links and title searches are supported. No arbitrary audio URL, Spotify DRM, stage support or other audio providers are claimed. YouTube can block VPS addresses or require source-plugin OAuth/cipher configuration; see the plugin's operator documentation. Age/region/removed videos and source failures cannot be guaranteed playable. Do not share extractor tokens with the model. Live playback must be tested on the operator's VPS before public rollout.
+YouTube/YouTube Music HTTPS video and playlist links and title searches are supported. No arbitrary audio URL, Spotify DRM, stage support or other audio providers are claimed. Anonymous iOS playback covers videos YouTube still serves to this host. Videos that return "requires login" play through the TV client after a one-time burner-account code at `https://www.google.com/device`. Store the refresh token in `YOUTUBE_OAUTH_REFRESH_TOKEN` and recreate the audio node; do not commit it. Age/region/removed videos and source failures cannot be guaranteed playable. Do not share extractor tokens with the model. Live playback must be tested on the operator's VPS before public rollout.
 
 ## TTS reference URLs
 
