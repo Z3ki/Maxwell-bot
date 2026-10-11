@@ -7,6 +7,7 @@ Music is a bundled plugin, not a second bot. `music_info` reads live state/searc
 Pinned dependencies:
 
 - Lavalink server **4.2.2**: DAVE E2EE support, introduced in 4.2.0.
+- Java **21.0.12.1 LTS** (Temurin JRE, digest-pinned): correct cgroup v2 resource detection on newer Linux kernels.
 - Python `lavalink==5.11.0`: sends the mandatory DAVE `channelId` voice field.
 - YouTube Source plugin snapshot `2be8e54` (September 2026, after 1.18.2): iOS playback and the cipher fetch fix. 1.18.2 answers many videos with "requires login" and cannot extract the WEB signature on this host.
 
@@ -19,6 +20,14 @@ docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build
 ```
 
 The audio REST/WebSocket port binds only to host loopback `127.0.0.1:2333`. No public reverse proxy is needed. The node has authenticated health checks, bounded logs, 1 GiB RAM and 1.5 CPU limits. Maxwell waits for the node health check at startup. The audio container needs outbound HTTPS and Discord voice UDP; do not block its outbound audio traffic. Do not publish its port to the internet. Generic HTTP/local audio sources are disabled at the node to prevent URL-fetch abuse.
+
+The image copies the unchanged pinned Lavalink artifacts onto the maintained Java runtime. Java 18 incorrectly detects the CPU/memory controllers on this host's newer kernel ([OpenJDK JDK-8347811](https://bugs.openjdk.org/browse/JDK-8347811)), sizing GC workers for the host rather than the container quota. Java 21 detects the 1.5-CPU/1-GiB limits; `JAVA_TOOL_OPTIONS` explicitly retains G1 GC instead of switching to serial GC for the small container. Under these limits, G1 uses two parallel workers and one concurrent worker.
+
+When replacing the audio node, also recreate `yt-cipher`: it shares Lavalink's network namespace. To apply the runtime change and restart the bot:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build --force-recreate --wait lavalink yt-cipher maxwell
+```
 
 For macOS/Windows or the bridge deployment, combine `docker-compose.bridge.yml` with `docker-compose.music.yml` and set `LAVALINK_HOST=lavalink` in `.env`. Both services must share the Compose default network. The audio port remains bound to host loopback.
 
@@ -98,4 +107,4 @@ Live verification checklist for an operator with credentials:
 5. Restart the audio node, test restored playback/queue, and let an empty session reach its idle timeout.
 6. Supply a permitted direct audio URL to TTS and verify Mistral generation and voice-message delivery.
 
-Local verification exercises live Lavalink title/radio resolution and music dispatch with simulated Discord voice transport. Embed payloads are checked against Discord limits and rendered in a desktop/mobile preview. These checks do not establish audible live Discord playback or exact Discord-client rendering; the operator checklist above covers those surfaces and live provider cloning. CI additionally validates the audio image and composed deployment on GitHub's Docker-enabled runner.
+Local verification exercises live Lavalink title/radio resolution and music dispatch with simulated Discord voice transport. The Java runtime cutover additionally verifies authenticated node health, unchanged server/plugin versions, native buffered UDP sender startup, cgroup CPU/memory detection and quota-sized G1 workers. Embed payloads are checked against Discord limits and rendered in a desktop/mobile preview. These checks do not establish audible live Discord playback, elimination of reported mid-song dropouts, or exact Discord-client rendering; the operator checklist above covers those surfaces and live provider cloning. CI additionally validates the audio image, JVM resource detection and composed deployment on GitHub's Docker-enabled runner.

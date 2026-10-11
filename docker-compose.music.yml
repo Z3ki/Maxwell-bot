@@ -34,7 +34,8 @@ services:
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a strong LAVALINK_PASSWORD in .env}
       YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
       YOUTUBE_CIPHER_PASSWORD: ${YOUTUBE_CIPHER_PASSWORD:?Set YOUTUBE_CIPHER_PASSWORD in .env}
-      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx768m"
+      # Keep concurrent GC when the container-aware JVM sees the 1 GiB limit.
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx768m -XX:+UseG1GC"
     volumes:
       - ./docker/music/application.yml:/opt/Lavalink/application.yml:ro
     mem_limit: 1g

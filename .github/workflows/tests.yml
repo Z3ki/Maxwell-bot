@@ -56,6 +56,8 @@ jobs:
           LAVALINK_HOST=lavalink docker compose -f docker-compose.bridge.yml -f docker-compose.music.yml config --quiet
       - name: Build and start pinned audio image; require authenticated node health
         run: docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build --wait --wait-timeout 180 lavalink
+      - name: Verify audio JVM container resource detection
+        run: docker compose -f docker-compose.yml -f docker-compose.music.yml exec -T lavalink java -XshowSettings:system -version
       - name: Verify pinned server and YouTube plugin versions
         run: |
           docker compose -f docker-compose.yml -f docker-compose.music.yml exec -T lavalink sh -c 'curl -fsS -H "Authorization: $LAVALINK_PASSWORD" http://127.0.0.1:2333/v4/info' > /tmp/music-info.json
