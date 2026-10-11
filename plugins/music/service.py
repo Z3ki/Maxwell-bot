@@ -18,7 +18,7 @@ import discord
 log = logging.getLogger(__name__)
 READ_ACTIONS = frozenset({'status', 'queue', 'search', 'channels'})
 ACTIONS = (*sorted(READ_ACTIONS), 'join', 'move', 'leave', 'play', 'skip', 'pause',
-           'resume', 'stop', 'volume', 'seek', 'remove', 'clear', 'shuffle', 'repeat', 'configure')
+           'resume', 'stop', 'volume', 'seek', 'remove', 'clear', 'shuffle', 'repeat', 'autoplay', 'configure')
 
 
 class MusicError(ValueError):
@@ -68,12 +68,13 @@ class Track:
     seekable: bool = True
     requester: int = 0
     key: str = field(default_factory=lambda: uuid.uuid4().hex)
+    autoplay: bool = False
 
     def public(self):
         # Explicit allowlist; never serialize encoded tracks or node userData.
         return {'id': self.key, 'title': self.title[:180], 'artist': self.author[:120],
                 'url': self.uri, 'duration_seconds': self.duration_ms // 1000,
-                'artwork': self.artwork, 'requester_id': str(self.requester)}
+                'artwork': self.artwork, 'requester_id': str(self.requester), 'autoplay': self.autoplay}
 
 
 @dataclass
@@ -86,9 +87,12 @@ class Session:
     paused: bool = False
     volume: int = 50
     repeat: str = 'off'
+    autoplay: bool = False
+    recent_uris: deque[str] = field(default_factory=lambda: deque(maxlen=50))
     last_active: float = field(default_factory=time.monotonic)
     empty_since: float | None = None
     panel: object | None = None
+    _panel_fingerprint: tuple | None = field(default=None, repr=False)
     text_channel: object | None = None
     error: str | None = None
     inflight: int = 0
@@ -233,6 +237,7 @@ class MusicService:
                 'voice_channel': {'id': str(session.channel.id), 'name': session.channel.name} if session.channel else None,
                 'current': session.current.public() if session.current else None,
                 'paused': session.paused, 'volume': session.volume, 'repeat': session.repeat,
+                'autoplay': session.autoplay,
                 'position_seconds': self.backend.position(session.guild.id) // 1000 if session.current else 0,
                 'queue_length': len(session.queue), 'queue': [t.public() for t in session.queue[:25]],
                 'queue_note': 'Use queue with offset to view more.', 'error': session.error,
@@ -273,7 +278,7 @@ class MusicService:
                     raise MusicError('Queue offset must be between 0 and 1000.')
                 return {'queue': [], 'offset': offset, 'total': 0}
             return {'connected': False, 'voice_channel': None, 'current': None,
-                    'paused': False, 'volume': 50, 'repeat': 'off', 'position_seconds': 0,
+                    'paused': False, 'volume': 50, 'repeat': 'off', 'autoplay': False, 'position_seconds': 0,
                     'queue_length': 0, 'queue': [], 'audio_available': self.backend.available}
         if session is None:
             if action not in {'play', 'join'}:
@@ -307,6 +312,8 @@ class MusicService:
                         if session.channel and target.id != session.channel.id and not self.privileged(guild, member):
                             raise MusicError('Moving an active session requires a DJ or server manager.')
                     if action == 'play':
+                        if query is not None and queries is not None:
+                            raise MusicError('Supply query or queries, not both.')
                         if mode not in {'queue', 'next', 'now'}:
                             raise MusicError('Choose queue, next, or now.')
                         if mode == 'now':
@@ -338,6 +345,7 @@ class MusicService:
                             result = {'queued': [t.public() for t in tracks], 'added': len(tracks)}
                     elif action in {'join', 'move'}:
                         await self._join(session, target)
+                        session.text_channel = getattr(message, 'channel', None) or session.text_channel
                         result = {'joined': {'id': str(target.id), 'name': target.name}}
                     elif action == 'leave':
                         await self._leave(session)
@@ -349,12 +357,14 @@ class MusicService:
                         session.paused = action == 'pause'
                         result = {'paused': session.paused}
                     elif action == 'skip':
+                        session.error = None
                         await self._advance(session, manual=True)
                         result = {'skipped': True, 'current': session.current.public() if session.current else None}
                     elif action == 'stop':
                         await self.backend.stop(guild.id)
                         session.current, session.paused = None, False
                         session.queue.clear()
+                        session.autoplay = False
                         result = {'stopped': True, 'queue_cleared': True}
                     elif action == 'volume':
                         if type(value) is not int or not 0 <= value <= 100:
@@ -387,8 +397,14 @@ class MusicService:
                             raise MusicError('Repeat must be off, track, or queue.')
                         session.repeat = value
                         result = {'repeat': value}
+                    elif action == 'autoplay':
+                        if type(value) is not bool:
+                            raise MusicError('Autoplay must be true or false.')
+                        session.autoplay = value
+                        result = {'autoplay': value}
                     session.last_active = time.monotonic()
-                    session.error = None
+                    if action != 'skip':
+                        session.error = None
                     await self.publish(session)
                     return {**result, 'state': self.snapshot(session)}
         finally:
@@ -416,6 +432,35 @@ class MusicService:
             await self.publish(session)
             raise
         session.current, session.paused, session.error = track, False, None
+        if not session.recent_uris or session.recent_uris[-1] != track.uri:
+            session.recent_uris.append(track.uri)
+
+    async def _autoplay(self, session, seed):
+        if self.loads.locked():
+            session.error = 'Autoplay search is busy. Request a song to continue.'
+            return False
+        try:
+            async with self.loads:
+                async with asyncio.timeout(20):
+                    tracks = await self.backend.recommendations(seed)
+        except Exception as exc:
+            log.warning('Music autoplay search failed guild=%s type=%s', session.guild.id, type(exc).__name__)
+            session.error = 'Autoplay could not find a related song. Request a song to continue.'
+            return False
+        excluded = set(session.recent_uris)
+        excluded.add(seed.uri)
+        for track in tracks:
+            # Recheck the public-source boundary before automatic playback.
+            try:
+                uri = identifier(track.uri)
+            except MusicError:
+                continue
+            if uri in excluded or not uri.startswith('https://www.youtube.com/watch?v='):
+                continue
+            await self._start(session, replace(track, uri=uri, requester=seed.requester, autoplay=True))
+            return True
+        session.error = 'No new related songs were found. Request a song to continue.'
+        return False
 
     async def _advance(self, session, *, manual=False, failed=False):
         old = session.current
@@ -431,6 +476,10 @@ class MusicService:
                 session.queue.append(old)
         elif old and not manual and not failed and session.repeat == 'queue':
             await self._start(session, old)
+        elif (old and session.autoplay and not failed and session.channel
+              and any(not m.bot for m in session.channel.members)
+              and await self._autoplay(session, old)):
+            return
         else:
             await self.backend.stop(session.guild.id)
             session.current, session.paused = None, False

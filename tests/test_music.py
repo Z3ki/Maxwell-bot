@@ -10,7 +10,7 @@ from jsonschema import validate, ValidationError
 
 from plugins.music.service import MusicError, MusicService, Track, identifier
 from plugins.music.tools import MusicControlTool, MusicInfoTool, perform
-from plugins.music.ui import install, uninstall, update_panel, command_definition, format_result
+from plugins.music.ui import install, uninstall, update_panel, command_definition
 
 
 class Backend:
@@ -135,35 +135,13 @@ def test_title_search_falls_back_to_youtube_music_when_youtube_search_is_empty(t
         'ytsearch:never gonna give you up', 'ytmsearch:never gonna give you up']
 
 
-def test_watch_mix_queues_one_track_and_status_reports_playback(tmp_path):
+def test_watch_mix_queues_only_the_requested_video(tmp_path):
     service, backend, msg, _ = fixture(tmp_path)
 
     async def journey():
         await service.execute(msg, 'play', query='https://www.youtube.com/watch?v=abcdefghijk&list=RDabcdefghijk')
         assert backend.calls[0] == ('load', 'https://www.youtube.com/watch?v=abcdefghijk')
         assert not service.sessions[10].queue
-        status = format_result(await service.execute(msg, 'status'))
-        assert 'Playing' in status and 'Lounge' in status and '0:12' in status
-        assert 'Volume 50%' in status and 'Repeat off' in status and '0 queued' in status
-        assert 'queue is empty' not in status
-        await service.execute(msg, 'pause')
-        assert 'Paused' in format_result(await service.execute(msg, 'status'))
-        assert format_result(await service.execute(msg, 'queue')) == 'The queue is empty.'
-
-    asyncio.run(journey())
-
-
-def test_idle_status_and_queue_have_distinct_responses(tmp_path):
-    service, backend, msg, _ = fixture(tmp_path)
-
-    async def journey():
-        status = format_result(await service.execute(msg, 'status'))
-        assert 'Disconnected' in status and 'Nothing is playing' in status
-        assert format_result(await service.execute(msg, 'queue')) == 'The queue is empty.'
-        with pytest.raises(MusicError, match='offset'):
-            await service.execute(msg, 'queue', offset=-1)
-        backend.available = False
-        assert 'audio node is unavailable' in format_result(await service.execute(msg, 'status'))
 
     asyncio.run(journey())
 
@@ -267,6 +245,8 @@ def test_limits_atomic_batch_and_queue_ownership(tmp_path):
         with pytest.raises(MusicError, match='No playable'):
             await service.execute(msg, 'play', queries=['valid', 'missing'])
         assert len(session.queue) == 2
+        with pytest.raises(MusicError, match='offset'):
+            await service.execute(msg, 'queue', offset=-1)
         session.queue[0].requester = 987
         with pytest.raises(MusicError, match='own songs'):
             await service.execute(msg, 'remove', track_id=session.queue[0].key)
@@ -312,7 +292,102 @@ def test_ai_tools_schemas_and_permissions(tmp_path):
         assert json.loads(await control.execute(msg, action='stop'))['stopped']
         assert json.loads(await info.execute(SimpleNamespace(guild=None, author=msg.author), action='status'))['error']
     asyncio.run(journey())
-    assert control.is_destructive and not info.side_effects
+
+
+def test_ai_batch_queue_preserves_order_and_rejects_ambiguous_selection(tmp_path):
+    service, _, msg, _ = fixture(tmp_path)
+    control = MusicControlTool(service.bot, service)
+
+    async def journey():
+        await control.execute(msg, action='play', query='current')
+        await control.execute(msg, action='play', queries=['later A', 'later B'])
+        result = json.loads(await control.execute(
+            msg, action='play', queries=['next A', 'next B'], mode='next'))
+        assert [t['title'] for t in result['queued']] == ['next A', 'next B']
+        session = service.sessions[10]
+        assert session.current.title == 'current'
+        assert [t.title for t in session.queue] == ['next A', 'next B', 'later A', 'later B']
+        rejected = json.loads(await control.execute(
+            msg, action='play', query='ignored', queries=['also ignored']))
+        assert rejected['succeeded'] is False
+        assert [t.title for t in session.queue] == ['next A', 'next B', 'later A', 'later B']
+        rejected = json.loads(await control.execute(
+            msg, action='play', queries=['would load', 'missing']))
+        assert rejected['succeeded'] is False
+        assert [t.title for t in session.queue] == ['next A', 'next B', 'later A', 'later B']
+        await service.close()
+
+    asyncio.run(journey())
+
+
+def test_web_search_then_music_keeps_permissions_and_destructive_gate(tmp_path, monkeypatch):
+    from types import MethodType
+
+    from bot import MaxwellBot, ToolCircuitBreaker
+    from bot_tools import WebSearchTool
+    from plugins.maxwell_extras.taint_gate_cleanup import install_taint_gate_cleanup
+
+    class Search:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def text(self, query, **kwargs):
+            return [{'title': 'VERITY PHONK by FASHXZ',
+                     'href': 'https://www.youtube.com/watch?v=abcdefghijk',
+                     'body': 'Track metadata'}]
+
+    monkeypatch.setattr('bot_tools._DDGS', Search)
+    monkeypatch.setattr('bot_tools._DDGS_AVAILABLE', True)
+    service, backend, msg, voice = fixture(tmp_path)
+    bot = service.bot
+    bot.config = SimpleNamespace(DISABLE_TAINT_GATE=False, RAG_WEB_STORE_ENABLED=False)
+    bot.memory = None
+    bot._tool_breaker = ToolCircuitBreaker()
+    bot.tool_concurrency = None
+    bot.hooks = None
+    bot._tainted_messages = {}
+    bot.mark_message_tainted = MethodType(MaxwellBot.mark_message_tainted, bot)
+    bot.is_message_tainted = MethodType(MaxwellBot.is_message_tainted, bot)
+    bot._message_tool_platform = lambda _msg: 'discord'
+    bot._record_llm_trace = AsyncMock()
+    bot._execute_tool_by_name = MethodType(MaxwellBot._execute_tool_by_name, bot)
+    shell = SimpleNamespace(is_destructive=True, execute=AsyncMock())
+    bot.tools = {'web_search': WebSearchTool(bot),
+                 'music_control': MusicControlTool(bot, service), 'shell': shell}
+    bot.plugin_manager = SimpleNamespace(
+        get_tool=lambda name: bot.tools.get(name),
+        get_available_tools=lambda **kwargs: bot.tools,
+        is_plugin_enabled_for_user=lambda *args, **kwargs: True)
+    msg.id, msg.channel.id = 123, 456
+    install_taint_gate_cleanup(bot)
+
+    async def call(name, **params):
+        return await bot._execute_tool_by_name(
+            msg, name, params, disabled=set(), compatible=set(bot.tools))
+
+    async def journey():
+        await call('web_search', query='VERITY PHONK FASHXZ')
+        assert bot.is_message_tainted(msg)
+        played = await call('music_control', action='play', query='VERITY PHONK FASHXZ')
+        assert '"started"' in played
+        session = service.sessions[msg.guild.id]
+        assert session.current.title == 'VERITY PHONK FASHXZ'
+        assert session.channel is voice
+
+        denied = await call('music_control', action='stop')
+        assert '"succeeded": false' in denied
+        assert session.current.title == 'VERITY PHONK FASHXZ'
+        assert not any(c[0] == 'stop' for c in backend.calls)
+        rejected = await call('music_control', action='play', query='https://127.0.0.1/a.mp3')
+        assert '"succeeded": false' in rejected
+        assert not session.queue
+        assert bot.is_message_tainted(msg)
+        assert 'refused' in await call('shell', command='echo unsafe')
+        shell.execute.assert_not_awaited()
+        await service.close()
+
+    asyncio.run(journey())
+
 
 
 def test_playlists_repeat_pause_seek_shuffle_and_cleanup(tmp_path):

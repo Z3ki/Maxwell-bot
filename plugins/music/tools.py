@@ -14,10 +14,14 @@ SETTINGS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties'
 PARAMETERS = {'type': 'object', 'additionalProperties': False, 'properties': {
     'action': {'type': 'string', 'enum': list(ACTIONS)},
     'query': {'type': 'string', 'maxLength': 400, 'description': 'Song title, artist or HTTPS YouTube video/playlist URL.'},
-    'queries': {'type': 'array', 'minItems': 1, 'maxItems': 10, 'items': {'type': 'string', 'maxLength': 400}},
+    'queries': {'type': 'array', 'minItems': 1, 'maxItems': 10,
+                'description': 'For several songs, supply ordered titles/YouTube URLs in one play call instead of separate calls. Use query OR queries, never both.',
+                'items': {'type': 'string', 'maxLength': 400}},
     'channel': {'type': 'string', 'maxLength': 100, 'description': 'Voice channel name, ID, or mention; omit to use requester voice channel.'},
     'mode': {'type': 'string', 'enum': ['queue', 'next', 'now'], 'default': 'queue'},
-    'value': {'oneOf': [{'type': 'integer'}, {'type': 'string', 'enum': ['off', 'track', 'queue']}]},
+    'value': {'oneOf': [{'type': 'integer'}, {'type': 'boolean'},
+                         {'type': 'string', 'enum': ['off', 'track', 'queue']}],
+              'description': 'Volume percentage, seek seconds, repeat mode, or true/false for autoplay.'},
     'track_id': {'type': 'string', 'maxLength': 32, 'description': 'Stable queued-track ID from queue/status, used by remove.'},
     'offset': {'type': 'integer', 'minimum': 0, 'maximum': 1000},
     'settings': SETTINGS_SCHEMA}, 'required': ['action']}
@@ -36,7 +40,10 @@ async def perform(service, message, action, **kwargs):
 class MusicControlTool(Tool):
     tool_name = 'music_control'
     returns_result = True
-    is_destructive = True
+    # Guild-scoped controls validate permissions and sources in MusicService.
+    # Web research must not prevent playing the track it helped identify.
+    is_destructive = False
+    side_effects = True
     transports = ('discord', 'user_install')
     timeout_seconds = 60
 
@@ -49,14 +56,18 @@ class MusicControlTool(Tool):
                 'action': {'type': 'string', 'enum': [a for a in ACTIONS if a not in READ_ACTIONS]}}}
 
     def get_description(self):
-        return ('Control music in the requesting Discord server. play(query or queries) automatically joins their voice channel; '
-                'mode=queue adds without interruption, next puts songs next, now replaces the current song only when asked. '
-                'join/move optionally take channel name/ID. pause/resume/skip/shuffle; stop clears queue; leave disconnects; '
+        return ('Control music in the requesting Discord server. play(query OR queries) automatically joins their voice channel. '
+                'For several songs, use queries=[title or YouTube URL, ...] (1-10) in one call; selections load atomically in the supplied order. '
+                'mode=queue adds without interruption, next inserts the whole batch ahead of upcoming songs, now replaces the current song only when asked. '
+                'join/move optionally take channel name/ID. pause/resume/skip/shuffle; stop clears queue and disables autoplay; leave disconnects. '
                 'volume value=0..100, seek value=seconds, repeat value=off/track/queue, remove track_id from music_info queue, clear queue. '
+                'autoplay value=true/false opts this session into related YouTube songs after the requested queue ends; default off. '
+                'Requested songs and repeat take priority over autoplay; it does not run in empty voice channels. '
                 'configure reads/updates server music settings (server managers only). '
                 'Never claim success unless the result confirms it; started means an actual TrackStart was received. '
+                'Successful changes refresh the public Now Playing embed when channel permissions allow. '
                 'If no voice channel is known, ask the user; do not hijack another session. '
-                'Read music_info for live state and channels. No guild/user overrides or arbitrary audio URLs.')
+                'Music controls work after web research. Read music_info for live state/channels; no guild/user overrides or arbitrary audio URLs.')
 
     async def execute(self, message, action, **kwargs):
         if action in READ_ACTIONS:
@@ -75,7 +86,7 @@ class MusicInfoTool(MusicControlTool):
             'query': PARAMETERS['properties']['query'], 'offset': PARAMETERS['properties']['offset']}, 'required': ['action']}
 
     def get_description(self):
-        return ('Read on-demand music state for this Discord server: status shows current song, connected voice channel, volume, repeat and next 25 songs; '
+        return ('Read on-demand music state for this Discord server: status shows current song, connected voice channel, volume, repeat, autoplay and next 25 songs; '
                 'queue(offset) paginates 25 songs with stable removal IDs; channels lists visible voice channels and requester voice channel; '
                 'search(query) finds up to five YouTube songs without joining or playing. '
                 'Use normal reasoning to choose tracks for moods/similar songs, then music_control play with the chosen title/URL. '

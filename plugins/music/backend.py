@@ -9,7 +9,7 @@ import aiohttp
 import discord
 import lavalink
 
-from .service import MusicError, Track
+from .service import MusicError, Track, identifier
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +135,13 @@ class LavalinkBackend:
             tracks.append(Track(item.track, item.title, item.author, uri, item.duration,
                                 item.artwork_url, item.is_seekable))
         return tracks, result.load_type == lavalink.LoadType.PLAYLIST
+
+    async def recommendations(self, seed):
+        # Radio mixes are deliberate playlists, unlike user watch/Mix links.
+        video = seed.uri.rsplit('=', 1)[-1]
+        identifier('https://www.youtube.com/watch?v=' + video)
+        tracks, _ = await self.load(f'https://www.youtube.com/watch?v={video}&list=RD{video}')
+        return tracks
 
     async def join(self, guild, channel):
         await self.ready()
