@@ -43,6 +43,8 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 
 from concurrency_safety import cancel_once
@@ -538,6 +540,8 @@ class RequestJournal:
     before it could record delivery. Reasons must be non-sensitive reason codes.
 
     Connections are opened, committed/rolled back, and closed per operation.
+    Async callers use ``submit()``: one FIFO worker keeps SQLite waits and fsync
+    off the event loop. Await effect checkpoints before performing the effect.
     Database errors propagate; a corrupt/unwritable journal is never replaced.
     ``update()`` explicitly permits terminal transitions for edited messages;
     ``accept()`` and ``begin()`` never silently reopen terminal requests.
@@ -552,6 +556,8 @@ class RequestJournal:
         if not self.path or self.path == ":memory:":
             raise ValueError("RequestJournal requires an on-disk database path")
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with contextlib.closing(sqlite3.connect(self.path, timeout=5.0)) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
         with self._transaction(write=True) as connection:
             connection.execute(
                 """
@@ -585,12 +591,29 @@ class RequestJournal:
                 "WHERE status IN ('delivered', 'suppressed', 'failed', 'superseded')"
             )
             self._prune(connection)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maxwell-journal")
+        self._closed = False
+
+    def submit(self, callback: Callable, /, *args, **kwargs) -> asyncio.Future:
+        """Enqueue immediately, preserving order even for synchronous queue callbacks."""
+        if self._closed:
+            raise RuntimeError("Request journal is closed")
+        future = asyncio.get_running_loop().run_in_executor(
+            self._executor, partial(callback, *args, **kwargs)
+        )
+        # Cancellation does not revoke an already accepted durable checkpoint.
+        return asyncio.shield(future)
+
+    async def drain(self) -> None:
+        """Wait until all previously submitted operations have finished."""
+        await self.submit(lambda: None)
 
     @contextlib.contextmanager
     def _transaction(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=5.0)
         try:
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous=FULL")
             with connection:
                 if write:
                     connection.execute("BEGIN IMMEDIATE")
@@ -837,7 +860,10 @@ class RequestJournal:
             self._log_transition(previous, record)
 
     def close(self) -> None:
-        """Lifecycle hook; every operation already closes its own connection."""
+        """Drain accepted operations and release the journal worker."""
+        if not self._closed:
+            self._closed = True
+            self._executor.shutdown(wait=True)
 
 
 class Watermarks:

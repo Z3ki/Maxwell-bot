@@ -209,23 +209,35 @@ async def update_panel(session, *, force=False):
     if not force and session.panel and getattr(session, '_panel_fingerprint', None) == fingerprint:
         return True
     old = session.panel
-    # Invalidate first, even when Discord refuses to edit an obsolete message.
-    session.panel = None
+    if not session.text_channel:
+        return False
+    view = panel_view(session.guild.id, state) if session.channel else None
+    if old and getattr(getattr(old, 'channel', None), 'id', None) == session.text_channel.id:
+        try:
+            await old.edit(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.NotFound, discord.Forbidden):
+            # Deleted/uneditable panels need a replacement; reject their controls first.
+            session.panel = None
+        except discord.HTTPException:
+            # A transient edit failure must not create another public message.
+            return False
+        else:
+            session._panel_fingerprint = fingerprint
+            return True
+    else:
+        session.panel = None
     if old:
         try:
             await old.edit(view=None)
         except discord.HTTPException:
             pass
-    if session.text_channel:
-        try:
-            session.panel = await session.text_channel.send(embed=embed,
-                view=panel_view(session.guild.id, state) if session.channel else None,
-                allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException:
-            return False
-        session._panel_fingerprint = fingerprint
-        return True
-    return False
+    try:
+        session.panel = await session.text_channel.send(embed=embed, view=view,
+            allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        return False
+    session._panel_fingerprint = fingerprint
+    return True
 
 
 def public_allowed(interaction):
@@ -301,7 +313,7 @@ def install(bot, service):
                 except discord.HTTPException:
                     pass
             if published:
-                await interaction.followup.send('Published the music status here.', ephemeral=True)
+                await interaction.followup.send('Music status is shown here.', ephemeral=True)
                 return True
         embeds = [state_embed(result)] if action == 'status' and 'connected' in result else private_embeds(result)
         batch, size = [], 0

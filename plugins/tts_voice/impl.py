@@ -545,7 +545,7 @@ async def _pick_voice(
     return chosen.voice_id, "", chosen.name
 
 
-def _record(bot: Any, message: Any, sent: Any) -> None:
+async def _record(bot: Any, message: Any, sent: Any) -> None:
     response_id = (
         sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", None)
     )
@@ -556,7 +556,7 @@ def _record(bot: Any, message: Any, sent: Any) -> None:
         return
     if not hasattr(sent, "id"):
         sent = type("Sent", (), {"id": response_id})()
-    record(message, sent)
+    await record(message, sent)
 
 
 class TtsTool(Tool):
@@ -707,7 +707,7 @@ class TtsTool(Tool):
                     for key, stamp in TtsTool._last_tts.items()
                     if stamp > cutoff
                 }
-        _record(self.bot, message, sent)
+        await _record(self.bot, message, sent)
         logger.info(
             "TTS provider: mistral voice=%s chars=%s bytes=%s",
             label,

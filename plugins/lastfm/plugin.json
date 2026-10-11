@@ -1,0 +1,15 @@
+{
+  "id": "lastfm",
+  "name": "lastfm",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "Private opt-in Last.fm browser linking and listener-aware music scrobbling.",
+  "author": "Maxwell",
+  "bundled": true,
+  "enabled_by_default": true,
+  "dependencies": ["music"],
+  "permissions": ["messages.send", "network"],
+  "tools": [
+    {"name": "lastfm_account", "returns_result": true, "is_destructive": false, "transports": ["discord", "user_install"]}
+  ]
+}

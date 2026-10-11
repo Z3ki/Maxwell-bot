@@ -1,70 +1,210 @@
 # Isolated Maxwell Dev Docker
 
-This Compose project is for a separate Discord application in designated test
-guilds. Its source checkout, token, Ollama model, data, logs, network, and
-Compose project are separate from Production. It exposes no host port, mounts
-no Docker socket, and disables the web API and voice. Production is not
-restarted by Dev Compose commands.
+Production stays on `main` at `/root/maxwell`; development runs from the separate
+`dev` worktree at `/root/maxwell-dev`. Dev has a different Discord application,
+token, guild allowlist, Compose project, network, data/log/public/shell volumes
+and optional model volume. The source bind is read-only, the API is off, no host
+ports or Docker socket are exposed, and no production data is mounted. Music is
+optional, not globally disabled: its lazy backend starts on an allowed request.
 
-## Prepare
+## Prepare the worktree and identity
 
-1. Use a separate checkout of `dev` or a reviewed feature branch. Do not run
-   Dev Compose from the Production bind-mounted checkout.
-2. Copy `docker/dev.env.example` to `.env.dev` in the Dev checkout, set a
-   **separate** Discord bot token and numeric test guild IDs, and `chmod 600`
-   the file. `.env.dev` is Git-ignored and excluded from Docker build context.
-3. Invite the Dev application only to test guilds. Dev rejects DMs and events
-   from guilds outside `MAXWELL_DEV_GUILD_IDS`. Its slash commands are synced
-   only to those guilds. Disable or remove any old global commands in the
-   separate Dev application's Developer Portal if previously published.
-
-## Start
-
-From the Dev checkout. The read-only source bind cannot create nested volume
-mountpoints, so those directories must exist before Compose starts:
+For initial setup only, if the worktree does not already exist:
 
 ```sh
-mkdir -p data logs public/bot shelldocker
-docker compose -f docker-compose.dev.yml config --quiet
-docker compose -f docker-compose.dev.yml up -d ollama-dev
-docker compose -f docker-compose.dev.yml exec -T ollama-dev ollama pull qwen2.5:1.5b
-docker compose -f docker-compose.dev.yml up -d --build maxwell-dev
-docker compose -f docker-compose.dev.yml ps
+cd /root/maxwell
+git fetch origin
+# Create dev from the reviewed main revision when it does not exist yet.
+git worktree add -b dev /root/maxwell-dev origin/main
+# If dev already exists locally, use: git worktree add /root/maxwell-dev dev
+cd /root/maxwell-dev
+cp docker/dev.env.example .env.dev
+chmod 600 .env.dev
 ```
 
-The local model is a small functional test model; evaluate quality separately.
-The Ollama service has no host port and uses the `maxwell-dev_dev_models`
-volume. The bot is capped at one CPU/3 GB RAM; Ollama is capped at one CPU/3 GB.
-Neither service uses the Production inference key.
+Use Docker with Compose v2, Git, Bash, Python 3 and Make. Configure `.env.dev`
+with `MAXWELL_DEV_MODE=true`, a **separate official bot** `DISCORD_BOT_TOKEN`,
+and comma-separated numeric `MAXWELL_DEV_GUILD_IDS`. Create/invite the Dev
+application only into those test guilds, enable its required gateway intents,
+and grant the app command/voice permissions needed for your checks. Commands
+register only in allowlisted guilds. Remove any legacy global commands from the
+Dev application. Never copy Production's Discord token, guild settings, entire
+`.env`, databases, or generated data into Dev.
 
-## Verify and stop
+Only explicitly authorized primary/fallback AI endpoints, model names and
+provider keys may be reused. Reused provider keys share billing, quotas and rate
+limits: Dev traffic can affect Production. Prefer distinct limited keys where
+available. Rotate any exposed token/key, update only its intended env file and
+recreate that bot; update the guild allowlist before inviting/registering Dev in
+a new test guild. Keep `.env.dev` private and out of Git.
 
-Check `docker compose -f docker-compose.dev.yml ps` for a healthy Dev bot.
-Use the Dev Discord application in the allowed test guild for a real rendering
-and conversation check. Health only proves the bot process is running; it does
-not prove Discord delivery or model quality. Check Production's independent
-container state before and after Dev maintenance.
+## Lifecycle commands
+
+Always run from `/root/maxwell-dev`, on `dev` or `feature/*`:
 
 ```sh
-docker compose -f docker-compose.dev.yml stop
+make updev
+make restartdev             # rebuild image, recreate Dev bot to load edited code
+make statusdev
+make logsdev                # Ctrl-C stops following, not the bot
+make stopdev                # keeps Dev volumes
 ```
 
-`stop` retains Dev data, logs, and model. `down` removes Dev containers and
-network while retaining named volumes. Never use `down -v` unless Dev data
-deletion has been reviewed and backed up. After updating the separate Dev
-checkout, recreate its bot so Python loads the new code and stops old tasks:
+Equivalent commands are `bash scripts/dev.sh up|restart|status|logs|stop`.
+The helper derives its checkout root, refuses `/root/maxwell`, `main`, detached
+checkouts and non-development branches, and requires the Dev mode, token and
+guild allowlist. It always selects project `maxwell-dev` and uses
+`docker compose --env-file .env.dev -f docker-compose.dev.yml`. It creates the
+read-only bind's required mountpoint directories. Up/restart stamp the bot image
+with the checkout's Git revision, rebuild only the Dev bot and selected audio
+node and start required Dev dependencies. With music, they recreate the cipher
+in the current node's namespace before recreating the Dev bot; they never operate on the public project. A Dev restart can
+interrupt its own conversation/music state. Keep optional flags consistent
+across lifecycle commands, especially `stopdev` to stop audio sidecars too.
+
+### Optional local model
+
+There is no mandatory Ollama dependency. To opt into profile `local-ai`, set
+`.env.dev`'s AI endpoint to `http://ollama-dev:11434` and select the model:
 
 ```sh
-docker compose -f docker-compose.dev.yml up -d --build --force-recreate --no-deps maxwell-dev
+LOCAL_AI=1 make updev
+# Pull once into the separate dev_models volume:
+docker compose --project-name maxwell-dev --env-file .env.dev \
+  -f docker-compose.dev.yml --profile local-ai exec -T ollama-dev \
+  ollama pull qwen2.5:1.5b
+LOCAL_AI=1 make restartdev
+LOCAL_AI=1 make stopdev
 ```
 
-This does not restart Production or the Dev model. Roll back by checking out the
-previous Dev commit in this isolated checkout and rebuilding only the Dev bot.
+This small model is for functional checks, not a production-quality claim.
+Alternatively, an existing host Ollama can be selected explicitly using
+`http://host.docker.internal:11434` if reachable from the Dev bridge; that shares
+inference capacity with the host, not Dev storage. No helper configures/exposes
+the host service automatically.
 
-## Limits
+### Optional music
 
-The guard runs inside Maxwell's event handlers. Discord can still deliver
-gateway metadata for any guild where the Dev application was invited, so keep
-the Dev application out of non-test guilds. This setup does not migrate or
-share Production databases. Database changes require a separate Dev migration
-test and backup before any Production release.
+Set **distinct generated** `LAVALINK_PASSWORD` and `YOUTUBE_CIPHER_PASSWORD` in
+`.env.dev` (for example, generate each separately with `openssl rand -hex 32`).
+Do not reuse Production audio credentials. Any YouTube OAuth token needs
+separate authorization for Dev. Enable the isolated node and cipher overlay:
+
+```sh
+WITH_MUSIC=1 make updev
+WITH_MUSIC=1 make restartdev
+WITH_MUSIC=1 make statusdev
+WITH_MUSIC=1 make stopdev
+# Both options can be combined:
+LOCAL_AI=1 WITH_MUSIC=1 make updev
+```
+
+`WITH_MUSIC=1` adds `docker-compose.dev.music.yml`; its `lavalink-dev` and
+`yt-cipher-dev` are private to Dev, with no host ports. The cipher shares the
+Dev node's network namespace. Voice remains permission-checked and confined to
+allowlisted guilds. Without this overlay, non-music testing has no audio service
+requirement; voice requests cannot produce playback without a configured node.
+
+For videos requiring YouTube login, run `make youtubeauthdev` from this worktree.
+Approve the displayed code at Google's device page with a separate burner
+account. The helper handles pending/slow-down/expiry without request flooding
+and saves the token only in private `.env.dev`; it never prints the token.
+Then run `WITH_MUSIC=1 make restartdev` to apply the new node environment and
+recreate its cipher in the correct namespace. Node startup does not create
+unattended device codes. Provider restrictions can still reject a video.
+
+### Optional Last.fm
+
+Set `LASTFM_API_KEY` and `LASTFM_API_SECRET` from a Last.fm application, plus a
+new Dev-only `LASTFM_ENCRYPTION_KEY` generated with `openssl rand -hex 32`.
+Keep `.env.dev` private and back up that encryption key. Authorized application
+credentials can be reused for Dev and Production, but share Last.fm's quota;
+Discord tokens, encryption keys, linked accounts and data volumes stay separate.
+Do not copy production account/session databases.
+
+Leave the Last.fm application's **callback URL blank**. This uses token/browser
+approval, not a hosted OAuth callback. Recreate Dev, then use `/lastfm connect`
+in its allowlisted guild, approve Maxwell in your browser, and `/lastfm finish`
+there. `/lastfm status` reports your private link/pending count; disconnect
+removes local consent and pending listening. Asking Maxwell to connect sends a
+private DM approval link; in Dev, finish through the slash command in the test
+guild because the general Dev scope guard rejects DM interactions. Do not paste
+account passwords, approval tokens or session keys into chat. See `MUSIC.md`
+for listening eligibility, durable retry and verification limits.
+
+## Real tests and Discord checks
+
+Tests work **before** a Discord token/guild or `.env.dev` has been configured:
+
+```sh
+cd /root/maxwell-dev
+make testdev                               # full actual pytest suite
+make testdev PYTEST_ARGS='tests/test_config_tools.py -q'
+bash scripts/dev.sh test -k music -q       # explicit pytest arguments
+```
+
+The helper builds the runtime with its test dependencies, then runs pytest in a
+separate disposable container: no network, no persistent data volumes, no env
+file passed, read-only checkout/root filesystem, writable executable `/tmp`
+tmpfs for test fixtures, nonexistent temporary `MAXWELL_ENV_FILE`, and pytest's
+cache provider disabled. Executable scratch space is limited to this offline
+test container, not added to the live bot.
+Existing checkout `.env`/`.env.dev` files are masked with `/dev/null` inside the
+test container. Tests do not start Discord, Compose services or Production.
+Network-dependent live integrations must instead be checked explicitly in Dev.
+The linked worktree's `.git` is masked by disposable empty Git metadata, so
+installer subprocesses work without mounting production Git history/config.
+
+For the existing dependency/lint/shell/coverage gates, install
+`requirements.txt` and `requirements-dev.txt` in an isolated Python environment
+and run `make check`, or rely on the branch CI gates. Container pytest is not a
+replacement for those gates. A healthy Dev bot only proves process liveness;
+verify real Discord delivery, allowed/denied guild behavior, model responses,
+and music queue/play/skip/stop in the Dev guild when promoting music changes.
+
+`stopdev` retains all Dev data. To remove containers/network deliberately, use
+the same Dev Compose files/env/project with `down`; never use `down -v` without
+reviewed backups and deliberate data deletion. To roll back Dev, select a
+reviewed prior commit on a `feature/*` branch and rebuild/recreate its bot.
+Production database migration testing requires separate Dev data and a backup.
+
+## Promote reviewed features, then deploy separately
+
+Create `feature/<name>` from `dev` in the Dev worktree. Submit a PR into `dev`,
+pass the branch CI checks, and exercise the separate Dev Discord application.
+Then submit a reviewed PR from `dev` into `main`, pass main CI, and merge only
+after the Dev Discord checks. No helper pushes, resets, rebases or automatically
+deploys Production.
+
+Publishing a release by updating `VERSION` and pushing a reviewed release tag
+through the existing release workflow publishes artifacts; it does **not** mean
+the public bot has been updated. Deployment is a separate operator action.
+For this source/worktree installation, after approval and a recommended backup
+of `.env`, databases and persistent volumes, run **only in Production**:
+
+```sh
+cd /root/maxwell
+test "$(pwd -P)" = /root/maxwell
+test "$(git branch --show-current)" = main
+test -z "$(git status --porcelain)"   # do not overwrite local changes
+git fetch origin
+docker compose stop maxwell          # source is bind-mounted; drain before changing it
+git pull --ff-only origin main       # only the reviewed main revision
+docker compose build --build-arg "MAXWELL_BUILD_COMMIT=$(git rev-parse HEAD)" maxwell
+docker compose up -d --force-recreate --no-deps maxwell
+docker compose ps maxwell
+docker compose logs --tail 100 maxwell
+```
+
+Run the guards successfully before continuing; commands are shown individually
+so any failure can be inspected, not bypassed. Review fetched changes before
+pulling. Recreating the public bot interrupts music/queues and in-flight work;
+schedule downtime and do not assume queues persist. If a reviewed change also
+updates public audio dependencies, follow `docs/MUSIC.md` deliberately rather
+than letting Dev commands touch them. Release-installer deployments instead
+follow `docs/INSTALL.md`'s pinned version update workflow. Neither path should
+reuse Dev's Discord identity or volumes.
+
+The guild guard applies inside event handlers; Discord can still deliver gateway
+metadata for every guild the Dev app joins. Keep that application out of
+non-test guilds even when the allowlist rejects their events.

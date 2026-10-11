@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -99,7 +100,7 @@ def test_tts_sends_the_emotion_voice_and_marks_delivery(monkeypatch):
     TtsTool._last_tts.clear()
     tool = TtsTool(
         SimpleNamespace(
-            config=None, _record_delivery=lambda *_a: seen.setdefault("recorded", True)
+            config=None, _record_delivery=AsyncMock(side_effect=lambda *_a: seen.setdefault("recorded", True))
         )
     )
     message = SimpleNamespace(channel=SimpleNamespace(id=7))

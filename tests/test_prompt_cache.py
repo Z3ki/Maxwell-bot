@@ -602,3 +602,16 @@ def test_app_context_zero_excludes_cached_and_live_channel_history():
     assert "UNREQUESTED_CONTEXT" not in str(output)
     assert "UNREQUESTED_CACHED_CONTEXT" not in str(output)
     assert not any(row["role"] == "user" and str(row["content"]).startswith("<previous_conversation>") for row in output)
+
+
+def test_optional_recall_is_dropped_before_recent_history_under_prompt_pressure():
+    bot = _bot(FakeMemory())
+    bot._control["prompt_context_budget"] = 20000
+    size = MaxwellBot._prompt_budget_chars(bot) // 3
+    recent = {"role": "user", "content": "<previous_conversation>\n" + "r" * size + "\n</previous_conversation>"}
+    recalled = {"role": "user", "content": "<recalled_conversation>\n" + "o" * (size + 1000) + "\n</recalled_conversation>"}
+    instructions = {"role": "system", "content": "i" * size}
+    live = {"role": "user", "content": "answer the current question"}
+    result = MaxwellBot._apply_prompt_budget(bot, [instructions, recent, recalled, live])
+    assert recalled not in result
+    assert result == [instructions, recent, live]

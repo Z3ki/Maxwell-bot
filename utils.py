@@ -265,6 +265,10 @@ def _describe_component(comp: Any) -> str | None:
     if label or url or (custom_id and not getattr(comp, "children", None)):
         name = label or emoji_txt or "button"
         if url:
+            # Approval tokens belong to the browser, not history/model context,
+            # including when Discord delivers our own private approval DM.
+            if url.startswith(("https://www.last.fm/api/auth/?", "https://last.fm/api/auth/?")):
+                return f"link {name} [private approval URL omitted]"
             return f"link {name} <{url}>"
         return f"button {name}"
 

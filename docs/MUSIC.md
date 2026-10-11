@@ -33,6 +33,13 @@ For macOS/Windows or the bridge deployment, combine `docker-compose.bridge.yml` 
 
 For a separately operated node, set `LAVALINK_HOST`, `LAVALINK_PORT`, `LAVALINK_PASSWORD`, and optionally `LAVALINK_TLS=true` in the bot environment. Use a private network and authentication. Blank password keeps Maxwell running without an audio connection and returns an actionable music configuration error.
 
+The bot opens its Lavalink WebSocket lazily on the first music request. That
+request waits up to five seconds for the node's ready handshake and session
+setup rather than treating a still-connecting node as an outage. Concurrent
+requests share the connection; cancelling one does not cancel the others.
+Shutdown wakes pending readiness waits. A timeout still reports the node
+unavailable; container health alone does not establish bot-side readiness.
+
 The bot must be server-installed, with the voice-state intent (already enabled) and View Channel, Connect and Speak permissions. Normal voice channels are supported; stage channels are deliberately rejected. Slash commands are registered by Maxwell's existing application-command sync on readiness. Audio processing remains on Lavalink rather than the AI process.
 
 ## Usage and permissions
@@ -53,17 +60,21 @@ Listeners can request songs and remove their own queued songs. Ordinary pause/re
 
 `music_control` remains available after web search or URL fetches, so Maxwell can identify a track and play it in the same turn. Music mutations are serialized side effects, not destructive tools for the fetched-content taint gate. Guild membership, voice-channel access, DJ/manager permissions and the YouTube-only source allowlist still apply; destructive tools such as shell remain blocked on a tainted turn.
 
-`/music` includes play/batch/autoplay/join/move/search/status/queue/pause/resume/skip/stop/leave/volume/seek/repeat/shuffle/clear/remove/configure. A meaningful playback or queue change posts a fresh public Now Playing embed with artwork, linked track/artist, requester or autoplay origin, duration, voice channel, settings and the next three songs. Previous panels lose their controls; stale or cross-server buttons cannot change playback. No-op updates do not repost, and there is no periodic panel polling. Pause/resume, skip, queue, shuffle, repeat, autoplay and stop buttons recheck current permissions.
+`/music` includes play/batch/autoplay/join/move/search/status/queue/pause/resume/skip/stop/leave/volume/seek/repeat/shuffle/clear/remove/configure. Playback and queue changes edit one persistent public Now Playing embed with artwork, linked track/artist, requester or autoplay origin, duration, voice channel, settings and the next three songs. The same controls remain active across songs and recheck current permissions. A new panel is posted only when the previous one is deleted/uneditable or the text channel changes; superseded and cross-server buttons cannot change playback. No-op updates do not edit, and transient Discord edit failures do not post duplicate panels. There is no periodic panel polling.
 
-`/music status` publishes a fresh panel in the invoking text channel when Maxwell can view, send and embed there; otherwise it returns a private status embed. Queue/search results and action/error feedback are private. Failed public publication does not turn a confirmed music operation into a failure.
+`/music status` updates the existing panel in the invoking text channel when Maxwell can view, send and embed there, creating one only if needed; otherwise it returns a private status embed. Queue/search results and action/error feedback are private. Failed public publication does not turn a confirmed music operation into a failure.
 
 ### Multiple songs and autoplay
 
 For AI requests, `music_control(action="play", queries=[...], mode="queue")` loads one to ten selections atomically in the supplied order. Use `query` for one selection or `queries` for a batch, never both. `mode="next"` inserts the whole batch ahead of the existing queue without reversing it; `now` replaces the current song only on explicit request. `/music batch input:` accepts one title or YouTube link per line, with the same queue/next/now modes.
 
-Autoplay is **off by default**, scoped to the current session. Enable it with `/music autoplay enabled:true`, the Autoplay button, or `music_control(action="autoplay", value=true)`. Once the requested queue is exhausted, Maxwell loads a real YouTube radio mix seeded by the last song and starts one new related track. Requested songs and repeat modes take precedence. The last 50 played URLs are excluded to avoid immediate cycling; automatically chosen songs are labeled in the embed.
+Autoplay is **off by default**, scoped to the current session. Enable it with `/music autoplay enabled:true`, the Autoplay button, or `music_control(action="autoplay", value=true)`. While the last requested song is still playing, Maxwell resolves one related song from its real YouTube radio mix in the background. At the end it uses that prepared song rather than starting a fresh recommendation search. Requested songs and repeat modes take precedence. The last 50 played URLs are excluded to avoid immediate cycling; automatically chosen songs are labeled in the embed.
 
-Autoplay does not continue in an empty voice channel or after a failed source with no queued successor. Exhausted/unavailable recommendations leave playback idle with an actionable notice, not an infinite retry loop. Disabling autoplay prevents future automatic selections; it does not interrupt the current song. Stop clears the queue and disables autoplay. Leaving or restarting Maxwell discards session autoplay state.
+Autoplay does not continue in an empty voice channel or after a failed source with no queued successor. Exhausted/unavailable recommendations leave playback idle with an actionable notice, not an infinite retry loop. Disabling autoplay, enabling repeat, adding an explicit queue, stopping or leaving invalidates the prepared recommendation. Disabling autoplay does not interrupt the current song. Stop clears the queue, disables autoplay and prevents an earlier still-loading request from restarting playback. Leaving or restarting Maxwell discards session autoplay state.
+
+Queued tracks already contain resolved Lavalink track data. New song searches run outside the playback-state lock, so a slow request cannot hold up an already queued successor or Skip. Play requests retain their arrival order; permissions, current voice channel and queue allowances are checked again before committing the complete batch. Stop, Clear and Leave invalidate earlier pending additions.
+
+This removes recommendation-search and unrelated-search waits from the handoff, not all source startup time. Stock Lavalink does not offer next-track audio prebuffering: YouTube stream opening, signature decoding and Discord voice delivery can still delay audible playback. No fixed ten-second sleep is imposed; `trackStuckThresholdMs` is a failure threshold, not a transition delay.
 
 `/music configure` shows or edits:
 
@@ -80,13 +91,107 @@ Settings are saved atomically under the music plugin data directory, independent
 
 ## Reliability and limits
 
-One playback session per guild, with one guild lock shared by actions and events. Independent guilds can play concurrently. Admission is bounded to 250 sessions, eight concurrent source loads, eight outstanding actions per session and ten mutating/search requests per user/server per ten seconds. Playlist loading is limited to the first 100 tracks (one source page); overly large queue additions fail atomically rather than partly inserting songs. Queue listings paginate 25 tracks. Volume is 0–100.
+One playback session per guild, with one guild lock shared by playback-state changes and events and a separate lock preserving play-request order during source loading. Independent guilds can play concurrently. Admission is bounded to 250 sessions, eight concurrent source loads, eight outstanding actions per session and ten mutating/search requests per user/server per ten seconds. Background radio preparation is limited to two tasks node-wide (or the source-load limit if smaller), with one candidate retained per eligible guild; maintenance retries admission for guilds that could not prepare yet. Playlist loading is limited to the first 100 tracks (one source page); overly large queue additions fail atomically rather than partly inserting songs. Queue listings paginate 25 tracks. Volume is 0–100.
+
+The 250-session admission limit is not a measured audio capacity. Resource use grows primarily with simultaneous guild voice sessions, not listeners sharing one stream. The default audio node is limited to 1.5 CPU cores and 1 GiB RAM, and its cipher sidecar to 512 MiB without swap. The old 256 MiB cipher cap showed reclaim/swap pressure on this VPS; the higher budget is a configuration change, not a measured multi-stream capacity claim. Determine capacity with representative concurrent playback and source startup, monitoring cgroup CPU throttling, memory pressure and audio frame deficits; spare host resources do not override container quotas.
 
 The Lavalink client reconnects with exponential backoff. Session resuming is requested for 120 seconds; its node manager restores current tracks, seek positions, pause state and volume after a fresh node session. Recovery uses the same guild lock. In-memory queues survive transient node disconnects; a failed transition retains upcoming songs for a later skip. Failed-source end events advance to the next track; repeated source/node failures are surfaced without a tight retry loop. Unexpected Discord disconnects/guild removal destroy the session. Idle/paused/empty sessions leave automatically; shutdown leaves voice and closes the audio client. Node/source failures are logged by exception type without including source tokens or private messages.
 
 Queue and autoplay-session persistence across a complete Maxwell process restart are **not implemented**. The separate Dev/production bots need separate Discord identities and may share an audio node with its capacity adjusted. The supported discord.py VoiceProtocol forwards voice gateway state by guild ID (including channel moves that keep the same Discord session ID), so no audio passes through Discord shards. Gateway connections may be sharded. Guild locks and music sessions stay keyed by guild id, and a shard ready or resume only resyncs that shard. Redis or cross-process session ownership is not claimed.
 
-YouTube/YouTube Music HTTPS video and playlist links and title searches are supported. No arbitrary audio URL, Spotify DRM, stage support or other audio providers are claimed. Anonymous iOS playback covers videos YouTube still serves without a login. Videos that return "requires login" need the one-time burner-account device code from `https://www.google.com/device`. Store that refresh token in `YOUTUBE_OAUTH_REFRESH_TOKEN` and recreate the audio node; do not commit it. Signature decoding uses the local `yt-cipher` sidecar (`YOUTUBE_CIPHER_PASSWORD`), which shares the audio node's network namespace, not the public cipher host. Ordinary YouTube title search is often empty on this plugin, so a title with no YouTube results is loaded again with YouTube Music search. Age/region/removed videos and source failures cannot be guaranteed playable. Do not share extractor tokens with the model. Live playback must be tested on the operator's VPS before public rollout.
+YouTube/YouTube Music HTTPS video and playlist links and title searches are supported. No arbitrary audio URL, Spotify DRM, stage support or other audio providers are claimed. Signature decoding uses the local `yt-cipher` sidecar (`YOUTUBE_CIPHER_PASSWORD`), which shares the audio node's network namespace, not the public cipher host. Ordinary YouTube title search is often empty on this plugin, so a title with no YouTube results is loaded again with YouTube Music search. Age/region/removed videos and source failures cannot be guaranteed playable. Live playback must be tested on the operator's VPS before public rollout.
+
+### YouTube account authorization
+
+Videos returning “requires login” need a separately approved YouTube account.
+Use a burner account, not your main account: the source provider warns that
+automated account use can lead to rate limits or bans. Do not reuse Production's
+account credentials in Dev or paste passwords, device grants or tokens into chat.
+
+From the intended checkout, authorize explicitly into its existing private env:
+
+```sh
+# Public checkout only; Dev instead uses make youtubeauthdev.
+chmod 600 .env
+python3 scripts/youtube_auth.py --env-file .env
+```
+
+The helper prints an approval code for `https://www.google.com/device`, waits
+at Google's polling interval, handles HTTP 400 pending/slow-down responses,
+and stops on denial or expiry. It preserves existing credentials on failure
+and saves only the approved refresh token to `YOUTUBE_OAUTH_REFRESH_TOKEN`,
+without printing it. It rejects insecure/symlink env files and redirects.
+Recreate the audio node and cipher together after it succeeds, using the
+deployment command above. In Dev, use `WITH_MUSIC=1 make restartdev`.
+
+OAuth stays enabled, but `skipInitialization: true` prevents the pinned
+plugin's unattended device flow. That plugin throws on HTTP 400 before parsing
+Google's pending/expired response, then retries without a delay. Account
+approval is now an explicit operator step instead of a process-start side
+effect; missing credentials still leave login-restricted videos unavailable.
+
+## Opt-in Last.fm
+
+Configure `LASTFM_API_KEY` and `LASTFM_API_SECRET` from a Last.fm application
+and an independent `LASTFM_ENCRYPTION_KEY` (`openssl rand -hex 32`, 64 hex
+characters). Keep these in a private env file, not source, logs or chat, and
+back up the encryption key with the account database. Changing it cannot
+decrypt old accounts; loading fails closed instead of replacing them. Dev
+uses separate account data and its own encryption key. Shared application
+credentials share Last.fm's upstream quota.
+
+**Callback URL: leave blank.** No public callback server or exposed port is
+needed. `/lastfm connect` privately supplies a browser approval link; approve
+Maxwell on Last.fm, then click Finish linking or run `/lastfm finish`.
+Approval expires after 60 minutes. `/lastfm status` shows only your connection
+and pending uploads; `/lastfm disconnect` deletes your local consent, pending
+approval and queued listening. Revoke Maxwell on Last.fm too if you want to
+invalidate its upstream session. Asking Maxwell to connect invokes
+`lastfm_account` and privately DMs the approval link; blocked DMs require
+`/lastfm connect`. No password or account override is accepted. In Dev, use
+`/lastfm finish` in the allowlisted guild rather than the DM button.
+Approval URLs live in the browser button, not message text. Context rendering
+omits that button's private URL so self-DM ingestion cannot copy the token into
+transcript/model context. Expired scratch approvals are removed in bounded
+off-loop maintenance batches; idle owner locks and completed outbox counters/
+old consent fences are released rather than retained forever.
+
+
+Every linked human listener is tracked separately while present and not
+server/self-deaf in Maxwell's actual voice channel. Merely requesting a song
+from elsewhere does not count. Counted time excludes pause, absence, loading
+gaps and time before joining/linking; seeking does not invent elapsed listening.
+The track must exceed 30 seconds and have seekable, non-stream structured
+artist/title metadata. Submit after half its duration or four minutes,
+whichever is shorter. Repeats create distinct plays; autoplay counts under the
+same listening rules. Metadata is taken from the source, not guessed from
+video titles, and Last.fm can reject unrecognized metadata.
+
+Account tokens/session keys are owner-bound and AES-GCM-encrypted in private
+`accounts.sqlite3` under the Last.fm plugin store. Qualified listening goes to
+private `scrobbles.sqlite3` on its own serial disk worker; submissions do not
+hold playback locks or wait on the music transition path. One HTTP flight,
+bounded persistence batches and a client limit of two request starts/second
+avoid unbounded task fan-out. Pending qualified plays survive restart and
+retry transient failures; disposable Now Playing notices are coalesced.
+Unlink/relink removes old pending consent generations. A submission already
+accepted upstream cannot be undone. No exactly-once guarantee is possible
+after an ambiguous network response.
+
+High listener counts can outpace Last.fm's upload rate even when audio stays
+healthy. Monitor `/lastfm status` pending counts and disk growth; this is not
+an unlimited-upload claim. Missing/wrong encryption credentials make linking
+unavailable without disrupting music.
+
+Local verification covers scope/owner/nonce/privacy boundaries, encrypted
+persistence, eligible elapsed-time transitions, repeats, outage retry,
+unlink/relink and shutdown. A real API token request and an unapproved-session
+rejection were verified, but a human-approved live account/scrobble still
+requires the operator's browser approval. A 16-second real-clock simulated
+provider stall left a qualified play durable and status accurate; music pause
+completed in 0.18 ms. It did not upload a real Last.fm scrobble or exercise
+audible Discord voice.
+
 
 ## TTS reference URLs
 
@@ -108,3 +213,14 @@ Live verification checklist for an operator with credentials:
 6. Supply a permitted direct audio URL to TTS and verify Mistral generation and voice-message delivery.
 
 Local verification exercises live Lavalink title/radio resolution and music dispatch with simulated Discord voice transport. The Java runtime cutover additionally verifies authenticated node health, unchanged server/plugin versions, native buffered UDP sender startup, cgroup CPU/memory detection and quota-sized G1 workers. Embed payloads are checked against Discord limits and rendered in a desktop/mobile preview. These checks do not establish audible live Discord playback, elimination of reported mid-song dropouts, or exact Discord-client rendering; the operator checklist above covers those surfaces and live provider cloning. CI additionally validates the audio image, JVM resource detection and composed deployment on GitHub's Docker-enabled runner.
+
+Transition verification also exercises background radio preparation against the live source, consumes the prepared result with no new lookup at handoff, and checks queued transitions during a blocked new search, opt-out/cancellation, stale additions after Stop/Clear/Leave and bounded preparation across guilds. Simulated voice transport establishes service ordering and source lookup placement, not audible gap duration or multi-session audio capacity.
+
+Live Dev YouTube authorization completed through the explicit helper, saved the
+refresh token into mode-0600 `.env.dev`, and successfully refreshed access after
+recreating the node and its cipher in the same current namespace. Unattended
+OAuth poll errors were zero. Two real music search-result streams returned
+HTTP 200 and each decoded one second of actual audio through ffmpeg; a short
+video also decoded. One specific music video still returned a source HTTP 500.
+These checks prove authenticated source/audio access, not universal video
+availability, audible Discord delivery or multi-session capacity.

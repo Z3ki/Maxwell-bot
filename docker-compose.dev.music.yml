@@ -1,0 +1,69 @@
+# Optional Dev audio: docker compose --env-file .env.dev -f docker-compose.dev.yml -f docker-compose.dev.music.yml up -d --build
+# Compose interpolation reads --env-file, not the bot service's env_file.
+services:
+  lavalink-dev:
+    build:
+      context: .
+      dockerfile: docker/music/Dockerfile
+    image: maxwell-lavalink:4.2.2
+    restart: unless-stopped
+    init: true
+    environment:
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a dedicated LAVALINK_PASSWORD in .env.dev}
+      YOUTUBE_CIPHER_PASSWORD: ${YOUTUBE_CIPHER_PASSWORD:?Set a dedicated YOUTUBE_CIPHER_PASSWORD in .env.dev}
+      YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx768m -XX:+UseG1GC"
+    volumes:
+      - ./docker/music/application.yml:/opt/Lavalink/application.yml:ro
+    networks:
+      - dev
+    cpus: "1.0"
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 256
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", 'curl -fsS -H "Authorization: $$LAVALINK_PASSWORD" http://127.0.0.1:2333/v4/info >/dev/null']
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  yt-cipher-dev:
+    image: ghcr.io/kikkia/yt-cipher:master
+    restart: unless-stopped
+    init: true
+    # application.yml reaches the cipher at localhost:8001 inside this node.
+    network_mode: "service:lavalink-dev"
+    depends_on:
+      - lavalink-dev
+    environment:
+      API_TOKEN: ${YOUTUBE_CIPHER_PASSWORD:?Set a dedicated YOUTUBE_CIPHER_PASSWORD in .env.dev}
+      OVERRIDE_SCRIPT_VARIANT: IAS
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  maxwell-dev:
+    environment:
+      LAVALINK_HOST: lavalink-dev
+      LAVALINK_PORT: "2333"
+      LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a dedicated LAVALINK_PASSWORD in .env.dev}
+    depends_on:
+      lavalink-dev:
+        condition: service_healthy
+      yt-cipher-dev:
+        condition: service_started

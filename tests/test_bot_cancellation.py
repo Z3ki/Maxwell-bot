@@ -105,6 +105,7 @@ def test_repeated_same_user_interrupt_joins_cleanup_and_preserves_other_user(
         assert not predecessor.done()
         release.set()
         await bot._reply_queue._channels["22"].pump
+        await journal.drain()
         assert cleaned.is_set()
         assert answered == [201, replacement_messages[-1].id]
         superseded = [101, 102, *(m.id for m in replacement_messages[:-1])]
@@ -150,6 +151,7 @@ def test_replacement_from_other_user_never_stops_running_users_request(tmp_path)
         replacement = _message(202, 12)
         predecessor = bot._active_requests["22"]
         MaxwellBot._interrupt_same_user(bot, replacement)
+        await journal.drain()
         assert not predecessor.cancelling()
         assert journal.get(101)["status"] == "running"
         assert journal.get(201)["status"] == "superseded"

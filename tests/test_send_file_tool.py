@@ -2,6 +2,7 @@ import asyncio
 import base64
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
@@ -99,7 +100,7 @@ def test_send_media_qr_url_uploads_png(monkeypatch):
     monkeypatch.setattr("plugins.media.impl._get_shared_session", session)
     monkeypatch.setattr("plugins.media.impl._read_response_limited", read)
     message = FakeMessage()
-    tool = SendMediaTool(SimpleNamespace(_record_delivery=lambda *_a: None))
+    tool = SendMediaTool(SimpleNamespace(_record_delivery=AsyncMock()))
     result = asyncio.run(
         tool.execute(
             message,
@@ -142,7 +143,7 @@ def test_send_media_snapshot_without_reply_uses_channel_send(monkeypatch):
             return SimpleNamespace(id=8, attachments=[SimpleNamespace(url="https://cdn.example/thumb.jpg")])
 
     message = SimpleNamespace(id=1556030371907244183, channel=Channel(), guild=None)
-    tool = SendMediaTool(SimpleNamespace(_record_delivery=lambda *_a: None))
+    tool = SendMediaTool(SimpleNamespace(_record_delivery=AsyncMock()))
     result = asyncio.run(
         tool.execute(message, url="https://i.ytimg.com/vi/tR0wNrPp2mM/hqdefault.jpg")
     )
@@ -226,7 +227,7 @@ def test_file_delivery_records_the_confirmed_message():
     message = FakeMessage()
     receipts = []
     tool = SendFileTool(SimpleNamespace(
-        _record_delivery=lambda origin, sent: receipts.append((origin, sent)),
+        _record_delivery=AsyncMock(side_effect=lambda origin, sent: receipts.append((origin, sent))),
     ))
     result = asyncio.run(tool.execute(message, filename="answer.txt", content="answer"))
     assert result.startswith("__FILE_SENT__")
@@ -264,7 +265,7 @@ def test_media_delivery_only_records_confirmed_sends(monkeypatch, tool_class, fo
         message.reply = denied
     receipts = []
     tool = tool_class(SimpleNamespace(
-        _record_delivery=lambda origin, sent: receipts.append((origin, sent)),
+        _record_delivery=AsyncMock(side_effect=lambda origin, sent: receipts.append((origin, sent))),
     ))
     result = asyncio.run(tool.execute(message, url="https://example.com/image.png"))
     if forbidden:

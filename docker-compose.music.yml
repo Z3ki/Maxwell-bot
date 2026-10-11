@@ -12,7 +12,9 @@ services:
     environment:
       API_TOKEN: ${YOUTUBE_CIPHER_PASSWORD:?Set YOUTUBE_CIPHER_PASSWORD in .env}
       OVERRIDE_SCRIPT_VARIANT: IAS
-    mem_limit: 256m
+    # The old 256 MiB cap caused reclaim/swap pressure during cipher work.
+    mem_limit: 512m
+    memswap_limit: 512m
     pids_limit: 128
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

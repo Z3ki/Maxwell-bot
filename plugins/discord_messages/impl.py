@@ -168,7 +168,7 @@ class EditMessageTool(Tool):
             requester_id = str(getattr(getattr(message, "author", None), "id", "") or "")
             current_channel_id = str(getattr(channel, "id", "") or "")
             journal = getattr(self.bot, "_request_journal", None)
-            owner = journal.find_response(message_id) if journal is not None else None
+            owner = await journal.submit(journal.find_response, message_id) if journal is not None else None
             attributable = bool(
                 owner
                 and str(owner.get("author_id") or "") == requester_id
@@ -253,7 +253,7 @@ class DeleteMessageTool(Tool):
             mine = self.bot.user and msg.author.id == self.bot.user.id
             if mine:
                 journal = getattr(self.bot, "_request_journal", None)
-                owner = journal.find_response(message_id) if journal is not None else None
+                owner = await journal.submit(journal.find_response, message_id) if journal is not None else None
                 requester_id = str(getattr(getattr(message, "author", None), "id", "") or "")
                 channel_matches = str(owner.get("channel_id") or "") == str(
                     getattr(channel, "id", "") or ""
@@ -573,7 +573,7 @@ class SendMessageTool(Tool):
                     try:
                         mark_effect = getattr(self.bot, "_mark_request_effect", None)
                         if callable(mark_effect):
-                            mark_effect(message)
+                            await mark_effect(message)
                         # Only pass stickers to Discord; drop all other tool kwargs (reasoning, channel_id, etc.)
                         # to avoid "multiple values for keyword argument 'content'" and "unexpected keyword"
                         extra = {}
@@ -595,7 +595,7 @@ class SendMessageTool(Tool):
                                     return "Error: missing permissions to send message"
                                 record = getattr(self.bot, "_record_request_outcome", None)
                                 if callable(record):
-                                    record(message, "delivered", reason="partial_delivery")
+                                    await record(message, "delivered", reason="partial_delivery")
                                 return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
                         elif i == 0 and use_reply:
                             try:
@@ -622,7 +622,7 @@ class SendMessageTool(Tool):
                         sent_chunks.append(chunk)
                         record_delivery = getattr(self.bot, "_record_delivery", None)
                         if callable(record_delivery):
-                            record_delivery(message, sent)
+                            await record_delivery(message, sent)
                         remember = getattr(self.bot, "_remember_sent_message", None)
                         if callable(remember):
                             try:
@@ -639,7 +639,7 @@ class SendMessageTool(Tool):
                             record = getattr(self.bot, "_record_request_outcome", None)
                             if callable(record):
                                 with contextlib.suppress(Exception):
-                                    record(message, "delivered", reason="partial_delivery")
+                                    await record(message, "delivered", reason="partial_delivery")
                             return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
                         raise
                     if len(chunks) > 1:
@@ -741,7 +741,7 @@ class SendFileTool(Tool):
             return error
         record_delivery = getattr(self.bot, "_record_delivery", None)
         if callable(record_delivery) and sent is not None:
-            record_delivery(message, sent)
+            await record_delivery(message, sent)
 
         # Every piece of media gets its URL attached: the sent Discord
         # attachment carries a CDN URL the model can curl/pull/reuse.
@@ -1510,7 +1510,7 @@ class NoResponseTool(Tool):
 
     async def execute(self, message: Message, reason: str = "other", **kwargs) -> str:
         journal = getattr(self.bot, "_request_journal", None)
-        row = journal.get(getattr(message, "id", "")) if journal is not None else None
+        row = await journal.submit(journal.get, getattr(message, "id", "")) if journal is not None else None
         if row and row.get("status") == "delivered":
             return "__NO_RESPONSE__"
         directed = getattr(self.bot, "_directly_addressed", None)
@@ -1532,5 +1532,5 @@ class NoResponseTool(Tool):
             reason = "other"
         record = getattr(self.bot, "_record_request_outcome", None)
         if callable(record):
-            record(message, "suppressed", reason=f"model_no_response:{reason}")
+            await record(message, "suppressed", reason=f"model_no_response:{reason}")
         return "__NO_RESPONSE__"

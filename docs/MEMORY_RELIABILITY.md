@@ -1,45 +1,25 @@
-# Memory reliability changes
+# Memory reliability
 
-This note describes the reliability branch's current behavior and the decisions left open for a later memory redesign.
+## Storage and retention
 
-## Retention and storage
+The active `ConversationMemory` backend uses the existing `maxwell_rag.db`. Historical facts, vectors and unrelated rows remain stored; the active prompt path reads transcripts only. It does not require an embedding endpoint or run local vector inference, fact extraction, graph recall or consolidation.
 
-- The old global 25-channel eviction limit is removed. Activity in one channel cannot evict another channel's message history.
-- Transcript retention remains a per-channel setting: `MEMORY_MESSAGE_LIMIT` (default 2,000; accepted range 1–10,000). Retention deletes only the oldest transcript rows in that same channel. It does not prune long-term facts or shared-context rows.
-- There is no new aggregate customer-facing storage quota or permanent retention policy. Existing data is not removed by migration.
-- The admin RAG stats endpoint reports channel, message, vector, embedded, and pending-embedding counts. The bot emits a privacy-safe embedding health summary at most once per minute with tracked background queue depth, pending work, processing time, failures, cache hit ratio, and endpoint cooldown. SQLite database file size can be measured by the operator for disk accounting.
+There is no global channel-eviction limit. `MEMORY_MESSAGE_LIMIT` bounds transcripts per channel; retention removes only that channel's oldest transcript rows. The inactivity sweep atomically removes transcripts from channels whose newest stored user message is older than 12 hours. Bot output does not extend the cutoff. Neither operation deletes archived non-transcript rows or messages on Discord. No new aggregate storage quota is imposed.
 
-## Scope and legacy data
+All runtime SQLite reads/writes, row decoding, sanitization and cleanup run on one FIFO worker, off Discord's event loop. Whole writes and retention deletes stay in one transaction. Caller cancellation does not revoke accepted work; shutdown drains the worker before closing the connection. A covering partial index avoids the prior broad cleanup scan.
 
-Memory reads used in prompt assembly now require a validated `MemoryRequester`. Transcript and semantic retrieval are narrowed by channel and guild before vector decoding. Private user facts stay with their owner and source channel; guild facts require a public source channel; DM facts are DM-only. Persisted web search results carry the originating query's channel provenance, so private-channel and DM searches do not surface in guild channels. Cross-guild global facts are visible only when an administrator explicitly approved them as operator-public.
+## Authorization and older recall
 
-Rows whose original scope cannot be proven remain in SQLite and are hidden from prompt retrieval. This includes legacy unscoped LTM rows and graph edges without requester provenance. New chat-graph edges and their non-public nodes are namespaced to the exact source channel (or exact DM); public site-index edges remain shareable. Legacy graph edges remain stored but hidden. Administrator status does not widen ordinary semantic or transcript retrieval. The explicit global-recall tool returns only operator-approved public facts.
+A validated `MemoryRequester` is required for prompt reads. SQL constrains both channel and guild before returning transcripts, including exact DM scope. Admin status does not widen retrieval. Discord pointer/reply hydration uses the same requester for its stored-history fallback.
 
-The LTM extractor and REM/consolidation actors have been removed. Historical unscoped facts are retained but fail closed in ordinary prompts. Existing facts still require valid provenance and visibility before retrieval; disabling the actors does not broaden their access.
+A contentless FTS5 index searches older messages using bounded meaningful query terms. Startup seeds existing transcripts; SQLite triggers maintain the index on insert/edit/scope change/delete. Recall excludes already-selected recent messages and does not search facts, vectors, other channels or other guilds. Archived ambiguous rows remain stored but are not newly exposed.
 
-## Prompt boundaries
+Recent history stays the cacheable prefix. Up to four older matches, at most 2,000 characters within the remaining history allowance, follow in a separate user-role `<recalled_conversation>` reference block. Retrieved text is not an instruction or persona override. Optional older recall is trimmed before recent conversation. Disabled history and explicit app-selected history do not receive additional recall; short ambient turns skip it. Lexical recall does not establish semantic equivalence or recover pruned messages.
 
-Retrieved transcripts, profile/entity facts, shared context, and web results are reference material, not instructions or persona overrides. When shared context omits its source, Maxwell must not infer or claim who created or owns it. This changes prompt interpretation only; it does not alter stored memory scope or retention.
+## Evidence and operational boundaries
 
-## Retrieval and embeddings
+A read-only snapshot copied into a disposable container preserved 12,318 original rows. The new index initialized in 117.02 ms; scoped retrieval averaged 0.53 ms and peaked at 1.70 ms. The run demonstrated older-topic recall, cross-guild exclusion and a stable recent prompt prefix. Earlier cleanup checks on a separate 12,287-row clone averaged 13.69 ms, maximum 17.06 ms, with event-loop heartbeat oversleep at most 4.22 ms. These measurements do not establish unlimited corpus size, live model answer quality or total VPS capacity.
 
-RAG candidate rows are filtered in SQL by requester scope before vectors are loaded and scored. Scope and transcript indexes support the frequent filters. Scoring normalizes the filtered vectors into one NumPy matrix rather than repeatedly searching and decoding all rows per candidate.
+The inbound request journal is separate: a FIFO worker, WAL and FULL durability, with awaited checkpoints before irreversible effects and awaited delivery receipts. A real 350 ms SQLite write lock delayed its checkpoint by 442.29 ms while heartbeat oversleep stayed at most 3.75 ms; delivery did not proceed before the durable checkpoint.
 
-The configured local embedding defaults remain `qwen3-embedding:0.6b`, 1,024 dimensions, at `http://localhost:11434`; `MAXWELL_EMBED_MODEL`, `MAXWELL_EMBED_DIM`, and `MAXWELL_EMBED_BASE_URL` can override them. Failed embedding generation leaves transcript text durable with a NULL vector. Query embedding has a bounded deadline and outage cooldown, so recent channel history remains available when semantic recall is offline. When local embeddings are enabled, a singleton background recovery worker runs an initial backlog pass at startup and retries durable NULL-vector rows every 60 seconds. It uses bounded batches, yields to interactive embedding requests, snapshots each pass, and stops cleanly during shutdown. A partial SQLite index narrows pending-row scans; metrics expose pending work, active rows, and whether the worker is running.
-
-The synthetic benchmark compares the prior broad blank-scope LTM query and Python vector loop with the new scoped RAG path. It calls no Discord, embedding, or chat provider. Its numbers describe SQLite/filtering and vector-scoring behavior on the CI runner, not live inference throughput or a server-capacity guarantee.
-
-## Confirmed follow-up risks
-
-- SQLite calls are synchronous and run on the bot's event loop. Scope filtering reduces rows substantially, but very large per-scope corpora or slow storage still need profiling before deciding whether to move database work off-loop.
-- The current Docker deployment still mounts `/var/run/docker.sock:ro`. A read-only bind mount does not make Docker API operations read-only. The site builder depends on host file visibility, so replacing this access with a narrower helper or separate builder changes the hosting boundary and should be reviewed separately.
-- The API memory routes require administrator authentication. They remain operational/admin interfaces and are not requester-context endpoints for community users.
-
-## Future memory design
-
-Keep the current SQLite store until production measurements show it cannot meet the workload. A later redesign can split small interfaces for ingestion, scope authorization, durable storage, embedding, retrieval, consolidation, retention, and context assembly while preserving the authorization tests in this branch. Before moving or widening data, decide:
-1. Whether explicitly approved public facts may be shared across guilds, and who can approve them.
-2. Whether consolidation may combine channels, guilds, or DMs.
-3. How legacy ambiguous rows will be reviewed or mapped to a scope.
-4. What disk-growth and retention controls operators need, without silently deleting existing memories.
-5. Whether SQLite's measured write contention and event-loop cost justify a different store or a worker boundary.
+The admin API remains authenticated and operational, not a requester-context cross-scope endpoint. Measure database size and retention when growing deployments. Production's existing Docker socket mount is a separate hosting-security concern; a read-only mount does not make Docker API operations read-only. The isolated Dev deployment does not mount that socket or production data.

@@ -51,11 +51,10 @@ services:
       - dev_shell:/app/shelldocker
     networks:
       - dev
-    depends_on:
-      - ollama-dev
     stop_grace_period: 120s
 
   ollama-dev:
+    profiles: ["local-ai"]
     image: ollama/ollama@sha256:7ab595e4ead391f6818c7215297781282babe0701f6d9a9f8862ac591360a58b
     restart: unless-stopped
     init: true

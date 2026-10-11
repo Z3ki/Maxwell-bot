@@ -17,6 +17,29 @@ cleanup, memory policy, and plugin lifecycle have explicit module boundaries.
 See [MAINTAINABILITY.md](MAINTAINABILITY.md) for module ownership, lifecycle
 contracts, migration behavior, and the regression checks.
 
+Transcript database work runs on one FIFO worker, not the Discord event loop.
+Whole writes and retention deletes stay in one transaction; cancellation does
+not interrupt an accepted transaction, and shutdown drains accepted work.
+Cleanup uses a covering partial index and atomically removes transcripts from
+channels whose newest stored user message is older than 12 hours. Bot output
+does not extend that existing cutoff. Archived facts and Discord messages are
+not deleted by this sweep.
+
+Older transcript recall uses a contentless SQLite FTS5 index maintained by
+insert/edit/delete triggers. Queries require exact requester channel/guild
+scope, exclude recent history, and run on the same worker. Up to four bounded
+matches follow the stable transcript prefix as user-role reference material;
+optional recall is trimmed before recent history. No embedding provider or
+archived fact/vector retrieval participates in this path.
+
+The request journal has its own FIFO worker and WAL database with FULL
+synchronous durability. Receipt acceptance and irreversible-effect checkpoints
+are awaited before advancing a watermark or calling Discord/tools. Synchronous
+queue callbacks enqueue transitions immediately; later journal operations see
+them in FIFO order. Turn ownership starts before journal awaits so same-user
+interrupts also cancel and persist requests still waiting to begin. Shutdown
+drains the journal worker after disconnecting Discord.
+
 ## What stays in core
 
 - Process init/shutdown

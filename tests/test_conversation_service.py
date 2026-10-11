@@ -295,3 +295,41 @@ def test_live_media_manifest_and_attachments_share_one_signed_url():
     messages = build(builder, message, has_media=True, media_summary="Audio available:\n1. sample.mp3 (audio/mpeg, new) — " + url)
     assert messages[-1]["content"].count(url) == 1
     assert "18s" in messages[-1]["content"]
+
+
+def test_older_relevant_history_is_recalled_without_changing_recent_prefix(tmp_path):
+    from conversation_memory import ConversationMemoryManager
+
+    async def scenario():
+        builder, message, _ = service(memory_history_messages=2, tool_history_messages=0)
+        memory = ConversationMemoryManager(str(tmp_path))
+        builder.host.memory = memory
+        try:
+            for index in range(8):
+                await memory.add_to_channel_memory("20", {
+                    "message_id": str(100 + index), "guild_id": "30", "author": "Alice",
+                    "author_id": "42", "content": "Birch deployment uses Go" if index == 0 else f"recent weather {index}",
+                    "timestamp": f"2026-10-11T12:00:0{index}+00:00",
+                })
+            await memory.add_to_channel_memory("20", {
+                "message_id": "200", "guild_id": "31", "content": "Birch private other guild",
+            })
+            messages = await builder.build(message, "What did I decide about Birch?")
+            historical = [row for row in messages[:-1] if "Birch deployment uses Go" in row["content"]]
+            assert len(historical) == 1 and historical[0]["role"] == "user"
+            assert all("private other guild" not in row["content"] for row in messages)
+            assert sum("recent weather 7" in row["content"] for row in messages) == 1
+            changed = await builder.build(message, "What did I decide about Mercury?")
+            assert messages[:2] == changed[:2]
+            assert all("Birch deployment uses Go" not in row["content"] for row in changed)
+            builder.host._control["memory_history_messages"] = 0
+            disabled = await builder.build(message, "What did I decide about Birch?")
+            assert all("Birch deployment uses Go" not in row["content"] for row in disabled)
+            builder.host._control["memory_history_messages"] = 2
+            message.user_install = True
+            message.user_install_history_limit = 2
+            explicit = await builder.build(message, "What did I decide about Birch?")
+            assert all("Birch deployment uses Go" not in row["content"] for row in explicit)
+        finally:
+            await memory.flush()
+    asyncio.run(scenario())

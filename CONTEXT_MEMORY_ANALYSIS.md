@@ -1,84 +1,38 @@
 # Maxwell context and memory architecture
 
-> Current-status replacement for the older line-number-based analysis. The previous version described an older Maxwell tree and contained claims that are no longer true, including that Maxwell had no vector/RAG memory and that memory lived in a separate `memory.py`. Use the implementation files linked below as the source of truth.
+## Active storage and retrieval
 
-## Current architecture
+`conversation_memory.py` implements the runtime `ConversationMemory` backend. It opens the existing `maxwell_rag.db`, retains historical fact/vector rows, and stores scoped Discord transcripts. Ordinary prompts do not run embedding generation, vector scoring, graph recall, automatic fact extraction or consolidation.
 
-Maxwell's memory/context system is layered rather than a single chat-history file.
+SQLite operations, message decoding and sanitization run on one FIFO worker. Writes and per-channel retention deletes are atomic; cancelling a caller does not interrupt an accepted transaction. Shutdown drains accepted work before closing SQLite. The stale-channel sweep uses the newest stored user message and the existing 12-hour inactivity cutoff; bot output does not keep a channel alive. Archived non-transcript rows are not deleted.
 
-### 1. Live Discord context
+## Recent context and older recall
 
-`bot.py` owns Discord ingestion and live turn assembly. It can use message text, reply metadata, attachments/media summaries, Discord context, recent conversation history, tool history, scoped facts, and configured persona/server context subject to runtime budgets and policy gates.
+`maxwell_core/prompts/conversation.py` composes recent channel history as a stable prefix, then live-turn context. Reads require a validated `MemoryRequester` and exact channel/guild scope, including exact DM boundaries. Administrator status does not widen ordinary retrieval. Pointer hydration uses the same requester when Discord history is unavailable.
 
-Not every observed message necessarily causes a reply. Reply policy, direct mentions/replies, DMs, channel restrictions, sleep/watch behavior, and runtime controls decide whether Maxwell should answer.
+A contentless SQLite FTS5 index recalls older transcript passages matching meaningful words in the current query. Existing transcripts are indexed at startup; triggers update the index on inserts, edits, scope changes and deletions. Recall excludes messages already selected for recent context and the live turn. It does not search archived facts or vectors, cross channels, infer synonyms, or call an embedding/chat provider.
 
-### 2. Vector/RAG memory
+Older passages are optional, bounded reference material in a separate **user-role** `<recalled_conversation>` block. They are not system instructions or evidence of who owns a shared fact. At most four matches and 2,000 characters are added, within the remaining history budget. Final prompt trimming drops this optional block before recent conversation. Explicit app-selected history and disabled history do not receive extra recall; short ambient turns skip the lookup.
 
-`rag_memory.py` contains `RAGMemoryManager`, the current memory manager. It is explicitly vector-backed and SQLite-backed.
+## Persistence and limits
 
-It stores/retrieves multiple memory kinds, including channel/message memory, long-term facts, and scoped shared context. Embeddings use an OpenAI-compatible embedding endpoint. The bot can continue operating when embedding work is unavailable; the exact degradation/retry behavior is implemented in `rag_memory.py` and covered by tests.
+`MEMORY_MESSAGE_LIMIT` controls per-channel transcript retention. There is no global channel eviction cap and no new aggregate storage quota. Recall cannot recover messages already removed by retention or the inactivity sweep. Existing ambiguous or unrelated archived data remains stored but is not included by this transcript-only path.
 
-This replaces the old statement that Maxwell had "zero vector DB, embedding, or RAG code." That statement is obsolete.
+The active backend exposes channel/message statistics; it does not run a pending-embedding recovery worker. The administrator API remains an authenticated operational surface, not a community cross-scope memory API.
 
-### 3. Scoped/cross-context facts
+## Request reliability is separate
 
-Cross-context memory is controlled by runtime settings such as `cross_context_enabled` and related visibility controls. Facts are scoped and filtered before they are injected into another turn.
+`message_pipeline.py` stores inbound lifecycle metadata in `DATA_DIR/inbound_requests.sqlite3`: IDs, timestamps, attempts, reason codes and delivery state, not a second private-message archive. Its own FIFO SQLite worker uses WAL and FULL durability. Irreversible-effect checkpoints are awaited before Discord/tool effects; delivery receipts are awaited afterward. Recovery re-fetches eligible messages from Discord rather than retaining their full content in the journal.
 
-Do not assume all remembered facts are globally visible. Private/admin/scoped context boundaries are part of the memory model.
+## Implementation and checks
 
-### 4. Entity and relationship memory
+- `conversation_memory.py`: storage, authorization, retention, FTS5 recall and worker lifecycle.
+- `maxwell_core/memory/base.py`: requester and backend contracts.
+- `maxwell_core/prompts/conversation.py`: stable recent prefix and optional older recall.
+- `context_hydration.py`: requester-scoped fallback for reply/pointer context.
+- `bot.py`: ingestion, prompt budgeting and shutdown.
+- `tests/test_conversation_memory.py`, `tests/test_conversation_service.py`, `tests/test_context_hydration.py`, `tests/test_prompt_cache.py`: scope isolation, migration, edits/deletion, prompt boundaries and budget behavior.
 
-`knowledge_graph.py` adds entity/relationship memory on top of conversation/fact storage. Runtime controls such as `entity_memory_enabled` and `knowledge_graph_enabled` determine whether these layers participate.
+A disposable clone of the live database (12,318 original rows) built the new index in 117.02 ms. Scoped lookups averaged 0.53 ms, maximum 1.70 ms; an older topic was recalled, another guild was excluded, the recent prefix stayed stable and original rows remained intact. These are local storage/prompt checks, not evidence of better model answers or an unbounded memory capacity.
 
-### 5. Retired memory agents
-
-REM, the context fact watcher and automatic long-term-memory summarizers have been removed. They no longer call an auxiliary model or create facts from transcript batches. Existing scoped facts and conversation history remain available for retrieval; normal storage and embedding maintenance still run. Saved settings cannot restore the retired actors.
-
-### 6. Context budgets
-
-`context_budget.py`, runtime controls, and `bot.py` bound how much history/memory/tool context reaches a model turn. Current behavior should be read from those files rather than from old hard-coded line numbers in this document.
-
-Important runtime controls include `prompt_context_budget`, `memory_context_budget`, `memory_history_messages`, and tool-history/context settings.
-
-### 7. Inbound request journal
-
-Directed inbound requests are tracked in `DATA_DIR/inbound_requests.sqlite3`. That database is for lifecycle/reliability state (IDs, timestamps, attempts, delivery state, reason labels), not a duplicate archive of full private Discord message content.
-
-When recovery is possible, Maxwell can re-fetch message content from Discord instead of keeping a second complete copy in the request journal.
-
-## Current files to inspect
-
-| File | Why it matters |
-|---|---|
-| `bot.py` | Discord ingestion, reply policy, prompt/context assembly, memory integration |
-| `rag_memory.py` | SQLite/vector memory and embedding-backed retrieval |
-| `knowledge_graph.py` | Entity/relationship memory |
-| `context_budget.py` | Context/prompt budgeting helpers |
-| `control_defaults.py` | Memory/context runtime defaults |
-| `api/state.py` | Runtime-control sanitization |
-| `api/storage.py` | Dashboard/admin storage paths |
-| `tests/test_entity_memory.py` | Entity-memory behavior |
-| `tests/test_knowledge_graph.py` | Knowledge-graph behavior |
-| `tests/test_web_rag_store.py` | RAG/web-memory behavior |
-| `tests/test_memory_reload.py` | Reload/persistence behavior |
-| `tests/test_ltm_batch.py` | Long-term-memory batch behavior |
-| `tests/test_context_budget.py` | Context-budget behavior |
-
-## Configuration
-
-RAG/embedding configuration is documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md) and `.env.example`. `doctor.py --probe` can test the configured embedding endpoint when RAG is enabled.
-
-The easy installer uses provider-neutral `AI_*` names for the primary chat model. Embeddings have their own advanced settings; do not assume the chat URL/model is automatically the embedding model.
-
-## What is intentionally not frozen in this document
-
-This file no longer duplicates exact source line numbers, fixed message counts, database column lists, or every scoring heuristic. Those details changed enough that the previous document became actively misleading.
-
-For operational behavior, use the current code plus:
-
-- [README.md](README.md)
-- [docs/OVERVIEW.md](docs/OVERVIEW.md)
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
-- [docs/AUDIT.md](docs/AUDIT.md)
-
-The repository tests are the best executable reference for edge cases.
+See [docs/MEMORY_RELIABILITY.md](docs/MEMORY_RELIABILITY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for runtime reliability and ownership.

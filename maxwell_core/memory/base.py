@@ -8,9 +8,19 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from .scope import MemoryRequester
+
 
 class MemoryService(Protocol):
-    async def get_channel_memory(self, channel_id: str) -> list[dict[str, Any]]:
+    async def get_channel_memory(
+        self, channel_id: str, *, requester: MemoryRequester | None = None,
+    ) -> list[dict[str, Any]]:
+        ...
+
+    async def get_relevant_channel_memory(
+        self, channel_id: str, query: str, *, requester: MemoryRequester | None = None,
+        exclude_ids=(), limit: int = 4,
+    ) -> list[dict[str, Any]]:
         ...
 
     async def add_to_channel_memory(

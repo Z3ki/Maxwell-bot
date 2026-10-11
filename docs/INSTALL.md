@@ -22,8 +22,16 @@ Fresh self-hosted installs do not enforce message quotas, advertise paid
 plans, send legal notices, or apply the public bot's retired-tool restrictions.
 An existing `data/bot_control.json` keeps any quotas the operator configured;
 turn off `message_quota_enabled` in owner controls to remove them. Hosted
-operators can opt into legal DMs with `MAXWELL_LEGAL_NOTICE=true` and retain
-the public tool restrictions with `MAXWELL_RESTRICT_PUBLIC_RUNTIME=true`.
+operators can retain the public tool restrictions with
+`MAXWELL_RESTRICT_PUBLIC_RUNTIME=true`.
+
+Maxwell never sends automatic first-use Terms/Privacy DMs. Its shared model
+context includes this operator's `${MAXWELL_PUBLIC_BASE_URL}/terms/` and
+`${MAXWELL_PUBLIC_BASE_URL}/privacy/` links, to provide when someone asks.
+Set that origin only if those pages are actually hosted there; a blank origin
+does not substitute another operator's policies. The former
+`MAXWELL_LEGAL_NOTICE` switch is removed, and old notice/consent files are left
+untouched but no longer loaded or updated.
 
 Optional integrations use `auto` detection. Website tools need a nonblank
 `MAXWELL_PUBLIC_BASE_URL`; `ENABLE_CREATE_SITE=true` also allows local-only

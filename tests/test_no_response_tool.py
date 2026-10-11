@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,8 +13,11 @@ def _run(*, directed=False, control=None, row=None, reason="other"):
     bot = SimpleNamespace(
         _control=control or {},
         _directly_addressed=lambda _message: directed,
-        _request_journal=SimpleNamespace(get=lambda _id: row),
-        _record_request_outcome=lambda *args, **kwargs: outcomes.append((args, kwargs)),
+        _request_journal=SimpleNamespace(
+            get=lambda _id: row,
+            submit=AsyncMock(side_effect=lambda callback, *args: callback(*args)),
+        ),
+        _record_request_outcome=AsyncMock(side_effect=lambda *args, **kwargs: outcomes.append((args, kwargs))),
     )
     result = asyncio.run(NoResponseTool(bot).execute(message, reason=reason))
     return result, outcomes

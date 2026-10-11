@@ -86,12 +86,13 @@ class LavalinkBackend:
         self.node = None
         self.pending: dict[int, tuple[str, asyncio.Future]] = {}
         self._init_lock = asyncio.Lock()
+        self._node_ready = asyncio.Event()
         self._voice_events: dict[int, asyncio.Event] = {}
         self._closed = False
 
     @property
     def available(self):
-        return bool(self.node and self.node.available)
+        return bool(not self._closed and self.node and self.node.available and self._node_ready.is_set())
 
     async def start(self):
         async with self._init_lock:
@@ -118,8 +119,15 @@ class LavalinkBackend:
 
     async def ready(self):
         await self.start()
-        if not self.available:
-            raise MusicError('The audio node is unavailable. Try again after it reconnects.')
+        try:
+            async with asyncio.timeout(5):
+                while not self.available:
+                    if self._closed:
+                        raise MusicError('The audio connection has been closed.')
+                    self._node_ready.clear()
+                    await self._node_ready.wait()
+        except TimeoutError:
+            raise MusicError('The audio node is unavailable. Try again after it reconnects.') from None
 
     async def load(self, query):
         await self.ready()
@@ -244,10 +252,12 @@ class LavalinkBackend:
     async def event(self, event):
         if isinstance(event, lavalink.NodeReadyEvent):
             await event.node.update_session(resuming=True, timeout=120)
+            self._node_ready.set()
             # The client restores players on a fresh session via change_node;
             # resumed sessions keep remote player state. Queue is in MusicService.
             return
         if isinstance(event, lavalink.NodeDisconnectedEvent):
+            self._node_ready.clear()
             log.warning('Music audio node disconnected; queues retained')
             return
         player = getattr(event, 'player', None)
@@ -323,6 +333,7 @@ class LavalinkBackend:
 
     async def close(self):
         self._closed = True
+        self._node_ready.set()
         if self.client:
             self.bot.remove_listener(self.voice_state, 'on_voice_state_update')
             self.bot.remove_listener(self.guild_removed, 'on_guild_remove')

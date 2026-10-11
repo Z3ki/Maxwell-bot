@@ -25,7 +25,6 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
     async def journey():
         _, _, msg, voice = fixture(tmp_path)
         sockets, requests = [], []
-        ready = asyncio.Event()
         async def socket(request):
             assert request.headers['Authorization'] == 'test-secret'
             ws = web.WebSocketResponse()
@@ -38,7 +37,6 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
         async def session(request):
             data = await request.json()
             assert data == {'resuming': True, 'timeout': 120}
-            ready.set()
             return web.json_response({'resuming': True, 'timeout': 120})
         async def load(request):
             query = request.query['identifier']
@@ -96,9 +94,6 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
                     'guild_id': gid, 'endpoint': 'voice.example.test', 'token': 'discord-secret'})
         msg.guild.change_voice_state = change_voice
         try:
-            await backend.start()
-            async with asyncio.timeout(3):
-                await ready.wait()
             result = await service.execute(msg, 'play', query='first')
             assert result['started']['title'] == 'first'
             voice_payload = next(d['voice'] for kind, d in requests if kind == 'player' and 'voice' in d)
@@ -192,4 +187,74 @@ def test_recovery_serializes_with_actions_and_keeps_authoritative_state(tmp_path
         session.current = None
         await actual.change_node(SimpleNamespace())
         assert actual.current is None and actual._next is None
+    asyncio.run(journey())
+
+
+def test_first_load_waits_for_handshake_and_survives_other_waiter_cancellation(monkeypatch):
+    async def journey():
+        connected, release = asyncio.Event(), asyncio.Event()
+        sockets = []
+        async def socket(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            sockets.append(ws)
+            connected.set()
+            await release.wait()
+            await ws.send_json({'op': 'ready', 'resumed': False, 'sessionId': 'first-session'})
+            async for _ in ws:
+                pass
+            return ws
+        async def session(request):
+            return web.json_response({'resuming': True, 'timeout': 120})
+        async def load(request):
+            return web.json_response({'loadType': 'search', 'data': [audio_track('first load')]})
+        app = web.Application()
+        app.router.add_get('/v4/websocket', socket)
+        app.router.add_patch('/v4/sessions/first-session', session)
+        app.router.add_get('/v4/loadtracks', load)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        server = web.TCPSite(runner, '127.0.0.1', 0)
+        await server.start()
+        monkeypatch.setenv('LAVALINK_PASSWORD', 'test-secret')
+        monkeypatch.setenv('LAVALINK_HOST', '127.0.0.1')
+        monkeypatch.setenv('LAVALINK_PORT', str(server._server.sockets[0].getsockname()[1]))
+        bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
+        await bot._async_setup_hook()
+        bot._connection.user = SimpleNamespace(id=777)
+        backend = LavalinkBackend(bot)
+        waiters = []
+        try:
+            waiters.append(asyncio.create_task(backend.load('ytsearch:first')))
+            async with asyncio.timeout(3):
+                await connected.wait()
+            assert not backend.available
+            waiters.append(asyncio.create_task(backend.load('ytsearch:second')))
+            await asyncio.sleep(0)
+            waiters[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiters[0]
+            release.set()
+            async with asyncio.timeout(3):
+                tracks, playlist = await waiters[1]
+            assert tracks[0].title == 'first load' and not playlist
+            assert backend.available and len(sockets) == 1
+        finally:
+            release.set()
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+            await backend.close()
+            await bot.close()
+            await runner.cleanup()
+    asyncio.run(journey())
+
+
+def test_closed_backend_rejects_new_audio_requests():
+    async def journey():
+        backend = LavalinkBackend(SimpleNamespace())
+        await backend.close()
+        with pytest.raises(MusicError, match='closed'):
+            await backend.ready()
     asyncio.run(journey())

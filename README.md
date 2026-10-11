@@ -245,6 +245,15 @@ docs/PLUGINS.md         Plugin development API
 
 ## Development checks
 
+For a separate Discord Dev bot, use the `dev` worktree at `/root/maxwell-dev`
+(Production remains `/root/maxwell` on `main`). See [isolated Dev Docker and
+promotion](docs/DEV_DOCKER.md): `make updev`, `make restartdev`, `make statusdev`,
+`make logsdev`, `make stopdev`, and `make testdev` (offline ephemeral pytest,
+no Discord credentials required). `LOCAL_AI=1` opts into local Ollama;
+`WITH_MUSIC=1` opts into isolated audio services. Features move through reviewed
+PRs into `dev`, CI and Dev Discord checks, then a reviewed PR into `main`;
+publishing a version/tag does not automatically deploy the public bot.
+
 Install the runtime and test dependencies, then run the dependency, lint, shell
 syntax, regression, and shared-core coverage checks:
 

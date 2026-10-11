@@ -232,6 +232,73 @@ def test_parallel_queue_requests_and_guild_isolation(tmp_path):
     assert len([c for c in backend.calls if c[0] == 'play']) == 2
 
 
+def test_slow_new_search_does_not_block_an_already_queued_song(tmp_path):
+    service, backend, message, _ = fixture(tmp_path)
+
+    async def journey():
+        await service.execute(message, 'play', query='current')
+        await service.execute(message, 'play', query='next')
+        session = service.sessions[10]
+        started, release = asyncio.Event(), asyncio.Event()
+        original_load = backend.load
+
+        async def load(query):
+            if query == 'ytsearch:slow':
+                started.set()
+                await release.wait()
+            return await original_load(query)
+
+        backend.load = load
+        pending = asyncio.create_task(service.execute(message, 'play', query='slow'))
+        await asyncio.wait_for(started.wait(), 1)
+        try:
+            await asyncio.wait_for(service.ended(10, session.current.key), 1)
+            assert session.current.title == 'next'
+            release.set()
+            await pending
+            assert [t.title for t in session.queue] == ['slow']
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)
+            await service.close()
+
+    asyncio.run(journey())
+
+
+@pytest.mark.parametrize('action', ['stop', 'clear', 'leave'])
+def test_loading_request_cannot_undo_a_later_stop_clear_or_leave(tmp_path, action):
+    service, backend, message, _ = fixture(tmp_path)
+
+    async def journey():
+        await service.execute(message, 'play', query='current')
+        started, release = asyncio.Event(), asyncio.Event()
+        original_load = backend.load
+
+        async def load(query):
+            started.set()
+            await release.wait()
+            return await original_load(query)
+
+        backend.load = load
+        pending = asyncio.create_task(service.execute(message, 'play', query='late'))
+        await asyncio.wait_for(started.wait(), 1)
+        message.author.guild_permissions.manage_guild = True
+        try:
+            await asyncio.wait_for(service.execute(message, action), 1)
+            release.set()
+            with pytest.raises(MusicError):
+                await pending
+            assert not any(c[:3] == ('play', 10, 'late') for c in backend.calls)
+            if action != 'leave':
+                assert not service.sessions[10].queue
+        finally:
+            release.set()
+            await asyncio.gather(pending, return_exceptions=True)
+            await service.close()
+
+    asyncio.run(journey())
+
+
 def test_limits_atomic_batch_and_queue_ownership(tmp_path):
     service, _, msg, _ = fixture(tmp_path)
     async def journey():

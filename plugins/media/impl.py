@@ -391,7 +391,7 @@ class SendMemeTool(Tool):
             return error
         record_delivery = getattr(self.bot, "_record_delivery", None)
         if callable(record_delivery) and sent is not None:
-            record_delivery(message, sent)
+            await record_delivery(message, sent)
 
         return f'__MEME_SENT__ Sent meme: "{title}" from r/{sub} ({ups} upvotes)'
 
@@ -445,7 +445,7 @@ class SendMediaTool(Tool):
             return error
         record_delivery = getattr(self.bot, "_record_delivery", None)
         if callable(record_delivery) and sent is not None:
-            record_delivery(message, sent)
+            await record_delivery(message, sent)
 
         # Attach the URL of what was actually sent (source URL + the new
         # Discord CDN URL) so the model can curl/pull/reuse either one.

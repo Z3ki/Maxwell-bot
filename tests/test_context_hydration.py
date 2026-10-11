@@ -137,7 +137,7 @@ def test_unresolved_pointer_is_not_dispatched():
     assert message.hydration_failed is True
     host = SimpleNamespace()
     host._dispatch_reply = MaxwellBot._dispatch_reply.__get__(host)
-    assert host._dispatch_reply(message, "this", directed=True) == "dropped"
+    assert asyncio.run(host._dispatch_reply(message, "this", directed=True)) == "dropped"
 
 
 def test_live_prompt_includes_hydrated_context():
@@ -168,3 +168,32 @@ def test_live_prompt_includes_hydrated_context():
     content = built[-1]["content"]
     assert "[RESPOND TO THIS]" in content
     assert "hello from above" in content
+
+
+def test_pointer_uses_scoped_stored_history_when_discord_history_is_unavailable(tmp_path):
+    from conversation_memory import ConversationMemoryManager
+
+    async def scenario():
+        memory = ConversationMemoryManager(str(tmp_path))
+        try:
+            await memory.add_to_channel_memory("42", {
+                "message_id": "3", "guild_id": "30", "author": "Ada", "author_id": "8",
+                "content": "the earlier message in this channel",
+            })
+            await memory.add_to_channel_memory("42", {
+                "message_id": "4", "guild_id": "31", "author_id": "9",
+                "content": "private other guild must not hydrate",
+            })
+            message = SimpleNamespace(
+                id=9, content="^", author=_author("Sam", 4),
+                channel=SimpleNamespace(id=42), guild=SimpleNamespace(id=30), reference=None,
+                attachments=[], embeds=[], stickers=[], mentions=[],
+            )
+            bot = SimpleNamespace(user=SimpleNamespace(id=1), memory=memory)
+            await hydrate_turn_context(bot, message)
+            assert message.hydrated_target_id == "3"
+            assert "earlier message in this channel" in message.hydrated_context
+            assert "private other guild" not in message.hydrated_context
+        finally:
+            await memory.flush()
+    asyncio.run(scenario())

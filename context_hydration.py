@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from utils import message_reference_is_forward
+from maxwell_core.memory.scope import MemoryRequester
 
 logger = logging.getLogger("maxwell")
 
@@ -184,12 +185,7 @@ async def preceding_non_bot_message(bot: Any, message: Any) -> Any:
         return None
     channel_id = str(getattr(channel, "id", "") or "")
     try:
-        rows = await getter(channel_id)
-    except TypeError:
-        try:
-            rows = await getter(channel_id, requester=None)
-        except Exception:
-            return None
+        rows = await getter(channel_id, requester=MemoryRequester.from_message(message))
     except Exception:
         return None
     if not isinstance(rows, list):

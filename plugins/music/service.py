@@ -81,6 +81,8 @@ class Track:
 class Session:
     guild: object
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    play_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    play_generation: int = 0
     channel: object | None = None
     queue: list[Track] = field(default_factory=list)
     current: Track | None = None
@@ -96,6 +98,8 @@ class Session:
     text_channel: object | None = None
     error: str | None = None
     inflight: int = 0
+    autoplay_seed: str | None = None
+    autoplay_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 DEFAULTS = {'default_channel': None, 'listener_controls': True, 'idle_seconds': 180,
@@ -110,10 +114,14 @@ class MusicService:
         self.settings: dict[str, dict] = {}
         self.max_sessions = max_sessions
         self.loads = asyncio.Semaphore(max_loads)
+        # Reserve most source slots for interactive requests, even with many guilds.
+        self.max_prefetch = min(2, max_loads)
+        self._prefetch_active = 0
         self.settings_lock = asyncio.Lock()
         self.rates = OrderedDict()
         self._closed = False
         self.panel_update = None
+        self.playback_observer = None
         backend.service = self
 
     async def load_settings(self):
@@ -292,8 +300,34 @@ class MusicService:
             raise MusicError('This music session is busy. Try again shortly.')
         session.inflight += 1
         # Bound lock wait; a stalled provider must not accumulate endless requests.
+        play_admitted = False
+        generation = session.play_generation
+        tracks: list[Track] = []
         try:
             async with asyncio.timeout(50):
+                if action == 'play':
+                    # Preserve play-request order without blocking track-end/skip on search.
+                    await session.play_lock.acquire()
+                    play_admitted = True
+                    async with session.lock:
+                        if self.sessions.get(guild.id) is not session:
+                            raise MusicError('This session ended. Try the request again.')
+                        self.authorize(session, member, action)
+                        target = self.voice_channel(guild, member, channel) if channel or session.channel is None else session.channel
+                        if session.channel and target.id != session.channel.id and not self.privileged(guild, member):
+                            raise MusicError('Moving an active session requires a DJ or server manager.')
+                        if mode == 'now':
+                            self.authorize(session, member, 'skip')
+                        generation = session.play_generation
+                    if query is not None and queries is not None:
+                        raise MusicError('Supply query or queries, not both.')
+                    if mode not in {'queue', 'next', 'now'}:
+                        raise MusicError('Choose queue, next, or now.')
+                    entries = queries if queries is not None else [query]
+                    if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
+                        raise MusicError('Request one to ten songs at a time.')
+                    for item in entries:
+                        tracks.extend(await self._load(item, member.id))
                 async with session.lock:
                     if self.sessions.get(guild.id) is not session:
                         raise MusicError('This session ended. Try the request again.')
@@ -307,25 +341,16 @@ class MusicService:
                                     'offset': offset, 'total': len(session.queue)}
                         return self.snapshot(session)
                     self.authorize(session, member, action)
-                    if action in {'join', 'move', 'play'}:
-                        target = self.voice_channel(guild, member, channel) if channel or session.channel is None or action == 'move' else session.channel
-                        if session.channel and target.id != session.channel.id and not self.privileged(guild, member):
-                            raise MusicError('Moving an active session requires a DJ or server manager.')
                     if action == 'play':
-                        if query is not None and queries is not None:
-                            raise MusicError('Supply query or queries, not both.')
-                        if mode not in {'queue', 'next', 'now'}:
-                            raise MusicError('Choose queue, next, or now.')
+                        if session.play_generation != generation:
+                            raise MusicError('Playback changed while songs were loading. Request them again.')
                         if mode == 'now':
                             self.authorize(session, member, 'skip')
-                        entries = queries if queries is not None else [query]
-                        if not isinstance(entries, list) or not 1 <= len(entries) <= 10:
-                            raise MusicError('Request one to ten songs at a time.')
+                        target = self.voice_channel(guild, member, channel) if channel or session.channel is None else session.channel
+                        if session.channel and target.id != session.channel.id and not self.privileged(guild, member):
+                            raise MusicError('Moving an active session requires a DJ or server manager.')
                         own_count = sum(t.requester == member.id for t in session.queue)
                         config = self.config(guild.id)
-                        tracks = []
-                        for item in entries:
-                            tracks.extend(await self._load(item, member.id))
                         if len(session.queue) + len(tracks) > config['queue_limit']:
                             raise MusicError('The queue is full. Remove songs before adding this request.')
                         if own_count + len(tracks) > config['user_queue_limit'] and not self.privileged(guild, member):
@@ -344,6 +369,9 @@ class MusicService:
                                 session.queue.extend(tracks)
                             result = {'queued': [t.public() for t in tracks], 'added': len(tracks)}
                     elif action in {'join', 'move'}:
+                        target = self.voice_channel(guild, member, channel) if channel or session.channel is None or action == 'move' else session.channel
+                        if session.channel and target.id != session.channel.id and not self.privileged(guild, member):
+                            raise MusicError('Moving an active session requires a DJ or server manager.')
                         await self._join(session, target)
                         session.text_channel = getattr(message, 'channel', None) or session.text_channel
                         result = {'joined': {'id': str(target.id), 'name': target.name}}
@@ -355,13 +383,16 @@ class MusicService:
                             raise MusicError('Nothing is playing.')
                         await self.backend.pause(guild.id, action == 'pause')
                         session.paused = action == 'pause'
+                        self._notify_playback(session, 'state')
                         result = {'paused': session.paused}
                     elif action == 'skip':
                         session.error = None
                         await self._advance(session, manual=True)
                         result = {'skipped': True, 'current': session.current.public() if session.current else None}
                     elif action == 'stop':
+                        self._notify_playback(session, 'end')
                         await self.backend.stop(guild.id)
+                        session.play_generation += 1
                         session.current, session.paused = None, False
                         session.queue.clear()
                         session.autoplay = False
@@ -387,6 +418,7 @@ class MusicService:
                         session.queue.remove(track)
                         result = {'removed': track.public()}
                     elif action == 'clear':
+                        session.play_generation += 1
                         session.queue.clear()
                         result = {'queue_cleared': True}
                     elif action == 'shuffle':
@@ -405,9 +437,12 @@ class MusicService:
                     session.last_active = time.monotonic()
                     if action != 'skip':
                         session.error = None
+                    self._prepare_autoplay(session)
                     await self.publish(session)
                     return {**result, 'state': self.snapshot(session)}
         finally:
+            if play_admitted:
+                session.play_lock.release()
             session.inflight -= 1
             # A failed first request leaves neither a reserved slot nor a lock behind.
             if session.channel is None and not session.current and not session.queue:
@@ -417,36 +452,74 @@ class MusicService:
     async def _join(self, session, target):
         if session.channel is not None and session.channel.id == target.id:
             return
+        self._notify_playback(session, 'state')
         await self.backend.join(session.guild, target)
         session.channel = target
         session.empty_since = None
+        self._notify_playback(session, 'state')
 
     async def _start(self, session, track, *, position=0):
         track = replace(track, key=uuid.uuid4().hex)
+        self._notify_playback(session, 'end')
         try:
             await self.backend.play(session.guild.id, track, volume=session.volume, position=position)
         except BaseException:
+            self._cancel_autoplay(session)
             session.current, session.paused = None, False
             session.last_active = time.monotonic()
             session.error = 'Playback could not be confirmed. The queue has been preserved.'
             await self.publish(session)
             raise
         session.current, session.paused, session.error = track, False, None
+        self._cancel_autoplay(session)
         if not session.recent_uris or session.recent_uris[-1] != track.uri:
             session.recent_uris.append(track.uri)
+        self._notify_playback(session, 'start')
 
-    async def _autoplay(self, session, seed):
-        if self.loads.locked():
-            session.error = 'Autoplay search is busy. Request a song to continue.'
-            return False
+    def _notify_playback(self, session, event):
+        """Observers are synchronous and must never delay or interrupt music."""
+        if self.playback_observer:
+            try:
+                self.playback_observer(session, event)
+            except Exception as exc:
+                log.warning('Music playback observer failed type=%s', type(exc).__name__)
+
+    def _cancel_autoplay(self, session):
+        task = session.autoplay_task
+        session.autoplay_task, session.autoplay_seed = None, None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _prepare_autoplay(self, session):
+        eligible = (not self._closed and session.current and session.autoplay
+                    and session.repeat == 'off' and not session.queue
+                    and session.channel and any(not m.bot for m in session.channel.members))
+        if not eligible:
+            self._cancel_autoplay(session)
+            return
+        if session.autoplay_seed == session.current.key and session.autoplay_task is not None:
+            return
+        self._cancel_autoplay(session)
+        if self._prefetch_active >= self.max_prefetch:
+            return  # tick retries admission while the current song is still playing.
+        self._prefetch_active += 1
+        session.autoplay_seed = session.current.key
+        session.autoplay_task = asyncio.create_task(
+            self._radio_candidate(session, session.current),
+            name=f'music-autoplay-{session.guild.id}')
+        session.autoplay_task.add_done_callback(self._prefetch_finished)
+
+    def _prefetch_finished(self, task):
+        self._prefetch_active -= 1
+
+    async def _radio_candidate(self, session, seed):
         try:
-            async with self.loads:
-                async with asyncio.timeout(20):
+            async with asyncio.timeout(20):
+                async with self.loads:
                     tracks = await self.backend.recommendations(seed)
         except Exception as exc:
             log.warning('Music autoplay search failed guild=%s type=%s', session.guild.id, type(exc).__name__)
-            session.error = 'Autoplay could not find a related song. Request a song to continue.'
-            return False
+            return None, 'Autoplay could not find a related song. Request a song to continue.'
         excluded = set(session.recent_uris)
         excluded.add(seed.uri)
         for track in tracks:
@@ -457,13 +530,26 @@ class MusicService:
                 continue
             if uri in excluded or not uri.startswith('https://www.youtube.com/watch?v='):
                 continue
-            await self._start(session, replace(track, uri=uri, requester=seed.requester, autoplay=True))
-            return True
-        session.error = 'No new related songs were found. Request a song to continue.'
-        return False
+            return replace(track, uri=uri, requester=seed.requester, autoplay=True), None
+        return None, 'No new related songs were found. Request a song to continue.'
+
+    async def _autoplay(self, session, seed):
+        if session.autoplay_seed == seed.key and session.autoplay_task is not None:
+            track, error = await session.autoplay_task
+        else:
+            if self.loads.locked():
+                session.error = 'Autoplay search is busy. Request a song to continue.'
+                return False
+            track, error = await self._radio_candidate(session, seed)
+        if track is None:
+            session.error = error
+            return False
+        await self._start(session, track)
+        return True
 
     async def _advance(self, session, *, manual=False, failed=False):
         old = session.current
+        self._notify_playback(session, 'end')
         if old and not manual and not failed and session.repeat == 'track':
             await self._start(session, old)
             return
@@ -502,6 +588,7 @@ class MusicService:
                 session.current = None
                 session.error = 'Audio is unavailable; the queue has been preserved. Try skip after recovery.'
                 session.last_active = time.monotonic()
+            self._prepare_autoplay(session)
             await self.publish(session)
 
     async def disconnected(self, gid):
@@ -510,6 +597,8 @@ class MusicService:
             async with session.lock:
                 if self.sessions.get(gid) is not session:
                     return
+                self._cancel_autoplay(session)
+                self._notify_playback(session, 'end')
                 await self.backend.destroy(gid)
                 session.current = None
                 session.queue.clear()
@@ -531,6 +620,7 @@ class MusicService:
                 elif session.empty_since is None:
                     session.empty_since = now
                 timeout = self.config(session.guild.id)['idle_seconds']
+                self._prepare_autoplay(session)
                 if ((not session.current or session.paused) and now - session.last_active >= timeout
                         or session.empty_since is not None and now - session.empty_since >= timeout):
                     try:
@@ -539,6 +629,8 @@ class MusicService:
                         log.warning('Music idle cleanup failed guild=%s type=%s', session.guild.id, type(exc).__name__)
 
     async def _leave(self, session):
+        self._notify_playback(session, 'end')
+        self._cancel_autoplay(session)
         await self.backend.leave(session.guild)
         session.channel, session.current = None, None
         session.queue.clear()
@@ -586,6 +678,11 @@ class MusicService:
 
     async def close(self):
         self._closed = True
+        pending = [s.autoplay_task for s in self.sessions.values() if s.autoplay_task is not None]
+        for session in self.sessions.values():
+            self._cancel_autoplay(session)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         async def leave(session):
             try:
                 async with asyncio.timeout(5):

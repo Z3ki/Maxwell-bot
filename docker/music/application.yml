@@ -43,11 +43,12 @@ plugins:
         searching: false
       ANDROID_VR:
         searching: false
-    # TV playback needs a signed-in account. Leave the refresh token blank to
-    # print a one-time device code. Store the resulting token only in .env.
+    # OAuth remains enabled, but account approval is an explicit operator step.
+    # scripts/youtube_auth.py saves the token privately; no unattended device poller.
     oauth:
       enabled: true
       refreshToken: ${YOUTUBE_OAUTH_REFRESH_TOKEN:}
+      skipInitialization: true
     # Local signature extraction fails on the current player script.
     remoteCipher:
       url: http://127.0.0.1:8001

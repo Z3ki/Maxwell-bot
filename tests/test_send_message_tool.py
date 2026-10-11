@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from bot_tools import (
     SendMessageTool,
@@ -494,8 +495,8 @@ def test_send_receipt_is_recorded_only_after_success():
 
         bot = SimpleNamespace(
             _send_with_slowmode=send,
-            _mark_request_effect=lambda msg: events.append(("effect", msg)),
-            _record_delivery=lambda msg, sent: events.append(("delivered", sent.id)),
+            _mark_request_effect=AsyncMock(side_effect=lambda msg: events.append(("effect", msg))),
+            _record_delivery=AsyncMock(side_effect=lambda msg, sent: events.append(("delivered", sent.id))),
         )
         result = await SendMessageTool(bot).execute(message, content="answer")
         assert "__MESSAGE_SENT__" in result
@@ -517,7 +518,7 @@ def test_send_none_does_not_claim_delivery():
 
         bot = SimpleNamespace(
             _send_with_slowmode=send,
-            _record_delivery=lambda *_args: receipts.append("delivered"),
+            _record_delivery=AsyncMock(side_effect=lambda *_args: receipts.append("delivered")),
         )
         result = await SendMessageTool(bot).execute(FakeMessage(), content="answer")
         assert result.startswith("Error:")
@@ -539,9 +540,9 @@ def test_partial_send_does_not_claim_unsent_chunks():
 
         bot = SimpleNamespace(
             _send_with_slowmode=send,
-            _record_request_outcome=lambda _msg, status, **kw: outcomes.append(
+            _record_request_outcome=AsyncMock(side_effect=lambda _msg, status, **kw: outcomes.append(
                 (status, kw.get("reason"))
-            ),
+            )),
         )
         result = await SendMessageTool(bot).execute(
             FakeMessage(), content="a" * 1900 + "b" * 100
@@ -557,7 +558,7 @@ def test_failed_effect_checkpoint_prevents_send():
     async def run():
         message = FakeMessage()
 
-        def mark(_message):
+        async def mark(_message):
             raise OSError("journal unavailable")
 
         result = await SendMessageTool(

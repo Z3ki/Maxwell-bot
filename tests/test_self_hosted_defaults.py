@@ -1,18 +1,15 @@
 """Unrestricted installs and optional integrations follow actual setup."""
 
-import asyncio
 import json
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
 from conftest import clean_env
 
-import legal_notice
 from bot import MaxwellBot
 from control_defaults import DEFAULT_CONTROL
 from maxwell_core.plugins.bundled import build_tools
@@ -27,16 +24,6 @@ def test_self_hosted_defaults_have_no_hosted_allowance():
     assert DEFAULT_CONTROL["site_ttl_hours"] == 0
     ledger = SimpleNamespace(status=lambda *a: pytest.fail("disabled quota was queried"))
     assert "Unlimited" in usage_text_for(SimpleNamespace(_control={}, _message_quota=ledger), "1")
-
-
-def test_no_legal_dm_without_operator_opt_in(monkeypatch, tmp_path):
-    monkeypatch.delenv("MAXWELL_LEGAL_NOTICE", raising=False)
-    bot = SimpleNamespace(config=SimpleNamespace(DATA_DIR=str(tmp_path)))
-    user = SimpleNamespace(id=1, bot=False, send=AsyncMock())
-    legal_notice.install(bot)
-    asyncio.run(legal_notice.notify_user(bot, user))
-    user.send.assert_not_awaited()
-    assert list(tmp_path.iterdir()) == []
 
 
 def test_only_help_and_usage_are_registered_and_premium_is_removed(monkeypatch):

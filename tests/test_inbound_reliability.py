@@ -149,7 +149,7 @@ def test_receipt_is_durable_before_watermark_and_work(tmp_path, monkeypatch):
 
     asyncio.run(run())
     assert seen == ["101"]
-    row = bot._request_state(message)
+    row = bot._request_journal.get(message.id)
     assert row["status"] == "delivered"
     assert row["response_id"] == "10000"
     assert row["attempts"] == 1
@@ -187,7 +187,7 @@ def test_gate_returns_have_terminal_reason(tmp_path, control, reason):
     if reason == "bot_author":
         message.author.bot = True
     asyncio.run(bot.on_message(message))
-    row = bot._request_state(message)
+    row = bot._request_journal.get(message.id)
     assert (row["status"], row["reason"]) == ("suppressed", reason)
 
 
@@ -212,15 +212,15 @@ def test_same_user_followup_stops_generation_and_answers_only_latest(tmp_path):
         await bot.on_message(first)
         await started.wait()
         await bot.on_message(other)
-        assert bot._request_state(first)["status"] == "running"
+        assert bot._request_journal.get(first.id)["status"] == "running"
         await bot.on_message(second)
         await bot.on_message(third)
         await _drain(bot)
 
     asyncio.run(run())
-    assert bot._request_state(first)["status"] == "superseded"
-    assert bot._request_state(second)["status"] == "superseded"
-    assert bot._request_state(third)["status"] == "delivered"
+    assert bot._request_journal.get(first.id)["status"] == "superseded"
+    assert bot._request_journal.get(second.id)["status"] == "superseded"
+    assert bot._request_journal.get(third.id)["status"] == "delivered"
     assert 101 not in handled[1:]
     assert handled[-1] == 103
 
@@ -233,7 +233,7 @@ def test_explicit_stop_supersedes_active_queued_and_persisted(tmp_path):
         started = asyncio.Event()
 
         async def work(message, _content):
-            bot._mark_request_effect(message)
+            await bot._mark_request_effect(message)
             started.set()
             await asyncio.Event().wait()
 
@@ -248,7 +248,7 @@ def test_explicit_stop_supersedes_active_queued_and_persisted(tmp_path):
         await bot._retry_pending_inbound()
 
     asyncio.run(run())
-    assert all(bot._request_state(m)["status"] == "superseded" for m in messages)
+    assert all(bot._request_journal.get(m.id)["status"] == "superseded" for m in messages)
 
 
 def test_retry_before_effect_is_bounded_and_bypasses_receipt_dedup(tmp_path):
@@ -265,14 +265,14 @@ def test_retry_before_effect_is_bounded_and_bypasses_receipt_dedup(tmp_path):
     async def run():
         await bot.on_message(message)
         await _drain(bot)
-        assert bot._request_state(message)["status"] == "deferred"
+        assert bot._request_journal.get(message.id)["status"] == "deferred"
         await bot._retry_pending_inbound()
         await _drain(bot)
         await bot._retry_pending_inbound()
 
     asyncio.run(run())
     assert calls == [101, 101]
-    assert bot._request_state(message)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["status"] == "failed"
 
 
 def test_app_retry_uses_live_interaction_instead_of_fetching_it_as_a_message(tmp_path):
@@ -294,13 +294,13 @@ def test_app_retry_uses_live_interaction_instead_of_fetching_it_as_a_message(tmp
     async def run():
         await bot.on_message(message)
         await _drain(bot)
-        assert bot._request_state(message)["status"] == "deferred"
+        assert bot._request_journal.get(message.id)["status"] == "deferred"
         await bot._retry_pending_inbound()
         await _drain(bot)
 
     asyncio.run(run())
     assert calls == [message, message]
-    assert bot._request_state(message)["status"] == "delivered"
+    assert bot._request_journal.get(message.id)["status"] == "delivered"
     message.channel.fetch_message.assert_not_awaited()
     assert bot._watermarks.get(message.channel.id) is None
 
@@ -319,7 +319,7 @@ def test_failure_after_effect_never_replays(tmp_path):
     calls = []
 
     async def uncertain(msg, _content):
-        bot._mark_request_effect(msg)
+        await bot._mark_request_effect(msg)
         calls.append(msg.id)
         raise TimeoutError
 
@@ -334,9 +334,9 @@ def test_failure_after_effect_never_replays(tmp_path):
 
     asyncio.run(run())
     assert calls == [101]
-    assert bot._request_state(message)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["status"] == "failed"
     assert (
-        bot._request_state(message)["reason"] == "uncertain_after_effect:TimeoutError"
+        bot._request_journal.get(message.id)["reason"] == "uncertain_after_effect:TimeoutError"
     )
 
 
@@ -354,7 +354,7 @@ def test_empty_output_retries_then_sends_confirmed_fallback(tmp_path):
 
     asyncio.run(run())
     assert bot._handle_message.await_count == 2
-    assert bot._request_state(message)["status"] == "delivered"
+    assert bot._request_journal.get(message.id)["status"] == "delivered"
     assert len(message.channel.sent) == 1
     assert "couldn't finish" in message.channel.sent[0].content
 
@@ -375,8 +375,8 @@ def test_forbidden_send_is_not_delivery_or_replayed(tmp_path):
         await bot._retry_pending_inbound()
 
     asyncio.run(run())
-    assert bot._request_state(message)["status"] == "failed"
-    assert bot._request_state(message)["response_id"] is None
+    assert bot._request_journal.get(message.id)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["response_id"] is None
     # reply() forbidden, then a one-shot channel.send fallback. Not retried.
     assert message.channel.send.await_count == 2
 
@@ -403,7 +403,7 @@ def test_deadline_covers_preparation_and_cleans_typing_context(tmp_path):
         assert _current_inbound.get() is None
 
     asyncio.run(run())
-    assert bot._request_state(message)["status"] == "deferred"
+    assert bot._request_journal.get(message.id)["status"] == "deferred"
     assert bot._inflight_context == {}
     assert bot._active_requests == {}
     assert bot._replying_channels == set()
@@ -426,7 +426,7 @@ def test_preparation_exception_cleans_up_and_records_failure(tmp_path):
         await _drain(bot)
 
     asyncio.run(run())
-    assert bot._request_state(message)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["status"] == "failed"
     assert bot._active_requests == {}
     assert bot._inflight_context == {}
 
@@ -446,7 +446,7 @@ def test_new_edited_mention_dispatches_once_and_never_reanswers(tmp_path):
 
     asyncio.run(run())
     assert len(after.channel.sent) == 1
-    assert bot._request_state(after)["status"] == "delivered"
+    assert bot._request_journal.get(after.id)["status"] == "delivered"
 
 
 def test_edited_mentions_can_be_disabled(tmp_path):
@@ -455,7 +455,7 @@ def test_edited_mentions_can_be_disabled(tmp_path):
     before = _message(bot, directed=False)
     after = _message(bot, content="<@999> question")
     asyncio.run(bot._maybe_reply_to_edited_mention(before, after))
-    assert bot._request_state(after) == {}
+    assert bot._request_journal.get(after.id) is None
 
 
 def test_unresolved_reply_parent_retries_instead_of_becoming_chatter(tmp_path):
@@ -478,12 +478,12 @@ def test_unresolved_reply_parent_retries_instead_of_becoming_chatter(tmp_path):
 
     async def run():
         await bot.on_message(message)
-        assert bot._request_state(message)["status"] == "deferred"
+        assert bot._request_journal.get(message.id)["status"] == "deferred"
         await bot._retry_pending_inbound()
         await _drain(bot)
 
     asyncio.run(run())
-    assert bot._request_state(message)["status"] == "delivered"
+    assert bot._request_journal.get(message.id)["status"] == "delivered"
     assert calls == 2
 
 
@@ -494,8 +494,8 @@ def test_sleep_is_explicit_suppression_not_promised_deferral(tmp_path):
     bot._is_sleeping = lambda: (True, 120)
     bot._request_journal.accept(message.id, 22, 11, directed=True)
     assert asyncio.run(bot._check_sleep_gate(message)) is False
-    assert bot._request_state(message)["reason"] == "sleep_policy"
-    assert bot._request_state(message)["status"] == "suppressed"
+    assert bot._request_journal.get(message.id)["reason"] == "sleep_policy"
+    assert bot._request_journal.get(message.id)["status"] == "suppressed"
     assert "ping me again" in message.channel.sent[0].content
 
 
@@ -538,8 +538,8 @@ def test_disconnect_snapshot_does_not_answer_missed_messages(tmp_path):
         await _drain(bot)
 
     asyncio.run(run())
-    assert bot._request_state(missed) == {}
-    assert bot._request_state(live)["status"] == "delivered"
+    assert bot._request_journal.get(missed.id) is None
+    assert bot._request_journal.get(live.id)["status"] == "delivered"
     assert bot._watermarks.get(22) == 200
     assert len(live.channel.sent) == 1
     assert bot._recovery_cursors == {}
@@ -576,8 +576,8 @@ def test_restart_drains_accepted_request_but_not_uncertain_tool(tmp_path):
         await _drain(restarted)
 
     asyncio.run(run())
-    assert restarted._request_state(message)["status"] == "delivered"
-    assert restarted._request_state(uncertain)["status"] == "failed"
+    assert restarted._request_journal.get(message.id)["status"] == "delivered"
+    assert restarted._request_journal.get(uncertain.id)["status"] == "failed"
     assert len(message.channel.sent) == 1
 
 
@@ -597,8 +597,8 @@ def test_restart_does_not_reset_exhausted_retry_budget(tmp_path):
 
     asyncio.run(run())
     bot._handle_message.assert_not_awaited()
-    assert bot._request_state(message)["status"] == "failed"
-    assert bot._request_state(message)["attempts"] == 2
+    assert bot._request_journal.get(message.id)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["attempts"] == 2
 
 
 def test_concurrent_rooms_record_only_their_own_delivery(tmp_path):
@@ -611,8 +611,8 @@ def test_concurrent_rooms_record_only_their_own_delivery(tmp_path):
         assert _current_inbound.get() is None
 
     asyncio.run(run())
-    assert bot._request_state(first)["status"] == "delivered"
-    assert bot._request_state(second)["status"] == "delivered"
+    assert bot._request_journal.get(first.id)["status"] == "delivered"
+    assert bot._request_journal.get(second.id)["status"] == "delivered"
     assert len(first.channel.sent) == len(second.channel.sent) == 1
 
 
@@ -625,7 +625,7 @@ def test_queued_request_rechecks_disabled_policy(tmp_path):
     bot._handle_message = AsyncMock()
     asyncio.run(bot._run_reliable_turn(message, message.content))
     bot._handle_message.assert_not_awaited()
-    assert bot._request_state(message)["reason"] == "bot_disabled"
+    assert bot._request_journal.get(message.id)["reason"] == "bot_disabled"
 
 
 def test_overlapping_recovery_scans_are_serialized(tmp_path):
@@ -689,14 +689,17 @@ def test_delivery_preserves_status_and_records_partial_diagnostic(tmp_path):
     bot = _bot(tmp_path)
     message = _message(bot)
     bot._request_journal.accept(message.id, 22, 11, directed=True)
-    bot._mark_request_effect(message)
-    bot._record_delivery(message, SimpleNamespace(id=12345))
-    bot._record_request_outcome(
-        message, "suppressed", reason="model_no_response:already_answered"
-    )
-    assert bot._request_state(message)["status"] == "delivered"
-    bot._record_request_outcome(message, "delivered", reason="partial_delivery")
-    row = bot._request_state(message)
+    async def run():
+        await bot._mark_request_effect(message)
+        await bot._record_delivery(message, SimpleNamespace(id=12345))
+        await bot._record_request_outcome(
+            message, "suppressed", reason="model_no_response:already_answered"
+        )
+        assert bot._request_journal.get(message.id)["status"] == "delivered"
+        await bot._record_request_outcome(message, "delivered", reason="partial_delivery")
+
+    asyncio.run(run())
+    row = bot._request_journal.get(message.id)
     assert row["status"] == "delivered"
     assert row["response_id"] == "12345"
     assert row["reason"] == "partial_delivery"
@@ -716,8 +719,12 @@ def test_queue_drop_reasons_preserve_durable_overflow(tmp_path, reason, status):
     bot = _bot(tmp_path)
     message = _message(bot)
     bot._request_journal.accept(message.id, 22, 11, directed=True)
-    bot._on_reply_queue_drop("22", SimpleNamespace(message=message), reason)
-    assert bot._request_state(message)["status"] == status
+    async def run():
+        bot._on_reply_queue_drop("22", SimpleNamespace(message=message), reason)
+        await bot._request_journal.drain()
+
+    asyncio.run(run())
+    assert bot._request_journal.get(message.id)["status"] == status
 
 
 def test_explicit_command_is_checkpointed_before_execution(tmp_path):
@@ -726,7 +733,7 @@ def test_explicit_command_is_checkpointed_before_execution(tmp_path):
     sends = []
 
     async def send(content, **_kwargs):
-        assert bot._request_state(message)["effects_started"] is True
+        assert bot._request_journal.get(message.id)["effects_started"] is True
         sends.append(content)
         return SimpleNamespace(id=12345)
 
@@ -735,7 +742,7 @@ def test_explicit_command_is_checkpointed_before_execution(tmp_path):
     assert sends == [
         "Text-prefix commands are retired. Use `/help` to see Maxwell's slash commands."
     ]
-    row = bot._request_state(message)
+    row = bot._request_journal.get(message.id)
     assert row["status"] == "suppressed"
     assert row["reason"] == "command"
     assert row["effects_started"] is True
@@ -770,7 +777,7 @@ def test_restart_skips_offline_gap_instead_of_answering_it(tmp_path):
 
     asyncio.run(after_restart())
     assert restarted._watermarks.get(22) == 200
-    assert restarted._request_state(backlog[2]) == {}
+    assert restarted._request_journal.get(backlog[2].id) is None
     assert len(backlog[0].channel.sent) == 1
 
 
@@ -793,7 +800,7 @@ def test_offline_journal_rows_are_abandoned_not_answered(tmp_path):
     dropped = bot._abandon_offline_inbound()
     assert dropped == 1
     asyncio.run(bot._retry_pending_inbound())
-    assert bot._request_state(message)["reason"] == "stale_offline"
+    assert bot._request_journal.get(message.id)["reason"] == "stale_offline"
     assert message.channel.sent == []
 
 
@@ -808,18 +815,18 @@ def test_pending_sweep_reaches_new_rooms_beyond_busy_first_page(tmp_path):
 
     async def run():
         await bot._retry_pending_inbound()
-        assert bot._request_state(waiting)["status"] == "received"
+        assert bot._request_journal.get(waiting.id)["status"] == "received"
         newer = _message(bot, 1003, 24)
         journal.accept(newer.id, 24, 11, directed=True)
         await bot._retry_pending_inbound()
         await _drain(bot)
-        assert bot._request_state(waiting)["status"] == "delivered"
-        assert bot._request_state(newer)["status"] == "received"
+        assert bot._request_journal.get(waiting.id)["status"] == "delivered"
+        assert bot._request_journal.get(newer.id)["status"] == "received"
         # A fresh, bounded sweep includes the newly arrived room.
         await bot._retry_pending_inbound()
         await bot._retry_pending_inbound()
         await _drain(bot)
-        assert bot._request_state(newer)["status"] == "delivered"
+        assert bot._request_journal.get(newer.id)["status"] == "delivered"
 
     asyncio.run(run())
 
@@ -836,7 +843,7 @@ def test_command_exception_after_effect_is_terminal_not_retried(tmp_path):
         assert message.channel.send.await_count == count
 
     asyncio.run(run())
-    row = bot._request_state(message)
+    row = bot._request_journal.get(message.id)
     assert row["status"] == "failed"
     assert row["effects_started"] is True
 
@@ -882,8 +889,8 @@ def test_completed_tool_then_empty_output_gets_ack_without_reexecuting(tmp_path)
     tool.execute.assert_awaited_once()
     assert len(message.channel.sent) == 1
     assert "won't repeat those actions" in message.channel.sent[0].content
-    assert bot._request_state(message)["status"] == "delivered"
-    assert bot._request_state(message)["attempts"] == 1
+    assert bot._request_journal.get(message.id)["status"] == "delivered"
+    assert bot._request_journal.get(message.id)["attempts"] == 1
 
 
 def test_completed_tool_then_failed_send_gets_no_second_send(tmp_path):
@@ -909,7 +916,7 @@ def test_completed_tool_then_failed_send_gets_no_second_send(tmp_path):
     asyncio.run(run())
     tool.execute.assert_awaited_once()
     message.channel.send.assert_awaited_once()
-    assert bot._request_state(message)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["status"] == "failed"
 
 
 def test_uncertain_tool_result_does_not_enable_fallback_send(tmp_path):
@@ -931,7 +938,7 @@ def test_uncertain_tool_result_does_not_enable_fallback_send(tmp_path):
     asyncio.run(run())
     tool.execute.assert_awaited_once()
     assert message.channel.sent == []
-    assert bot._request_state(message)["status"] == "failed"
+    assert bot._request_journal.get(message.id)["status"] == "failed"
 
 
 @pytest.mark.parametrize("prior_watermark", [None, 100, 200])
@@ -959,7 +966,7 @@ def test_failed_receipt_floor_survives_new_live_message_and_restart(
         bot._watermarks.save()
 
     asyncio.run(before_restart())
-    assert bot._request_state(missing) == {}
+    assert bot._request_journal.get(missing.id) is None
     assert bot._watermarks.get(22) == prior_watermark
     assert bot._recovery_cursors["22"] == 100
 
@@ -974,7 +981,7 @@ def test_failed_receipt_floor_survives_new_live_message_and_restart(
         await _drain(restarted)
 
     asyncio.run(after_restart())
-    assert restarted._request_state(missing) == {}
+    assert restarted._request_journal.get(missing.id) is None
     assert len(missing.channel.sent) == 1
     assert json.loads((tmp_path / "inbound_recovery_floors.json").read_text()) == {}
 
@@ -1029,13 +1036,13 @@ def test_failed_retry_fetch_cannot_fail_concurrent_live_turn(tmp_path, forbidden
         bot._handle_message = handle
         message.channel.fetch_message = fetch
         await bot._retry_pending_inbound()
-        assert bot._request_state(message)["status"] == "running"
-        assert bot._request_state(message)["attempts"] == 1
+        assert bot._request_journal.get(message.id)["status"] == "running"
+        assert bot._request_journal.get(message.id)["attempts"] == 1
         release.set()
         await _drain(bot)
 
     asyncio.run(run())
-    assert bot._request_state(message)["status"] == "delivered"
+    assert bot._request_journal.get(message.id)["status"] == "delivered"
     assert len(message.channel.sent) == 1
 
 
@@ -1079,7 +1086,7 @@ def test_global_reply_capacity_defers_to_journal_and_retries(tmp_path):
         await bot.on_message(first)
         await first_started.wait()
         await bot.on_message(second)
-        deferred = bot._request_state(second)
+        deferred = bot._request_journal.get(second.id)
         assert deferred["status"] == "deferred"
         assert deferred["reason"] == "global_queue_capacity"
         assert bot._reply_queue.full
@@ -1090,13 +1097,102 @@ def test_global_reply_capacity_defers_to_journal_and_retries(tmp_path):
 
         release_first.set()
         await _drain(bot)
-        assert bot._request_state(first)["status"] == "delivered"
+        assert bot._request_journal.get(first.id)["status"] == "delivered"
 
         # The normal journal recovery loop fetches the deferred Discord
         # message once the process-wide in-memory slot is available.
         await bot._retry_pending_inbound()
         await _drain(bot)
-        assert bot._request_state(second)["status"] == "delivered"
+        assert bot._request_journal.get(second.id)["status"] == "delivered"
         assert [entry.content for entry in second.channel.sent] == ["answer"]
 
     asyncio.run(run())
+
+
+def test_busy_journal_yields_but_commits_before_discord_send(tmp_path):
+    import sqlite3
+
+    bot = _bot(tmp_path)
+    message = _message(bot)
+    journal = bot._request_journal
+    journal.accept(message.id, 22, 11, directed=True)
+    blocker = sqlite3.connect(journal.path)
+    blocker.execute("BEGIN IMMEDIATE")
+    original_send = message.channel.send
+
+    async def send(*args, **kwargs):
+        with sqlite3.connect(journal.path) as db:
+            assert db.execute(
+                "SELECT effects_started FROM requests WHERE message_id=?",
+                (str(message.id),),
+            ).fetchone()[0] == 1
+        return await original_send(*args, **kwargs)
+
+    message.channel.send = send
+    message.reply = send
+
+    async def run():
+        token = _current_inbound.set(message)
+        try:
+            delivery = asyncio.create_task(
+                bot._send_with_slowmode(message.channel, "answer", reply_to=message))
+            await asyncio.sleep(0)
+            assert message.channel.sent == []
+            blocker.rollback()
+            await delivery
+        finally:
+            _current_inbound.reset(token)
+
+    try:
+        asyncio.run(run())
+        row = journal.get(message.id)
+        assert row["status"] == "delivered" and row["effects_started"]
+        assert row["response_id"] == str(message.channel.sent[0].id)
+    finally:
+        blocker.close()
+        journal.close()
+
+
+def test_same_user_cancel_during_journal_begin_is_durable(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+
+    bot = _bot(tmp_path)
+    message, replacement = _message(bot, 101), _message(bot, 102)
+    journal = bot._request_journal
+    journal.accept(message.id, 22, 11, directed=True)
+    journal.update(message.id, "queued")
+    blocker = sqlite3.connect(journal.path)
+    blocker.execute("BEGIN IMMEDIATE")
+    entered = threading.Event()
+    original_begin = journal.begin
+
+    def begin(mid):
+        entered.set()
+        original_begin(mid)
+
+    monkeypatch.setattr(journal, "begin", begin)
+
+    async def run():
+        turn = asyncio.create_task(bot._run_reliable_turn(message, message.content))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 2), 3)
+            bot._interrupt_same_user(replacement)
+            blocker.rollback()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+            await journal.drain()
+            assert journal.get(message.id)["status"] == "superseded"
+            assert message.channel.sent == []
+            assert not bot._active_requests and not bot._active_request_messages
+        finally:
+            blocker.rollback()
+            if not turn.done():
+                turn.cancel()
+                await asyncio.gather(turn, return_exceptions=True)
+
+    try:
+        asyncio.run(run())
+    finally:
+        blocker.close()
+        journal.close()

@@ -103,7 +103,6 @@ def test_first_install_runs_configuration_wizard(tmp_path):
     assert values["MAXWELL_OWNER_IDS"] == "123"
     assert values["ENABLE_AUTONOMY"] == "false"
     assert values["ENABLE_SHELL"] == "false"
-    assert values["MAXWELL_LEGAL_NOTICE"] == "false"
     assert not values["MAXWELL_PUBLIC_BASE_URL"]
     assert "MAXWELL_EMBED_MODEL" not in values
     assert not values["GEMINI_IMAGE_MODEL"]

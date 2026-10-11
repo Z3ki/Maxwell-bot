@@ -8,14 +8,24 @@ and never loads, generates, or searches embeddings.
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from maxwell_core.memory.scope import MemoryRequester, _decode_metadata, _has_requester
 from media_payloads import sanitize_media_memory
+
+_RECALL_STOP_WORDS = frozenset(
+    "a an and are as at be been but by can could did do does for from had has have "
+    "how i if in is it its just me my of on or our please remember said say should "
+    "so some that the their them then there these they this to us was we were what "
+    "when where which who why will with would you your about earlier previous recall".split()
+)
 
 
 class ConversationMemoryManager:
@@ -24,8 +34,9 @@ class ConversationMemoryManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.max_messages = max(1, min(int(max_messages), 10000))
         self.db_path = self.data_dir / "maxwell_rag.db"
-        self._lock = asyncio.Lock()
-        self._db = sqlite3.connect(str(self.db_path), isolation_level=None)
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maxwell-history")
+        self._closed = False
+        self._db = sqlite3.connect(str(self.db_path), isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
@@ -51,10 +62,63 @@ class ConversationMemoryManager:
         self._db.execute("""CREATE INDEX IF NOT EXISTS idx_conversation_history
             ON vectors(channel_id, guild_id, timestamp DESC, created_at DESC)
             WHERE kind IN ('message', 'bot_output')""")
+        self._db.execute("""CREATE INDEX IF NOT EXISTS idx_conversation_cleanup
+            ON vectors(channel_id, timestamp) WHERE kind='message'""")
+        self._initialize_search()
+
+    def _initialize_search(self):
+        # Contentless FTS stores only the index; transcript text stays in vectors.
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            exists = self._db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='conversation_search'"
+            ).fetchone()
+            self._db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS conversation_search
+                USING fts5(scope_key, content, content='', tokenize='unicode61')""")
+            if not exists:
+                self._db.execute("""INSERT INTO conversation_search(rowid,scope_key,content)
+                    SELECT rowid,'g'||COALESCE(guild_id,'')||'c'||channel_id,content
+                    FROM vectors WHERE kind IN ('message','bot_output')""")
+            self._db.execute("""CREATE TRIGGER IF NOT EXISTS conversation_search_insert
+                AFTER INSERT ON vectors WHEN new.kind IN ('message','bot_output')
+                BEGIN
+                    INSERT INTO conversation_search(rowid,scope_key,content)
+                    VALUES(new.rowid,'g'||COALESCE(new.guild_id,'')||'c'||new.channel_id,new.content);
+                END""")
+            self._db.execute("""CREATE TRIGGER IF NOT EXISTS conversation_search_delete
+                AFTER DELETE ON vectors WHEN old.kind IN ('message','bot_output')
+                BEGIN
+                    INSERT INTO conversation_search(conversation_search,rowid,scope_key,content)
+                    VALUES('delete',old.rowid,'g'||COALESCE(old.guild_id,'')||'c'||old.channel_id,old.content);
+                END""")
+            self._db.execute("""CREATE TRIGGER IF NOT EXISTS conversation_search_update
+                AFTER UPDATE OF kind,channel_id,guild_id,content ON vectors
+                BEGIN
+                    INSERT INTO conversation_search(conversation_search,rowid,scope_key,content)
+                    SELECT 'delete',old.rowid,'g'||COALESCE(old.guild_id,'')||'c'||old.channel_id,old.content
+                    WHERE old.kind IN ('message','bot_output');
+                    INSERT INTO conversation_search(rowid,scope_key,content)
+                    SELECT new.rowid,'g'||COALESCE(new.guild_id,'')||'c'||new.channel_id,new.content
+                    WHERE new.kind IN ('message','bot_output');
+                END""")
+            self._db.execute("COMMIT")
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
+
+    async def _run_db(self, callback, *args):
+        if self._closed:
+            raise RuntimeError("Conversation history is closed")
+        future = asyncio.get_running_loop().run_in_executor(self._executor, partial(callback, *args))
+        # Cancelling a caller cannot interrupt a running SQLite transaction.
+        return await asyncio.shield(future)
 
     async def get_channel_memory(self, channel_id: str, *, requester: MemoryRequester | None = None) -> list[dict]:
         if not _has_requester(requester) or str(channel_id) != requester.channel_id:
             return []
+        return await self._run_db(self._get_channel_memory, requester)
+
+    def _get_channel_memory(self, requester):
         rows = self._db.execute(
             "SELECT id, author, author_id, content, timestamp, metadata FROM vectors "
             "WHERE channel_id=? AND guild_id=? AND kind IN ('message','bot_output') "
@@ -67,7 +131,56 @@ class ConversationMemoryManager:
             "timestamp": row["timestamp"],
         }) for row in reversed(rows)]
 
+    async def get_relevant_channel_memory(
+        self, channel_id: str, query: str, *, requester: MemoryRequester | None = None,
+        exclude_ids=(), limit: int = 4,
+    ) -> list[dict]:
+        if not _has_requester(requester) or str(channel_id) != requester.channel_id:
+            return []
+        words = list(dict.fromkeys(
+            word for word in re.findall(r"[^\W_]{2,64}", str(query)[:2000].casefold())
+            if word not in _RECALL_STOP_WORDS
+        ))[:12]
+        if not words:
+            return []
+        return await self._run_db(
+            self._get_relevant_channel_memory, requester, words,
+            tuple(str(mid) for mid in exclude_ids), max(1, min(int(limit), 6)),
+        )
+
+    def _get_relevant_channel_memory(self, requester, words, excluded, limit):
+        guild = "" if requester.is_dm else requester.guild_id
+        scope_key = f"g{guild}c{requester.channel_id}".replace('"', '""')
+        match = f'scope_key:"{scope_key}" AND content:(' + " OR ".join(
+            f'"{word}"' for word in words
+        ) + ")"
+        exclusion = " AND v.id NOT IN (" + ",".join("?" for _ in excluded) + ")" if excluded else ""
+        rows = self._db.execute(
+            "SELECT v.id,v.author,v.author_id,v.content,v.timestamp,v.metadata "
+            "FROM conversation_search JOIN vectors v ON v.rowid=conversation_search.rowid "
+            "WHERE conversation_search MATCH ? AND v.channel_id=? AND v.guild_id=? "
+            "AND v.kind IN ('message','bot_output')" + exclusion +
+            " ORDER BY bm25(conversation_search,0.0,1.0),v.timestamp DESC,v.created_at DESC LIMIT ?",
+            (match, requester.channel_id, guild, *excluded, limit * 4),
+        ).fetchall()
+        result = []
+        for row in rows:
+            metadata = _decode_metadata(row["metadata"])
+            if metadata.get("is_tool"):
+                continue
+            result.append(sanitize_media_memory(metadata | {
+                "message_id": row["id"], "author": row["author"],
+                "author_id": row["author_id"], "content": row["content"],
+                "timestamp": row["timestamp"],
+            }))
+            if len(result) == limit:
+                break
+        return result
+
     async def add_to_channel_memory(self, channel_id: str, message: dict) -> None:
+        await self._run_db(self._add_to_channel_memory, channel_id, message)
+
+    def _add_to_channel_memory(self, channel_id, message):
         entry = sanitize_media_memory(message)
         if str(entry.get("message_type") or "default") not in {"default", "reply"}:
             return
@@ -84,47 +197,80 @@ class ConversationMemoryManager:
             "content", "author", "author_id", "message_id", "timestamp", "guild_id",
         }}
         now = time.time()
-        async with self._lock:
-            # One transaction preserves edit identity and per-scope retention.
-            self._db.execute("BEGIN IMMEDIATE")
-            try:
-                self._db.execute("DELETE FROM vectors WHERE id=?", (mid,))
-                self._db.execute(
-                    "INSERT INTO vectors (id,kind,channel_id,guild_id,author,author_id,source,"
-                    "content,content_hash,metadata,timestamp,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (mid, kind, channel, guild, str(entry.get("author") or ""),
-                     str(entry.get("author_id") or ""), source, content[:8000],
-                     hashlib.sha256(content.encode()).hexdigest(),
-                     json.dumps(metadata, ensure_ascii=False, default=str), stamp, now, now),
-                )
-                self._db.execute(
-                    "DELETE FROM vectors WHERE id IN (SELECT id FROM vectors "
-                    "WHERE channel_id=? AND guild_id=? AND kind IN ('message','bot_output') "
-                    "ORDER BY timestamp DESC,created_at DESC LIMIT -1 OFFSET ?)",
-                    (channel, guild, self.max_messages),
-                )
-                self._db.execute("COMMIT")
-            except BaseException:
-                self._db.execute("ROLLBACK")
-                raise
+        # All database operations use the same worker, including complete transactions.
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._db.execute("DELETE FROM vectors WHERE id=?", (mid,))
+            self._db.execute(
+                "INSERT INTO vectors (id,kind,channel_id,guild_id,author,author_id,source,"
+                "content,content_hash,metadata,timestamp,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (mid, kind, channel, guild, str(entry.get("author") or ""),
+                 str(entry.get("author_id") or ""), source, content[:8000],
+                 hashlib.sha256(content.encode()).hexdigest(),
+                 json.dumps(metadata, ensure_ascii=False, default=str), stamp, now, now),
+            )
+            self._db.execute(
+                "DELETE FROM vectors WHERE id IN (SELECT id FROM vectors "
+                "WHERE channel_id=? AND guild_id=? AND kind IN ('message','bot_output') "
+                "ORDER BY timestamp DESC,created_at DESC LIMIT -1 OFFSET ?)",
+                (channel, guild, self.max_messages),
+            )
+            self._db.execute("COMMIT")
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
 
     async def merge_message_metadata(self, message_id: str, patch: dict) -> bool:
-        async with self._lock:
-            row = self._db.execute("SELECT metadata FROM vectors WHERE id=? AND kind IN ('message','bot_output')", (str(message_id),)).fetchone()
-            if row is None:
-                return False
-            metadata = _decode_metadata(row["metadata"]) | sanitize_media_memory(patch)
-            self._db.execute("UPDATE vectors SET metadata=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False, default=str), str(message_id)))
-            return True
+        return await self._run_db(self._merge_message_metadata, message_id, patch)
+
+    def _merge_message_metadata(self, message_id, patch):
+        row = self._db.execute("SELECT metadata FROM vectors WHERE id=? AND kind IN ('message','bot_output')", (str(message_id),)).fetchone()
+        if row is None:
+            return False
+        metadata = _decode_metadata(row["metadata"]) | sanitize_media_memory(patch)
+        self._db.execute("UPDATE vectors SET metadata=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False, default=str), str(message_id)))
+        return True
 
     async def clear_channel_memory(self, channel_id: str) -> None:
-        async with self._lock:
-            self._db.execute("DELETE FROM vectors WHERE channel_id=? AND kind IN ('message','bot_output')", (str(channel_id),))
+        await self._run_db(self._clear_channel_memory, str(channel_id))
+
+    def _clear_channel_memory(self, channel_id):
+        self._db.execute("DELETE FROM vectors WHERE channel_id=? AND kind IN ('message','bot_output')", (channel_id,))
 
     async def list_recent_channel_ids(self, limit: int = 20) -> list[str]:
-        rows = self._db.execute("SELECT channel_id FROM vectors WHERE kind IN ('message','bot_output') AND channel_id!='' GROUP BY channel_id ORDER BY MAX(created_at) DESC LIMIT ?", (max(1, min(int(limit), 80)),)).fetchall()
+        return await self._run_db(self._list_recent_channel_ids, max(1, min(int(limit), 80)))
+
+    def _list_recent_channel_ids(self, limit):
+        rows = self._db.execute("SELECT channel_id FROM vectors WHERE kind IN ('message','bot_output') AND channel_id!='' GROUP BY channel_id ORDER BY MAX(created_at) DESC LIMIT ?", (limit,)).fetchall()
         return [row["channel_id"] for row in rows]
+
+    async def cleanup_stale_channels(self, cutoff: datetime) -> int:
+        return await self._run_db(self._cleanup_stale_channels, cutoff)
+
+    def _cleanup_stale_channels(self, cutoff):
+        # The covering partial index avoids reading transcript/embedding pages.
+        # Keep the existing policy: newest stored user message, not bot output.
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._db.execute(
+                "SELECT channel_id, MAX(timestamp) AS latest FROM vectors "
+                "WHERE kind='message' AND channel_id!='' GROUP BY channel_id"
+            ).fetchall()
+            cleared = 0
+            for row in rows:
+                try:
+                    stale = bool(row["latest"]) and datetime.fromisoformat(row["latest"]) < cutoff
+                except (TypeError, ValueError):
+                    continue
+                if stale:
+                    self._clear_channel_memory(row["channel_id"])
+                    cleared += 1
+            self._db.execute("COMMIT")
+            return cleared
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
 
     def get_long_term_memory(self, *args, **kwargs) -> list[dict]:
         return []
@@ -136,4 +282,12 @@ class ConversationMemoryManager:
         """History is queried directly; nothing is loaded into a global cache."""
 
     async def flush(self) -> None:
-        self._db.close()
+        if self._closed:
+            return
+        self._closed = True
+        # FIFO executor ordering drains accepted work before closing the connection.
+        future = asyncio.get_running_loop().run_in_executor(self._executor, self._db.close)
+        try:
+            await asyncio.shield(future)
+        finally:
+            self._executor.shutdown(wait=False)

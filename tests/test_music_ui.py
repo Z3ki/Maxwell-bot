@@ -18,7 +18,13 @@ class TextChannel:
         self.messages = []
 
     async def send(self, **kwargs):
-        message = SimpleNamespace(id=len(self.messages) + self.id * 100, edit=AsyncMock(), payload=kwargs)
+        message = SimpleNamespace(id=len(self.messages) + self.id * 100, channel=self, payload=kwargs)
+
+        async def edit(**changes):
+            message.payload.update(changes)
+            return message
+
+        message.edit = AsyncMock(side_effect=edit)
         self.messages.append(message)
         return message
 
@@ -38,7 +44,7 @@ def feedback(request):
     return request.followup.send.call_args.kwargs['embeds'][0].description
 
 
-def test_meaningful_updates_replace_panels_and_noop_preserves_current(tmp_path):
+def test_player_updates_one_panel_through_queue_pause_stop_and_disconnect(tmp_path):
     service, _, message, _ = fixture(tmp_path)
     message.channel = TextChannel()
 
@@ -46,30 +52,23 @@ def test_meaningful_updates_replace_panels_and_noop_preserves_current(tmp_path):
         service.panel_update = update_panel
         await service.execute(message, 'play', query='first')
         session = service.sessions[10]
-        first = session.panel
+        panel = session.panel
+        initial_toggle = panel.payload['view'].children[0].label
         await update_panel(session)
-        assert session.panel is first
         await service.execute(message, 'pause')
-        paused = session.panel
-        assert paused is not first
-        first.edit.assert_awaited_once_with(view=None)
-        assert 'Paused' in paused.payload['embed'].title
-        assert next(b for b in paused.payload['view'].children if b.custom_id.endswith(':toggle')).label == 'Resume'
+        assert session.panel is panel
+        assert panel.payload['view'].children[0].label != initial_toggle
         await service.execute(message, 'play', query='next')
-        assert session.panel is not paused
-        paused.edit.assert_awaited_once_with(view=None)
-        assert 'next' in session.panel.payload['embed'].fields[-1].value
+        assert 'next' in panel.payload['embed'].fields[-1].value
         await service.execute(message, 'resume')
-        before_noop = session.panel
-        await service.execute(message, 'resume')
-        assert session.panel is before_noop
+        assert panel.payload['view'].children[0].label == initial_toggle
         message.author.guild_permissions.manage_guild = True
         await service.execute(message, 'stop')
-        assert 'Ready to play' in session.panel.payload['embed'].title
-        assert 'empty' in session.panel.payload['embed'].fields[-1].value
+        assert panel.payload['view'].children[0].disabled
+        assert panel.payload['view'].children[1].disabled
         await service.execute(message, 'leave')
-        assert 'Disconnected' in message.channel.messages[-1].payload['embed'].title
-        assert message.channel.messages[-1].payload['view'] is None
+        assert panel.payload['view'] is None
+        assert message.channel.messages == [panel]
 
     asyncio.run(journey())
 
@@ -90,7 +89,7 @@ def test_deleted_panel_and_text_channel_move_publish_fresh_controls(tmp_path):
         old = session.panel
         message.channel = TextChannel(300)
         await service.execute(message, 'play', query='second')
-        old.edit.assert_awaited_once_with(view=None)
+        assert old.payload['view'] is None
         assert session.panel is message.channel.messages[-1]
 
     asyncio.run(journey())
@@ -115,13 +114,16 @@ def test_batch_ai_autoplay_permissions_and_stale_controls_share_session(tmp_path
             button.data = {'custom_id': 'maxwell_music:10:skip'}
             button.message = old
             await handler(service.bot, button)
-            assert 'no longer active' in feedback(button)
-            assert session.current.title == 'first'
+            assert session.current.title == 'second'
+            message.channel = TextChannel(300)
+            await handler(service.bot, interaction(message, 'status'))
+            await handler(service.bot, button)
+            assert session.current.title == 'second'
+            assert button.followup.send.call_args.kwargs['ephemeral'] is True
             service.settings['10'] = {'listener_controls': False}
             denied = interaction(message, 'autoplay', enabled=True)
             await handler(service.bot, denied)
             assert not session.autoplay
-            assert denied.followup.send.call_args.kwargs['embeds'][0].title.endswith('Request failed')
             service.settings['10'] = {'listener_controls': True}
             enabled = interaction(message, 'autoplay', enabled=True)
             await handler(service.bot, enabled)
@@ -134,14 +136,13 @@ def test_batch_ai_autoplay_permissions_and_stale_controls_share_session(tmp_path
             before = list(session.queue)
             await handler(service.bot, invalid)
             assert session.queue == before
-            assert invalid.followup.send.call_args.kwargs['embeds'][0].title.endswith('Request failed')
         finally:
             uninstall()
 
     asyncio.run(journey())
 
 
-def test_status_replaces_panel_publicly_and_failed_publish_keeps_confirmed_feedback(tmp_path):
+def test_status_updates_panel_and_failed_publish_keeps_private_feedback(tmp_path):
     service, _, message, _ = fixture(tmp_path)
     message.channel = TextChannel()
 
@@ -154,8 +155,10 @@ def test_status_replaces_panel_publicly_and_failed_publish_keeps_confirmed_feedb
             old = session.panel
             request = interaction(message, 'status')
             await handler(service.bot, request)
-            assert session.panel is not old
-            old.edit.assert_awaited_once_with(view=None)
+            assert session.panel is old
+            assert message.channel.messages == [old]
+            old.edit.side_effect = discord.Forbidden(
+                SimpleNamespace(status=403, reason='Forbidden'), 'No access')
             message.channel.send = AsyncMock(side_effect=discord.Forbidden(
                 SimpleNamespace(status=403, reason='Forbidden'), 'No access'))
             paused = interaction(message, 'pause')
@@ -164,7 +167,6 @@ def test_status_replaces_panel_publicly_and_failed_publish_keeps_confirmed_feedb
             assert session.panel is None
             private = interaction(message, 'status')
             await handler(service.bot, private)
-            assert 'Paused' in private.followup.send.call_args.kwargs['embeds'][0].title
             assert private.followup.send.call_args.kwargs['ephemeral'] is True
         finally:
             uninstall()
@@ -219,3 +221,27 @@ def test_embed_bounds_untrusted_text_and_explains_autoplay_origin():
     assert len(embed) <= 6000
     assert len(embed.title) <= 256 and len(embed.description) <= 4096
     assert all(len(f.name) <= 256 and len(f.value) <= 1024 for f in embed.fields)
+
+
+def test_transient_edit_failure_does_not_spam_or_invalidate_controls(tmp_path):
+    service, _, message, _ = fixture(tmp_path)
+    message.channel = TextChannel()
+
+    async def journey():
+        service.panel_update = update_panel
+        await service.execute(message, 'play', query='first')
+        session = service.sessions[10]
+        panel = session.panel
+        edit = panel.edit.side_effect
+        initial_toggle = panel.payload['view'].children[0].label
+        panel.edit.side_effect = discord.HTTPException(
+            SimpleNamespace(status=500, reason='Server Error'), 'Temporary')
+        await service.execute(message, 'pause')
+        assert session.paused and session.panel is panel
+        assert message.channel.messages == [panel]
+        panel.edit.side_effect = edit
+        await update_panel(session)
+        assert panel.payload['view'].children[0].label != initial_toggle
+        assert message.channel.messages == [panel]
+
+    asyncio.run(journey())
