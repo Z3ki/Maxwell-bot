@@ -212,7 +212,16 @@ class MusicService:
             raise MusicError('Music search is busy. Try again shortly.')
         async with self.loads:
             async with asyncio.timeout(20):
-                tracks, playlist = await self.backend.load(query_id)
+                try:
+                    tracks, playlist = await self.backend.load(query_id)
+                except MusicError:
+                    if not query_id.startswith('ytsearch:'):
+                        raise
+                    tracks, playlist = [], False
+                # YouTube's own search often returns an empty page. Music search
+                # still resolves the same titles, and playback uses the video id.
+                if not tracks and query_id.startswith('ytsearch:'):
+                    tracks, playlist = await self.backend.load('ytmsearch:' + query_id[len('ytsearch:'):])
         if not tracks:
             raise MusicError('No playable tracks found. Try another title or YouTube link.')
         selected = tracks[:5] if search else (tracks[:100] if playlist else tracks[:1])

@@ -7,7 +7,7 @@
 - Hydrate `^`, `^^`, `this`, `that`, and Discord reply references into the live prompt. An unresolved pointer is not sent to the model alone.
 - Run Discord tools, including music, from `/maxwell` in the server where the command was used. Private replies still go only to the requester and cannot be posted to another channel.
 - Send `/maxwell` rich replies through the interaction webhook even when the source channel denies view, send, or embed permissions. Server tools still see those real channel permissions.
-- Play anonymous YouTube audio through the September 2026 youtube-source snapshot and the iOS client. Videos YouTube still marks "requires login" use the TV client after a one-time burner-account device code; the refresh token stays in `.env`.
+- Play YouTube again after the login wall. The September 2026 source plugin, a burner-account TV token in `.env`, and a local `yt-cipher` sidecar decode streams that plugin 1.18.2 refused. Title search falls back to YouTube Music when YouTube search returns nothing.
 - Preserve full textual tool results through shell capture, repository inspection, plugin reads/diffs, web reads, backend logs, and follow-up rounds. Retire shell command/output size caps and pass large scripts over stdin. Provider context windows, Discord payload limits, and sandbox resource boundaries still apply.
 - Share the site route contract across runtime and tool guidance. Resolve frontend endpoints against the same-origin site API mount so nested pages work; reject literal public mounts in Python route declarations before overwriting source.
 - Keep app-action options out of stored user text, apply shared response/search defaults once, and clean legacy prompt wrappers without rewriting stored source material.

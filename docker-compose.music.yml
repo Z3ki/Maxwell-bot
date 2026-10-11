@@ -1,5 +1,26 @@
 # Linux/host-network Maxwell: docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build
 services:
+  yt-cipher:
+    image: ghcr.io/kikkia/yt-cipher:master
+    restart: unless-stopped
+    init: true
+    # Share Lavalink's network namespace. Container-to-container traffic on
+    # this host times out, while localhost inside the audio node does not.
+    network_mode: "service:lavalink"
+    depends_on:
+      - lavalink
+    environment:
+      API_TOKEN: ${YOUTUBE_CIPHER_PASSWORD:?Set YOUTUBE_CIPHER_PASSWORD in .env}
+      OVERRIDE_SCRIPT_VARIANT: IAS
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
   lavalink:
     build:
       context: .
@@ -12,6 +33,7 @@ services:
     environment:
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a strong LAVALINK_PASSWORD in .env}
       YOUTUBE_OAUTH_REFRESH_TOKEN: ${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
+      YOUTUBE_CIPHER_PASSWORD: ${YOUTUBE_CIPHER_PASSWORD:?Set YOUTUBE_CIPHER_PASSWORD in .env}
       JAVA_TOOL_OPTIONS: "-Xms128m -Xmx768m"
     volumes:
       - ./docker/music/application.yml:/opt/Lavalink/application.yml:ro

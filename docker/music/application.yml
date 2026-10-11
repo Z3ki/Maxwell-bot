@@ -36,11 +36,23 @@ plugins:
       - WEB
       - TVHTML5_SIMPLY
       - MUSIC
+    # iOS and Android VR answer ytsearch with an empty page, and that empty
+    # result stops the client chain before WEB can parse a real search.
+    clientOptions:
+      IOS:
+        searching: false
+      ANDROID_VR:
+        searching: false
     # TV playback needs a signed-in account. Leave the refresh token blank to
     # print a one-time device code. Store the resulting token only in .env.
     oauth:
       enabled: true
       refreshToken: ${YOUTUBE_OAUTH_REFRESH_TOKEN:}
+    # Local signature extraction fails on the current player script.
+    remoteCipher:
+      url: http://127.0.0.1:8001
+      password: ${YOUTUBE_CIPHER_PASSWORD}
+      userAgent: maxwell
 logging:
   level:
     root: INFO

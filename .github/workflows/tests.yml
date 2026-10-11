@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 10
     env:
       LAVALINK_PASSWORD: ci-only-music-node-secret
+      # Compose requires this for the cipher sidecar. The version check does not start it.
+      YOUTUBE_CIPHER_PASSWORD: ci-only-cipher-secret
     steps:
       - uses: actions/checkout@v4
       - name: Prepare deployment environment
@@ -61,8 +63,8 @@ jobs:
           import json
           info = json.load(open('/tmp/music-info.json'))
           assert info['version']['semver'] == '4.2.2', info
-          assert any(p['name'].lower() == 'youtube-plugin' and p['version'] == '1.18.2' for p in info['plugins']), info
-          print('Pinned DAVE audio node and YouTube plugin are healthy')
+          assert any(p['name'].lower() == 'youtube-plugin' and p['version'] == '2be8e542d3f6f178e048dca565892684c2e40177' for p in info['plugins']), info
+          print('Pinned DAVE audio node and YouTube plugin snapshot are healthy')
           PYCODE
       - name: Audio node diagnostics
         if: failure()

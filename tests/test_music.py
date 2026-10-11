@@ -114,6 +114,27 @@ def test_invalid_video_or_unknown_path_cannot_silently_load_a_playlist(path):
         identifier('https://www.youtube.com' + path + 'list=PLtest1234567890')
 
 
+def test_title_search_falls_back_to_youtube_music_when_youtube_search_is_empty(tmp_path):
+    service, backend, msg, _ = fixture(tmp_path)
+
+    async def load(query):
+        backend.calls.append(('load', query))
+        if query.startswith('ytsearch:'):
+            return [], False
+        title = query.removeprefix('ytmsearch:')
+        return [Track('PRIVATE_ENCODED', title, 'artist', 'https://www.youtube.com/watch?v=abcdefghijk', 120000)], False
+
+    backend.load = load
+
+    async def journey():
+        result = await service.execute(msg, 'play', query='never gonna give you up')
+        assert result['started']['title'] == 'never gonna give you up'
+
+    asyncio.run(journey())
+    assert [c[1] for c in backend.calls if c[0] == 'load'] == [
+        'ytsearch:never gonna give you up', 'ytmsearch:never gonna give you up']
+
+
 def test_watch_mix_queues_one_track_and_status_reports_playback(tmp_path):
     service, backend, msg, _ = fixture(tmp_path)
 
