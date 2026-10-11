@@ -49,4 +49,4 @@ services:
       - ${MAXWELL_SITE_DIR:-./public/bot}:${MAXWELL_SITE_DIR:-/app/public/bot}
     ports:
       - "127.0.0.1:${MAXWELL_API_PORT:-8765}:${MAXWELL_API_PORT:-8765}"
-    stop_grace_period: 20s
+    stop_grace_period: 120s

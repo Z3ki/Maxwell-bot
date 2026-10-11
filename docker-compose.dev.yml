@@ -53,7 +53,7 @@ services:
       - dev
     depends_on:
       - ollama-dev
-    stop_grace_period: 30s
+    stop_grace_period: 120s
 
   ollama-dev:
     image: ollama/ollama@sha256:7ab595e4ead391f6818c7215297781282babe0701f6d9a9f8862ac591360a58b

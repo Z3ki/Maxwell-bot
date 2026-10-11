@@ -79,6 +79,7 @@ from utils import (
     render_discord_context_text as _render_discord_context_text,
 )
 from identity import process_name
+from runtime_lifecycle import begin_inflight, end_inflight
 from autonomy_social import (  # noqa: E402
     FLOOR_ADDRESSED,
     FLOOR_IDLE,
@@ -1449,27 +1450,35 @@ class AutonomyEngine:
         consecutive_failures = 0
         MAX_AUTONOMY_INTERVAL = 86400  # 24h cap — don't let a bad value sleep forever
         while self._running:
+            if getattr(self.bot, "_draining", False):
+                return
+            begin_inflight(self.bot, "autonomy")
             try:
-                control = getattr(self.bot, "_control", None) or {}
-                if control.get("autonomy_enabled", False):
-                    tick_result = await self.tick()
-                    if tick_result.get("error"):
-                        consecutive_failures += 1
-                    elif not tick_result.get("skipped"):
-                        consecutive_failures = 0
-                else:
-                    # Reset backoff while disabled so re-enabling after a run
-                    # of failures doesn't delay the first tick by up to 6x.
-                    consecutive_failures = 0
-            except asyncio.CancelledError as _exc:
-                raise
-            except Exception as e:
-                consecutive_failures += 1
-                logger.error(f"AutonomyEngine tick error: {e}", exc_info=True)
                 try:
-                    await self.store.record_error(str(e))
-                except Exception as rec_err:
-                    logger.error(f"Failed to record autonomy error to store: {rec_err}")
+                    control = getattr(self.bot, "_control", None) or {}
+                    if control.get("autonomy_enabled", False):
+                        tick_result = await self.tick()
+                        if tick_result.get("error"):
+                            consecutive_failures += 1
+                        elif not tick_result.get("skipped"):
+                            consecutive_failures = 0
+                    else:
+                        # Reset backoff while disabled so re-enabling after a run
+                        # of failures doesn't delay the first tick by up to 6x.
+                        consecutive_failures = 0
+                except asyncio.CancelledError as _exc:
+                    raise
+                except Exception as e:
+                    consecutive_failures += 1
+                    logger.error(f"AutonomyEngine tick error: {e}", exc_info=True)
+                    try:
+                        await self.store.record_error(str(e))
+                    except Exception as rec_err:
+                        logger.error(
+                            f"Failed to record autonomy error to store: {rec_err}"
+                        )
+            finally:
+                end_inflight(self.bot, "autonomy")
             # read interval from bot control (source of truth)
             try:
                 control = getattr(self.bot, "_control", None) or {}

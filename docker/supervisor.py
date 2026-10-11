@@ -71,7 +71,15 @@ def main() -> int:
     commands = [[sys.executable, str(root / "bot.py"), *sys.argv[1:]]]
     if os.getenv("MAXWELL_START_API", "1") != "0":
         commands.append([sys.executable, str(root / "api/api_server.py")])
-    return asyncio.run(supervise(commands))
+    # The bot drains in-flight turns before it exits. Wait longer than that
+    # drain so this supervisor does not SIGKILL a reply that is still sending.
+    try:
+        from runtime_lifecycle import drain_timeout_seconds
+
+        stop_timeout = drain_timeout_seconds() + 15.0
+    except Exception:
+        stop_timeout = 45.0
+    return asyncio.run(supervise(commands, stop_timeout=stop_timeout))
 
 
 if __name__ == "__main__":

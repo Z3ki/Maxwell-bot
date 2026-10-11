@@ -161,7 +161,12 @@ class ReplyQueue:
         self._handler: Callable[[Any, str], Awaitable[Any]] | None = None
         self._task_factory: Callable[[Any], Any] = lambda task: task
         self._closing = False
+        self._pause_new = False
         self._close_task: asyncio.Task[None] | None = None
+
+    def pause_new(self) -> None:
+        """Finish the turn already running. Do not start the next one."""
+        self._pause_new = True
 
     def bind(
         self,
@@ -240,7 +245,7 @@ class ReplyQueue:
         accepted into memory and must be persisted/retried by the caller.
         """
         cid = str(channel_id or "")
-        if not cid or self._handler is None or self._closing:
+        if not cid or self._handler is None or self._closing or self._pause_new:
             return "dropped"
         # Do not retain empty channel states for submissions that are
         # deferred by the process-wide limit.
@@ -353,7 +358,11 @@ class ReplyQueue:
                 )
 
     def _ensure_pump(self, cid: str, state: _ChannelState) -> None:
-        if self._closing or (state.pump is not None and not state.pump.done()):
+        if (
+            self._closing
+            or self._pause_new
+            or (state.pump is not None and not state.pump.done())
+        ):
             return
         state.pump = self._task_factory(
             asyncio.create_task(self._pump(cid), name=f"reply-queue-{cid}")
@@ -367,6 +376,8 @@ class ReplyQueue:
         cancelled = False
         try:
             while state.queue and not self._closing:
+                if self._pause_new:
+                    break
                 self._expire(cid, state, time.monotonic())
                 if not state.queue:
                     break
@@ -420,7 +431,12 @@ class ReplyQueue:
             state.pump = None
             if not state.queue and state.running is None:
                 self._channels.pop(cid, None)
-            elif state.queue and not self._closing and not cancelled:
+            elif (
+                state.queue
+                and not self._closing
+                and not self._pause_new
+                and not cancelled
+            ):
                 # A submission landed while we were tearing down.
                 self._ensure_pump(cid, state)
 
