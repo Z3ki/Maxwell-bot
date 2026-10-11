@@ -478,6 +478,17 @@ class SendRichMessageTool(Tool):
             return permissions_for(member)
         return None
 
+    @staticmethod
+    def _webhook_reply(message: Any) -> bool:
+        """User-install replies post through the interaction webhook.
+
+        The channel adapter still reports the real channel's permissions so
+        server tools can see them. This send does not use those permissions.
+        """
+        from user_install import UserInstallChannelAdapter
+
+        return isinstance(getattr(message, "channel", None), UserInstallChannelAdapter)
+
     async def _send_plain(
         self,
         message: Any,
@@ -551,7 +562,8 @@ class SendRichMessageTool(Tool):
         if not title_s and not desc_s:
             return "Error: title or description is required."
 
-        permissions = self._channel_permissions(message)
+        webhook_reply = self._webhook_reply(message)
+        permissions = None if webhook_reply else self._channel_permissions(message)
         is_thread = isinstance(message.channel, discord.Thread) or getattr(
             message.channel, "type", None
         ) in {
@@ -560,7 +572,7 @@ class SendRichMessageTool(Tool):
             discord.ChannelType.private_thread,
         }
         send_permission = "send_messages_in_threads" if is_thread else "send_messages"
-        missing = [
+        missing = [] if webhook_reply else [
             name
             for name in ("view_channel", send_permission)
             if getattr(permissions, name, None) is False
@@ -580,7 +592,7 @@ class SendRichMessageTool(Tool):
             "fields": fields,
             "buttons": buttons,
         }
-        if getattr(permissions, "embed_links", None) is False:
+        if not webhook_reply and getattr(permissions, "embed_links", None) is False:
             return await self._send_plain(message, **plain_args)
 
         mode_s = str(mode or "auto").strip().lower()
