@@ -12,6 +12,58 @@ from conversation_memory import ConversationMemoryManager
 from maxwell_core.memory.scope import MemoryRequester
 
 
+def test_opt_out_deletes_one_account_and_blocks_new_rows(tmp_path):
+    async def scenario():
+        memory = ConversationMemoryManager(str(tmp_path))
+        try:
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "keep", "guild_id": "g", "author_id": "200",
+                "content": "other person", "timestamp": "2026-10-12T00:00:00+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "drop", "guild_id": "g", "author_id": "100",
+                "content": "private words", "timestamp": "2026-10-12T00:00:01+00:00",
+            })
+            memory.tracks_message_content = lambda uid: uid != "100"
+            memory._db.execute(
+                "INSERT INTO vectors (id, kind, channel_id, guild_id, author, author_id, "
+                "content, timestamp, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                ("fact", "entity", "", "", "", "100", "likes tea", "2026-10-12T00:00:02+00:00", 1),
+            )
+            memory._db.execute(
+                "CREATE TABLE user_entities (user_id TEXT PRIMARY KEY, display_names TEXT)"
+            )
+            memory._db.execute(
+                "INSERT INTO user_entities (user_id, display_names) VALUES (?, ?)",
+                ("100", "[]"),
+            )
+            removed = await memory.delete_author_content("100")
+            assert removed["messages"] == 1
+            assert removed["facts"] == 1
+            assert removed["profiles"] == 1
+            requester = MemoryRequester("200", "c1", "g", is_admin=True)
+            history = await memory.get_channel_memory("c1", requester=requester)
+            assert [row["content"] for row in history] == ["other person"]
+            assert memory._db.execute(
+                "SELECT COUNT(*) FROM vectors WHERE author_id='100'"
+            ).fetchone()[0] == 0
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "bot-reply", "guild_id": "g", "author_id": "999",
+                "author_is_bot": True, "reply_to_author_id": "100",
+                "content": "echo of private words", "timestamp": "2026-10-12T00:00:03+00:00",
+            })
+            history = await memory.get_channel_memory("c1", requester=requester)
+            assert [row["message_id"] for row in history] == ["keep"]
+            recalled = await memory.get_relevant_channel_memory(
+                "c1", "private words", requester=requester,
+            )
+            assert all("private" not in row["content"] for row in recalled)
+        finally:
+            await memory.flush()
+
+    asyncio.run(scenario())
+
+
 def test_history_edits_and_retention_never_cross_guilds_or_channels(tmp_path):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path), max_messages=2)

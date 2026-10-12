@@ -1549,6 +1549,8 @@ class MaxwellBot(_BotBase):
         """
         enriched = dict(message_dict)
         enriched.update(self._mem_kwargs(message))
+        if not self._message_content_may_be_stored(message, enriched):
+            return
         await self.memory.add_to_channel_memory(channel_id, enriched)
         # Private /maxwell histories use a synthetic per-user channel key and
         # must not update the shared cross-context entity directory.
@@ -1591,6 +1593,36 @@ class MaxwellBot(_BotBase):
             )
         except Exception as e:
             logger.debug(f"entity observe skipped: {e}")
+
+    def _message_content_may_be_stored(self, message, row: dict) -> bool:
+        """False when this write would store an opted-out person's content.
+
+        The live request is still answered. This only gates persistent
+        history: their own rows, tool rows recorded on their message, and
+        Maxwell posts that reply to them.
+        """
+        from plugins.maxwell_extras.user_preferences import tracks_message_content
+
+        store = getattr(self, "_user_preferences", None)
+        subjects: list[str] = []
+        author = getattr(message, "author", None)
+        author_is_bot = bool(getattr(author, "bot", False))
+        if author is not None and not author_is_bot:
+            subjects.append(str(getattr(author, "id", "") or ""))
+        if not row.get("author_is_bot"):
+            subjects.append(str(row.get("author_id") or ""))
+        if author_is_bot or row.get("author_is_bot"):
+            subjects.append(str(row.get("reply_to_author_id") or ""))
+            parent_fn = getattr(self, "_reply_parent", None)
+            parent = parent_fn(message) if callable(parent_fn) and message is not None else None
+            parent_author = getattr(parent, "author", None)
+            if parent_author is not None and not getattr(parent_author, "bot", False):
+                subjects.append(str(getattr(parent_author, "id", "") or ""))
+        seen: list[str] = []
+        for uid in subjects:
+            if uid.isdigit() and uid not in seen:
+                seen.append(uid)
+        return all(tracks_message_content(store, uid) for uid in seen)
 
     def _get_channel_lock(self, channel_id: str) -> asyncio.Lock:
         return self._channel_locks.get(channel_id)

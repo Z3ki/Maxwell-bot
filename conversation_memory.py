@@ -20,6 +20,97 @@ from uuid import uuid4
 from maxwell_core.memory.scope import MemoryRequester, _decode_metadata, _has_requester
 from media_payloads import sanitize_media_memory
 
+def _delete_author_rows(db, author_id: str) -> dict:
+    """Remove one account's stored messages and facts from an open database.
+
+    Other people's rows stay, including quotes of this account inside them.
+    ``user_entities`` is removed only when that older table is present.
+    """
+    uid = str(author_id or "").strip()
+    empty = {"messages": 0, "facts": 0, "profiles": 0}
+    if not uid.isdigit():
+        return dict(empty)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        messages = db.execute(
+            "DELETE FROM vectors WHERE author_id=? AND kind IN ('message', 'bot_output')",
+            (uid,),
+        ).rowcount
+        facts = db.execute(
+            "DELETE FROM vectors WHERE author_id=? AND kind IN ('entity', 'ltm')",
+            (uid,),
+        ).rowcount
+        profiles = 0
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_entities'"
+        ).fetchone():
+            profiles = db.execute(
+                "DELETE FROM user_entities WHERE user_id=?", (uid,)
+            ).rowcount
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    return {
+        "messages": int(messages or 0),
+        "facts": int(facts or 0),
+        "profiles": int(profiles or 0),
+    }
+
+
+async def forget_author(memory, user_id: str) -> dict:
+    """Delete stored content for one account through the live history store."""
+    deleter = getattr(memory, "delete_author_content", None)
+    if not callable(deleter):
+        raise TypeError(
+            "Message storage is off, but stored messages could not be deleted. "
+            "Open /config and choose Off again."
+        )
+    result = deleter(str(user_id))
+    if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+        result = await result
+    return result if isinstance(result, dict) else {}
+
+
+def delete_author_content_file(path, author_id: str) -> dict:
+    """Delete one account's stored content through a short-lived connection."""
+    db_path = Path(path)
+    if not db_path.is_file():
+        return {"messages": 0, "facts": 0, "profiles": 0}
+    db = sqlite3.connect(str(db_path), isolation_level=None, timeout=5)
+    try:
+        return _delete_author_rows(db, author_id)
+    finally:
+        db.close()
+
+
+def _tracking_blocks(memory, message: dict) -> bool:
+    """True when this row belongs to someone who opted out of storage.
+
+    A bot row is blocked only when it replies to that person. Another
+    person's own message is kept even if it quotes them.
+    """
+    checker = getattr(memory, "tracks_message_content", None)
+    if not callable(checker):
+        return False
+    subjects = []
+    author_id = str(message.get("author_id") or "")
+    if author_id.isdigit() and not message.get("author_is_bot"):
+        subjects.append(author_id)
+    if message.get("author_is_bot"):
+        reply_to = str(message.get("reply_to_author_id") or "")
+        if reply_to.isdigit():
+            subjects.append(reply_to)
+    for uid in subjects:
+        try:
+            allowed = checker(uid)
+        except Exception:
+            return True
+        if not allowed:
+            return True
+    return False
+
+
 _RECALL_STOP_WORDS = frozenset(
     "a an and are as at be been but by can could did do does for from had has have "
     "how i if in is it its just me my of on or our please remember said say should "
@@ -180,8 +271,17 @@ class ConversationMemoryManager:
     async def add_to_channel_memory(self, channel_id: str, message: dict) -> None:
         await self._run_db(self._add_to_channel_memory, channel_id, message)
 
+    async def delete_author_content(self, author_id: str) -> dict:
+        """Delete transcript rows and facts stored for one Discord account."""
+        return await self._run_db(self._delete_author_content, str(author_id))
+
+    def _delete_author_content(self, author_id: str) -> dict:
+        return _delete_author_rows(self._db, author_id)
+
     def _add_to_channel_memory(self, channel_id, message):
         entry = sanitize_media_memory(message)
+        if _tracking_blocks(self, entry):
+            return
         if str(entry.get("message_type") or "default") not in {"default", "reply"}:
             return
         source = str(entry.get("source") or ("bot" if entry.get("author_is_bot") else "user"))
