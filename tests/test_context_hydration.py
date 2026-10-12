@@ -116,6 +116,28 @@ def test_discord_reference_beats_the_previous_channel_message():
     assert message.hydrated_target is parent
 
 
+def test_pointer_with_media_is_not_an_unresolved_pointer():
+    async def run(payload):
+        message = SimpleNamespace(
+            id=2,
+            content="this",
+            author=_author("Sam", 4),
+            channel=SimpleNamespace(id="room"),
+            reference=None,
+            attachments=payload.get("attachments", []),
+            embeds=payload.get("embeds", []),
+            stickers=payload.get("stickers", []),
+            mentions=[],
+        )
+        bot = SimpleNamespace(user=SimpleNamespace(id=1), memory=None)
+        await hydrate_turn_context(bot, message)
+        assert hydration_value(bot, message, "hydration_failed", False) is False
+
+    asyncio.run(run({"attachments": [SimpleNamespace(filename="pic.png")]}))
+    asyncio.run(run({"embeds": [SimpleNamespace(title="card")]}))
+    asyncio.run(run({"stickers": [SimpleNamespace(name="wave")]}))
+
+
 def test_unresolved_pointer_is_not_dispatched():
     message = SimpleNamespace(
         id=1,

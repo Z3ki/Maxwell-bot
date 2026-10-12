@@ -173,7 +173,7 @@ private `scrobbles.sqlite3` on its own serial disk worker; submissions do not
 hold playback locks or wait on the music transition path. One HTTP flight,
 bounded persistence batches and a client limit of two request starts/second
 avoid unbounded task fan-out. Pending qualified plays survive restart and
-retry transient failures; disposable Now Playing notices are coalesced.
+retry transient failures, including Last.fm error 8, any HTTP 5xx, and operator key errors 10, 13, and 26. A per-track rejection such as error 6 is removed. Disposable Now Playing notices are coalesced.
 Unlink/relink removes old pending consent generations. A submission already
 accepted upstream cannot be undone. No exactly-once guarantee is possible
 after an ambiguous network response.

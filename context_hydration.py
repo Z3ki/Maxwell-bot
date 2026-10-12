@@ -49,6 +49,17 @@ def is_pointer_only(text: str) -> bool:
     )
 
 
+def message_has_visible_media(message: Any) -> bool:
+    """True when this message already carries an attachment, embed, or sticker."""
+    if message is None:
+        return False
+    return bool(
+        list(getattr(message, "attachments", None) or [])
+        or list(getattr(message, "embeds", None) or [])
+        or list(getattr(message, "stickers", None) or [])
+    )
+
+
 def reference_payload_usable(obj: Any) -> bool:
     """True when a fetched reply target still has an author or a payload."""
     if obj is None:
@@ -284,7 +295,9 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
             ).strip():
                 target = None
     if target is None:
-        if pointer:
+        # "@Maxwell this" plus an image is about that image. Drop the turn
+        # only when the pointer has neither a prior message nor its own media.
+        if pointer and not message_has_visible_media(message):
             hydration_set(bot, message, hydration_failed=True, hydrated_context="")
         elif content_empty and has_reference:
             hydration_set(

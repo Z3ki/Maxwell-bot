@@ -35,10 +35,17 @@ def signature(parameters: dict, secret: str) -> str:
     return hashlib.md5(payload.encode('utf-8')).hexdigest()
 
 
-def provider_error(code: int) -> LastFmError:
+# 8 is Last.fm's "operation failed, try again". 11/16 are service outages.
+# 29 is rate limiting. 10/13/26 are operator credentials: hold the play.
+RETRYABLE_PROVIDER_CODES = frozenset({8, 11, 16, 29})
+HELD_PROVIDER_CODES = frozenset({8, 10, 13, 26})
+
+
+def provider_error(code: int, *, http_status: int = 0) -> LastFmError:
     messages = {
         4: 'Last.fm authorization is invalid. Start /lastfm connect again.',
         6: 'Last.fm rejected the track or request parameters.',
+        8: 'Last.fm could not complete the request. Try again later.',
         9: 'Your Last.fm session was revoked. Reconnect with /lastfm connect.',
         10: 'Last.fm rejected the operator API key. Ask the operator to check LASTFM_API_KEY.',
         11: 'Last.fm is temporarily unavailable. Try again later.',
@@ -49,8 +56,13 @@ def provider_error(code: int) -> LastFmError:
         26: 'Last.fm suspended the operator API key. Ask the operator to check the application.',
         29: 'Last.fm is rate limiting requests. Try again later.',
     }
+    retryable = (
+        code in RETRYABLE_PROVIDER_CODES
+        or code in HELD_PROVIDER_CODES
+        or http_status >= 500
+    )
     return LastFmError(messages.get(code, 'Last.fm rejected this request.'), code=code,
-                       retryable=code in {11, 16, 29})
+                       retryable=retryable)
 
 
 class LastFmClient:
@@ -102,7 +114,7 @@ class LastFmClient:
                             code = int(result['error'])
                         except (TypeError, ValueError):
                             raise LastFmError('Last.fm returned an invalid error response.') from None
-                        raise provider_error(code)
+                        raise provider_error(code, http_status=response.status)
                     if response.status != 200:
                         raise LastFmError('Last.fm could not complete the request. Try again later.',
                                           code=29 if response.status == 429 else 0,

@@ -43,7 +43,7 @@ DEFAULT_CONTROL = {
     "bot_enabled": True,
     # Off until bot_control.json turns it on. A saved true is enforced.
     "message_quota_enabled": False,
-    "message_quota_limit": 300,
+    "message_quota_limit": 200,
     "message_quota_window_seconds": 5 * 60 * 60,
     "log_messages": False,
     "error_replies": True,

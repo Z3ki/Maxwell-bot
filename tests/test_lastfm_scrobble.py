@@ -563,6 +563,25 @@ def test_permanent_rejection_is_removed_without_retry_or_false_success(tmp_path,
     asyncio.run(journey())
 
 
+@pytest.mark.parametrize('code', [8, 10, 13, 26])
+def test_held_provider_errors_keep_the_qualified_play(tmp_path, code):
+    async def journey():
+        h = harness(tmp_path)
+        h.client.outcomes.append(LastFmError('hold', code=code, retryable=False))
+        await h.manager.start()
+        try:
+            await start(h)
+            h.clock.advance(60)
+            await h.manager.tick()
+            await delivered(h)
+            assert await h.manager.pending_count(100) == 1
+            saved = await asyncio.to_thread(rows, h.manager._store.path)
+            assert len(saved) == 1 and saved[0]['attempts'] == 1
+        finally:
+            await h.manager.close()
+    asyncio.run(journey())
+
+
 @pytest.mark.parametrize('code', [4, 5])
 def test_temporary_ignored_response_retains_qualified_play(tmp_path, code):
     async def journey():

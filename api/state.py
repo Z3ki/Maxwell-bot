@@ -247,7 +247,14 @@ def _sanitize_control(control):
         min(_safe_int(out.get("prompt_context_budget"), 240000), 500000),
     )
     out["message_quota_limit"] = max(
-        1, min(_safe_int(out.get("message_quota_limit"), 300), 100_000)
+        1,
+        min(
+            _safe_int(
+                out.get("message_quota_limit"),
+                DEFAULT_CONTROL["message_quota_limit"],
+            ),
+            100_000,
+        ),
     )
     out["message_quota_window_seconds"] = max(
         60, min(_safe_int(out.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600)

@@ -240,6 +240,9 @@ class Config:
     # not serve fails later, as an opaque 404 from the provider. Empty fails
     # at startup with a sentence that says what to do.
     AI_MODEL = _first_env("AI_MODEL", "OLLAMA_MODEL")
+    # Stronger chat model for an operator-granted premium plan. Blank keeps
+    # premium on AI_MODEL and only raises the message allowance. No checkout.
+    AI_PREMIUM_MODEL = os.getenv("AI_PREMIUM_MODEL", "").strip()
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     AI_MAX_OUTPUT_TOKENS = _int_env(

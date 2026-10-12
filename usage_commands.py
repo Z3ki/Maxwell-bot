@@ -117,8 +117,13 @@ def usage_status_text(state: dict) -> str:
     limit = max(1, int(state.get("limit") or 0))
     used = max(0, int(state.get("used") or 0))
     percent_used = int((used * 100 / limit) + 0.5)
+    allowance = (
+        "Premium message allowance"
+        if state.get("plan") == "premium"
+        else "current message allowance"
+    )
     lines = [
-        f"Usage: {percent_used}% of your current message allowance used "
+        f"Usage: {percent_used}% of your {allowance} used "
         f"in the last {window}; {max(0, 100 - percent_used)}% remaining."
     ]
     resets_in = int(state.get("resets_in") or 0)
