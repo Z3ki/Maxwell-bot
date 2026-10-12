@@ -78,6 +78,9 @@ def _tts_result(result: str) -> bool:
 
 
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
+    from discord_expressions import social_result_is_terminal
+    if any(social_result_is_terminal(r) for r in tool_results):
+        return False
     # First pass: does the batch contain anything that needs a model turn
     # (a follow-up tool result, or an error)? If yes, we ALWAYS loop back,
     # even if the batch also contains a terminal send_message. Otherwise a
@@ -145,6 +148,8 @@ def _only_promise_results(tool_results: list[str]) -> bool:
 
 
 _VISIBLE_RESULT_MARKERS = (
+    "__REACTION_SENT__",
+    "__GIF_SENT__",
     "__MESSAGE_SENT__",
     "__FILE_SENT__",
     "__MEDIA_SENT__",

@@ -494,7 +494,7 @@ def guild_capability_for_tool(name: str, *, plugin_owned: bool = False) -> str |
         return "web"
     if tool in {"create_site", "edit_site", "delete_site", "list_sites", "host_file", "site_server"}:
         return "sites"
-    if tool in {"image_generator", "hd_image", "send_meme", "chess_start", "chess_move", "chess_state", "chess_resign"} or tool.startswith("checkers_"):
+    if tool in {"image_generator", "hd_image", "send_meme", "send_gif", "chess_start", "chess_move", "chess_state", "chess_resign"} or tool.startswith("checkers_"):
         return "creative"
     if tool in {"send_file", "send_media"}:
         return "files"

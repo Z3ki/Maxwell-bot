@@ -6,6 +6,8 @@ from maxwell_core.plugins.bundled import build_tools
 def setup(bot, ctx=None):
     return build_tools(bot, __package__, [
         ('react', 'ReactTool', None),
+        ('list_expressions', 'ListExpressionsTool', None),
+        ('send_gif', 'SendGifTool', 'GIPHY_API_KEY'),
         ('edit_message', 'EditMessageTool', None),
         ('delete_message', 'DeleteMessageTool', None),
         ('create_poll', 'CreatePollTool', None),

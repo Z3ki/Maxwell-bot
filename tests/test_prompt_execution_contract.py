@@ -17,11 +17,11 @@ from tool_schemas import returns_result
 from api.state import _sanitize_control
 
 
-def _call(name, index):
+def _call(name, index, arguments=None):
     return {
         "id": f"call_{index}",
         "type": "function",
-        "function": {"name": name, "arguments": "{}"},
+        "function": {"name": name, "arguments": json.dumps(arguments or {})},
     }
 
 
@@ -44,7 +44,7 @@ def test_actions_are_observed_before_a_terminal_reply(
         monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
         names = [ending, action] if ending_first else [action, ending]
         _, results = await MaxwellBot._process_native_tool_calls(
-            owner, message, "", [_call(n, i) for i, n in enumerate(names)]
+            owner, message, "", [_call(n, i, {"finish": False}) if n == "react" else _call(n, i) for i, n in enumerate(names)]
         )
         assert executed == [action]
         assert any(f"Tool {ending}: Deferred" in r for r in results)

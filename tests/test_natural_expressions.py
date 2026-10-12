@@ -1,0 +1,556 @@
+"""Expression delivery, scoping, live refresh and terminal reply regressions."""
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import aiohttp
+import discord
+import pytest
+
+from bot import MaxwellBot, _tool_results_need_followup
+from discord_expressions import (
+    available_emojis,
+    available_stickers,
+    cannot_send,
+    extract_stickers,
+    refresh_global_expressions,
+    start_expression_refresh,
+    sync_guild,
+)
+from plugins.discord_messages import setup
+from plugins.discord_messages.impl import (
+    ReactTool,
+    SendGifTool,
+    SendMessageTool,
+    NoResponseTool,
+)
+from plugins.maxwell_extras.visible_output_guard import tool_result_is_visible
+from tool_schemas import build_openai_tools
+
+
+class Emoji:
+    def __init__(self, name, eid=123456789012345678, animated=False, available=True):
+        self.name, self.id, self.animated, self.available = (
+            name,
+            eid,
+            animated,
+            available,
+        )
+
+    def __str__(self):
+        return f"<{'a' if self.animated else ''}:{self.name}:{self.id}>"
+
+
+def fixture(**permissions):
+    perms = SimpleNamespace(
+        **{
+            "view_channel": True,
+            "read_message_history": True,
+            "add_reactions": True,
+            "send_messages": True,
+            "send_messages_in_threads": True,
+            "embed_links": True,
+        }
+        | permissions
+    )
+    guild = SimpleNamespace(id=1, me=SimpleNamespace(id=3), emojis=[], stickers=[])
+    channel = SimpleNamespace(
+        id=2,
+        guild=guild,
+        permissions_for=lambda _: perms,
+        send=AsyncMock(return_value=SimpleNamespace(id=10)),
+    )
+    message = SimpleNamespace(
+        id=4,
+        guild=guild,
+        channel=channel,
+        add_reaction=AsyncMock(),
+        reactions=[],
+        author=SimpleNamespace(id=5),
+    )
+    bot = SimpleNamespace(
+        _guild_emojis={},
+        _guild_stickers={},
+        _control={},
+        _application_emojis={},
+        _standard_stickers={},
+        config=SimpleNamespace(GIPHY_API_KEY="test-secret"),
+        _record_delivery=AsyncMock(),
+        _record_request_outcome=AsyncMock(),
+        _directly_addressed=lambda _: True,
+        _progress_enabled=lambda _: False,
+    )
+    return bot, message, perms
+
+
+def test_reaction_is_a_confirmed_complete_response():
+    bot, msg, _ = fixture()
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji="👍"))
+    assert result.startswith("__REACTION_SENT__")
+    msg.add_reaction.assert_awaited_once_with("👍")
+    bot._record_request_outcome.assert_awaited_once_with(
+        msg, "delivered", reason="reaction_only"
+    )
+    assert not _tool_results_need_followup(["Tool react: " + result])
+    assert tool_result_is_visible("Tool react: " + result)
+
+
+def test_nonterminal_reaction_still_allows_substantive_work():
+    bot, msg, _ = fixture()
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji="👍", finish=False))
+    assert _tool_results_need_followup(["Tool react: " + result])
+    bot._record_request_outcome.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "field", ["view_channel", "read_message_history", "add_reactions"]
+)
+def test_reaction_permission_denials_do_not_hit_discord(field):
+    bot, msg, _ = fixture(**{field: False})
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji="👍"))
+    assert result.startswith("Error:")
+    msg.add_reaction.assert_not_awaited()
+    bot._record_request_outcome.assert_not_awaited()
+
+
+def test_existing_reaction_can_be_joined_without_add_reactions():
+    bot, msg, _ = fixture(add_reactions=False)
+    msg.reactions = [SimpleNamespace(emoji="👍")]
+    assert asyncio.run(ReactTool(bot).execute(msg, emoji="👍")).startswith(
+        "__REACTION_SENT__"
+    )
+
+
+def test_application_emoji_can_react_without_external_emoji_permission():
+    bot, msg, _ = fixture(use_external_emojis=False)
+    em = Emoji("wave", animated=True)
+    bot._application_emojis = {"wave": str(em)}
+    assert asyncio.run(ReactTool(bot).execute(msg, emoji="wave")).startswith(
+        "__REACTION_SENT__"
+    )
+    msg.add_reaction.assert_awaited_once_with(str(em))
+
+
+def test_other_server_emoji_is_rejected_locally():
+    bot, msg, _ = fixture()
+    bot._guild_emojis["unrelated"] = {"other": str(Emoji("other"))}
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji=str(Emoji("other"))))
+    assert result.startswith("Error:")
+    msg.add_reaction.assert_not_awaited()
+    rendered = MaxwellBot._render_custom_emojis(bot, str(Emoji("other")), msg.guild)
+    assert "<" not in rendered
+
+
+def test_reaction_target_stays_in_current_channel():
+    bot, msg, _ = fixture()
+    target = SimpleNamespace(add_reaction=AsyncMock(), reactions=[])
+    msg.channel.fetch_message = AsyncMock(return_value=target)
+    asyncio.run(ReactTool(bot).execute(msg, emoji="🔥", message_id="9"))
+    msg.channel.fetch_message.assert_awaited_once_with(9)
+    target.add_reaction.assert_awaited_once_with("🔥")
+
+
+@pytest.mark.parametrize("thread", [False, True])
+def test_read_only_ping_ends_without_model_or_post(monkeypatch, thread):
+    bot, msg, _ = fixture(
+        **{"send_messages_in_threads" if thread else "send_messages": False}
+    )
+    if thread:
+        msg.channel.type = discord.ChannelType.public_thread
+    bot.tools = {"react": ReactTool(bot)}
+    bot._begin_inflight_context = AsyncMock(
+        side_effect=AssertionError("started a model turn")
+    )
+    bot._check_sleep_gate = AsyncMock(
+        side_effect=AssertionError("posted a sleep notice")
+    )
+    msg.content = "hello"
+
+    async def invoke(owner, inbound, name, handler, **args):
+        return await handler.execute(inbound, **args)
+
+    monkeypatch.setattr(MaxwellBot, "_invoke_request_tool", invoke)
+    asyncio.run(MaxwellBot._handle_message(bot, msg))
+    msg.add_reaction.assert_awaited_once_with("🔇")
+    msg.channel.send.assert_not_awaited()
+
+
+def test_read_only_ping_without_reactions_is_suppressed(monkeypatch):
+    bot, msg, _ = fixture(send_messages=False, add_reactions=False)
+    bot.tools = {"react": ReactTool(bot)}
+
+    async def invoke(owner, inbound, name, handler, **args):
+        return await handler.execute(inbound, **args)
+
+    monkeypatch.setattr(MaxwellBot, "_invoke_request_tool", invoke)
+    monkeypatch.setattr(
+        MaxwellBot, "_record_request_outcome", bot._record_request_outcome
+    )
+    assert asyncio.run(MaxwellBot._acknowledge_read_only_channel(bot, msg))
+    msg.add_reaction.assert_not_awaited()
+    assert bot._record_request_outcome.await_args.args[2] == "suppressed"
+
+
+def test_read_only_direct_request_can_end_silently_and_thread_permissions_work():
+    bot, msg, _ = fixture(send_messages=False)
+    assert asyncio.run(NoResponseTool(bot).execute(msg)) == "__NO_RESPONSE__"
+    msg.channel.type = discord.ChannelType.public_thread
+    assert not cannot_send(msg)
+    msg.user_install = True
+    msg.channel.permissions_for = lambda _: SimpleNamespace(
+        view_channel=False, send_messages=False
+    )
+    assert not cannot_send(msg)
+
+
+@pytest.mark.parametrize("terminal", ["react", "send_gif"])
+def test_social_response_stops_following_calls_and_prose(monkeypatch, terminal):
+    bot, msg, _ = fixture()
+    bot.tools = {}
+    marker = "__REACTION_SENT__" if terminal == "react" else "__GIF_SENT__"
+    calls = []
+
+    async def execute(owner, inbound, name, *_args, **_kwargs):
+        calls.append(name)
+        return f"Tool {name}: {marker}"
+
+    monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+    monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+    native = [
+        {
+            "id": str(i),
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        }
+        for i, name in enumerate([terminal, "send_message"])
+    ]
+    text, results = asyncio.run(
+        MaxwellBot._dispatch_tool_calls(
+            bot, msg, "extra prose", native_tool_calls=native
+        )
+    )
+    assert calls == [terminal]
+    assert text == ""
+    assert not _tool_results_need_followup(results)
+
+
+def test_guild_updates_and_removal_replace_catalogs():
+    bot, msg, _ = fixture()
+    em = Emoji("new", animated=True)
+    sticker = SimpleNamespace(
+        name="Animated hello",
+        id=99,
+        format=discord.StickerFormatType.apng,
+        available=True,
+    )
+    bot._dev_scope_allows = lambda *a, **kw: True
+    sync_guild(bot, msg.guild, emojis=[em], stickers=[sticker])
+    assert bot._guild_emojis["1"] == {"new": str(em)}
+    assert bot._guild_stickers["1"] == {"animated hello": "Animated hello"}
+    sync_guild(bot, msg.guild, emojis=[], stickers=[])
+    assert bot._guild_emojis["1"] == bot._guild_stickers["1"] == {}
+    bot._dispatch_plugin_event = lambda *a: None
+    asyncio.run(MaxwellBot.on_guild_remove(bot, msg.guild))
+    assert "1" not in bot._guild_emojis
+
+
+def test_global_refresh_replaces_additions_renames_and_deletions_and_keeps_failures():
+    bot, msg, _ = fixture()
+    sticker = SimpleNamespace(
+        name="Wumpus hello", id=99, format=discord.StickerFormatType.lottie
+    )
+    em = Emoji("appwave", animated=True)
+    bot.fetch_application_emojis = AsyncMock(return_value=[em])
+    bot.fetch_premium_sticker_packs = AsyncMock(
+        return_value=[SimpleNamespace(stickers=[sticker])]
+    )
+    asyncio.run(refresh_global_expressions(bot))
+    assert available_emojis(bot, None) == {"appwave": str(em)}
+    assert available_stickers(bot, None) == {"wumpus hello": sticker}
+    assert MaxwellBot._render_custom_emojis(bot, ":appwave:", None) == str(em)
+    bot.fetch_application_emojis = AsyncMock(return_value=[])
+    bot.fetch_premium_sticker_packs = AsyncMock(side_effect=TimeoutError())
+    asyncio.run(refresh_global_expressions(bot))
+    assert bot._application_emojis == {}
+    assert bot._standard_stickers == {"wumpus hello": sticker}
+    bot.fetch_premium_sticker_packs = AsyncMock(return_value=[])
+    asyncio.run(refresh_global_expressions(bot))
+    assert bot._standard_stickers == {}
+
+
+def test_refresh_task_is_single_tracked_and_cancellable():
+    async def run():
+        bot, _, _ = fixture()
+        bot.is_closed = lambda: False
+        bot.fetch_application_emojis = AsyncMock(return_value=[])
+        bot.fetch_premium_sticker_packs = AsyncMock(return_value=[])
+        tracked = []
+        bot._track_task = lambda t: tracked.append(t) or t
+        start_expression_refresh(bot)
+        start_expression_refresh(bot)
+        await asyncio.sleep(0)
+        assert len(tracked) == 1
+        tracked[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tracked[0]
+
+    asyncio.run(run())
+
+
+def test_official_and_current_server_stickers_require_explicit_markers():
+    bot, msg, _ = fixture()
+    official = SimpleNamespace(
+        name="Wumpus hello", id=99, format=discord.StickerFormatType.lottie
+    )
+    local = SimpleNamespace(name="hello", id=100, available=True)
+    msg.guild.stickers = [local]
+    bot._standard_stickers = {"wumpus hello": official}
+    text, stickers = extract_stickers(
+        bot, "hello there [STICKER (Wumpus hello)]", msg.guild
+    )
+    assert text == "hello there"
+    assert stickers == [official]
+    assert extract_stickers(bot, "hello there", msg.guild) == ("hello there", [])
+    assert extract_stickers(bot, "[STICKER (hello)]", None)[1] == []
+
+
+class Response:
+    def __init__(self, status=200, payload=None):
+        self.status = status
+        self.payload = payload or {
+            "data": [
+                {
+                    "images": {
+                        "original": {
+                            "url": "https://media.giphy.com/media/test/giphy.gif"
+                        }
+                    }
+                }
+            ]
+        }
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def json(self):
+        return self.payload
+
+
+class Session:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+
+def test_giphy_is_optional_and_has_a_native_schema():
+    bot, _, _ = fixture()
+    assert "send_gif" in {t.name for t in setup(bot)}
+    bot.config.GIPHY_API_KEY = ""
+    assert "send_gif" not in {t.name for t in setup(bot)}
+    schema = build_openai_tools({"send_gif": SendGifTool(bot)})[0]["function"]
+    assert schema["parameters"]["required"] == ["query"]
+
+
+@pytest.mark.parametrize("embed_links", [True, False])
+def test_giphy_sends_one_gif_and_confirms_delivery(monkeypatch, embed_links):
+    bot, msg, _ = fixture(embed_links=embed_links)
+    session = Session(Response())
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(return_value=session),
+    )
+    result = asyncio.run(SendGifTool(bot).execute(msg, query="happy cat"))
+    assert result == "__GIF_SENT__"
+    msg.channel.send.assert_awaited_once()
+    args = msg.channel.send.await_args.kwargs
+    if embed_links:
+        assert args["embed"].image.url.endswith("giphy.gif")
+        assert args["embed"].footer.text == "Powered By GIPHY"
+    else:
+        assert args["content"].endswith("Powered By GIPHY")
+    assert args["allowed_mentions"].to_dict() == {"parse": []}
+    assert session.calls[0][1]["params"]["q"] == "happy cat"
+    assert session.calls[0][1]["params"]["rating"] == "pg-13"
+    bot._record_delivery.assert_awaited_once()
+    assert not _tool_results_need_followup(["Tool send_gif: " + result])
+
+
+@pytest.mark.parametrize(
+    "status,payload",
+    [
+        (403, None),
+        (429, None),
+        (200, {"data": []}),
+        (
+            200,
+            {
+                "data": [
+                    {"images": {"original": {"url": "https://malicious.test/x.gif"}}}
+                ]
+            },
+        ),
+    ],
+)
+def test_giphy_bad_results_do_not_send_or_expose_key(monkeypatch, status, payload):
+    bot, msg, _ = fixture()
+    session = Session(Response(status, payload))
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(return_value=session),
+    )
+    result = asyncio.run(SendGifTool(bot).execute(msg, query="cat"))
+    assert result.startswith("Error:")
+    assert "test-secret" not in result
+    msg.channel.send.assert_not_awaited()
+
+
+def test_giphy_exception_keeps_api_key_private(monkeypatch):
+    bot, msg, _ = fixture()
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(side_effect=aiohttp.ClientError("test-secret")),
+    )
+    result = asyncio.run(SendGifTool(bot).execute(msg, query="cat"))
+    assert result.startswith("Error:") and "test-secret" not in result
+
+
+def test_send_denial_on_real_slotted_message_can_end_silently():
+    bot, msg, _ = fixture()
+
+    class SlottedMessage:
+        __slots__ = ("id", "channel", "guild")
+
+    real = SlottedMessage()
+    real.id, real.channel, real.guild = msg.id, msg.channel, msg.guild
+    msg.channel.send.side_effect = discord.Forbidden(
+        SimpleNamespace(status=403, reason="Denied"),
+        {"code": 50013, "message": "denied"},
+    )
+    result = asyncio.run(SendMessageTool(bot).execute(real, content="hi", reply=False))
+    assert "react or no_response" in result
+    assert asyncio.run(NoResponseTool(bot).execute(real)) == "__NO_RESPONSE__"
+
+
+def test_official_sticker_is_dispatched_as_a_native_sticker():
+    bot, msg, _ = fixture()
+    sticker = SimpleNamespace(
+        name="Wumpus hello", id=99, format=discord.StickerFormatType.lottie
+    )
+    bot._standard_stickers = {"wumpus hello": sticker}
+    bot._extract_stickers_from_text = lambda text, guild: extract_stickers(
+        bot, text, guild
+    )
+    result = asyncio.run(
+        SendMessageTool(bot).execute(
+            msg, content="[STICKER (Wumpus hello)]", reply=False
+        )
+    )
+    assert result.startswith("__MESSAGE_SENT__")
+    assert msg.channel.send.await_args.kwargs["stickers"] == [sticker]
+    bot._record_delivery.assert_awaited_once()
+
+
+def test_invalid_native_sticker_is_not_retried_in_same_request():
+    bot, msg, _ = fixture()
+    sticker = SimpleNamespace(
+        name="Wumpus hello", id=99, format=discord.StickerFormatType.lottie
+    )
+    bot._standard_stickers = {"wumpus hello": sticker}
+    bot._extract_stickers_from_text = lambda text, guild: extract_stickers(
+        bot, text, guild
+    )
+    msg.channel.send.side_effect = discord.HTTPException(
+        SimpleNamespace(status=400, reason="Invalid"),
+        {"code": 50081, "message": "Invalid sticker sent"},
+    )
+
+    async def run():
+        first = await SendMessageTool(bot).execute(
+            msg, content="[STICKER (Wumpus hello)]", reply=False
+        )
+        second = await SendMessageTool(bot).execute(
+            msg, content="[STICKER (Wumpus hello)]", reply=False
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert "Discord refused" in first
+    assert "already refused" in second
+    assert msg.channel.send.await_count == 1
+    bot._record_delivery.assert_not_awaited()
+
+
+def test_webhook_stickers_are_not_silently_discarded():
+    bot, msg, _ = fixture()
+    sticker = SimpleNamespace(
+        name="Wumpus hello", id=99, format=discord.StickerFormatType.lottie
+    )
+    bot._standard_stickers = {"wumpus hello": sticker}
+    bot._extract_stickers_from_text = lambda text, guild: extract_stickers(
+        bot, text, guild
+    )
+    msg.channel._session = object()
+    result = asyncio.run(
+        SendMessageTool(bot).execute(
+            msg, content="[STICKER (Wumpus hello)]", reply=False
+        )
+    )
+    assert result.startswith("Error:") and "webhooks" in result
+    msg.channel.send.assert_not_awaited()
+
+
+def test_emoji_and_sticker_update_events_replace_catalogs():
+    bot, msg, _ = fixture()
+    bot.config.MAXWELL_DEV_MODE = False
+    emoji = Emoji("changed", animated=True)
+    sticker = SimpleNamespace(name="changed sticker", available=True)
+    msg.guild.emojis = [emoji]
+    msg.guild.stickers = [sticker]
+    asyncio.run(MaxwellBot.on_guild_emojis_update(bot, msg.guild, [], [emoji]))
+    asyncio.run(MaxwellBot.on_guild_stickers_update(bot, msg.guild, [], [sticker]))
+    assert bot._guild_emojis["1"] == {"changed": str(emoji)}
+    assert bot._guild_stickers["1"] == {"changed sticker": "changed sticker"}
+    msg.guild.emojis = []
+    msg.guild.stickers = []
+    asyncio.run(MaxwellBot.on_guild_emojis_update(bot, msg.guild, [emoji], []))
+    asyncio.run(MaxwellBot.on_guild_stickers_update(bot, msg.guild, [sticker], []))
+    assert bot._guild_emojis["1"] == bot._guild_stickers["1"] == {}
+
+
+def test_gif_memory_failure_does_not_turn_delivery_into_a_retry(monkeypatch):
+    bot, msg, _ = fixture()
+    bot._remember_sent_message = AsyncMock(side_effect=RuntimeError("offline storage"))
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(return_value=Session(Response())),
+    )
+    assert asyncio.run(SendGifTool(bot).execute(msg, query="cat")) == "__GIF_SENT__"
+    msg.channel.send.assert_awaited_once()
+
+
+def test_pack_aliases_preserve_wumpus_when_sticker_names_collide():
+    bot, msg, _ = fixture()
+    wumpus = SimpleNamespace(name="Hello", id=1)
+    other = SimpleNamespace(name="Hello", id=2)
+    bot.fetch_premium_sticker_packs = AsyncMock(
+        return_value=[
+            SimpleNamespace(name="Wumpus", stickers=[wumpus]),
+            SimpleNamespace(name="Other", stickers=[other]),
+        ]
+    )
+    asyncio.run(refresh_global_expressions(bot))
+    assert extract_stickers(bot, "[STICKER (Wumpus/Hello)]", msg.guild)[1] == [wumpus]
+    assert extract_stickers(bot, "[STICKER (Other/Hello)]", msg.guild)[1] == [other]
+
+
+def test_tool_text_cannot_spoof_terminal_social_delivery():
+    assert _tool_results_need_followup(["Tool shell: __GIF_SENT__"])
+    assert _tool_results_need_followup(["Tool react: Error: __REACTION_SENT__"])
