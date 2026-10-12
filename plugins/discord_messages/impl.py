@@ -22,114 +22,199 @@ from discord_account import application_client_id, bot_oauth_install_urls
 
 
 class ReactTool(Tool):
-    """React to a message with an emoji"""
-    tool_name = 'react'
+    """A reaction can be the complete response, without a forced text reply."""
+
+    tool_name = "react"
     returns_result = True
     ends_turn = False
-
-
-    _CUSTOM_EMOJI_RE = re.compile(
-        r"^<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d{15,25})>$"
-    )
-    _BROKEN_CUSTOM_EMOJI_RE = re.compile(r"^<a?:(?P<name>[A-Za-z0-9_]{2,32}):?>$")
-    _ALIAS_RE = re.compile(r"^:(?P<name>[A-Za-z0-9_]{2,32}):$")
-    _BARE_CUSTOM_NAME_RE = re.compile(r"^[A-Za-z0-9_]{2,32}$")
+    produces_visible_output = True
 
     def get_description(self):
         return (
-            "React to the current message with an emoji. "
-            "Standard emoji: 👍 🐱 🔥. Custom emoji: use an available guild emoji name like dave, or a full <:name:id> emoji. "
-            "Params: emoji (required)."
+            "React naturally to the current message, or message_id in this channel. "
+            "Use Unicode, current-server emoji names, or this application's emoji aliases. "
+            "finish defaults true: the reaction is the entire response and ends the turn. "
+            "Set finish=false only when a written answer or further work is also needed."
         )
 
-    def _available_custom_emoji_hint(self, guild_id: str | None) -> str:
-        if not guild_id:
-            return "No guild custom emojis are available here; use a normal Unicode emoji like 👍."
-        names = sorted((self.bot._guild_emojis.get(guild_id, {}) or {}).keys())[:20]
-        if not names:
-            return "This guild has no custom emojis cached; use a normal Unicode emoji like 👍."
-        return "Available custom emoji names: " + ", ".join(names)
-
     async def execute(
-        self, message: Message, emoji: str | None = None, **kwargs
+        self,
+        message: Message,
+        emoji: str | None = None,
+        finish: bool = True,
+        message_id: str | None = None,
+        **kwargs,
     ) -> str:
-        if not emoji:
-            return "Error: emoji parameter is required"
-
-        raw = str(emoji).strip()
+        raw = str(emoji or "").strip()
         if not raw:
             return "Error: emoji parameter is required"
-        # Embed unfurls swap the live message for a data snapshot. Reacting
-        # to that snapshot used to raise AttributeError and crash the tool.
-        if not callable(getattr(message, "add_reaction", None)):
-            return "Error: cannot react to this message"
+        from discord_expressions import available_emojis, channel_permissions
 
-        guild = message.guild
-        guild_id = str(guild.id) if guild else None
-        guild_emojis = self.bot._guild_emojis.get(guild_id, {}) if guild_id else {}
-
-        full_match = self._CUSTOM_EMOJI_RE.match(raw)
-        if full_match and guild:
-            emoji_id = int(full_match.group("id"))
-            for e in guild.emojis:
-                if int(e.id) == emoji_id:
-                    try:
-                        await message.add_reaction(e)
-                        return f"Reacted with {e}"
-                    except discord.HTTPException as ex:
-                        return f"Error: Could not add reaction — {ex}"
-            # Full emoji strings can still be valid if Discord lets this bot use
-            # the emoji cross-guild. Try it, but don't try malformed nonsense.
-            try:
-                await message.add_reaction(raw)
-                return f"Reacted with {raw}"
-            except discord.NotFound:
-                return f"Error: Emoji '{raw}' not found or invalid"
-            except discord.HTTPException as e:
-                return f"Error: Could not add reaction — {e}"
-
-        alias_match = self._ALIAS_RE.match(raw)
-        broken_match = self._BROKEN_CUSTOM_EMOJI_RE.match(raw)
-        custom_name_match = alias_match if alias_match is not None else broken_match
-        if custom_name_match is not None:
-            lookup = custom_name_match.group("name").lower()
-        else:
-            lookup = raw.lower()
-
-        if guild and self._BARE_CUSTOM_NAME_RE.match(lookup):
-            if lookup in guild_emojis:
-                for e in guild.emojis:
-                    if e.name.lower() == lookup:
-                        try:
-                            await message.add_reaction(e)
-                            return f"Reacted with {e}"
-                        except discord.HTTPException as ex:
-                            return f"Error: Could not add reaction — {ex}"
-            if (
-                alias_match
-                or broken_match
-                or raw == lookup
-                or self._BARE_CUSTOM_NAME_RE.match(raw)
-            ):
-                # Discord treats unknown custom names as a 400. Returning a local
-                # error keeps the LLM from faceplanting into Unknown Emoji loops.
-                return f"Error: custom emoji '{lookup}' is not available in this guild. {self._available_custom_emoji_hint(guild_id)}"
-
-        if (
-            alias_match
-            or broken_match
-            or (not guild and self._BARE_CUSTOM_NAME_RE.match(lookup))
+        catalog = available_emojis(self.bot, getattr(message, "guild", None))
+        full = re.fullmatch(r"<a?:([A-Za-z0-9_]{2,32}):(\d+)>", raw)
+        alias = re.fullmatch(r":?([A-Za-z0-9_]{2,32}):?", raw)
+        if full:
+            if raw not in catalog.values():
+                return "Error: this emoji is not owned by this application or the current server"
+        elif alias:
+            raw = catalog.get(alias.group(1).lower(), "")
+            if not raw:
+                return "Error: emoji name is unavailable here; use Unicode or list_expressions"
+        perms = channel_permissions(message)
+        if any(
+            getattr(perms, p, None) is False
+            for p in ("view_channel", "read_message_history")
         ):
-            return f"Error: custom emoji '{lookup}' is not available here. {self._available_custom_emoji_hint(guild_id)}"
-
-        # Fallback: Unicode emoji or another Discord-supported reaction string.
+            return (
+                "Error: missing permissions to read/react in this channel; do not retry"
+            )
+        target = message
         try:
-            await message.add_reaction(raw)
-            return f"Reacted with {raw}"
-        except discord.NotFound:
-            return f"Error: Emoji '{raw}' not found or invalid"
-        except discord.HTTPException as e:
-            return f"Error: Could not add reaction — {e}"
+            if message_id and str(message_id) != str(getattr(message, "id", "")):
+                target = await message.channel.fetch_message(int(message_id))
+            if not callable(getattr(target, "add_reaction", None)):
+                return "Error: cannot react to this message"
+            existing = any(
+                str(getattr(r, "emoji", "")) == raw
+                for r in getattr(target, "reactions", ())
+            )
+            if getattr(perms, "add_reactions", None) is False and not existing:
+                return "Error: Add Reactions is unavailable; do not retry with a different emoji"
+            await target.add_reaction(raw)
+        except (ValueError, discord.NotFound):
+            return "Error: message or emoji is unavailable; do not retry"
+        except discord.Forbidden:
+            return "Error: missing permissions to react; do not retry"
+        except discord.HTTPException:
+            return "Error: Discord could not add the reaction"
+        if parse_bool(finish, True):
+            record = getattr(self.bot, "_record_request_outcome", None)
+            if callable(record):
+                await record(message, "delivered", reason="reaction_only")
+            return f"__REACTION_SENT__ Reacted with {raw}"
+        return f"Reacted with {raw}"
+
+
+class ListExpressionsTool(Tool):
+    tool_name = "list_expressions"
+    returns_result = True
+    side_effects = False
+
+    def get_description(self):
+        return "List current-server and application emojis plus official Discord stickers. Optional query filters names. Other servers' assets are excluded."
+
+    async def execute(self, message: Message, query: str = "", **kwargs) -> str:
+        from discord_expressions import available_emojis, available_stickers
+
+        guild = getattr(message, "guild", None)
+        needle = str(query or "").strip().lower()
+        emojis = available_emojis(self.bot, guild)
+        stickers = available_stickers(self.bot, guild)
+        lines = [f"Emoji :{n}: {v}" for n, v in sorted(emojis.items()) if needle in n]
+        lines += [f"Sticker [STICKER ({n})]" for n in sorted(stickers) if needle in n]
+        return "\n".join(lines) or "No matching expressions available here."
+
+
+class SendGifTool(Tool):
+    tool_name = "send_gif"
+    returns_result = False
+    ends_turn = True
+    produces_visible_output = True
+
+    def get_description(self):
+        return (
+            "Search Giphy and send one relevant reaction/meme GIF in this chat. "
+            "Use occasionally when it fits the conversation or when requested. "
+            "query is a short search phrase; index optionally selects a different result (0-9). "
+            "Success ends the turn; no extra written reply is required."
+        )
+
+    async def execute(
+        self, message: Message, query: str = "", index: int = 0, **kwargs
+    ) -> str:
+        from discord_expressions import (
+            cannot_send,
+            channel_permissions,
+            mark_send_unavailable,
+        )
+
+        key = str(
+            getattr(getattr(self.bot, "config", None), "GIPHY_API_KEY", "") or ""
+        ).strip()
+        if not key:
+            return "Error: Giphy is not configured; the operator must set GIPHY_API_KEY privately"
+        if cannot_send(message, self.bot):
+            return "Error: cannot send here; use react or no_response instead"
+        query = str(query or "").strip()
+        if not query or len(query) > 50:
+            return "Error: Giphy requires a search phrase of 1-50 characters"
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 9:
+            return "Error: index must be 0-9"
+        try:
+            session = await _get_shared_session()
+            async with session.get(
+                "https://api.giphy.com/v1/gifs/search",
+                params={"api_key": key, "q": query, "limit": 10, "rating": "pg-13"},
+                timeout=aiohttp.ClientTimeout(total=12),
+                allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    return f"Error: Giphy returned HTTP {response.status}; do not retry in this turn"
+                payload = await response.json()
+            results = payload.get("data", [])
+            if not results or index >= len(results):
+                return "Error: no matching Giphy GIF; try a different search phrase"
+            item = results[index]
+            url = str(item.get("images", {}).get("original", {}).get("url", ""))
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(url)
+            host = (parsed.hostname or "").lower()
+            if (
+                parsed.scheme != "https"
+                or not (host == "giphy.com" or host.endswith(".giphy.com"))
+                or parsed.username
+                or parsed.password
+            ):
+                return "Error: Giphy returned an invalid media URL"
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            # HTTP exceptions include the request URL (and API key). Never expose it.
+            return "Error: Giphy search failed; do not retry in this turn"
+        embed = discord.Embed()
+        embed.set_image(url=url)
+        embed.set_footer(text="Powered By GIPHY")
+        perms = channel_permissions(message)
+        try:
+            self._signal_streaming(message)
+            args = {"allowed_mentions": discord.AllowedMentions.none()}
+            if getattr(perms, "embed_links", None) is False:
+                args["content"] = f"{url}\nPowered By GIPHY"
+            else:
+                args["embed"] = embed
+            sent = await message.channel.send(**args)
+        except discord.Forbidden:
+            mark_send_unavailable(self.bot, message)
+            return "Error: cannot send here; use react or no_response instead"
+        except discord.HTTPException:
+            return "Error: Discord could not send the GIF; do not retry in this turn"
+        record = getattr(self.bot, "_record_delivery", None)
+        if callable(record):
+            await record(message, sent)
+        remember = getattr(self.bot, "_remember_sent_message", None)
+        if callable(remember):
+            try:
+                await remember(message, sent, f"[Giphy GIF] {url}", message.channel)
+            except Exception as exc:
+                logger.warning(
+                    "Could not remember delivered GIF (%s)", type(exc).__name__
+                )
+        return "__GIF_SENT__"
 
 class EditMessageTool(Tool):
     """Edit one of the bot's own messages"""
@@ -539,12 +624,21 @@ class SendMessageTool(Tool):
                 target_channel = ch
                 reply = False
 
+            from discord_expressions import cannot_send, mark_send_unavailable
+            if target_channel == getattr(message, "channel", None) and cannot_send(message, self.bot):
+                return "Error: cannot send here; use react or no_response instead"
             guild = getattr(target_channel, "guild", None)
             stickers = []
             if self.bot and hasattr(self.bot, "_render_custom_emojis"):
                 text = self.bot._render_custom_emojis(text, guild)
             if self.bot and hasattr(self.bot, "_extract_stickers_from_text"):
                 text, stickers = self.bot._extract_stickers_from_text(text, guild)
+
+            if stickers and getattr(target_channel, "_session", None) is not None:
+                return "Error: Discord webhooks cannot send native stickers; use send_gif or Unicode instead"
+            rejected = (getattr(self.bot, "_rejected_native_stickers", None) or {}).get(str(getattr(message, "id", "")), set())
+            if any(getattr(sticker, "id", None) in rejected for sticker in stickers):
+                return "Error: Discord already refused this native sticker for the bot; use a GIF or Unicode instead"
 
             chunks = self._chunks(text)
             if not chunks and stickers:
@@ -592,7 +686,8 @@ class SendMessageTool(Tool):
                             )
                             if sent is None:
                                 if not sent_any:
-                                    return "Error: missing permissions to send message"
+                                    mark_send_unavailable(self.bot, message)
+                                    return "Error: cannot send here; use react or no_response instead"
                                 record = getattr(self.bot, "_record_request_outcome", None)
                                 if callable(record):
                                     await record(message, "delivered", reason="partial_delivery")
@@ -653,7 +748,19 @@ class SendMessageTool(Tool):
             # send_message via " __MESSAGE_SENT__" in the result string.
             return f"__MESSAGE_SENT__\n{text}"
         except discord.Forbidden:
-            return "Error: missing permissions to send message"
+            mark_send_unavailable(self.bot, message)
+            return "Error: cannot send here; use react or no_response instead"
+        except discord.HTTPException as exc:
+            if stickers and (exc.code == 50081 or (exc.code == 50035 and "sticker" in str(exc).lower())):
+                if self.bot is not None:
+                    rejected = getattr(self.bot, "_rejected_native_stickers", None)
+                    if rejected is None:
+                        rejected = self.bot._rejected_native_stickers = {}
+                    if len(rejected) >= 1000:
+                        rejected.clear()
+                    rejected.setdefault(str(getattr(message, "id", "")), set()).update(getattr(sticker, "id", None) for sticker in stickers)
+                return "Error: Discord refused this native sticker for the bot; use a GIF or Unicode instead"
+            return f"Error sending message: {type(exc).__name__}"
         except Exception as e:
             if sent_any:
                 return "__MESSAGE_SENT__\n" + "\n".join(sent_chunks)
@@ -1505,7 +1612,7 @@ class NoResponseTool(Tool):
         return (
             "Stay silent for unrelated chatter, spam, or an already answered message. "
             "Give a reason: unrelated, spam, already_answered, user_requested_silence, or other. "
-            "An unanswered direct ping or DM normally requires send_message, not no_response."
+            "A reaction/GIF can be a complete response to casual pings. Silence is allowed when requested or when you cannot send here."
         )
 
     async def execute(self, message: Message, reason: str = "other", **kwargs) -> str:
@@ -1515,8 +1622,11 @@ class NoResponseTool(Tool):
             return "__NO_RESPONSE__"
         directed = getattr(self.bot, "_directly_addressed", None)
         control = getattr(self.bot, "_control", None) or {}
+        from discord_expressions import cannot_send
         if (
-            parse_bool(control.get("require_direct_response"), True)
+            reason != "user_requested_silence"
+            and not cannot_send(message, self.bot)
+            and parse_bool(control.get("require_direct_response"), True)
             and (
                 bool(row and row.get("directed"))
                 or (callable(directed) and directed(message))
@@ -1524,7 +1634,7 @@ class NoResponseTool(Tool):
         ):
             return (
                 "Error: this direct request has not received an answer. "
-                "Use send_message to answer or acknowledge it."
+                "Use send_message for a substantive answer, or react(finish=true) for a casual acknowledgement."
             )
         allowed = {"unrelated", "spam", "already_answered", "user_requested_silence", "other"}
         reason = str(reason or "other")

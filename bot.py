@@ -750,6 +750,9 @@ class MaxwellBot(_BotBase):
         self._admins: set[str] = configured_admin_ids(self.config)
         self._guild_emojis: dict[str, dict[str, str]] = {}
         self._guild_stickers: dict[str, dict[str, str]] = {}
+        self._application_emojis: dict[str, str] = {}
+        self._standard_stickers: dict[str, Any] = {}
+        self._expression_refresh_task: asyncio.Task | None = None
         self._media_context: dict[str, list[dict]] = {}
         # Latest Discord message snapshots keyed by message id. MESSAGE_UPDATE
         # can arrive after the original turn has started, so keep the newest
@@ -1765,7 +1768,7 @@ class MaxwellBot(_BotBase):
             if tool_identifier in {
                 "create_poll",
                 "create_thread", "thread_control", "send_message", "send_file", "shell", "send_meme",
-                "send_media", "forward_message",
+                "send_media", "send_gif", "forward_message",
             }:
                 state["send_attempted"] = True
         try:
@@ -1915,7 +1918,7 @@ class MaxwellBot(_BotBase):
             "create_category", "edit_category", "delete_category", "set_channel_permissions",
             "move_channel", "clone_channel", "sync_channel", "manage_role",
             "manage_emoji", "manage_invites", "edit_server", "change_avatar",
-            "send_media", "send_meme",
+            "send_media", "send_meme", "send_gif",
             "create_site", "edit_site", "delete_site", "host_file", "site_server",
             "reminder",
         }
@@ -3685,6 +3688,8 @@ class MaxwellBot(_BotBase):
             )
         logger.info(f"Connected to {len(self.guilds)} guilds")
         self._load_emojis()
+        from discord_expressions import start_expression_refresh
+        start_expression_refresh(self)
         await self._save_discord_state()
         if self._sleep_window_active():
             await self._apply_sleep_presence(asleep=True)
@@ -4313,82 +4318,27 @@ class MaxwellBot(_BotBase):
             logger.warning("Inbox group_join notice failed: %s", e)
 
     def _load_emojis(self):
+        from discord_expressions import sync_guild
         self._guild_emojis = {}
         self._guild_stickers = {}
         for guild in self.guilds:
-            if not MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
-                continue
-            gid = str(guild.id)
-            self._guild_emojis[gid] = {}
-            for emoji in guild.emojis:
-                if getattr(emoji, "animated", False):
-                    continue
-                self._guild_emojis[gid][emoji.name.lower()] = str(emoji)
-            self._guild_stickers[gid] = {}
-            for sticker in getattr(guild, "stickers", []) or []:
-                if getattr(sticker, "format", None) and str(sticker.format).lower() in (
-                    "lottie",
-                    "apng",
-                    "gif",
-                ):
-                    continue
-                self._guild_stickers[gid][sticker.name.lower()] = str(sticker.name)
-            logger.info(
-                f"Loaded {len(self._guild_emojis[gid])} emojis and {len(self._guild_stickers[gid])} stickers for guild {guild.name}"
-            )
-        total_e = sum(len(v) for v in self._guild_emojis.values())
-        total_s = sum(len(v) for v in self._guild_stickers.values())
-        logger.info(
-            f"Loaded {total_e} static custom emojis and {total_s} stickers across {len(self._guild_emojis)} guilds"
-        )
+            if MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
+                sync_guild(self, guild)
 
     def _extract_stickers_from_text(self, text: str, guild) -> tuple[str, list]:
-        if not guild or not text:
-            return text, []
-        stickers_found = []
-        cleaned_text = text
-        for sticker in getattr(guild, "stickers", []) or []:
-            fmt = getattr(sticker, "format", None)
-            fmt_str = str(fmt).lower() if fmt else ""
-            fmt_name = getattr(fmt, "name", "").lower()
-            if (
-                "lottie" in fmt_str
-                or "apng" in fmt_str
-                or "gif" in fmt_str
-                or fmt_name in ("lottie", "apng", "gif")
-            ):
-                continue
-            s_name = sticker.name.strip()
-            # Match explicit [STICKER (name here)], [sticker: name], [sticker_name], or whole word
-            patterns = [
-                re.compile(
-                    rf"\[STICKER\s*\(\s*{re.escape(s_name)}\s*\)\]", re.IGNORECASE
-                ),
-                re.compile(rf"\[STICKER\s*:\s*{re.escape(s_name)}\]", re.IGNORECASE),
-                re.compile(rf"\[STICKER\s+{re.escape(s_name)}\]", re.IGNORECASE),
-                re.compile(rf"\[{re.escape(s_name)}\]", re.IGNORECASE),
-                re.compile(rf"\b{re.escape(s_name)}\b", re.IGNORECASE)
-                if len(s_name) >= 3
-                else None,
-            ]
-            matched = False
-            for pat in patterns:
-                if pat and pat.search(cleaned_text):
-                    cleaned_text = pat.sub("", cleaned_text).strip()
-                    matched = True
-                    break
-            if matched:
-                stickers_found.append(sticker)
-                if len(stickers_found) >= 3:
-                    break
-        return cleaned_text, stickers_found
+        from discord_expressions import extract_stickers
+        return extract_stickers(self, text, guild)
 
     def _render_custom_emojis(self, text: str, guild) -> str:
-        if not guild:
-            return text
-        return render_custom_emoji_aliases(
-            text, self._guild_emojis.get(str(guild.id), {})
+        from discord_expressions import available_emojis
+        catalog = available_emojis(self, guild)
+        # Only current-server or application-owned markup is allowed.
+        text = re.sub(
+            r"<a?:([A-Za-z0-9_]{2,32}):\d+>",
+            lambda m: m.group(0) if m.group(0) in catalog.values() else f":{m.group(1)}:",
+            text,
         )
+        return render_custom_emoji_aliases(text, catalog)
 
     def _message_memory_content(self, message) -> str:
         """Render the current Discord payload for transcript storage.
@@ -6130,6 +6080,8 @@ class MaxwellBot(_BotBase):
         """Someone added this official bot to a server."""
         if not MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
             return
+        from discord_expressions import sync_guild
+        sync_guild(self, guild)
         self._dispatch_plugin_event("on_guild_join", guild)
         with contextlib.suppress(Exception):
             logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
@@ -6146,7 +6098,20 @@ class MaxwellBot(_BotBase):
             logger.debug("Inbox guild_join notice failed: %s", e)
 
     async def on_guild_remove(self, guild):
+        self._guild_emojis.pop(str(guild.id), None)
+        self._guild_stickers.pop(str(guild.id), None)
         self._dispatch_plugin_event("on_guild_remove", guild)
+
+    async def on_guild_emojis_update(self, guild, before, after):
+        if MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
+            from discord_expressions import sync_guild
+            sync_guild(self, guild, emojis=after)
+
+    async def on_guild_stickers_update(self, guild, before, after):
+        if MaxwellBot._dev_scope_allows(self, guild, guild_id=guild.id):
+            from discord_expressions import sync_guild
+            sync_guild(self, guild, stickers=after)
+
 
     async def on_member_join(self, member):
         self._dispatch_plugin_event("on_member_join", member)
@@ -8067,31 +8032,22 @@ class MaxwellBot(_BotBase):
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    @staticmethod
-    def _grid_entries(guild) -> list[tuple[str, str]]:
-        """(name, cdn_url) for the icons worth drawing, stickers first."""
-        entries: list[tuple[str, str]] = []
-        for st in list(getattr(guild, "stickers", None) or []):
-            fmt = getattr(st, "format", None)
+    def _grid_entries(self, guild) -> list[tuple[str, str]]:
+        """Current-server, application and official icons; no other guilds."""
+        from discord_expressions import available_emojis, available_stickers
+        entries = []
+        for name, sticker in sorted(available_stickers(self, guild).items())[:self._GRID_MAX_STICKERS]:
+            fmt = getattr(sticker, "format", None)
             if "lottie" in str(getattr(fmt, "name", fmt) or "").lower():
-                continue  # vector JSON, nothing to rasterize
-            url = str(getattr(st, "url", "") or "")
-            if url:
-                entries.append((str(getattr(st, "name", "?")), url))
-        entries = entries[: MaxwellBot._GRID_MAX_STICKERS]
-        emojis = []
-        for em in list(getattr(guild, "emojis", None) or []):
-            eid = getattr(em, "id", None)
-            if not eid:
                 continue
-            ext = ".gif" if getattr(em, "animated", False) else ".png"
-            emojis.append(
-                (
-                    str(getattr(em, "name", "?")),
-                    f"https://cdn.discordapp.com/emojis/{eid}{ext}",
-                )
-            )
-        return entries + emojis[: MaxwellBot._GRID_MAX_EMOJIS]
+            if url := str(getattr(sticker, "url", "") or ""):
+                entries.append((name, url))
+        for name, markup in sorted(available_emojis(self, guild).items())[:self._GRID_MAX_EMOJIS]:
+            match = re.fullmatch(r"<(a?):[^:]+:(\d+)>", markup)
+            if match:
+                ext = "gif" if match.group(1) else "png"
+                entries.append((name, f"https://cdn.discordapp.com/emojis/{match.group(2)}.{ext}"))
+        return entries
 
     async def _emoji_grid_media(self, guild) -> dict | None:
         """Build (or load from cache) the labeled grid for a guild."""
@@ -8132,7 +8088,7 @@ class MaxwellBot(_BotBase):
         every guild. The text name-list is enough unless they ask.
         """
         guild = getattr(message, "guild", None)
-        if guild is None or not self._control.get("emoji_context_enabled", True):
+        if not self._control.get("emoji_context_enabled", True):
             return None
         asked = str(getattr(message, "content", "") or "")
         if not re.search(
@@ -8148,7 +8104,7 @@ class MaxwellBot(_BotBase):
             return None
         if item is None:
             return None
-        key = item.get("b64", "")[:64]
+        key = hashlib.sha256(item.get("b64", "").encode()).hexdigest()
         if self._emoji_grid_shown.get(channel_id) == key:
             return None
         self._emoji_grid_shown[channel_id] = key
@@ -9300,9 +9256,35 @@ class MaxwellBot(_BotBase):
         )
         return False
 
+    async def _acknowledge_read_only_channel(self, message) -> bool:
+        from discord_expressions import cannot_send
+        if not cannot_send(message, self):
+            return False
+        # No model call, typing/progress post, retry or DM for an unsendable ping.
+        handler = (getattr(self, "tools", None) or {}).get("react")
+        if handler is not None and self._directly_addressed(message):
+            emoji = "🔇"
+            for reaction in getattr(message, "reactions", ()):
+                candidate = str(getattr(reaction, "emoji", ""))
+                if candidate and "<" not in candidate:
+                    emoji = candidate
+                    break
+            try:
+                result = await MaxwellBot._invoke_request_tool(
+                    self, message, "react", handler, emoji=emoji, finish=True
+                )
+                if str(result).startswith("__REACTION_SENT__"):
+                    return True
+            except (PermissionError, discord.HTTPException):
+                pass
+        await MaxwellBot._record_request_outcome(self, message, "suppressed", "channel_send_unavailable")
+        return True
+
     async def _handle_message(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
+        if await MaxwellBot._acknowledge_read_only_channel(self, message):
+            return
         # Sleep gate: when the bot is in a sleep window, abort the
         # dispatch, send a one-shot notice in the triggering channel
         # saying "Max is sleeping, back in Xm", and return. Never DM.
@@ -9583,8 +9565,10 @@ class MaxwellBot(_BotBase):
                 {
                     "role": "system",
                     "content": (
-                        "This is a direct request. Provide a visible answer via send_message "
-                        "or a completed media reply. Do not use no_response for this request. "
+                        "This message addresses you. Answer substantive questions/requests with send_message "
+                        "or completed media. For a casual ping, joke, thanks or acknowledgement, "
+                        "react(finish=true) or send_gif can be the whole response. "
+                        "Use no_response if the user requests silence or sending is unavailable. "
                         "If you cannot complete it, briefly say so; do not promise later work "
                         "unless you have actually scheduled it."
                     ),
@@ -10034,6 +10018,10 @@ class MaxwellBot(_BotBase):
                         break
                 finally:
                     await self._release_ai_slot()
+            from discord_expressions import social_result_is_terminal
+            if any(social_result_is_terminal(r) for r in all_tool_results):
+                normal_reply_sent = True
+                return
             # Terminal silence only for explicit no_response.
             if any(
                 tr.startswith("Tool no_response:")
@@ -10763,10 +10751,17 @@ class MaxwellBot(_BotBase):
 
         # Results do not exist yet when the model generates this batch. Hold
         # terminal replies until it has inspected the actual action results.
+        def social_terminal(call):
+            return call["name"] == "send_gif" or (
+                call["name"] == "react"
+                and parse_bool((call.get("arguments") or {}).get("finish"), True)
+            )
+
         needs_result_turn = any(
-            returns_result(c["name"])
-            or c["name"] not in {"send_message", "no_response", "sleep", "typing", "wait"}
-            for c in calls
+            not social_terminal(c) and (
+                returns_result(c["name"])
+                or c["name"] not in {"send_message", "no_response", "sleep", "typing", "wait"}
+            ) for c in calls
         )
 
         # Preserve raw tool_calls for the assistant message in the follow-up turn
@@ -10886,13 +10881,19 @@ class MaxwellBot(_BotBase):
             send_message_seen = False
             send_burst_open = False
             sleep_seen = False
+            social_done = False
             # A previous model round in this turn already posted. That post
             # owns the quote-reply; this round's sends go to the channel.
             prior_delivery = bool(
                 ((await MaxwellBot._request_state(self, message)) or {}).get("response_id")
             )
             for call in calls:
-                if needs_result_turn and call["name"] in TURN_ENDING_TOOL_NAMES:
+                if social_done:
+                    line = f"Tool {call['name']}: Skipped — the reaction/GIF already ended the turn"
+                    result_by_id[call["id"]] = line
+                    tool_results.append(line)
+                    continue
+                if needs_result_turn and (call["name"] in TURN_ENDING_TOOL_NAMES or social_terminal(call)):
                     line = (
                         f"Tool {call['name']}: Deferred — inspect the tool results "
                         "on the next model turn before replying or ending."
@@ -11020,6 +11021,8 @@ class MaxwellBot(_BotBase):
                     dispatch_call["arguments"] = dispatch_args
                 line = await run_safely(dispatch_call)
                 tool_results.append(line)
+                from discord_expressions import social_result_is_terminal
+                social_done = social_result_is_terminal(line)
                 if call["name"] == "send_message":
                     delivered = (
                         "__MESSAGE_SENT__" in line

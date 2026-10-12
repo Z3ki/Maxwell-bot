@@ -15,6 +15,8 @@ from types import MethodType
 from typing import Any
 
 _VISIBLE_MARKERS = (
+    "__REACTION_SENT__",
+    "__GIF_SENT__",
     "__MESSAGE_SENT__",
     "__FILE_SENT__",
     "__MEDIA_SENT__",

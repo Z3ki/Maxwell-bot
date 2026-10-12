@@ -5,6 +5,9 @@
 - Keep a pointer such as "this" when the same message already has an attachment, embed, or sticker. Drop it only when there is no media and no earlier message to resolve.
 - Keep qualified Last.fm plays when the provider returns error 8, an HTTP 5xx response, or an operator key error (10, 13, or 26). Retry those with the existing backoff. Remove a play only for a real per-track rejection.
 - Lower the default free message allowance from 300 to 200 messages per five hours. An operator-granted premium plan uses 2,000 messages in that window and `AI_PREMIUM_MODEL` when it is set. Billing, prices, and checkout stay off. A fresh install still leaves the quota disabled.
+- Add optional Giphy GIF replies, reaction-only completion and read-only-channel ping acknowledgements without forced text or retry loops.
+- Refresh application emojis and official Discord sticker packs every five minutes; handle live server emoji/sticker updates, animated expressions, joins and removals while preserving server isolation.
+
 - Remove automatic first-use Terms/Privacy DMs and their per-user records/locks from the runtime. Keep operator-specific policy links in shared model context even with tools disabled; offer them when asked, never invent another instance's policies. Preserve existing notice/consent data without reading or rewriting it.
 - Add guarded isolated Dev lifecycle and offline ephemeral pytest commands, optional local-model/music services, and a reviewed dev-to-main promotion workflow without automatic public deployment.
 - Stamp Dev images with their checkout revision and document draining the bind-mounted public bot before updating source, so restart/promotion diagnostics identify the applied revision without mixed live code.

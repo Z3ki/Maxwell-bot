@@ -294,3 +294,5 @@ If the Discord token is rejected, regenerate/copy the **bot token from the Disco
 ## AI-controlled music
 
 Maxwell can join your voice channel and play or queue YouTube songs from normal conversation. The AI tools, `/music` subcommands and Now Playing buttons use one permission-checked service per server. Audio is streamed by a separate, authenticated Lavalink node with DAVE support. See [Music setup and verification](docs/MUSIC.md) for deployment, controls, permissions and limitations.
+
+Natural reactions, optional Giphy GIFs, application emojis and live Discord sticker catalogs: [setup and behavior](docs/DISCORD_EXPRESSIONS.md).

@@ -825,6 +825,8 @@ def _sanitize_visible_reply(text: str, *, scrub_repeats: bool = True) -> str:
         "__NO_RESPONSE__",
         "__SHELL_SENT__",
         "__MEME_SENT__",
+        "__GIF_SENT__",
+        "__REACTION_SENT__",
         "__MEDIA_SENT__",
         "__FILE_SENT__",
         "__MESSAGE_SENT__",

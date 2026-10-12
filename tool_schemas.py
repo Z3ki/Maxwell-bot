@@ -68,7 +68,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         },
         ["prompt"],
     ),
-    "react": _obj({"emoji": _str("Emoji or custom emoji name")}, ["emoji"]),
+    "react": _obj({
+        "emoji": _str("Unicode, current-server or application emoji alias"),
+        "finish": {"type": "boolean", "default": True, "description": "End with just this reaction; false continues work/reply"},
+        "message_id": _str("Optional message ID in this channel"),
+    }, ["emoji"]),
+    "list_expressions": _obj({"query": _str("Optional emoji/sticker name filter")}),
+    "send_gif": _obj({"query": _str("Giphy search phrase", minLength=1, maxLength=50), "index": {"type": "integer", "minimum": 0, "maximum": 9}}, ["query"]),
     "edit_message": _obj(
         {
             "message_id": _str("Message ID to edit"),
@@ -832,6 +838,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 RESULT_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "react",
+        "list_expressions",
         "delete_message",
         "change_presence",
         "set_nickname",
@@ -950,7 +957,7 @@ CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
 # Tools that end the turn outright. Nothing after them runs, and there is no
 # follow-up turn unless a RESULT tool shared the same batch.
 TURN_ENDING_TOOL_NAMES: frozenset[str] = frozenset(
-    {"send_message", "no_response", "sleep"}
+    {"send_message", "no_response", "sleep", "send_gif"}
 )
 
 # Plugin tools that declared ``returns_result = True``. Plugin names cannot live

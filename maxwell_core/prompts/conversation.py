@@ -243,35 +243,20 @@ class ConversationPromptBuilder:
             message, user_message, system_parts, dynamic_parts
         )
 
-        if (
-            message.guild
-            and host._control.get("emoji_context_enabled", True)
-            and not host._is_short_live_turn(message, user_message)
-        ):
-            emojis = host._guild_emojis.get(str(message.guild.id), {})
-            stickers = getattr(host, "_guild_stickers", {}).get(
-                str(message.guild.id), {}
-            )
-            if emojis or stickers:
-                # Keep the name list and the reference grid on the same caps —
-                # they drifted (25/15 vs 48/12), so Maxwell saw icons he had no
-                # name for and was given sticker names that were never drawn.
-                items = sorted(emojis.items())[: host._GRID_MAX_EMOJIS]
-                sticker_items = sorted(stickers.keys())[: host._GRID_MAX_STICKERS]
-                grid_parts = []
-                if items:
-                    grid_parts.append(
-                        "Static Server Emojis (use :name: format, no animated/Nitro): "
-                        + ", ".join(f":{name}:" for name, _ in items)
-                    )
-                if sticker_items:
-                    grid_parts.append(
-                        "Static Server Stickers (type [STICKER (sticker_name)] to dispatch as real Discord sticker): "
-                        + ", ".join(f"[STICKER ({sname})]" for sname in sticker_items)
-                    )
-                # Guild assets and short-turn omissions are volatile; keep
-                # them behind the reusable system + history prefix.
-                dynamic_parts.append("\n".join(grid_parts))
+        if host._control.get("emoji_context_enabled", True):
+            from discord_expressions import available_emojis, available_stickers
+            emojis = available_emojis(host, message.guild)
+            stickers = available_stickers(host, message.guild)
+            parts = []
+            if emojis:
+                names = sorted(emojis)[:host._GRID_MAX_EMOJIS]
+                parts.append("Available current-server/application emojis (including animated): " + ", ".join(f":{name}:" for name in names))
+            if stickers:
+                names = sorted(stickers)[:host._GRID_MAX_STICKERS]
+                parts.append("Available current-server/official Discord stickers: " + ", ".join(f"[STICKER ({name})]" for name in names))
+            if parts:
+                parts.append("Use list_expressions(query=...) to find more, including Wumpus. Use expressions sparingly when they fit; reactions can replace a written reply. Only explicit sticker markers send stickers.")
+                dynamic_parts.append("\n".join(parts))
         tool_prompt = host._tool_system_prompt(
             message=message, content=user_message, dynamic_parts=dynamic_parts
         )
