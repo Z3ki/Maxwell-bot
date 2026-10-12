@@ -130,6 +130,10 @@ async def change_setting(bot, context, scope, setting, value, *, reset=False):
         elif not isinstance(value, str) or value not in suite._PERSONAL_DEFAULT_VALUES[setting]:
             raise ValueError("Choose a supported value for this setting.")
         await asyncio.to_thread(store.set_default, uid, setting, value)
+        if setting == "tracking" and value == "off":
+            from conversation_memory import forget_author
+
+            await forget_author(getattr(bot, "memory", None), uid)
         return
     if scope == "owner":
         from .admin_commands import _reload_control, _set_control
@@ -241,7 +245,7 @@ class ConfigureTool(Tool):
 
     def get_description(self):
         return ("Change or reset a /config setting only when the requester asks. "
-                "Read get_configuration for options first. Personal: style (personality), language, mode, web, detail, context (integer), visibility. "
+                "Read get_configuration for options first. Personal: style (personality), language, mode, web, detail, context (integer), visibility, tracking (on/off; off deletes that account's stored messages and facts). "
                 "Server managers: channels (channel ID or all), capabilities (allowed group list), plugins (ID:boolean map; reset inherits), moderation (on/off), progress (on/off/default), ticket (boolean). "
                 "App owners only: tools_enabled/autonomy_enabled (boolean), reload (set with no value). "
                 "scope defaults personal; no arbitrary user/guild target. Credential/AI connection changes, tests, removal and diagnostics use open_configuration instead. "
