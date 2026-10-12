@@ -382,6 +382,20 @@ class Dashboard:
             await asyncio.to_thread(
                 self.preferences.update, user_id, defaults, personality
             )
+            if defaults.get("tracking") == "off":
+                from conversation_memory import delete_author_content_file
+
+                try:
+                    await asyncio.to_thread(
+                        delete_author_content_file,
+                        Path(self.data_dir()) / "maxwell_rag.db",
+                        user_id,
+                    )
+                except Exception:
+                    logger.warning("Could not delete stored message content", exc_info=True)
+                    raise web.HTTPBadRequest(
+                        text="Message storage is off, but stored messages could not be deleted. Try again."
+                    ) from None
         from user_install import USER_INSTALL_CONTEXT_COUNTS
 
         result = await asyncio.to_thread(self.preferences.get, user_id)

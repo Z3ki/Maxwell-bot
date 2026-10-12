@@ -10,6 +10,7 @@ from tooling.helpers import *  # noqa: F401,F403
 
 from plugins.images.impl import ImageGeneratorTool  # noqa: F401
 from plugins.images.impl import HDImageGeneratorTool  # noqa: F401
+from plugins.discord_messages.impl import ListExpressionsTool, SendGifTool  # noqa: F401
 from plugins.discord_messages.impl import ReactTool  # noqa: F401
 from plugins.discord_messages.impl import EditMessageTool  # noqa: F401
 from plugins.discord_messages.impl import DeleteMessageTool  # noqa: F401

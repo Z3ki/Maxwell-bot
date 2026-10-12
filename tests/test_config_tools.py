@@ -76,6 +76,31 @@ def test_invalid_or_secret_settings_cannot_be_written(tmp_path, setting, value):
     assert bot._user_preferences.get("100") == before
 
 
+def test_tracking_off_deletes_that_account_and_rejects_unknown_values(tmp_path):
+    bot = fixture_bot(tmp_path)
+    deleted = []
+
+    async def delete_author_content(author_id):
+        deleted.append(author_id)
+        return {"messages": 1, "facts": 0, "profiles": 0}
+
+    bot.memory = SimpleNamespace(delete_author_content=delete_author_content)
+    result = run(ConfigureTool(bot), message(), setting="tracking", value="off", user_id="200")
+    assert result["saved"]
+    assert deleted == ["100"]
+    assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
+    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "on"
+    assert "error" in run(ConfigureTool(bot), message(), setting="tracking", value="maybe")
+    assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
+
+
+def test_tracking_off_keeps_the_opt_out_when_deletion_is_unavailable(tmp_path):
+    bot = fixture_bot(tmp_path)
+    result = run(ConfigureTool(bot), message(), setting="tracking", value="off")
+    assert "could not be deleted" in result["error"]
+    assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
+
+
 def test_language_auto_matches_manual_reset(tmp_path):
     bot = fixture_bot(tmp_path)
     run(ConfigureTool(bot), message(), setting="language", value="Spanish")

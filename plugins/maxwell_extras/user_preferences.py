@@ -18,6 +18,8 @@ _DEFAULTS: dict[str, Any] = {
     "context": 25,
     "language": "",
     "visibility": "public",
+    # on: store this person's message content. off: do not store it.
+    "tracking": "on",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800
@@ -75,9 +77,10 @@ class UserPreferenceStore:
             row = row if isinstance(row, dict) else {}
             defaults = dict(_DEFAULTS)
             if root.get("unavailable"):
-                # Do not publish a reply or read channel context when an
-                # unreadable file prevents us from honoring a saved opt-out.
-                defaults.update(visibility="private", context=0)
+                # Do not publish a reply, read channel context, or store
+                # message content when an unreadable file prevents us from
+                # honoring a saved opt-out.
+                defaults.update(visibility="private", context=0, tracking="off")
             raw_defaults = row.get("defaults")
             if isinstance(raw_defaults, dict):
                 defaults.update(
@@ -174,4 +177,37 @@ class UserPreferenceStore:
             self._write(root)
 
 
-__all__ = ["UserPreferenceStore"]
+def tracks_message_content(store: Any, user_id: Any) -> bool:
+    """False when this person opted out, or their choice cannot be read.
+
+    A missing store keeps the historical default and still stores content.
+    System and bot ids are not personal opt-outs.
+    """
+    uid = str(user_id or "").strip()
+    if not uid.isdigit():
+        return True
+    if store is None:
+        return True
+    try:
+        row = store.get(uid)
+    except Exception:
+        return False
+    defaults = row.get("defaults") if isinstance(row, dict) else None
+    if not isinstance(defaults, dict):
+        return False
+    return str(defaults.get("tracking", "on")) != "off"
+
+
+def bind_message_tracking(bot: Any, store: Any) -> None:
+    """Attach the opt-out check to the live history store, if it has one."""
+    memory = getattr(bot, "memory", None)
+    if memory is None:
+        return
+
+    def allowed(user_id: str, _store: Any = store) -> bool:
+        return tracks_message_content(_store, user_id)
+
+    memory.tracks_message_content = allowed
+
+
+__all__ = ["UserPreferenceStore", "bind_message_tracking", "tracks_message_content"]

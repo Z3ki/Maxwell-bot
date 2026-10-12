@@ -20,7 +20,7 @@ def setup(bot, ctx):
         SendRichMessageTool,
         deliver_due_reminders,
     )
-    from .user_preferences import UserPreferenceStore
+    from .user_preferences import UserPreferenceStore, bind_message_tracking
     from .byok import CredentialVault
 
     store = ReminderStore(ctx.store_path("reminders.json"))
@@ -34,6 +34,7 @@ def setup(bot, ctx):
     # Discord, and teach its webhook transport to preserve embeds/views/files.
     preferences = UserPreferenceStore(ctx.store_path("user_preferences.json"))
     bot._user_preferences = preferences
+    bind_message_tracking(bot, preferences)
     bot._byok_vault = CredentialVault(ctx.store_path("byok.sqlite3"))
     install_user_install_features(bot)
     install_command_suite(bot, preferences)

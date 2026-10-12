@@ -28,6 +28,7 @@ _PERSONAL_DEFAULT_VALUES = {
     "context": {str(count) for count in ui.USER_INSTALL_CONTEXT_COUNTS},
     "visibility": {"private", "public"},
     "language": {"auto", "English", "Spanish"},
+    "tracking": {"on", "off"},
 }
 _PERSONAL_SETTINGS = {
     "mode": ("Response mode", "Choose how Maxwell approaches your requests."),
@@ -38,6 +39,7 @@ _PERSONAL_SETTINGS = {
     "language": ("Language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("AI connection", "Connect your own AI account with an API key."),
+    "tracking": ("Privacy", "Choose whether Maxwell stores your message content."),
 }
 _SERVER_SETTINGS = {
     "channels": ("Response channels", "Limit Maxwell to one channel in this server or allow all channels."),
@@ -68,6 +70,7 @@ _PERSONAL_VALUE_CHOICES = {
         for count in ui.USER_INSTALL_CONTEXT_COUNTS
     ],
     "visibility": [("Public — visible in this channel", "public"), ("Private — only you can see the reply", "private")],
+    "tracking": [("On — save my messages", "on"), ("Off — stop and delete", "off")],
 }
 _CHOICE_HELP = {
     "auto": "Searches when current information is needed.",
@@ -93,6 +96,7 @@ _SETTING_HELP = {
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",
     "byok": "Paste a public HTTPS OpenAI-compatible endpoint, the model ID, and the modalities that model accepts. The key is encrypted. Private hosts are rejected.",
+    "tracking": "On saves your messages and facts stored for your account. Off stops saving them and deletes what is already stored. A request you send is still answered.",
     "channels": "Choose a response channel, or use Allow all channels. The channel picker includes every text channel in this server.",
     "plugins": "Select the optional tools to allow in this server. Reset inherits the existing global and personal choices.",
     "capabilities": "Selected groups are allowed. Unselect a group to disable its tools. Discord permissions still apply.",
@@ -253,7 +257,27 @@ def _friendly_personal_value(key: str, value: Any) -> str:
         return {"private": "Private — only you", "public": "Public — visible in this channel"}.get(text, "Private — only you")
     if key == "language" and text in {"auto", "not set"}:
         return "Automatic"
+    if key == "tracking":
+        return {"on": "On — messages can be saved", "off": "Off — not saved"}.get(text, text)
     return text
+
+
+def _choice_description(key: str, value: str) -> str | None:
+    if key == "language" and value == "auto":
+        return "Follow the conversation language."
+    if key == "tracking" and value == "on":
+        return "Save your messages and facts about you."
+    if key == "tracking" and value == "off":
+        return "Stop saving and delete what is stored for you."
+    return _CHOICE_HELP.get(value)
+
+
+def _privacy_policy_url(bot: Any) -> str:
+    cfg = getattr(bot, "config", None)
+    base = str(getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+    if not base:
+        base = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    return f"{base}/privacy/" if base else ""
 
 
 class _ConfigNavButton(discord.ui.Button):
@@ -295,7 +319,12 @@ class _ConfigValueSelect(discord.ui.Select):
         label = (_PERSONAL_SETTINGS if panel.scope == "personal" else
                  _SERVER_SETTINGS if panel.scope == "server" else _OWNER_SETTINGS).get(self.key, ("Choose an option", ""))[0]
         options = [
-            discord.SelectOption(label=label, value=value, default=value == current, description=("Follow the conversation language." if self.key == "language" and value == "auto" else _CHOICE_HELP.get(value)))
+            discord.SelectOption(
+                label=label,
+                value=value,
+                default=value == current,
+                description=_choice_description(self.key, value),
+            )
             for label, value in choices
         ]
         super().__init__(
@@ -543,8 +572,10 @@ class _OwnerReloadButton(discord.ui.Button):
 
 class _ConfigCloseButton(discord.ui.Button):
     def __init__(self, panel: "_ConfigPanel"):
+        # Row 4 is the personal home's five shortcuts. Discord allows five
+        # components on a row, so Close stays on the top row.
         super().__init__(label="Close", style=discord.ButtonStyle.secondary,
-                         custom_id="maxwell:config:close", row=4)
+                         custom_id="maxwell:config:close", row=0)
         self.panel = panel
 
     @_config_action(thinking=False)
@@ -744,7 +775,13 @@ class _ConfigPanel(discord.ui.View):
             if self.scope == "personal":
                 for row, key in ((1, "language"), (2, "detail"), (3, "visibility")):
                     self.add_item(_ConfigValueSelect(self, _PERSONAL_VALUE_CHOICES[key], key=key, row=row))
-                for key, label in (("style", "Personality"), ("language", "Custom language"), ("replies", "More options"), ("byok", "My AI provider")):
+                for key, label in (
+                    ("style", "Personality"),
+                    ("language", "Custom language"),
+                    ("replies", "More options"),
+                    ("byok", "My AI provider"),
+                    ("tracking", "Privacy"),
+                ):
                     self.add_item(_ConfigNavButton(self, key, label=label, row=4))
                 return
             keys = tuple(
@@ -862,6 +899,8 @@ class _ConfigPanel(discord.ui.View):
             return self.overview()
         if self.scope == "personal" and self.selected_key.startswith("byok"):
             return connections.render(self)
+        if self.scope == "personal" and self.selected_key == "tracking":
+            return self._privacy_screen()
         if self.scope == "personal" and self.selected_key == "replies":
             defaults = self.personal["defaults"]
             lines = [f"**{_PERSONAL_SETTINGS[key][0]}:** {_friendly_personal_value(key, defaults[key])}"
@@ -885,10 +924,11 @@ class _ConfigPanel(discord.ui.View):
             language = discord.utils.escape_markdown(str(defaults.get("language") or "Automatic"))
             visibility = _friendly_personal_value("visibility", defaults.get("visibility"))
             active = discord.utils.escape_markdown(connections.summary(self))
+            storage = _friendly_personal_value("tracking", defaults.get("tracking"))
             return ("## Your personal settings\nPick language, answer length and visibility below — each choice saves immediately.\n\n"
                     f"**Personality:** {style}\n**Language:** {language}\n"
-                    f"**App replies:** {visibility}\n**AI connection:** {active}\n\n"
-                    "Personality and language follow you everywhere. My AI provider is optional and replaces Maxwell's model for your messages. More options covers app tasks, search and recent messages.\n\n" + self.notice)
+                    f"**App replies:** {visibility}\n**Message storage:** {storage}\n**AI connection:** {active}\n\n"
+                    "Personality and language follow you everywhere. Privacy chooses whether your messages are saved. My AI provider is optional. More options covers app tasks, search and recent messages.\n\n" + self.notice)
         if self.scope == "server":
             guild = getattr(self.command_interaction, "guild", None)
             name = discord.utils.escape_markdown(str(getattr(guild, "name", "this server"))[:80])
@@ -900,6 +940,41 @@ class _ConfigPanel(discord.ui.View):
         return ("## Application owner settings\nThese controls affect the entire bot.\n\n"
                 "Open diagnostics, manage global features or reload saved controls. "
                 "Choose a button below. Only configured bot owners have access.")
+
+    def _privacy_screen(self) -> str:
+        current = _friendly_personal_value("tracking", self.personal["defaults"].get("tracking"))
+        policy = _privacy_policy_url(self.bot)
+        policy_line = (
+            f"Privacy policy: {policy}"
+            if policy else
+            "This bot has no privacy-policy link configured. Ask the operator for it."
+        )
+        return (
+            "## Privacy\n"
+            "Choose whether Maxwell stores your message content.\n\n"
+            f"**Message storage:** {current}\n\n"
+            "Off stops saving your messages and deletes the messages and facts already stored for your account. "
+            "A request you send is still answered, and that request is still sent to the AI provider. "
+            "It is not added to saved history afterwards. "
+            "Operator logs, backups, and copies already held by a provider are not erased here.\n\n"
+            f"{policy_line}\n\n{self.notice}"
+        )[:1900]
+
+    async def _forget_stored_content(self) -> str:
+        from conversation_memory import forget_author
+
+        try:
+            await forget_author(getattr(self.bot, "memory", None), self.user_id)
+        except Exception:
+            logger.warning("Could not delete stored message content", exc_info=True)
+            return (
+                "**Saved.** Message storage is off, but stored messages could not be deleted. "
+                "Choose Off again to retry."
+            )
+        return (
+            "**Saved.** Message storage is off. Messages and facts stored for your account were deleted. "
+            "A request you send is still answered and is not kept afterwards."
+        )
 
     @_config_action()
     async def set_choice(self, interaction: Any, value: str, *, key: str | None = None) -> None:
@@ -917,6 +992,14 @@ class _ConfigPanel(discord.ui.View):
                 stored: Any = int(value) if key == "context" else value
                 await asyncio.to_thread(self.store.set_default, self.user_id, key, stored)
             await self._refresh_personal()
+            if key == "tracking" and value == "off":
+                self.notice = await self._forget_stored_content()
+                self._build()
+                await _edit_panel(interaction,
+                    content=None, embed=self.embed(), view=self,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
         elif key == "moderation":
             if value not in {"on", "off"}:
                 await _send(interaction, "That setting value is unavailable.")
@@ -1004,6 +1087,11 @@ class _ConfigPanel(discord.ui.View):
             return
         if self.selected_key == "overview":
             return
+        tracking_was_off = (
+            self.scope == "personal"
+            and self.selected_key == "tracking"
+            and str(self.personal["defaults"].get("tracking")) == "off"
+        )
         if self.scope == "personal":
             if self.selected_key == "style":
                 await asyncio.to_thread(self.store.set_personality, self.user_id, "")
@@ -1050,7 +1138,11 @@ class _ConfigPanel(discord.ui.View):
             await self._save_server_flag(self.selected_key, "default" if self.selected_key == "progress" else False)
         if self.scope == "personal":
             await self._refresh_personal()
-        self.notice = "**Reset.** The default is restored."
+        self.notice = (
+            "**Reset.** Message storage is on again. Messages deleted earlier stay deleted."
+            if tracking_was_off else
+            "**Reset.** The default is restored."
+        )
         self._build()
         await _edit_panel(interaction,
             content=None, embed=self.embed(), view=self,

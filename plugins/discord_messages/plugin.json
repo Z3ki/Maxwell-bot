@@ -27,6 +27,20 @@
       "requires_admin": false
     },
     {
+      "name": "list_expressions",
+      "returns_result": true,
+      "ends_turn": false,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
+      "name": "send_gif",
+      "returns_result": false,
+      "ends_turn": true,
+      "is_destructive": false,
+      "requires_admin": false
+    },
+    {
       "name": "edit_message",
       "returns_result": true,
       "ends_turn": false,

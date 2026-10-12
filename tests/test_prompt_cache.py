@@ -285,13 +285,18 @@ def test_short_turn_and_guild_asset_changes_preserve_system_and_history():
     bot._guild_stickers = {"9": {"hello": "456"}}
     bot._GRID_MAX_EMOJIS, bot._GRID_MAX_STICKERS = 48, 12
     message = _message()
-    message.guild = SimpleNamespace(id=9, name="test")
+    message.guild = SimpleNamespace(
+        id=9, name="test", emojis=[SimpleNamespace(name="wave")],
+        stickers=[SimpleNamespace(name="hello")],
+    )
 
     async def run():
         short = await MaxwellBot._build_messages(bot, message, "hi")
         long = await MaxwellBot._build_messages(bot, message, "Describe the conversation. " * 5)
         bot._guild_emojis["9"] = {"new_emoji": "124"}
         bot._guild_stickers["9"] = {"new_sticker": "457"}
+        message.guild.emojis = [SimpleNamespace(name="new_emoji")]
+        message.guild.stickers = [SimpleNamespace(name="new_sticker")]
         changed = await MaxwellBot._build_messages(bot, message, "Describe the conversation. " * 5)
         return short, long, changed
 

@@ -59,6 +59,16 @@ def test_user_preferences_are_isolated_and_resettable(tmp_path):
     assert reset["personality"] == ""
 
 
+def test_unreadable_preferences_turn_message_storage_off(tmp_path):
+    path = tmp_path / "prefs.json"
+    path.write_text("{", encoding="utf-8")
+    store = UserPreferenceStore(path)
+    defaults = store.get("100")["defaults"]
+    assert defaults["tracking"] == "off"
+    assert defaults["visibility"] == "private"
+    assert defaults["context"] == 0
+
+
 def test_personality_has_a_bounded_size(tmp_path):
     store = UserPreferenceStore(tmp_path / "user_preferences.json")
     try:
@@ -515,13 +525,124 @@ def test_config_home_offers_direct_controls_and_compact_embed(tmp_path):
     interaction = SimpleNamespace(user=SimpleNamespace(id=100))
     panel = command_suite._ConfigPanel(SimpleNamespace(), store, interaction)
     assert {child.label for child in panel.children if isinstance(child, command_suite._ConfigNavButton)} == {
-        "Personality", "Custom language", "More options", "My AI provider"
+        "Personality", "Custom language", "More options", "My AI provider", "Privacy"
     }
     assert {child.key for child in panel.children if isinstance(child, command_suite._ConfigValueSelect)} == {"language", "detail", "visibility"}
+    rows = {}
+    for child in panel.children:
+        rows.setdefault(getattr(child, "row", 0), 0)
+        rows[getattr(child, "row", 0)] += 1
+    assert max(rows.values()) <= 5
     assert panel.embed().title == "Your personal settings"
     assert "Be brief and friendly." in panel.embed().description
     assert "Spanish" in panel.embed().description
+    assert "Message storage" in panel.embed().description
     assert len(panel.embed().description) < 700
+
+
+def test_privacy_opt_out_deletes_stored_content_and_blocks_later_writes(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAXWELL_PUBLIC_BASE_URL", raising=False)
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    deleted = []
+
+    class Memory:
+        async def delete_author_content(self, author_id):
+            deleted.append(author_id)
+            return {"messages": 2, "facts": 1, "profiles": 1}
+
+        async def add_to_channel_memory(self, channel_id, row):
+            self.rows.append((channel_id, row))
+
+        rows = []
+
+    memory = Memory()
+    bot = SimpleNamespace(_user_preferences=store, memory=memory, _control={})
+    bot._mem_kwargs = lambda message: MaxwellBot._mem_kwargs(bot, message)
+    bot._message_content_may_be_stored = (
+        lambda message, row: MaxwellBot._message_content_may_be_stored(bot, message, row)
+    )
+    bot._reply_parent = lambda message: MaxwellBot._reply_parent(bot, message)
+
+    async def observe(message, enriched):
+        await MaxwellBot._observe_message_author(bot, message, enriched)
+
+    bot._observe_message_author = observe
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100, bot=False))
+    edits = []
+
+    class Response:
+        async def edit_message(self, **payload):
+            edits.append(payload)
+
+    interaction.response = Response()
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    panel.selected_key = "tracking"
+    panel._build()
+    assert "still answered" in panel.render()
+    assert "maxwell.z3ki.dev" not in panel.render()
+    asyncio.run(panel.set_choice(interaction, "off"))
+    assert store.get("100")["defaults"]["tracking"] == "off"
+    assert deleted == ["100"]
+    assert "were deleted" in panel.notice
+    message = SimpleNamespace(
+        author=SimpleNamespace(id=100, bot=False, display_name="Ada"),
+        guild=None,
+        channel=SimpleNamespace(id=7, name="general"),
+    )
+    asyncio.run(MaxwellBot.add_message_to_memory(
+        bot, "7", {"content": "secret", "author_id": "100", "author": "Ada"}, message,
+    ))
+    assert memory.rows == []
+    tool_message = SimpleNamespace(
+        author=SimpleNamespace(id=100, bot=False, display_name="Ada"),
+        guild=None,
+        channel=SimpleNamespace(id=7, name="general"),
+    )
+    asyncio.run(MaxwellBot.add_message_to_memory(
+        bot, "7", {"author": "Tool", "content": "Called echo with secret", "is_tool": True}, tool_message,
+    ))
+    assert memory.rows == []
+    other = SimpleNamespace(
+        author=SimpleNamespace(id=200, bot=False, display_name="Bea"),
+        guild=None,
+        channel=SimpleNamespace(id=7, name="general"),
+    )
+    asyncio.run(MaxwellBot.add_message_to_memory(
+        bot, "7", {"content": "hello", "author_id": "200", "author": "Bea"}, other,
+    ))
+    assert memory.rows[0][1]["author_id"] == "200"
+    reply = SimpleNamespace(
+        author=SimpleNamespace(id=999, bot=True, display_name="Maxwell"),
+        guild=None,
+        channel=SimpleNamespace(id=7, name="general"),
+        reference=SimpleNamespace(
+            message_id=1,
+            resolved=SimpleNamespace(author=SimpleNamespace(id=100, bot=False)),
+        ),
+    )
+    asyncio.run(MaxwellBot.add_message_to_memory(
+        bot, "7",
+        {"content": "reply", "author_id": "999", "author_is_bot": True, "author": "Maxwell"},
+        reply,
+    ))
+    assert [row[1]["author_id"] for row in memory.rows] == ["200"]
+    asyncio.run(panel.reset(interaction))
+    assert store.get("100")["defaults"]["tracking"] == "on"
+    assert "stay deleted" in panel.notice
+    assert deleted == ["100"]
+
+
+def test_privacy_screen_uses_the_configured_policy_link(tmp_path):
+    store = UserPreferenceStore(tmp_path / "prefs.json")
+    bot = SimpleNamespace(
+        config=SimpleNamespace(MAXWELL_PUBLIC_BASE_URL="https://maxwell.example"),
+        _user_preferences=store,
+    )
+    interaction = SimpleNamespace(user=SimpleNamespace(id=100))
+    panel = command_suite._ConfigPanel(bot, store, interaction)
+    panel.selected_key = "tracking"
+    panel._build()
+    assert "https://maxwell.example/privacy/" in panel.render()
 
 
 def test_personality_screen_saves_and_refreshes_without_breaking_cancel(tmp_path):

@@ -100,7 +100,7 @@ Blank IDs do not grant implicit ownership.
 
 ## Discord slash commands
 
-`/config` opens a private settings home with four buttons:
+`/config` opens a private settings home with five buttons:
 
 - **Personality**: edit the style of your replies or restore the default.
 - **Language**: choose Automatic, English, Spanish, or enter another language.
@@ -108,6 +108,9 @@ Blank IDs do not grant implicit ownership.
   response mode, web research or recent-message settings as needed.
 - **AI connection**: optionally connect a personal provider with an API key;
   see [BYOK.md](BYOK.md) for setup and advanced controls.
+- **Privacy**: choose whether your message content is stored. Off stops new
+  saves and deletes messages and facts already stored for your Discord account.
+  A request you send is still answered and is still sent to the AI provider.
 
 Personal style and language follow you across channels, servers and DMs. App
 request defaults apply to `/maxwell` and message actions, and explicit command
