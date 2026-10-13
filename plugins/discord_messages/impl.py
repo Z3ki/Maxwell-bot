@@ -115,6 +115,182 @@ class ListExpressionsTool(Tool):
         return "\n".join(lines) or "No matching expressions available here."
 
 
+_GIF_LIMIT = 8_000_000
+_NEKOS_AGENT = "Maxwell (https://maxwell.z3ki.dev)"
+_NEKOS_CATEGORIES = frozenset(
+    {
+        "angry", "baka", "bite", "bleh", "blowkiss", "blush", "bonk", "bored",
+        "carry", "clap", "confused", "cry", "cuddle", "dance", "facepalm", "feed",
+        "handhold", "handshake", "happy", "highfive", "hug", "kabedon", "kick",
+        "kiss", "lappillow", "laugh", "lurk", "nod", "nom", "nope", "nya", "pat",
+        "peck", "poke", "pout", "punch", "run", "salute", "shake", "shoot",
+        "shocked", "shrug", "sip", "slap", "sleep", "smile", "smug", "spin",
+        "stare", "tableflip", "teehee", "think", "thumbsup", "tickle", "wag",
+        "wave", "wink", "yawn", "yeet",
+    }
+)
+_GIF_ALIASES = {
+    "sad": "cry",
+    "crying": "cry",
+    "tears": "cry",
+    "lol": "laugh",
+    "lmao": "laugh",
+    "haha": "laugh",
+    "laughing": "laugh",
+    "hello": "wave",
+    "hi": "wave",
+    "hey": "wave",
+    "bye": "wave",
+    "goodbye": "wave",
+    "waving": "wave",
+    "yes": "thumbsup",
+    "yeah": "thumbsup",
+    "yep": "thumbsup",
+    "ok": "thumbsup",
+    "okay": "thumbsup",
+    "thumbs up": "thumbsup",
+    "thumbs-up": "thumbsup",
+    "no": "nope",
+    "nah": "nope",
+    "mad": "angry",
+    "rage": "angry",
+    "tired": "sleep",
+    "sleepy": "sleep",
+    "wow": "shocked",
+    "surprised": "shocked",
+    "shock": "shocked",
+    "idk": "shrug",
+    "smh": "facepalm",
+    "love": "hug",
+    "hugs": "hug",
+    "hugging": "hug",
+    "kissing": "kiss",
+    "dancing": "dance",
+    "smiling": "smile",
+    "grin": "smile",
+    "blushing": "blush",
+    "headpat": "pat",
+    "head pat": "pat",
+    "cuddling": "cuddle",
+    "thinking": "think",
+    "high five": "highfive",
+    "high-five": "highfive",
+}
+
+
+def _reaction_category(query: str) -> str:
+    parts = [
+        part
+        for part in "".join(ch.lower() if ch.isalnum() else " " for ch in query).split()
+        if part
+    ]
+    if not parts or len(parts) > 3:
+        return ""
+    for candidate in ("".join(parts), "-".join(parts), " ".join(parts)):
+        mapped = _GIF_ALIASES.get(
+            candidate, candidate if candidate in _NEKOS_CATEGORIES else ""
+        )
+        if mapped in _NEKOS_CATEGORIES:
+            return mapped
+    return ""
+
+
+def _gif_host(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return ""
+    return (parsed.hostname or "").lower().rstrip(".")
+
+
+def _allowed_gif_host(host: str) -> bool:
+    return host in {"nekos.best", "giphy.com"} or host.endswith(
+        (".nekos.best", ".giphy.com")
+    )
+
+
+async def _nekos_gif_url(session, category: str, index: int) -> str:
+    if category not in _NEKOS_CATEGORIES:
+        return ""
+    async with session.get(
+        f"https://nekos.best/api/v2/{category}",
+        params={"amount": 10},
+        headers={"User-Agent": _NEKOS_AGENT, "Accept": "application/json"},
+        timeout=aiohttp.ClientTimeout(total=12),
+        allow_redirects=False,
+    ) as response:
+        if response.status != 200:
+            return ""
+        payload = await response.json()
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or index >= len(results) or not isinstance(results[index], dict):
+        return ""
+    url = str(results[index].get("url") or "")
+    path = url.split("?", 1)[0].lower()
+    if not _allowed_gif_host(_gif_host(url)) or not path.endswith(".gif"):
+        return ""
+    return url
+
+
+async def _giphy_gif_url(session, key: str, query: str, index: int) -> tuple[str, str]:
+    async with session.get(
+        "https://api.giphy.com/v1/gifs/search",
+        params={"api_key": key, "q": query, "limit": 10, "rating": "pg-13"},
+        timeout=aiohttp.ClientTimeout(total=12),
+        allow_redirects=False,
+    ) as response:
+        if response.status != 200:
+            return "", f"Error: GIF search returned HTTP {response.status}; do not retry in this turn"
+        payload = await response.json()
+    results = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or index >= len(results) or not isinstance(results[index], dict):
+        return "", ""
+    images = results[index].get("images") or {}
+    url = ""
+    for name in ("downsized", "fixed_height", "original"):
+        url = str((images.get(name) or {}).get("url") or "")
+        if url:
+            break
+    if not _allowed_gif_host(_gif_host(url)):
+        return "", ""
+    return url, ""
+
+
+async def _download_gif(session, url: str) -> bytes:
+    if not _allowed_gif_host(_gif_host(url)):
+        return b""
+    async with session.get(
+        url,
+        headers={"User-Agent": _NEKOS_AGENT, "Accept": "image/gif"},
+        timeout=aiohttp.ClientTimeout(total=12),
+        allow_redirects=False,
+    ) as response:
+        if response.status != 200:
+            return b""
+        final = _gif_host(str(getattr(response, "url", url) or url))
+        if final and not _allowed_gif_host(final):
+            return b""
+        content = getattr(response, "content", None)
+        if content is not None and hasattr(content, "iter_chunked"):
+            chunks = []
+            total = 0
+            async for chunk in content.iter_chunked(65536):
+                total += len(chunk)
+                if total > _GIF_LIMIT:
+                    return b""
+                chunks.append(chunk)
+            data = b"".join(chunks)
+        else:
+            data = await response.read()
+    if not isinstance(data, (bytes, bytearray)) or len(data) > _GIF_LIMIT:
+        return b""
+    data = bytes(data)
+    if not data.startswith((b"GIF87a", b"GIF89a")):
+        return b""
+    return data
+
+
 class SendGifTool(Tool):
     tool_name = "send_gif"
     returns_result = False
@@ -123,15 +299,19 @@ class SendGifTool(Tool):
 
     def get_description(self):
         return (
-            "Search Giphy and send one relevant reaction/meme GIF in this chat. "
+            "Send one reaction or meme GIF in this chat, with no caption. "
             "Use occasionally when it fits the conversation or when requested. "
-            "query is a short search phrase; index optionally selects a different result (0-9). "
+            "query is a short search phrase. A reaction such as hug, laugh, or wave "
+            "uses the keyless catalog. Other phrases use Giphy when it is configured. "
+            "index optionally selects a different result (0-9). "
             "Success ends the turn; no extra written reply is required."
         )
 
     async def execute(
         self, message: Message, query: str = "", index: int = 0, **kwargs
     ) -> str:
+        import io
+
         from discord_expressions import (
             cannot_send,
             channel_permissions,
@@ -141,42 +321,29 @@ class SendGifTool(Tool):
         key = str(
             getattr(getattr(self.bot, "config", None), "GIPHY_API_KEY", "") or ""
         ).strip()
-        if not key:
-            return "Error: Giphy is not configured; the operator must set GIPHY_API_KEY privately"
         if cannot_send(message, self.bot):
             return "Error: cannot send here; use react or no_response instead"
         query = str(query or "").strip()
         if not query or len(query) > 50:
-            return "Error: Giphy requires a search phrase of 1-50 characters"
+            return "Error: a GIF search phrase must be 1-50 characters"
         if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 9:
             return "Error: index must be 0-9"
         try:
             session = await _get_shared_session()
-            async with session.get(
-                "https://api.giphy.com/v1/gifs/search",
-                params={"api_key": key, "q": query, "limit": 10, "rating": "pg-13"},
-                timeout=aiohttp.ClientTimeout(total=12),
-                allow_redirects=False,
-            ) as response:
-                if response.status != 200:
-                    return f"Error: Giphy returned HTTP {response.status}; do not retry in this turn"
-                payload = await response.json()
-            results = payload.get("data", [])
-            if not results or index >= len(results):
-                return "Error: no matching Giphy GIF; try a different search phrase"
-            item = results[index]
-            url = str(item.get("images", {}).get("original", {}).get("url", ""))
-            from urllib.parse import urlsplit
-
-            parsed = urlsplit(url)
-            host = (parsed.hostname or "").lower()
-            if (
-                parsed.scheme != "https"
-                or not (host == "giphy.com" or host.endswith(".giphy.com"))
-                or parsed.username
-                or parsed.password
-            ):
-                return "Error: Giphy returned an invalid media URL"
+            url = ""
+            category = _reaction_category(query)
+            if category:
+                url = await _nekos_gif_url(session, category, index)
+            notice = ""
+            if not url and key:
+                url, notice = await _giphy_gif_url(session, key, query, index)
+            if notice:
+                return notice
+            if not url:
+                return "Error: no matching GIF; try a different search phrase"
+            perms = channel_permissions(message)
+            file_ok = perms is None or getattr(perms, "attach_files", None) is not False
+            data = await _download_gif(session, url) if file_ok else b""
         except (
             aiohttp.ClientError,
             asyncio.TimeoutError,
@@ -185,18 +352,16 @@ class SendGifTool(Tool):
             AttributeError,
         ):
             # HTTP exceptions include the request URL (and API key). Never expose it.
-            return "Error: Giphy search failed; do not retry in this turn"
-        embed = discord.Embed()
-        embed.set_image(url=url)
-        embed.set_footer(text="Powered By GIPHY")
-        perms = channel_permissions(message)
+            return "Error: GIF search failed; do not retry in this turn"
+        if file_ok and not data:
+            return "Error: GIF could not be downloaded; do not retry in this turn"
         try:
             self._signal_streaming(message)
             args = {"allowed_mentions": discord.AllowedMentions.none()}
-            if getattr(perms, "embed_links", None) is False:
-                args["content"] = f"{url}\nPowered By GIPHY"
+            if data:
+                args["file"] = discord.File(io.BytesIO(data), filename="gif.gif")
             else:
-                args["embed"] = embed
+                args["content"] = url
             sent = await message.channel.send(**args)
         except discord.Forbidden:
             mark_send_unavailable(self.bot, message)
@@ -209,7 +374,7 @@ class SendGifTool(Tool):
         remember = getattr(self.bot, "_remember_sent_message", None)
         if callable(remember):
             try:
-                await remember(message, sent, f"[Giphy GIF] {url}", message.channel)
+                await remember(message, sent, f"[GIF] {url}", message.channel)
             except Exception as exc:
                 logger.warning(
                     "Could not remember delivered GIF (%s)", type(exc).__name__

@@ -24,6 +24,7 @@ from plugins.discord_messages.impl import (
     SendGifTool,
     SendMessageTool,
     NoResponseTool,
+    _download_gif,
 )
 from plugins.maxwell_extras.visible_output_guard import tool_result_is_visible
 from tool_schemas import build_openai_tools
@@ -354,14 +355,141 @@ def test_giphy_is_optional_and_has_a_native_schema():
     bot, _, _ = fixture()
     assert "send_gif" in {t.name for t in setup(bot)}
     bot.config.GIPHY_API_KEY = ""
-    assert "send_gif" not in {t.name for t in setup(bot)}
+    assert "send_gif" in {t.name for t in setup(bot)}
     schema = build_openai_tools({"send_gif": SendGifTool(bot)})[0]["function"]
     assert schema["parameters"]["required"] == ["query"]
 
 
-@pytest.mark.parametrize("embed_links", [True, False])
-def test_giphy_sends_one_gif_and_confirms_delivery(monkeypatch, embed_links):
-    bot, msg, _ = fixture(embed_links=embed_links)
+def _gif_bytes():
+    async def download(session, url):
+        assert url.startswith("https://")
+        return b"GIF89a-fake"
+
+    return download
+
+
+def test_giphy_sends_only_the_gif_file(monkeypatch):
+    bot, msg, _ = fixture()
+    session = Session(Response())
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(return_value=session),
+    )
+    monkeypatch.setattr("plugins.discord_messages.impl._download_gif", _gif_bytes())
+    result = asyncio.run(SendGifTool(bot).execute(msg, query="happy cat"))
+    assert result == "__GIF_SENT__"
+    msg.channel.send.assert_awaited_once()
+    args = msg.channel.send.await_args.kwargs
+    assert "embed" not in args and "content" not in args
+    assert args["file"].filename == "gif.gif"
+    assert args["file"].fp.getvalue().startswith(b"GIF89a")
+    assert "Powered By" not in str(args)
+    assert args["allowed_mentions"].to_dict() == {"parse": []}
+    assert session.calls[0][0] == "https://api.giphy.com/v1/gifs/search"
+    assert session.calls[0][1]["params"]["q"] == "happy cat"
+    assert session.calls[0][1]["params"]["rating"] == "pg-13"
+    bot._record_delivery.assert_awaited_once()
+    assert not _tool_results_need_followup(["Tool send_gif: " + result])
+
+
+def test_reaction_gif_uses_keyless_catalog_and_sends_only_the_file(monkeypatch):
+    bot, msg, _ = fixture()
+    bot.config.GIPHY_API_KEY = ""
+    session = Session(
+        Response(
+            payload={
+                "results": [
+                    {"url": "https://nekos.best/api/v2/hug/abc.gif"},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(return_value=session),
+    )
+    monkeypatch.setattr("plugins.discord_messages.impl._download_gif", _gif_bytes())
+    result = asyncio.run(SendGifTool(bot).execute(msg, query="hug"))
+    assert result == "__GIF_SENT__"
+    args = msg.channel.send.await_args.kwargs
+    assert args["file"].filename == "gif.gif"
+    assert "content" not in args and "embed" not in args
+    assert session.calls[0][0] == "https://nekos.best/api/v2/hug"
+    assert "api_key" not in session.calls[0][1].get("params", {})
+    assert "test-secret" not in str(session.calls)
+    assert session.calls[0][1]["headers"]["User-Agent"].startswith("Maxwell (")
+
+
+def test_unmatched_phrase_without_giphy_key_does_not_send(monkeypatch):
+    bot, msg, _ = fixture()
+    bot.config.GIPHY_API_KEY = ""
+    session = Session(Response())
+    monkeypatch.setattr(
+        "plugins.discord_messages.impl._get_shared_session",
+        AsyncMock(return_value=session),
+    )
+    result = asyncio.run(SendGifTool(bot).execute(msg, query="happy cat"))
+    assert result.startswith("Error:")
+    assert "test-secret" not in result
+    msg.channel.send.assert_not_awaited()
+    assert session.calls == []
+
+
+def test_download_gif_rejects_non_gif_and_other_hosts():
+    class Body:
+        def __init__(self, data):
+            self.data = data
+
+        def iter_chunked(self, _size):
+            data = self.data
+
+            async def chunks():
+                yield data
+
+            return chunks()
+
+    class DownloadResponse:
+        def __init__(self, data, url="https://nekos.best/a.gif"):
+            self.status = 200
+            self.url = url
+            self.content = Body(data)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class OneShot:
+        def __init__(self, response):
+            self.response = response
+
+        def get(self, _url, **_kwargs):
+            return self.response
+
+    rejected = asyncio.run(
+        _download_gif(
+            OneShot(DownloadResponse(b"not-a-gif")),
+            "https://nekos.best/a.gif",
+        )
+    )
+    foreign = asyncio.run(
+        _download_gif(
+            OneShot(DownloadResponse(b"GIF89aok")),
+            "https://evil.test/a.gif",
+        )
+    )
+    accepted = asyncio.run(
+        _download_gif(
+            OneShot(DownloadResponse(b"GIF89aok")),
+            "https://nekos.best/a.gif",
+        )
+    )
+    assert rejected == b"" and foreign == b"" and accepted.startswith(b"GIF89a")
+
+
+def test_attach_denied_sends_the_url_alone(monkeypatch):
+    bot, msg, _ = fixture(attach_files=False)
     session = Session(Response())
     monkeypatch.setattr(
         "plugins.discord_messages.impl._get_shared_session",
@@ -369,18 +497,10 @@ def test_giphy_sends_one_gif_and_confirms_delivery(monkeypatch, embed_links):
     )
     result = asyncio.run(SendGifTool(bot).execute(msg, query="happy cat"))
     assert result == "__GIF_SENT__"
-    msg.channel.send.assert_awaited_once()
     args = msg.channel.send.await_args.kwargs
-    if embed_links:
-        assert args["embed"].image.url.endswith("giphy.gif")
-        assert args["embed"].footer.text == "Powered By GIPHY"
-    else:
-        assert args["content"].endswith("Powered By GIPHY")
-    assert args["allowed_mentions"].to_dict() == {"parse": []}
-    assert session.calls[0][1]["params"]["q"] == "happy cat"
-    assert session.calls[0][1]["params"]["rating"] == "pg-13"
-    bot._record_delivery.assert_awaited_once()
-    assert not _tool_results_need_followup(["Tool send_gif: " + result])
+    assert args["content"] == "https://media.giphy.com/media/test/giphy.gif"
+    assert "file" not in args and "embed" not in args
+    assert "Powered By" not in args["content"]
 
 
 @pytest.mark.parametrize(
@@ -532,6 +652,7 @@ def test_gif_memory_failure_does_not_turn_delivery_into_a_retry(monkeypatch):
         "plugins.discord_messages.impl._get_shared_session",
         AsyncMock(return_value=Session(Response())),
     )
+    monkeypatch.setattr("plugins.discord_messages.impl._download_gif", _gif_bytes())
     assert asyncio.run(SendGifTool(bot).execute(msg, query="cat")) == "__GIF_SENT__"
     msg.channel.send.assert_awaited_once()
 

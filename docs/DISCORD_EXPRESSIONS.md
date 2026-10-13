@@ -6,17 +6,17 @@ Maxwell can answer a casual ping, greeting, joke or thanks with a reaction, GIF 
 
 When Maxwell can read a channel but cannot send, a direct ping receives a mute reaction, or joins an existing Unicode reaction when appropriate, if Discord allows it. Otherwise the request ends silently. This path does not invoke the language model, post typing/progress messages, DM the user, or retry the request. Threads use Send Messages in Threads. Reactions need View Channel and Read Message History; Add Reactions is needed only when creating a new reaction.
 
-## Giphy setup
+## GIF replies
 
-Create a key at https://developers.giphy.com/ and set this privately in the bot's `.env`:
+`send_gif` is always available. The Discord message is the GIF file itself: no caption, embed, or attribution line. A reaction phrase such as hug, laugh, wave, or thumbs up uses the keyless [nekos.best](https://nekos.best/) catalog (200 requests per minute per category, no API key). Other short phrases use Giphy when `GIPHY_API_KEY` is set in `.env`. `index` selects another of the first ten results. Search stays at Giphy's PG-13 ceiling. API failures do not expose the key or claim a GIF was delivered.
 
 ```dotenv
 GIPHY_API_KEY=your_key
 ```
 
-Restart the bot after changing environment configuration. Without a key, `send_gif` is absent from the model's tools. With a key, Maxwell searches for a short phrase and sends one matching GIF with Powered By GIPHY attribution. It can select another of the first ten search results. Search uses Giphy's PG-13 ceiling; provider quotas still apply. No extra Python dependency is needed. API failures do not expose the key or claim a GIF was delivered.
+Restart the bot after changing environment configuration. No extra Python dependency is needed.
 
-Official API reference: https://developers.giphy.com/docs/api/endpoint/search/
+Official references: https://docs.nekos.best/getting-started/api-endpoints.html and https://developers.giphy.com/docs/api/endpoint/search/
 
 ## Emojis and stickers
 
@@ -37,4 +37,4 @@ Official references:
 
 ## Verification
 
-The offline regression suite covers terminal reactions/GIFs, reaction and thread permissions, read-only pings, application emoji scoping, animated expressions, explicit sticker dispatch, periodic refresh/cancellation, optional Giphy registration, Giphy HTTP failures, unsafe URLs, attribution and API-key redaction. Live Giphy delivery and native sticker availability still need a configured key and a Discord test channel.
+The offline regression suite covers terminal reactions/GIFs, reaction and thread permissions, read-only pings, application emoji scoping, animated expressions, explicit sticker dispatch, periodic refresh/cancellation, keyless reaction GIFs, the Giphy fallback, file-only delivery, unsafe URLs, and API-key redaction. Live GIF delivery and native sticker availability still need a Discord test channel.
