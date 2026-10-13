@@ -74,7 +74,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "message_id": _str("Optional message ID in this channel"),
     }, ["emoji"]),
     "list_expressions": _obj({"query": _str("Optional emoji/sticker name filter")}),
-    "send_gif": _obj({"query": _str("Giphy search phrase", minLength=1, maxLength=50), "index": {"type": "integer", "minimum": 0, "maximum": 9}}, ["query"]),
+    "send_gif": _obj({"query": _str("Short GIF search phrase", minLength=1, maxLength=50), "index": {"type": "integer", "minimum": 0, "maximum": 9}}, ["query"]),
     "edit_message": _obj(
         {
             "message_id": _str("Message ID to edit"),
