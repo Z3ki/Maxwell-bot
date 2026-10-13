@@ -31,7 +31,7 @@ class ChessStartTool(Tool):
             f"{name} plays — a mention, Discord user id, or display name. Omit "
             f"it to play the person who asked, or the single @mentioned human "
             f"in the message. One game per channel; only that opponent may "
-            f"move. Posts the starting board image and returns FEN plus the "
+            f"move. Posts the starting board to Discord only; returns FEN and "
             f"annotated legal moves. {name} plays his own moves: if {name} is "
             f"white, this returns the opening position and you pick the first "
             f"move with chess_move. Params: opponent, bot_side (white|black|"
@@ -108,7 +108,7 @@ class ChessStartTool(Tool):
         _chess_clear_misses(game.game_id)
 
         self._signal_streaming(message)
-        cdn_url, local_path, png = await _chess_post_board(self.bot, message, game)
+        posted = await _chess_post_board(self.bot, message, game)
         manager.persist()
         await _chess_record(
             self.bot,
@@ -120,10 +120,7 @@ class ChessStartTool(Tool):
 
         result = _chess_game_result(
             game,
-            posted=True,
-            cdn_url=cdn_url,
-            local_path=local_path,
-            png=png,
+            posted=posted,
             bot_name=name,
         )
         if game.bot_turn and not game.is_over:
@@ -158,8 +155,8 @@ class ChessMoveTool(Tool):
             f"{name}'s move — there is no engine playing for you. The result "
             "lists every legal move annotated with what it captures, whether "
             "it checks or mates, and whether the piece would just be taken; "
-            "read it and pick the best one. Posts the updated board image and "
-            "returns FEN + the new position. Only the chosen opponent may "
+            "read it and pick the best one. Posts the board to Discord only; "
+            "returns text-only FEN + legal moves. Only the chosen opponent may "
             "call it with their move."
         )
 
@@ -255,7 +252,7 @@ class ChessMoveTool(Tool):
 
         manager.persist()
         self._signal_streaming(message)
-        cdn_url, local_path, png = await _chess_post_board(self.bot, message, game)
+        posted = await _chess_post_board(self.bot, message, game)
         manager.persist()
         await _chess_record(
             self.bot,
@@ -266,10 +263,7 @@ class ChessMoveTool(Tool):
         name = _chess_bot_name(self.bot)
         result = _chess_game_result(
             game,
-            posted=True,
-            cdn_url=cdn_url,
-            local_path=local_path,
-            png=png,
+            posted=posted,
             bot_name=name,
         )
         tail = "\n\nPlayed move(s): " + " ".join(played)
@@ -304,7 +298,7 @@ class ChessStateTool(Tool):
 
     def get_description(self):
         return (
-            "Get the current chess board state (text board, FEN, legal moves, "
+            "Get the current chess position (FEN, legal moves, last move, "
             "whose move it is) for the active game in this channel. Does NOT "
             "change the board or post an image; use it to re-sync when you lose "
             "track of the position. Only the chosen opponent may call it."
@@ -322,9 +316,8 @@ class ChessStateTool(Tool):
             return f"Error: {exc}"
         except PermissionError as exc:
             return f"Error: {exc}"
-        png = _chess_render_safe(game)
         return _chess_game_result(
-            game, posted=False, png=png, bot_name=_chess_bot_name(self.bot)
+            game, posted=False, bot_name=_chess_bot_name(self.bot)
         )
 
 class ChessResignTool(Tool):
@@ -340,7 +333,7 @@ class ChessResignTool(Tool):
             "End the active chess game in this channel. Pass "
             f"side={name.lower()} to have {name} resign, side=player to record "
             "the player resigning, or leave it default for a mutual end. "
-            "Returns the final board and result. Only the chosen opponent may "
+            "Returns the final FEN and result as text. Only the chosen opponent may "
             "call it."
         )
 
@@ -371,12 +364,10 @@ class ChessResignTool(Tool):
             winner = None
         manager.remove(channel_id)
         final = _chess_state_text(game, bot_name=_chess_bot_name(self.bot))
-        png = _chess_render_safe(game)
         if winner:
             final += f"\nGAME OVER: {winner} wins by resignation."
         else:
             final += "\nGAME OVER: the game was ended."
-        final = _chess_append_image(final, png)
         await _chess_record(self.bot, message, f"chess game ended ({who} resigned).")
         return final + "\n\nGame ended. Use chess_start to begin a new one."
 

@@ -427,7 +427,7 @@ def test_state_text_hands_maxwell_the_full_annotated_move_list():
     assert "Play to win." in text
 
 
-def test_state_text_truncates_only_the_opponents_list():
+def test_state_text_shows_the_opponents_legal_moves():
     import bot_tools
 
     g = cg.ChessGame(
@@ -441,6 +441,37 @@ def test_state_text_truncates_only_the_opponents_list():
     text = bot_tools._chess_state_text(g, bot_name="Uni")
     assert "Legal moves for them (20)" in text
     assert "YOUR LEGAL MOVES" not in text
+
+
+@pytest.mark.parametrize("bot_color", [chess.WHITE, chess.BLACK])
+@pytest.mark.parametrize("fen", [
+    "r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 0 1",  # castles/en passant
+    "7k/P7/8/8/8/8/8/7K w - - 0 1",  # every promotion
+    "3Q4/4Q3/1k4Q1/4Q3/2Q4Q/2K4Q/8/8 w - - 0 1",  # >48 legal moves
+])
+def test_compact_state_has_exact_position_and_every_legal_move(bot_color, fen):
+    import bot_tools
+
+    game = cg.ChessGame(
+        game_id="text", channel_id="c", player_id="p", player_name="Alice",
+        bot_color=bot_color, started_at="",
+    )
+    game.board = chess.Board(fen)
+    legal = game.legal_san
+    text = bot_tools._chess_state_text(game, bot_name="Uni")
+    assert f"FEN: {game.fen}" in text
+    assert f"To move: {game.turn_label}" in text
+    assert "Last move (SAN): none" in text
+    assert cg.board_ascii(game.board) not in text
+    assert "attached image" not in text
+    assert "Move history (SAN):" not in text
+    if game.bot_turn:
+        move_lines = text.split("— play exactly one of these:\n", 1)[1].split("\n\n", 1)[0]
+        shown = [line.strip().split(" (", 1)[0] for line in move_lines.splitlines()]
+    else:
+        shown = text.split(f"Legal moves for them ({len(legal)}): ", 1)[1].split(", ")
+    assert shown == legal
+    assert game.fen == chess.Board(fen).fen()  # annotation must not mutate state
 
 
 def test_state_text_stops_at_the_result_when_the_game_is_over():

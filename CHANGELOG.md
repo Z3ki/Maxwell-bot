@@ -2,6 +2,7 @@
 
 ## Unreleased — 2026-10-08
 
+- Keep chess model context text-only: FEN, last move and legal moves with tactical notes. Show board PNGs only in Discord, render them once per update, and avoid image payloads, duplicate text boards and growing full move histories in tool results.
 - Add a `/config` Privacy choice for message-content storage. Off stops saving that account's messages and deletes stored messages and facts for that Discord user. A live request is still answered and still sent to the AI provider.
 - Add optional Giphy GIF replies, reaction-only completion and read-only-channel ping acknowledgements without forced text or retry loops.
 - Refresh application emojis and official Discord sticker packs every five minutes; handle live server emoji/sticker updates, animated expressions, joins and removals while preserving server isolation.
