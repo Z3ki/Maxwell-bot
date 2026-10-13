@@ -953,7 +953,7 @@ class _ConfigPanel(discord.ui.View):
             "## Privacy\n"
             "Choose whether Maxwell stores your message content.\n\n"
             f"**Message storage:** {current}\n\n"
-            "Off stops saving your messages and deletes the messages and facts already stored for your account. "
+            "Off stops saving your messages and deletes stored messages, Maxwell's replies to you, tool records from those turns, and facts for your account. "
             "A request you send is still answered, and that request is still sent to the AI provider. "
             "It is not added to saved history afterwards. "
             "Operator logs, backups, and copies already held by a provider are not erased here.\n\n"

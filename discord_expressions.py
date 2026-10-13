@@ -113,7 +113,8 @@ def available_stickers(bot, guild) -> dict[str, object]:
 
 
 def extract_stickers(bot, text: str, guild) -> tuple[str, list]:
-    # Explicit markers only: ordinary words such as "hello" must stay text.
+    # Explicit markers only. Bare brackets such as [Help] or [100] stay text
+    # even when an official sticker pack uses that word.
     catalog = available_stickers(bot, guild)
     found = []
 
@@ -129,7 +130,7 @@ def extract_stickers(bot, text: str, guild) -> tuple[str, list]:
         return ""
 
     cleaned = re.sub(
-        r"\[STICKER\s*(?:\(\s*([^)]*?)\s*\)|:\s*([^\]]+)|\s+([^\]]+))\]|\[([^\]]+)\]",
+        r"\[STICKER\s*(?:\(\s*([^)]*?)\s*\)|:\s*([^\]]+)|\s+([^\]]+))\]",
         replace,
         text or "",
         flags=re.IGNORECASE,

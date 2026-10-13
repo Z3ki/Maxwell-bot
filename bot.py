@@ -1626,6 +1626,7 @@ class MaxwellBot(_BotBase):
             subjects.append(str(getattr(author, "id", "") or ""))
         if not row.get("author_is_bot"):
             subjects.append(str(row.get("author_id") or ""))
+        subjects.append(str(row.get("requested_by") or ""))
         if author_is_bot or row.get("author_is_bot"):
             subjects.append(str(row.get("reply_to_author_id") or ""))
             parent_fn = getattr(self, "_reply_parent", None)
@@ -10710,18 +10711,20 @@ class MaxwellBot(_BotBase):
             params_text = json.dumps(mem_params, ensure_ascii=False, sort_keys=True)
         except TypeError:
             params_text = strip_media_payloads(str(mem_params))
-        await self.add_message_to_memory(
-            str(channel_id),
-            {
-                "author": "Tool",
-                "content": f"Called {name} with {params_text} -> {result}",
-                "is_tool": True,
-                "tool_name": name,
-                "tool_params": mem_params,
-                "tool_result": result,
-            },
-            message,
-        )
+        author = getattr(message, "author", None)
+        author_id = str(getattr(author, "id", "") or "")
+        tool_row = {
+            "author": "Tool",
+            "content": f"Called {name} with {params_text} -> {result}",
+            "is_tool": True,
+            "tool_name": name,
+            "tool_params": mem_params,
+            "tool_result": result,
+            "origin_request_id": str(getattr(message, "id", "") or ""),
+        }
+        if author is not None and not getattr(author, "bot", False) and author_id.isdigit():
+            tool_row["requested_by"] = author_id
+        await self.add_message_to_memory(str(channel_id), tool_row, message)
 
     async def _remember_sent_message(self, request, sent, content: str, channel) -> None:
         """Record successful visible chunks once, preserving private app scope."""

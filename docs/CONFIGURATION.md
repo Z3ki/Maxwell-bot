@@ -109,7 +109,7 @@ Blank IDs do not grant implicit ownership.
 - **AI connection**: optionally connect a personal provider with an API key;
   see [BYOK.md](BYOK.md) for setup and advanced controls.
 - **Privacy**: choose whether your message content is stored. Off stops new
-  saves and deletes messages and facts already stored for your Discord account.
+  saves and deletes stored messages, replies to you, tool records from those turns, and facts already stored for your Discord account.
   A request you send is still answered and is still sent to the AI provider.
 
 Personal style and language follow you across channels, servers and DMs. App

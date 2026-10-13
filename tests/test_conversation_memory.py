@@ -64,6 +64,79 @@ def test_opt_out_deletes_one_account_and_blocks_new_rows(tmp_path):
     asyncio.run(scenario())
 
 
+def test_opt_out_deletes_replies_quotes_and_tool_rows(tmp_path):
+    async def scenario():
+        memory = ConversationMemoryManager(str(tmp_path))
+        try:
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "u1", "guild_id": "g", "author_id": "100", "author": "Ada",
+                "content": "my diagnosis is X, what should I do",
+                "timestamp": "2026-10-12T00:00:00+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "tool1", "guild_id": "g", "author": "Tool", "author_id": "",
+                "is_tool": True,
+                "content": 'Called web_search with {"query": "treatment for diagnosis X"} -> ...',
+                "timestamp": "2026-10-12T00:00:01+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "b1", "guild_id": "g", "author_id": "999", "author": "Maxwell",
+                "author_is_bot": True, "reply_to_author_id": "100",
+                "reply_to_content": "my diagnosis is X, what should I do",
+                "content": "Ada, for diagnosis X you should ...",
+                "timestamp": "2026-10-12T00:00:02+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "other", "guild_id": "g", "author_id": "200", "author": "Bea",
+                "content": "unrelated hello",
+                "reply_to_author_id": "100",
+                "reply_to_content": "my diagnosis is X, what should I do",
+                "timestamp": "2026-10-12T00:00:03+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "tool-other", "guild_id": "g", "author": "Tool",
+                "is_tool": True, "content": "Called weather with {}",
+                "timestamp": "2026-10-12T00:00:04+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "tool-named", "guild_id": "g", "author": "Tool",
+                "is_tool": True, "requested_by": "100",
+                "content": "Called later with diagnosis X",
+                "timestamp": "2026-10-12T00:00:05+00:00",
+            })
+            removed = await memory.delete_author_content("100")
+            assert removed["messages"] == 4
+            requester = MemoryRequester("200", "c1", "g", is_admin=True)
+            history = await memory.get_channel_memory("c1", requester=requester)
+            assert [row["message_id"] for row in history] == ["other", "tool-other"]
+            assert all("diagnosis" not in row["content"] for row in history)
+            assert all(not row.get("reply_to_content") for row in history)
+            recalled = await memory.get_relevant_channel_memory(
+                "c1", "diagnosis", requester=requester,
+            )
+            assert recalled == []
+            memory.tracks_message_content = lambda uid: uid != "100"
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "bot-again", "guild_id": "g", "author_id": "999",
+                "author_is_bot": True, "reply_to_author_id": "100",
+                "reply_to_content": "my diagnosis is X, what should I do",
+                "content": "still quoting the diagnosis",
+                "timestamp": "2026-10-12T00:00:06+00:00",
+            })
+            await memory.add_to_channel_memory("c1", {
+                "message_id": "tool-again", "guild_id": "g", "author": "Tool",
+                "is_tool": True, "requested_by": "100",
+                "content": "Called again with diagnosis X",
+                "timestamp": "2026-10-12T00:00:07+00:00",
+            })
+            history = await memory.get_channel_memory("c1", requester=requester)
+            assert [row["message_id"] for row in history] == ["other", "tool-other"]
+        finally:
+            await memory.flush()
+
+    asyncio.run(scenario())
+
+
 def test_history_edits_and_retention_never_cross_guilds_or_channels(tmp_path):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path), max_messages=2)
