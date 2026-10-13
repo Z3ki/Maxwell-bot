@@ -20,6 +20,7 @@ def runtime(tmp_path, monkeypatch):
     manager = chess_game.ChessManager(store_path=str(tmp_path / "games.json"))
     monkeypatch.setattr(impl, "_chess_get_manager", lambda: manager)
     bot = SimpleNamespace(
+        _control={},
         config=SimpleNamespace(DATA_DIR=str(tmp_path), DISABLE_TAINT_GATE=False),
         user=SimpleNamespace(id=999, name="Maxwell"),
         _tool_breaker=ToolCircuitBreaker(failure_threshold=100),
@@ -49,12 +50,95 @@ def runtime(tmp_path, monkeypatch):
             content="let's play chess",
         )
 
-    async def call(msg, name, **params):
+    async def call(msg, name, *, native=False, **params):
+        if native:
+            calls = [{
+                "id": "chess-call",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(params)},
+            }]
+            _, results, images = await MaxwellBot._process_native_tool_calls(
+                bot, msg, "", calls, include_images=True
+            )
+            assert images == []
+            assert bot._last_native_tool_media == []
+            assert len(results) == 1
+            assert bot._last_native_followup_messages[-1]["content"] == results[0]
+            assert "__IMAGE_B64__" not in results[0]
+            assert "Board image URL:" not in results[0]
+            assert "Board image local path:" not in results[0]
+            return results[0]
         return await MaxwellBot._execute_tool_by_name(
             bot, msg, name, params, disabled=set(), compatible=set(bot.tools)
         )
 
     return manager, message, call
+
+
+@pytest.mark.parametrize("bot_side", ["white", "black"])
+def test_native_followups_are_text_only_and_discord_keeps_the_board(
+    runtime, monkeypatch, bot_side
+):
+    manager, message, call = runtime
+    render = impl._chess_render_safe
+    rendered = []
+
+    def track_render(game):
+        rendered.append(game.fen)
+        return render(game)
+
+    monkeypatch.setattr("tooling.helpers._chess_render_safe", track_render)
+
+    async def run():
+        msg = message()
+        result = await call(msg, "chess_start", bot_side=bot_side, native=True)
+        assert "Game started" in result
+        assert f"FEN: {manager.active('10').fen}" in result
+        for san in ("e4", "e5", "Nf3", "Nc6"):
+            result = await call(msg, "chess_move", move=san, native=True)
+            assert f"Played move(s): {san}" in result
+            assert f"FEN: {manager.active('10').fen}" in result
+        assert len(rendered) == 5  # one render per Discord board, not two
+        assert msg.channel.send.await_count == 5
+        for sent in msg.channel.send.await_args_list:
+            file = sent.kwargs["file"]
+            assert file.filename.startswith("chess-")
+            assert file.fp.getvalue().startswith(b"\x89PNG\r\n\x1a\n")
+
+        def no_render(_game):
+            pytest.fail("state/resign/error results must not render a model image")
+
+        monkeypatch.setattr("tooling.helpers._chess_render_safe", no_render)
+        monkeypatch.setattr(impl, "_chess_render_safe", no_render)
+        state = await call(msg, "chess_state", native=True)
+        assert f"FEN: {manager.active('10').fen}" in state
+        assert "Last move (SAN): Nc6" in state
+        assert "Move history (SAN):" not in state
+        assert "Error" in await call(msg, "chess_move", move="e9", native=True)
+        ended = await call(msg, "chess_resign", native=True)
+        assert "GAME OVER" in ended
+        assert "FEN:" in ended
+        assert msg.channel.send.await_count == 5
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["render", "forbidden"])
+def test_failed_discord_board_still_returns_text_position(runtime, monkeypatch, failure):
+    import discord
+
+    manager, message, call = runtime
+    msg = message()
+    if failure == "render":
+        monkeypatch.setattr("tooling.helpers._chess_render_safe", lambda _game: None)
+    else:
+        response = SimpleNamespace(status=403, reason="Forbidden")
+        msg.channel.send.side_effect = discord.Forbidden(response, "Missing Permissions")
+    result = asyncio.run(call(msg, "chess_start", bot_side="white", native=True))
+    assert f"FEN: {manager.active('10').fen}" in result
+    assert "YOUR LEGAL MOVES (20)" in result
+    assert "Board image posted" not in result
+    assert "Game started" in result
 
 
 def test_dispatch_lifecycle_multiple_channels_and_restart(runtime, tmp_path):

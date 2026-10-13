@@ -4284,10 +4284,8 @@ def _find_member_voice(bot, user_id: int, prefer_guild=None):
 #
 # The chess_* tools let this bot play a real game against a chosen player in
 # a channel. Exactly one active game per channel; only that opponent may move.
-# The bot "sees" the board two ways: the tool result carries the board as
-# ASCII + FEN + legal moves, and the posted PNG is returned as base64
-# (__IMAGE_B64__) so the vision path attaches it to the next model turn. The
-# same PNG is posted to the channel so the player sees it too.
+# The model receives only FEN + legal moves and tactical notes. Board PNGs
+# are posted to Discord for the player, never attached to model follow-ups.
 # --------------------------------------------------------------------------- #
 
 _CHESS_MENTION_RE = re.compile(r"<@!?(\d+)>")
@@ -4501,7 +4499,7 @@ def _chess_render_safe(game) -> bytes | None:
 
 
 def _chess_state_text(game, bot_name: str | None = None) -> str:
-    """The board + metadata the model needs to play, as plain text.
+    """Compact position + legal moves for the model, without image payloads.
 
     When it is Maxwell's turn this is his entire view of the position, because
     he now picks the move himself instead of delegating to the search. A bare
@@ -4511,12 +4509,10 @@ def _chess_state_text(game, bot_name: str | None = None) -> str:
     """
     name = str(bot_name or "").strip() or process_name() or "Bot"
     lines: list[str] = []
-    lines.append("CHESS BOARD (text — see attached image for the real board):")
-    lines.append(_chess_board_ascii(game.board))
-    lines.append("")
+    lines.append("CHESS POSITION (FEN; no image needed):")
     lines.append(f"FEN: {game.fen}")
-    move_hist = " ".join(game.history_san) or "none"
-    lines.append(f"Move history (SAN): {move_hist}")
+    last_move = game.history_san[-1] if game.history_san else "none"
+    lines.append(f"Last move (SAN): {last_move}")
     lines.append(
         f"{name}={_chess_color_name(game.bot_color)} · "
         f"{game.player_name}={_chess_color_name(game.player_color)}"
@@ -4560,17 +4556,13 @@ def _chess_state_text(game, bot_name: str | None = None) -> str:
         )
     else:
         legal = game.legal_san
-        shown = ", ".join(legal[:48])
-        if len(legal) > 48:
-            shown += f" … (+{len(legal) - 48} more)"
-        lines.append(f"Legal moves for them ({len(legal)}): {shown}")
+        lines.append(f"Legal moves for them ({len(legal)}): {', '.join(legal)}")
     return "\n".join(lines)
 
 
-def _chess_save_png(bot, game) -> str | None:
+def _chess_save_png(bot, game, png: bytes) -> str | None:
     """Best-effort write of the board PNG to data/exports/chess for reuse."""
     try:
-        png = _chess_render_safe(game)
         if not png:
             return None
         data_dir = os.path.abspath(
@@ -4587,18 +4579,16 @@ def _chess_save_png(bot, game) -> str | None:
         return None
 
 
-async def _chess_post_board(bot, message, game) -> tuple[str, str, bytes | None]:
-    """Render, send the PNG to the channel, return ``(cdn_url, local_path, png)``."""
+async def _chess_post_board(bot, message, game) -> bool:
+    """Render once and post the player's board; return whether it was sent."""
     png = _chess_render_safe(game)
-    local_path = _chess_save_png(bot, game)
-    cdn_url = ""
     if not png:
-        return cdn_url, local_path, None
+        return False
+    _chess_save_png(bot, game, png)
     try:
         file = File(BytesIO(png), filename=f"chess-{game.game_id}.png")
-        sent = await message.channel.send(file=file)
-        if sent is not None and getattr(sent, "attachments", None):
-            cdn_url = sent.attachments[0].url
+        await message.channel.send(file=file)
+        return True
     except discord.Forbidden:
         logger.warning(
             "Cannot post chess board in %s — missing permissions",
@@ -4606,14 +4596,7 @@ async def _chess_post_board(bot, message, game) -> tuple[str, str, bytes | None]
         )
     except discord.HTTPException as exc:
         logger.warning("Failed to post chess board: %s", exc)
-    return cdn_url, local_path, png
-
-
-def _chess_append_image(result: str, png: bytes) -> str:
-    if not png:
-        return result
-    b64 = base64.b64encode(png).decode("ascii")
-    return result + f"\n__IMAGE_B64__{b64}__END_IMAGE_B64__\n"
+    return False
 
 
 async def _chess_record(bot, message, text: str) -> None:
@@ -4667,23 +4650,12 @@ def _chess_game_result(
     game,
     *,
     posted: bool,
-    cdn_url: str = "",
-    local_path: str = "",
-    png: bytes | None = None,
     bot_name: str | None = None,
 ) -> str:
+    """Text-only model result; board delivery stays in the Discord helper."""
     text = _chess_state_text(game, bot_name=bot_name)
-    extra: list[str] = []
     if posted:
-        extra.append("Board image posted to the channel.")
-    if cdn_url:
-        extra.append(f"Board image URL: {cdn_url}")
-    if local_path:
-        extra.append(f"Board image local path: {local_path}")
-    if extra:
-        text += "\n" + "\n".join(extra)
-    if png:
-        text = _chess_append_image(text, png)
+        text += "\nBoard image posted to the channel."
     return text
 
 
