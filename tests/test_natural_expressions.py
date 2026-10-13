@@ -24,6 +24,7 @@ from plugins.discord_messages.impl import (
     SendGifTool,
     SendMessageTool,
     NoResponseTool,
+    ListExpressionsTool,
     _download_gif,
 )
 from plugins.maxwell_extras.visible_output_guard import tool_result_is_visible
@@ -131,6 +132,87 @@ def test_application_emoji_can_react_without_external_emoji_permission():
         "__REACTION_SENT__"
     )
     msg.add_reaction.assert_awaited_once_with(str(em))
+
+
+@pytest.mark.parametrize("source", ["guild", "application"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "KingMe", ":kingme:", "123456789012345678",
+        "<:KingMe:123456789012345678>",
+        "<a:old_name:123456789012345678>",
+        "old_name:123456789012345678",
+    ],
+)
+def test_animated_reactions_resolve_live_ids_and_names(source, value):
+    bot, msg, _ = fixture(use_external_emojis=False)
+    em = Emoji("KingMe", animated=True)
+    if source == "guild":
+        msg.guild.emojis = [em]
+    else:
+        bot._application_emojis = {"kingme": str(em)}
+    assert asyncio.run(ReactTool(bot).execute(msg, emoji=value)).startswith(
+        "__REACTION_SENT__"
+    )
+    msg.add_reaction.assert_awaited_once_with(str(em))
+
+
+def test_existing_custom_reaction_is_matched_by_id_without_add_reactions():
+    bot, msg, _ = fixture(add_reactions=False)
+    em = Emoji("KingMe", animated=True)
+    msg.guild.emojis = [em]
+    msg.reactions = [
+        SimpleNamespace(emoji=discord.PartialEmoji(name="old_name", id=em.id))
+    ]
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji=":KingMe:"))
+    assert result.startswith("__REACTION_SENT__")
+    msg.add_reaction.assert_awaited_once_with(str(em))
+
+
+def test_application_emoji_remains_selectable_when_local_name_collides():
+    bot, msg, _ = fixture()
+    app = Emoji("KingMe", eid=123456789012345678, animated=True)
+    local = Emoji("KingMe", eid=234567890123456789)
+    bot._application_emojis = {"kingme": str(app)}
+    msg.guild.emojis = [local]
+    assert asyncio.run(ReactTool(bot).execute(msg, emoji=str(app))).startswith(
+        "__REACTION_SENT__"
+    )
+    msg.add_reaction.assert_awaited_once_with(str(app))
+    assert MaxwellBot._render_custom_emojis(bot, str(app), msg.guild) == str(app)
+    assert MaxwellBot._render_custom_emojis(bot, ":KingMe:", msg.guild) == str(local)
+    catalog = asyncio.run(ListExpressionsTool(bot).execute(msg, query="kingme"))
+    assert str(app) in catalog and str(local) in catalog
+
+
+@pytest.mark.parametrize("value", ["234567890123456789", "<a:KingMe:234567890123456789>"])
+def test_unknown_id_cannot_impersonate_a_local_animated_emoji(value):
+    bot, msg, _ = fixture()
+    local = Emoji("KingMe", animated=True)
+    msg.guild.emojis = [local]
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji=value))
+    assert result.startswith("Error:")
+    msg.add_reaction.assert_not_awaited()
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_guild_emoji_availability_and_role_restrictions_still_apply(available):
+    bot, msg, _ = fixture()
+    em = Emoji("KingMe", animated=True, available=available)
+    em.is_usable = lambda: False
+    msg.guild.emojis = [em]
+    result = asyncio.run(ReactTool(bot).execute(msg, emoji=str(em)))
+    assert result.startswith("Error:")
+    msg.add_reaction.assert_not_awaited()
+
+
+def test_animated_grid_uses_webp_for_webp_and_avif_upload_compatibility():
+    bot, msg, _ = fixture()
+    msg.guild.emojis = [Emoji("KingMe", animated=True)]
+    bot._GRID_MAX_EMOJIS, bot._GRID_MAX_STICKERS = 48, 12
+    assert MaxwellBot._grid_entries(bot, msg.guild) == [
+        ("kingme", "https://cdn.discordapp.com/emojis/123456789012345678.webp")
+    ]
 
 
 def test_other_server_emoji_is_rejected_locally():
@@ -559,23 +641,39 @@ def test_send_denial_on_real_slotted_message_can_end_silently():
     assert asyncio.run(NoResponseTool(bot).execute(real)) == "__NO_RESPONSE__"
 
 
-def test_official_sticker_is_dispatched_as_a_native_sticker():
+@pytest.mark.parametrize("source", ["guild", "official"])
+@pytest.mark.parametrize("fmt", list(discord.StickerFormatType))
+@pytest.mark.parametrize("selector", ["King Me", "99"])
+def test_all_sticker_formats_are_dispatched_natively(source, fmt, selector):
     bot, msg, _ = fixture()
     sticker = SimpleNamespace(
-        name="Wumpus hello", id=99, format=discord.StickerFormatType.lottie
+        name="King Me", id=99, format=fmt, available=True
     )
-    bot._standard_stickers = {"wumpus hello": sticker}
+    if source == "guild":
+        msg.guild.stickers = [sticker]
+    else:
+        bot._standard_stickers = {"king me": sticker}
     bot._extract_stickers_from_text = lambda text, guild: extract_stickers(
         bot, text, guild
     )
     result = asyncio.run(
         SendMessageTool(bot).execute(
-            msg, content="[STICKER (Wumpus hello)]", reply=False
+            msg, content=f"[STICKER ({selector})]", reply=False
         )
     )
     assert result.startswith("__MESSAGE_SENT__")
     assert msg.channel.send.await_args.kwargs["stickers"] == [sticker]
     bot._record_delivery.assert_awaited_once()
+    listing = asyncio.run(ListExpressionsTool(bot).execute(msg, query="King Me"))
+    assert f"format={fmt.name}" in listing
+
+
+def test_sticker_id_cannot_select_another_server_or_unavailable_sticker():
+    bot, msg, _ = fixture()
+    msg.guild.stickers = [SimpleNamespace(name="King Me", id=99, available=False)]
+    for selector in ("99", "100", "King Me"):
+        marker = f"[STICKER ({selector})]"
+        assert extract_stickers(bot, marker, msg.guild) == (marker, [])
 
 
 def test_invalid_native_sticker_is_not_retried_in_same_request():

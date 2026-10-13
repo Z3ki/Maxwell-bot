@@ -10,6 +10,20 @@ import discord
 
 logger = logging.getLogger(__name__)
 REFRESH_SECONDS = 300
+EMOJI_MARKUP_RE = re.compile(r"<a?:([A-Za-z0-9_]{2,32}):(\d+)>")
+
+
+def custom_emoji_id(value) -> str | None:
+    """Discord identifies custom reactions by ID, not name or animation flag."""
+    raw = str(value or "").strip()
+    match = EMOJI_MARKUP_RE.fullmatch(raw) or re.fullmatch(
+        r"([A-Za-z0-9_]{2,32}):(\d+)", raw
+    )
+    if match:
+        return match.group(2)
+    if raw.isascii() and raw.isdecimal():
+        return raw
+    return None
 
 
 def social_result_is_terminal(result) -> bool:
@@ -99,6 +113,27 @@ def available_emojis(bot, guild) -> dict[str, str]:
     return result
 
 
+def available_emoji_codes(bot, guild) -> dict[str, str]:
+    # Keep both assets when an application and guild emoji share a name.
+    codes = list((getattr(bot, "_application_emojis", {}) or {}).values())
+    if guild is not None:
+        codes.extend(str(e) for e in getattr(guild, "emojis", ()) if usable(e))
+    return {eid: code for code in codes if (eid := custom_emoji_id(code)) is not None}
+
+
+def resolve_custom_emoji(bot, guild, value) -> str | None:
+    raw = str(value or "").strip()
+    if eid := custom_emoji_id(raw):
+        return available_emoji_codes(bot, guild).get(eid)
+    return available_emojis(bot, guild).get(raw.strip(":").lower())
+
+
+def emoji_image_url(emoji_id: str) -> str:
+    # Discord can serve every upload format as WebP. GIF conversion can fail
+    # for animated WebP/AVIF uploads; a still frame is enough for the grid.
+    return f"https://cdn.discordapp.com/emojis/{emoji_id}.webp"
+
+
 def available_stickers(bot, guild) -> dict[str, object]:
     result = dict(getattr(bot, "_standard_stickers", {}) or {})
     if guild is not None:
@@ -123,6 +158,11 @@ def extract_stickers(bot, text: str, guild) -> tuple[str, list]:
             next(group for group in match.groups() if group is not None).strip().lower()
         )
         sticker = catalog.get(name)
+        if sticker is None and name.isascii() and name.isdecimal():
+            sticker = next(
+                (s for s in catalog.values() if str(getattr(s, "id", "")) == name),
+                None,
+            )
         if sticker is None or len(found) >= 3:
             return match.group(0)
         if sticker not in found:

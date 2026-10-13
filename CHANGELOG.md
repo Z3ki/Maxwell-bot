@@ -2,6 +2,7 @@
 
 ## Unreleased — 2026-10-08
 
+- Resolve animated reactions and message emojis by live Discord ID, preserving renamed emojis and application assets with colliding server names. Accept reaction IDs/API notation, expose animation/sticker formats, support sticker ID markers and verify PNG/APNG/GIF/Lottie native dispatch. Clarify bot animation capabilities without Nitro and use compatible WebP emoji previews.
 - Keep chess model context text-only: FEN, last move and legal moves with tactical notes. Show board PNGs only in Discord, render them once per update, and avoid image payloads, duplicate text boards and growing full move histories in tool results.
 - Only explicit `[STICKER (name)]` markers become stickers. Ordinary brackets such as `[Help]`, `[OK]`, and `[100]` stay in the text.
 - Privacy Off also deletes Maxwell's replies to that account, quoted text stored on those replies, and tool records from that account's turns. Another person's own message stays, without that quote.
