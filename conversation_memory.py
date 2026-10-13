@@ -20,11 +20,81 @@ from uuid import uuid4
 from maxwell_core.memory.scope import MemoryRequester, _decode_metadata, _has_requester
 from media_payloads import sanitize_media_memory
 
-def _delete_author_rows(db, author_id: str) -> dict:
-    """Remove one account's stored messages and facts from an open database.
+def _is_tool_metadata(meta: dict) -> bool:
+    return bool(meta.get("is_tool") or meta.get("tool_name"))
 
-    Other people's rows stay, including quotes of this account inside them.
-    ``user_entities`` is removed only when that older table is present.
+
+def _is_human_author(author_id: str, meta: dict) -> bool:
+    return (
+        str(author_id or "").isdigit()
+        and not meta.get("author_is_bot")
+        and not _is_tool_metadata(meta)
+    )
+
+
+def _opt_out_transcript_plan(rows, uid: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Rows to delete, and other people's rows whose quoted text must be cleared.
+
+    A tool row belongs to this account when it names them or when it sits in
+    their turn: after their message and before the next person speaks.
+    Maxwell's replies to them are removed. Someone else's own message stays,
+    without the verbatim quote of this account.
+    """
+    grouped: dict[tuple[str, str], list[tuple]] = {}
+    for row in rows:
+        row_id, channel_id, guild_id, author_id, _kind, _stamp, _created, raw = row
+        meta = _decode_metadata(raw)
+        grouped.setdefault((str(channel_id or ""), str(guild_id or "")), []).append(
+            (str(row_id), str(author_id or ""), meta)
+        )
+    delete_ids: list[str] = []
+    strips: list[tuple[str, str]] = []
+    for group in grouped.values():
+        user_message_ids = {
+            row_id for row_id, author_id, _meta in group if author_id == uid
+        }
+        involves = bool(user_message_ids) or any(
+            str(meta.get("reply_to_author_id") or "") == uid
+            or str(meta.get("requested_by") or "") == uid
+            or str(meta.get("origin_request_id") or "") in user_message_ids
+            for _row_id, _author_id, meta in group
+        )
+        if not involves:
+            continue
+        last_human = ""
+        for row_id, author_id, meta in group:
+            is_tool = _is_tool_metadata(meta)
+            is_bot = bool(meta.get("author_is_bot"))
+            replied = str(meta.get("reply_to_author_id") or "") == uid
+            requested = str(meta.get("requested_by") or "") == uid
+            from_user_turn = str(meta.get("origin_request_id") or "") in user_message_ids
+            drop = (
+                author_id == uid
+                or requested
+                or from_user_turn
+                or (is_tool and (replied or last_human == uid))
+                or (is_bot and replied)
+            )
+            if drop:
+                delete_ids.append(row_id)
+            elif replied and str(meta.get("reply_to_content") or "").strip():
+                cleaned = dict(meta)
+                cleaned.pop("reply_to_content", None)
+                strips.append((
+                    row_id,
+                    json.dumps(cleaned, ensure_ascii=False, default=str),
+                ))
+            if _is_human_author(author_id, meta):
+                last_human = author_id
+    return list(dict.fromkeys(delete_ids)), strips
+
+
+def _delete_author_rows(db, author_id: str) -> dict:
+    """Remove one account's stored messages, replies, tool rows, and facts.
+
+    Other people's own messages stay. A verbatim quote of this account stored
+    on those messages is cleared. ``user_entities`` is removed only when that
+    older table is present.
     """
     uid = str(author_id or "").strip()
     empty = {"messages": 0, "facts": 0, "profiles": 0}
@@ -32,10 +102,26 @@ def _delete_author_rows(db, author_id: str) -> dict:
         return dict(empty)
     db.execute("BEGIN IMMEDIATE")
     try:
-        messages = db.execute(
-            "DELETE FROM vectors WHERE author_id=? AND kind IN ('message', 'bot_output')",
-            (uid,),
-        ).rowcount
+        rows = db.execute(
+            "SELECT id, channel_id, guild_id, author_id, kind, timestamp, created_at, metadata "
+            "FROM vectors WHERE kind IN ('message', 'bot_output') "
+            "ORDER BY channel_id, guild_id, timestamp, created_at, id"
+        ).fetchall()
+        delete_ids, strips = _opt_out_transcript_plan(rows, uid)
+        messages = 0
+        for start in range(0, len(delete_ids), 400):
+            chunk = delete_ids[start:start + 400]
+            marks = ",".join("?" for _ in chunk)
+            removed = db.execute(
+                f"DELETE FROM vectors WHERE id IN ({marks})",
+                chunk,
+            ).rowcount
+            messages += max(0, int(removed or 0))
+        for row_id, metadata in strips:
+            db.execute(
+                "UPDATE vectors SET metadata=? WHERE id=?",
+                (metadata, row_id),
+            )
         facts = db.execute(
             "DELETE FROM vectors WHERE author_id=? AND kind IN ('entity', 'ltm')",
             (uid,),
@@ -87,8 +173,9 @@ def delete_author_content_file(path, author_id: str) -> dict:
 def _tracking_blocks(memory, message: dict) -> bool:
     """True when this row belongs to someone who opted out of storage.
 
-    A bot row is blocked only when it replies to that person. Another
-    person's own message is kept even if it quotes them.
+    A bot row is blocked when it replies to that person. A tool row is
+    blocked when it records their turn. Another person's own message is
+    kept even if it quotes them.
     """
     checker = getattr(memory, "tracks_message_content", None)
     if not callable(checker):
@@ -101,6 +188,10 @@ def _tracking_blocks(memory, message: dict) -> bool:
         reply_to = str(message.get("reply_to_author_id") or "")
         if reply_to.isdigit():
             subjects.append(reply_to)
+    if message.get("is_tool") or message.get("tool_name"):
+        requested = str(message.get("requested_by") or "")
+        if requested.isdigit():
+            subjects.append(requested)
     for uid in subjects:
         try:
             allowed = checker(uid)

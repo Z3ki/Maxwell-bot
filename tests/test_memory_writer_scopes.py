@@ -53,6 +53,8 @@ def test_generated_history_is_visible_only_in_its_origin_scope(tmp_path, guild_i
                 assert rows[0]["is_tool"] is True
                 assert rows[0]["tool_name"] == "web_search"
                 assert rows[0]["tool_result"] == "3 results"
+                assert rows[0]["requested_by"] == "42"
+                assert rows[0]["origin_request_id"] == "1"
             elif writer == "chess":
                 assert rows[0]["is_tool"] is True
                 assert rows[0]["content"] == "chess move: e4"
