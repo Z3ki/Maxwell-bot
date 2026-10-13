@@ -20,14 +20,15 @@ Official references: https://docs.nekos.best/getting-started/api-endpoints.html 
 
 ## Emojis and stickers
 
-- Current-server emojis, including animated emojis and role-based availability, are read from Discord's live guild objects. Server assets stay scoped to that server.
+- Current-server emojis, including animated emojis and role-based availability, are read from Discord's live guild objects. Bot accounts can send and react with animated emojis without Nitro. Server assets stay scoped to that server.
 - Application emojis uploaded in Discord Developer Portal are available across Maxwell's chats, including DMs. Discord does not require Use External Emojis for application-owned emojis.
-- Official sticker packs, including Wumpus when returned by Discord, are fetched using the official sticker-pack endpoint. Current-server stickers and official stickers are selected with `[STICKER (name)]` in `send_message`. Ordinary words never trigger stickers. Discord controls which native stickers a bot can send; listing a pack is not an entitlement to a Nitro-only sticker.
-- `list_expressions(query=...)` searches the full current catalog when the small prompt preview omits a name. The emoji reference image includes current-server and application emojis plus raster stickers when requested.
+- `react` accepts emoji aliases, IDs, Discord markup (`<a:KingMe:id>`) and API-style `name:id`. IDs resolve to the live name and animation flag, including after a rename. An application emoji sharing a server emoji's name remains selectable by its ID or markup; bare aliases prefer the current server.
+- Official sticker packs, including Wumpus when returned by Discord, are fetched using the official sticker-pack endpoint. Current-server stickers and official stickers are selected with `[STICKER (name)]` or `[STICKER (id)]` in `send_message`. PNG, APNG, GIF and Lottie all go through the native sticker API without a format or Nitro check. Ordinary words never trigger stickers. Discord API refusals are returned as errors and the same refused sticker is not retried within that request.
+- `list_expressions(query=...)` searches the full current catalog and shows animation flags, sticker IDs and formats. The emoji reference image includes current-server and application emojis plus raster stickers when requested. Emoji previews use WebP to support modern WebP/AVIF uploads. Lottie remains selectable and sendable as a native sticker; its vector JSON is not sent to the model as a raster image.
 
 Server joins, leaves and emoji/sticker updates refresh the server catalog immediately. Reconnects rebuild it. Application emojis and official sticker packs refresh on ready and every five minutes without a restart. Successful refreshes replace the old snapshot, so renames and deletions disappear; transient failures retain the last good snapshot and are retried at the next refresh. Only one refresh worker runs, and shutdown cancels it.
 
-Private/user-installed interaction replies use Discord webhooks. They retain their existing private visibility and do not grant permission to react publicly or access another server.
+Private/user-installed interaction replies use Discord webhooks. Native stickers are unavailable through that transport. They retain their existing private visibility and do not grant permission to react publicly or access another server.
 
 Official references:
 

@@ -465,17 +465,23 @@ TOOL_LINE_RE = re.compile(r"(?im)^\s*(?:TOOL|CALL)\s+([A-Za-z_]\w*)\s*[:\-]?\s*"
 TEXT_ATTACHMENT_MAX_BYTES = 512 * 1024
 
 
-def render_custom_emoji_aliases(text: str, emojis: dict[str, str]) -> str:
+def render_custom_emoji_aliases(
+    text: str, emojis: dict[str, str], *, emoji_codes: dict[str, str] | None = None
+) -> str:
     if not text or not emojis:
         return text
 
     # Fix broken AI-generated Discord emojis like <:blow_me:> or <a:catjam:>
     text = re.sub(r"<a?:([A-Za-z0-9_]{2,32}):>", r":\1:", text)
-    # Also recover real Discord emoji markup <:name:12345> the model emits,
-    # mapping by name so the live emoji code is used even if the id is stale.
+    # Prefer a live ID so an app emoji sharing a guild emoji's name stays the
+    # selected asset. Fall back to the alias only when the ID is stale.
+    from discord_expressions import custom_emoji_id
+    codes = emoji_codes if emoji_codes is not None else {
+        eid: code for code in emojis.values() if (eid := custom_emoji_id(code))
+    }
     text = re.sub(
-        r"<a?:([A-Za-z0-9_]{2,32}):\d+>",
-        lambda m: emojis.get(m.group(1).lower()) or m.group(0),
+        r"<a?:([A-Za-z0-9_]{2,32}):(\d+)>",
+        lambda m: codes.get(m.group(2)) or emojis.get(m.group(1).lower()) or m.group(0),
         text,
     )
 
@@ -4351,15 +4357,16 @@ class MaxwellBot(_BotBase):
         return extract_stickers(self, text, guild)
 
     def _render_custom_emojis(self, text: str, guild) -> str:
-        from discord_expressions import available_emojis
+        from discord_expressions import available_emojis, available_emoji_codes
         catalog = available_emojis(self, guild)
+        codes = available_emoji_codes(self, guild)
         # Only current-server or application-owned markup is allowed.
         text = re.sub(
-            r"<a?:([A-Za-z0-9_]{2,32}):\d+>",
-            lambda m: m.group(0) if m.group(0) in catalog.values() else f":{m.group(1)}:",
+            r"<a?:([A-Za-z0-9_]{2,32}):(\d+)>",
+            lambda m: codes.get(m.group(2)) or f":{m.group(1)}:",
             text,
         )
-        return render_custom_emoji_aliases(text, catalog)
+        return render_custom_emoji_aliases(text, catalog, emoji_codes=codes)
 
     def _message_memory_content(self, message) -> str:
         """Render the current Discord payload for transcript storage.
@@ -8051,7 +8058,7 @@ class MaxwellBot(_BotBase):
 
     def _grid_entries(self, guild) -> list[tuple[str, str]]:
         """Current-server, application and official icons; no other guilds."""
-        from discord_expressions import available_emojis, available_stickers
+        from discord_expressions import available_emojis, available_stickers, emoji_image_url
         entries = []
         for name, sticker in sorted(available_stickers(self, guild).items())[:self._GRID_MAX_STICKERS]:
             fmt = getattr(sticker, "format", None)
@@ -8062,8 +8069,7 @@ class MaxwellBot(_BotBase):
         for name, markup in sorted(available_emojis(self, guild).items())[:self._GRID_MAX_EMOJIS]:
             match = re.fullmatch(r"<(a?):[^:]+:(\d+)>", markup)
             if match:
-                ext = "gif" if match.group(1) else "png"
-                entries.append((name, f"https://cdn.discordapp.com/emojis/{match.group(2)}.{ext}"))
+                entries.append((name, emoji_image_url(match.group(2))))
         return entries
 
     async def _emoji_grid_media(self, guild) -> dict | None:

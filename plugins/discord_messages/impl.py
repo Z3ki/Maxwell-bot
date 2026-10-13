@@ -32,7 +32,8 @@ class ReactTool(Tool):
     def get_description(self):
         return (
             "React naturally to the current message, or message_id in this channel. "
-            "Use Unicode, current-server emoji names, or this application's emoji aliases. "
+            "Use Unicode, current-server/application emoji aliases, IDs, or custom markup. "
+            "Animated emojis are supported; no Nitro subscription is needed. "
             "finish defaults true: the reaction is the entire response and ends the turn. "
             "Set finish=false only when a written answer or further work is also needed."
         )
@@ -48,18 +49,18 @@ class ReactTool(Tool):
         raw = str(emoji or "").strip()
         if not raw:
             return "Error: emoji parameter is required"
-        from discord_expressions import available_emojis, channel_permissions
+        from discord_expressions import channel_permissions, custom_emoji_id, resolve_custom_emoji
 
-        catalog = available_emojis(self.bot, getattr(message, "guild", None))
-        full = re.fullmatch(r"<a?:([A-Za-z0-9_]{2,32}):(\d+)>", raw)
+        guild = getattr(message, "guild", None)
+        eid = custom_emoji_id(raw)
         alias = re.fullmatch(r":?([A-Za-z0-9_]{2,32}):?", raw)
-        if full:
-            if raw not in catalog.values():
+        if eid is not None or alias:
+            resolved = resolve_custom_emoji(self.bot, guild, raw)
+            if resolved is None and eid is not None:
                 return "Error: this emoji is not owned by this application or the current server"
-        elif alias:
-            raw = catalog.get(alias.group(1).lower(), "")
-            if not raw:
+            if resolved is None:
                 return "Error: emoji name is unavailable here; use Unicode or list_expressions"
+            raw = resolved
         perms = channel_permissions(message)
         if any(
             getattr(perms, p, None) is False
@@ -75,7 +76,9 @@ class ReactTool(Tool):
             if not callable(getattr(target, "add_reaction", None)):
                 return "Error: cannot react to this message"
             existing = any(
-                str(getattr(r, "emoji", "")) == raw
+                (custom_emoji_id(getattr(r, "emoji", "")) == custom_emoji_id(raw))
+                if custom_emoji_id(raw) is not None
+                else str(getattr(r, "emoji", "")) == raw
                 for r in getattr(target, "reactions", ())
             )
             if getattr(perms, "add_reactions", None) is False and not existing:
@@ -101,17 +104,29 @@ class ListExpressionsTool(Tool):
     side_effects = False
 
     def get_description(self):
-        return "List current-server and application emojis plus official Discord stickers. Optional query filters names. Other servers' assets are excluded."
+        return "List current-server/application emojis and official Discord stickers, including animated formats. Optional query filters names. Other servers' assets are excluded."
 
     async def execute(self, message: Message, query: str = "", **kwargs) -> str:
-        from discord_expressions import available_emojis, available_stickers
+        from discord_expressions import available_emojis, available_emoji_codes, available_stickers
 
         guild = getattr(message, "guild", None)
         needle = str(query or "").strip().lower()
         emojis = available_emojis(self.bot, guild)
         stickers = available_stickers(self.bot, guild)
-        lines = [f"Emoji :{n}: {v}" for n, v in sorted(emojis.items()) if needle in n]
-        lines += [f"Sticker [STICKER ({n})]" for n in sorted(stickers) if needle in n]
+        lines = [
+            f"Emoji :{n}: {v} ({'animated' if v.startswith('<a:') else 'static'})"
+            for n, v in sorted(emojis.items()) if needle in n
+        ]
+        lines += [
+            f"Emoji {v} (application; use markup or ID)"
+            for v in available_emoji_codes(self.bot, guild).values()
+            if v not in emojis.values() and needle in v.lower()
+        ]
+        lines += [
+            f"Sticker [STICKER ({n})] (id={getattr(s, 'id', '')}; "
+            f"format={getattr(getattr(s, 'format', None), 'name', 'unknown')})"
+            for n, s in sorted(stickers.items()) if needle in n
+        ]
         return "\n".join(lines) or "No matching expressions available here."
 
 
@@ -693,6 +708,8 @@ class SendMessageTool(Tool):
             "The first delivered message in a turn may quote-reply. Later calls in that turn, including a later model round, are posted in the channel with no quote-reply. "
             "Do not split a normal informational answer just to create more messages. "
             "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
+            "Current-server/application emojis support animation without Nitro. "
+            "Use [STICKER (name)] or [STICKER (id)] for a listed current-server/official sticker; PNG, APNG, GIF and Lottie are supported as native stickers. "
             "Params: content (required), reply (optional bool, default true — Discord "
             "quote-reply is on; pass false only for a standalone line with no quote), "
             "reply_to (optional short quote or who said it, like nah or alice — not an id). "

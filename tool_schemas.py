@@ -69,7 +69,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["prompt"],
     ),
     "react": _obj({
-        "emoji": _str("Unicode, current-server or application emoji alias"),
+        "emoji": _str("Unicode or current-server/application emoji alias, ID or markup; animated supported"),
         "finish": {"type": "boolean", "default": True, "description": "End with just this reaction; false continues work/reply"},
         "message_id": _str("Optional message ID in this channel"),
     }, ["emoji"]),

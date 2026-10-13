@@ -26,3 +26,9 @@ def test_render_custom_emoji_aliases_fixes_broken_discord_markup():
     )
 
     assert rendered == "broken <:dave:456> and <a:catjam:123>"
+
+
+def test_live_id_restores_animation_and_renamed_emoji():
+    assert render_custom_emoji_aliases(
+        "<:old_name:123>", {"kingme": "<a:KingMe:123>"}
+    ) == "<a:KingMe:123>"
