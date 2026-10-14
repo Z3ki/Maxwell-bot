@@ -31,7 +31,7 @@ jobs:
       - run: ruff check .
       - run: python scripts/check_shell_syntax.py
       - name: Regression tests and shared-core branch coverage
-        run: python -m pytest -v -W error::RuntimeWarning --cov --cov-report=term-missing:skip-covered
+        run: python -u -m pytest -v -W error::RuntimeWarning --cov --cov-report=term-missing:skip-covered
       - name: Benchmark scoped conversation history
         if: matrix.python-version == '3.12'
         run: python scripts/benchmark_conversation_history.py --guilds 100 500 1000 --iterations 10
