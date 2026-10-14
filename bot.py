@@ -44,7 +44,6 @@ from discord_media import (
     resolve_discord_message,
 )
 from message_quota import (
-    FREE_MESSAGE_LIMIT,
     MessageQuota,
     MessageQuotaExceeded,
     enforced_message_limit,
@@ -410,6 +409,22 @@ _SECRET_IN_ERROR_RE = re.compile(
     r"(?i)\b(?:sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,}"
     r"|(?:api[_-]?key|token|password|secret)\s*[=:]\s*\S+)"
 )
+
+
+def _tool_denial_text(name: str, exc: BaseException) -> str:
+    """User-facing text for a denied tool call.
+
+    Authorization-gate refusals start with ``refused:`` and carry safe,
+    actionable causes (bad argument shape, disabled tool, budgets), so the
+    model can correct itself. Any other exception text is masked.
+    """
+    reason = str(exc) if isinstance(exc, PermissionError) else ""
+    if reason.startswith("refused:"):
+        return f"Error: {reason}"
+    text = f"Error - permission denied ({name})"
+    if isinstance(exc, discord.Forbidden):
+        text += "; check Maxwell's Discord permissions in this channel."
+    return text
 
 
 def _format_user_error(exc: BaseException, limit: int = 300) -> str:
@@ -1126,17 +1141,6 @@ class MaxwellBot(_BotBase):
                     enforced_window_seconds(self._control),
                     guild_id=str(getattr(guild, "id", "") or ""),
                 )
-        if provider is None and not kwargs.get("model") and quota_user_id is not None:
-            premium_model = str(
-                getattr(getattr(self, "config", None), "AI_PREMIUM_MODEL", "") or ""
-            ).strip()
-            plan_for = getattr(getattr(self, "_message_quota", None), "plan_for", None)
-            if premium_model and callable(plan_for):
-                try:
-                    if plan_for(str(quota_user_id)) == "premium":
-                        kwargs["model"] = premium_model
-                except Exception:
-                    logger.debug("premium model lookup failed", exc_info=True)
         # This step is working again: any typing that a previous send
         # suspended in this channel comes back only now, so the indicator
         # never trails the last delivered message.
@@ -6477,11 +6481,7 @@ class MaxwellBot(_BotBase):
                 ),
             )
             control["message_quota_limit"] = max(
-                1,
-                min(
-                    _safe_int(control.get("message_quota_limit"), FREE_MESSAGE_LIMIT),
-                    100_000,
-                ),
+                1, min(_safe_int(control.get("message_quota_limit"), 300), 100_000)
             )
             control["message_quota_window_seconds"] = max(
                 60,
@@ -10618,9 +10618,7 @@ class MaxwellBot(_BotBase):
             # Expected access denials are scoped to this request/channel. They
             # must not disable a tool globally or generate owner crash alerts.
             logger.warning("Tool %s denied access (%s)", name, type(e).__name__)
-            result_text = f"Error - permission denied ({name})"
-            if isinstance(e, discord.Forbidden):
-                result_text += "; check Maxwell's Discord permissions in this channel."
+            result_text = _tool_denial_text(name, e)
         except Exception as e:
             logger.error(
                 f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"

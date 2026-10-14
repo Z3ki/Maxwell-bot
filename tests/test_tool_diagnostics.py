@@ -215,3 +215,37 @@ def test_real_tool_failures_still_open_the_circuit_breaker():
         assert bot._tool_breaker.is_open("create_site")
 
     asyncio.run(run())
+
+
+def test_gate_refusal_reasons_surface_but_exception_text_stays_masked():
+    from bot import _tool_denial_text
+
+    assert (
+        _tool_denial_text("create_site", PermissionError("refused: invalid arguments (ValidationError)"))
+        == "Error: refused: invalid arguments (ValidationError)"
+    )
+    assert (
+        _tool_denial_text("create_site", PermissionError("test-only-secret"))
+        == "Error - permission denied (create_site)"
+    )
+    assert "test-only-secret" not in _tool_denial_text(
+        "create_site", PermissionError("test-only-secret")
+    )
+
+
+def test_site_file_params_accept_native_json_shapes():
+    import jsonschema
+
+    from tool_schemas import TOOL_PARAMETERS
+
+    cases = (
+        ("create_site", {"name": "x", "title": "t", "files": {"a.html": "hi"}}),
+        (
+            "create_site",
+            {"name": "x", "title": "t", "files": [{"path": "a", "content": "b"}], "images": ["a.png"]},
+        ),
+        ("edit_site", {"name": "x", "action": "write", "files": {"a.css": "x"}}),
+        ("site_server", {"name": "x", "action": "deploy", "files": {"app.py": "x"}}),
+    )
+    for tool, args in cases:
+        jsonschema.Draft202012Validator(TOOL_PARAMETERS[tool]).validate(args)
