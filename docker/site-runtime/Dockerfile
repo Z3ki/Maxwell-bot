@@ -29,6 +29,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     itsdangerous==2.2.0 \
     # data
     sqlalchemy==2.0.36 \
+    # chess rules (import chess)
+    python-chess==1.999 \
     # outbound + rendering + media
     requests==2.32.3 \
     httpx==0.28.1 \

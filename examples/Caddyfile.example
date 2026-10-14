@@ -49,8 +49,10 @@ maxwell.example.com {
 		file_server
 	}
 
-	# Site backends are public and must precede the static file handler.
-	handle /bot/*/api/* {
+	# Caddy path globs do not cover arbitrarily nested API endpoint segments.
+	# Match the exact API root plus all descendants, before static files.
+	@site_api path_regexp site_api ^/bot/[a-z0-9-]{2,30}/api(?:/.*)?$
+	handle @site_api {
 		reverse_proxy 127.0.0.1:8765
 	}
 	handle_path /bot/* {

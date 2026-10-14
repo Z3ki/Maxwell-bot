@@ -569,7 +569,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "name": _str("Slug of the site this backend belongs to"),
             "action": _str(
                 "list | read | write | replace | deploy | start | stop | restart | "
-                "status | logs | env | rm | delete"
+                "status | logs | env | request | rm | delete"
             ),
             "files": _json_value(
                 'Server source: {"app.py": "...", "helpers.py": "..."} or '
@@ -577,20 +577,38 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "write merges these into the existing source (other files stay). "
                 "deploy replaces the whole snapshot — missing files disappear. "
                 "New apps use Python 3.12 + FastAPI/Uvicorn, one worker, no reload. "
-                "app.py must listen on 0.0.0.0:$PORT. SQLite is available in the "
-                "stdlib; put the database at /data/app.db. Only /data is writable "
+                "app.py must listen on 0.0.0.0:$PORT. Python-chess is baked into "
+                "the shared runtime: import chess for legal moves and game rules "
+                "instead of implementing them yourself. SQLite is available in "
+                "the stdlib; put the database at /data/app.db. Only /data is writable "
                 "and survives a restart. Existing Flask applications are supported. "
-                "Routes are served under /bot/<name>/api/; define routes without "
-                "that prefix. Frontend: apiBase = new URL('/bot/<name>/api/', "
-                "location.origin); fetch(new URL('notes', apiBase)). Endpoint names "
-                "have no leading slash. This works from nested pages too.",
+                "Define local Python routes without the public prefix. Frontend: "
+                "use the exact API mount in this tool's returned contract, including "
+                "any Dev prefix, as apiBase with new URL(mount, location.origin); "
+                "fetch(new URL('notes', apiBase)). Endpoint names have no leading "
+                "slash. This works from nested pages too.",
                 "string", "object", "array",
             ),
             "path": _str(
-                "For read/replace/rm/write-one-file: which server file (default app.py)"
+                "For read/replace/rm/write-one-file: server file (default app.py). "
+                "For request: local endpoint inside this site's published API "
+                "mount (e.g. games or games/123/moves), optional query string. "
+                "Omit for API root; no URLs or traversal."
             ),
             "content": _str(
                 "For write of a single file: the new contents (or use files=)"
+            ),
+            "method": _str(
+                "For request: GET (default), POST, PUT, PATCH, DELETE, HEAD, or OPTIONS. "
+                "Owner/admin only; mutation methods require Public visibility. "
+                "Calls the deployed public API outside the shell sandbox, without "
+                "redirects; returns actual HTTP status and up to 12KB of response body."
+            ),
+            "body": _json_value(
+                "For request: optional JSON request body, native JSON or JSON text. "
+                "Use with POST/PUT/PATCH to verify API writes; do not use shell "
+                "to call the public host.",
+                "string", "object", "array", "number", "boolean", "null",
             ),
             "find": _str("For replace: exact existing text to swap out"),
             "replace": _str("For replace: what to put there"),

@@ -190,6 +190,13 @@ Directed inbound work is journaled in `DATA_DIR/inbound_requests.sqlite3` with l
 
 Relevant controls include `live_turn_timeout_seconds`, `inbound_retry_attempts`, and `inbound_retry_delay_seconds`. Maxwell deliberately avoids blind replay after a tool or Discord send may already have taken effect.
 
+`live_turn_timeout_seconds` bounds the entire turn, not each provider/tool call.
+Its default is 180 seconds even when `ai_timeout_seconds` and
+`tool_iteration_timeout_seconds` are larger. Multi-step site creation and
+verification may need an operator-set budget such as 900 seconds. Keep network
+calls independently bounded; raising the turn budget does not make blocked
+sandbox destinations reachable.
+
 ## Conversation history
 
 `conversation_memory.py` stores scoped recent messages in SQLite without an embedding endpoint, vector search, graph retrieval, local model, or recovery worker. The existing `maxwell_rag.db` filename and schema are retained so upgrades preserve conversation history and archived facts. Archived vectors remain on disk for export and are never loaded into live prompts.

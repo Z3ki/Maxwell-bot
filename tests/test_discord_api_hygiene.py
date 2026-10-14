@@ -3,6 +3,9 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from datetime import datetime, timezone
+
+from plugins.discord_presence import impl as presence_tools
 
 from autonomy import AutonomyEngine
 from bot import MaxwellBot
@@ -24,6 +27,36 @@ def test_change_presence_does_not_write_user_settings_by_default():
     asyncio.run(bot.change_presence(status=None))
     assert "edit_settings" not in seen
     assert seen.get("status") is None
+
+
+def test_set_activity_elapsed_serializes_discord_timestamps(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(presence_tools, "datetime", FixedDatetime)
+    sent = []
+
+    async def push(**kwargs):
+        sent.append(kwargs["activity"])
+
+    bot = SimpleNamespace(change_presence=push)
+    bot._build_activities = lambda: [bot._current_game]
+    tool = presence_tools.SetActivityTool(bot)
+
+    async def run():
+        await tool.execute(
+            SimpleNamespace(), type="playing", text="Chess", elapsed="5m"
+        )
+        expected = int(FixedDatetime.now().timestamp() * 1000) - 300_000
+        activity = sent[0]
+        assert activity.to_dict()["timestamps"] == {"start": expected}
+        assert activity.start == datetime.fromtimestamp(
+            expected / 1000, tz=timezone.utc
+        )
+
+    asyncio.run(run())
 
 
 def test_autonomy_history_defaults_stay_small():
