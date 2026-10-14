@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from utils import controller_id
+
 
 # Root needs a narrow in-guest capability set for package installation,
 # ownership/permission changes, low-port development servers, and controlling
@@ -54,7 +56,9 @@ def shell_tenant(message: Any) -> ShellTenant | None:
         if not channel_id:
             return None
         scope = f"private:{channel_id}"
-    digest = hashlib.sha256(f"{owner}\0{scope}".encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(
+        f"{owner}\0{scope}\0{controller_id()}".encode("utf-8")
+    ).hexdigest()[:24]
     return ShellTenant(
         owner_id=owner,
         scope_id=scope,
@@ -158,6 +162,7 @@ def docker_run_args(
         raise ValueError("invalid trusted sandbox name")
     if network != "maxwell-shell-egress":
         raise ValueError("the required filtered shell egress network is not configured")
+    controller = controller_id()
     return [
         "run", "-d", "--init", "--runtime", runtime,
         "--name", container_name,
@@ -165,6 +170,9 @@ def docker_run_args(
         "--label", "maxwell.shell.managed=true",
         "--label", "maxwell.shell.runtime=runsc",
         "--label", "maxwell.shell.policy=v2",
+        # Ownership: a named controller's cleanup only ever removes its own
+        # guests. The default controller keeps the unlabeled legacy shape.
+        *(["--label", f"maxwell.shell.controller={controller}"] if controller else []),
         "--user", "0:0",
         "--cap-drop", "ALL",
         *[arg for cap in GUEST_CAPABILITIES for arg in ("--cap-add", cap)],
