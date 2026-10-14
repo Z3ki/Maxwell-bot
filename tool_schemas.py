@@ -33,6 +33,12 @@ def _str(desc: str = "", **extra: Any) -> dict[str, Any]:
     return out
 
 
+def _json_value(desc: str, *types: str) -> dict[str, Any]:
+    """A parameter models may send as native JSON or its string encoding."""
+    listed = list(types) if len(types) > 1 else types[0]
+    return {"type": listed, "description": desc}
+
+
 def _bool(desc: str = "") -> dict[str, Any]:
     return {"type": "boolean", "description": desc}
 
@@ -504,11 +510,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "curlable page). Use instead of pasting body. body is not needed "
                 "when url is set."
             ),
-            "files": _str(
-                'Optional extra files as JSON: {"style.css": "...", "app.js": "...", '
-                '"about/index.html": "..."}. Anything a static host serves — split a '
-                "big page up, add subpages, ship a data.json. Paths are relative to "
-                "the site root."
+            "files": _json_value(
+                'Optional extra files: {"style.css": "...", "app.js": "...", '
+                '"about/index.html": "..."} or [{"path": ..., "content": ...}] — '
+                "native JSON or a JSON string. Anything a static host serves — "
+                "split a big page up, add subpages, ship a data.json. Paths are "
+                "relative to the site root.",
+                "string", "object", "array",
             ),
             "backend": _bool(
                 "Optional, default false. Enables only the built-in simple KV API. "
@@ -519,7 +527,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "Skip the auto-expiry clock so the site stays up until deleted"
             ),
             "encoding": _str("text (default) or base64 for exact bytes"),
-            "images": _str("Optional JSON list of local image paths to include"),
+            "images": _json_value(
+                "Optional local image paths to include (a list, or a JSON list)",
+                "string", "array",
+            ),
         },
         ["name", "title"],
     ),
@@ -531,8 +542,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             ),
             "path": _str("File inside the site, default index.html"),
             "content": _str("New file contents for write"),
-            "files": _str(
-                'Optional extra files to write at once: {"style.css": "...", "app.js": "..."}'
+            "files": _json_value(
+                'Optional extra files to write at once: {"style.css": "...", '
+                '"app.js": "..."} or [{"path": ..., "content": ...}] — native JSON '
+                "or a JSON string.",
+                "string", "object", "array",
             ),
             "find": _str("For replace: exact existing text to swap out"),
             "replace": _str("For replace: what to put there (empty string deletes it)"),
@@ -557,8 +571,9 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "list | read | write | replace | deploy | start | stop | restart | "
                 "status | logs | env | rm | delete"
             ),
-            "files": _str(
-                'Server source as JSON: {"app.py": "...", "helpers.py": "..."}. '
+            "files": _json_value(
+                'Server source: {"app.py": "...", "helpers.py": "..."} or '
+                '[{"path": ..., "content": ...}] — native JSON or a JSON string. '
                 "write merges these into the existing source (other files stay). "
                 "deploy replaces the whole snapshot — missing files disappear. "
                 "New apps use Python 3.12 + FastAPI/Uvicorn, one worker, no reload. "
@@ -568,7 +583,8 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "Routes are served under /bot/<name>/api/; define routes without "
                 "that prefix. Frontend: apiBase = new URL('/bot/<name>/api/', "
                 "location.origin); fetch(new URL('notes', apiBase)). Endpoint names "
-                "have no leading slash. This works from nested pages too."
+                "have no leading slash. This works from nested pages too.",
+                "string", "object", "array",
             ),
             "path": _str(
                 "For read/replace/rm/write-one-file: which server file (default app.py)"

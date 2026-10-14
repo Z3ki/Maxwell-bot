@@ -411,6 +411,22 @@ _SECRET_IN_ERROR_RE = re.compile(
 )
 
 
+def _tool_denial_text(name: str, exc: BaseException) -> str:
+    """User-facing text for a denied tool call.
+
+    Authorization-gate refusals start with ``refused:`` and carry safe,
+    actionable causes (bad argument shape, disabled tool, budgets), so the
+    model can correct itself. Any other exception text is masked.
+    """
+    reason = str(exc) if isinstance(exc, PermissionError) else ""
+    if reason.startswith("refused:"):
+        return f"Error: {reason}"
+    text = f"Error - permission denied ({name})"
+    if isinstance(exc, discord.Forbidden):
+        text += "; check Maxwell's Discord permissions in this channel."
+    return text
+
+
 def _format_user_error(exc: BaseException, limit: int = 300) -> str:
     """One redacted line describing `exc`, safe to post in a channel.
 
@@ -10602,9 +10618,7 @@ class MaxwellBot(_BotBase):
             # Expected access denials are scoped to this request/channel. They
             # must not disable a tool globally or generate owner crash alerts.
             logger.warning("Tool %s denied access (%s)", name, type(e).__name__)
-            result_text = f"Error - permission denied ({name})"
-            if isinstance(e, discord.Forbidden):
-                result_text += "; check Maxwell's Discord permissions in this channel."
+            result_text = _tool_denial_text(name, e)
         except Exception as e:
             logger.error(
                 f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
