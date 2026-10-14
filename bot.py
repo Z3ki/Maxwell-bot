@@ -1142,11 +1142,11 @@ class MaxwellBot(_BotBase):
                     enforced_window_seconds(self._control),
                     guild_id=str(getattr(guild, "id", "") or ""),
                 )
-        if provider is None and not kwargs.get("model") and quota_user_id is not None:
+        if provider is None and not kwargs.get("model"):
             premium_model = str(
                 getattr(getattr(self, "config", None), "AI_PREMIUM_MODEL", "") or ""
             ).strip()
-            if premium_model and self._wants_premium_model(str(quota_user_id), message):
+            if premium_model and self._wants_premium_model(str(quota_user_id or ""), message):
                 kwargs["model"] = premium_model
         # This step is working again: any typing that a previous send
         # suspended in this channel comes back only now, so the indicator
@@ -1168,7 +1168,7 @@ class MaxwellBot(_BotBase):
     def _wants_premium_model(self, quota_user_id: str, message) -> bool:
         """Premium-plan grant, or the experimental agentic routing switch."""
         plan_for = getattr(getattr(self, "_message_quota", None), "plan_for", None)
-        if callable(plan_for):
+        if quota_user_id and callable(plan_for):
             try:
                 if plan_for(quota_user_id) == "premium":
                     return True

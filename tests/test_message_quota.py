@@ -263,6 +263,29 @@ def test_experimental_premium_routing_follows_agentic_intent(tmp_path):
     ask("build me a script that archives the logs")
     assert calls == [None]
 
+    # The agentic switch is about request complexity, so it also routes
+    # bot/webhook-authored turns that never get a quota identity.
+    calls.clear()
+    bot._control["experimental_premium_model"] = True
+    bot._message_quota = None
+    message = SimpleNamespace(
+        id=1,
+        author=SimpleNamespace(id=42, bot=True),
+        channel=SimpleNamespace(id=2),
+        guild=SimpleNamespace(id=7),
+        content="build and ship the todo app end to end",
+    )
+    token = _current_inbound.set(message)
+    try:
+        asyncio.run(
+            MaxwellBot._generate_response(
+                bot, [{"role": "user", "content": "build"}], max_tokens=20
+            )
+        )
+    finally:
+        _current_inbound.reset(token)
+    assert calls == ["gemini-3.8-flash"]
+
 
 def test_premium_grant_uses_the_higher_allowance_and_stronger_model(tmp_path):
     ledger = MessageQuota(tmp_path / "messages.sqlite3")
