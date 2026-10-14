@@ -478,7 +478,14 @@ def test_real_database_work_uses_one_off_loop_executor(tmp_path):
         service._load, service._save = load, save
 
         async def heartbeat():
-            for _ in range(20):
+            # Tick until the disk work has landed instead of racing a fixed
+            # budget: slow CI schedulers used to expire the budget before the
+            # one-off executor even started, failing the progress assertions.
+            deadline = asyncio.get_running_loop().time() + 5
+            while len(disk_threads) < 3 and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.005)
+                progress.append(len(disk_threads))
+            for _ in range(5):
                 await asyncio.sleep(0.005)
                 progress.append(len(disk_threads))
 
