@@ -296,7 +296,11 @@ LEAKED_CONTEXT_MARKER_RE = re.compile(
 )
 
 
-TRANSCRIPT_MENTION_RE = re.compile(r"@?[A-Za-z0-9_.\- ]{1,32}?\((\d{17,20})\)")
+TRANSCRIPT_MENTION_RE = re.compile(
+    r"@?[A-Za-z0-9_.\- ]{1,32}?\((\d{17,20})\)"
+    r"|(?P<sticker>\[STICKER\b[^\]\n]*\])",
+    re.IGNORECASE,
+)
 
 
 DOUBLE_WRAPPED_URL_RE = re.compile(r"<<(https?://[^>]+)>>")
@@ -795,7 +799,11 @@ def strip_tool_payload_leaks(text: str) -> str:
     # double/single-wrapped URLs the model emits (<<url>> → url, <url> → url).
     cleaned = DOUBLE_WRAPPED_URL_RE.sub(r"\1", cleaned)
     cleaned = WRAPPED_URL_RE.sub(r"\1", cleaned)
-    cleaned = TRANSCRIPT_MENTION_RE.sub(r"<@\1>", cleaned)
+    # Native sticker directives must reach expression extraction intact,
+    # rather than turning their numeric selectors into transcript mentions.
+    cleaned = TRANSCRIPT_MENTION_RE.sub(
+        lambda match: match.group("sticker") or f"<@{match.group(1)}>", cleaned
+    )
     # After a fenced tool JSON body is stripped, the model often leaves
     # ```json\n\n``` behind. Discord posted that empty fence as the reply.
     cleaned = re.sub(r"(?:```|~~~)[^\n`~]{0,32}\s*(?:```|~~~)", "", cleaned)
