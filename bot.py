@@ -44,6 +44,7 @@ from discord_media import (
     resolve_discord_message,
 )
 from message_quota import (
+    FREE_MESSAGE_LIMIT,
     MessageQuota,
     MessageQuotaExceeded,
     enforced_message_limit,
@@ -1141,6 +1142,17 @@ class MaxwellBot(_BotBase):
                     enforced_window_seconds(self._control),
                     guild_id=str(getattr(guild, "id", "") or ""),
                 )
+        if provider is None and not kwargs.get("model") and quota_user_id is not None:
+            premium_model = str(
+                getattr(getattr(self, "config", None), "AI_PREMIUM_MODEL", "") or ""
+            ).strip()
+            plan_for = getattr(getattr(self, "_message_quota", None), "plan_for", None)
+            if premium_model and callable(plan_for):
+                try:
+                    if plan_for(str(quota_user_id)) == "premium":
+                        kwargs["model"] = premium_model
+                except Exception:
+                    logger.debug("premium model lookup failed", exc_info=True)
         # This step is working again: any typing that a previous send
         # suspended in this channel comes back only now, so the indicator
         # never trails the last delivered message.
@@ -6481,7 +6493,11 @@ class MaxwellBot(_BotBase):
                 ),
             )
             control["message_quota_limit"] = max(
-                1, min(_safe_int(control.get("message_quota_limit"), 300), 100_000)
+                1,
+                min(
+                    _safe_int(control.get("message_quota_limit"), FREE_MESSAGE_LIMIT),
+                    100_000,
+                ),
             )
             control["message_quota_window_seconds"] = max(
                 60,
