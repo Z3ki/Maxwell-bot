@@ -162,6 +162,42 @@ def test_sandbox_naming_and_labels_are_controller_scoped(monkeypatch):
     assert "maxwell.shell.controller=dev" in args
 
 
+def test_missing_controller_label_renders_as_own_not_foreign(monkeypatch):
+    tenant = ShellTenant("7", "guild:9", "mwsh-" + "a" * 24)
+    calls = []
+
+    async def run_docker(cls, *args, timeout=30):
+        calls.append(args)
+        if args[0] == "inspect":
+            # Docker renders a missing label as "<no value>".
+            return (b"true runsc v2 <no value>", b""), 0
+        return (b"", b""), 0
+
+    monkeypatch.delenv("MAXWELL_CONTROLLER_ID", raising=False)
+    monkeypatch.setattr(ShellTool, "_run_docker", classmethod(run_docker))
+    monkeypatch.setattr(ShellTool, "_prepared_tenants", {tenant.container_name})
+    asyncio.run(ShellTool(None)._ensure_container_impl(tenant))
+    assert not any(call[0] in {"rm", "run"} for call in calls)
+
+
+def test_foreign_controller_label_is_never_reused_or_destroyed(monkeypatch):
+    tenant = ShellTenant("7", "guild:9", "mwsh-" + "a" * 24)
+    calls = []
+
+    async def run_docker(cls, *args, timeout=30):
+        calls.append(args)
+        if args[0] == "inspect":
+            return (b"true runsc v2 dev", b""), 0
+        return (b"", b""), 0
+
+    monkeypatch.delenv("MAXWELL_CONTROLLER_ID", raising=False)
+    monkeypatch.setattr(ShellTool, "_run_docker", classmethod(run_docker))
+    monkeypatch.setattr(ShellTool, "_prepared_tenants", {tenant.container_name})
+    with pytest.raises(RuntimeError, match="collision"):
+        asyncio.run(ShellTool(None)._ensure_container_impl(tenant))
+    assert not any(call[0] in {"rm", "run"} for call in calls)
+
+
 def test_command_timeout_destroys_the_tenant_container(monkeypatch):
     tenant = ShellTenant("7", "guild:9", "mwsh-" + "a" * 24)
     tool = ShellTool(None)

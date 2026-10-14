@@ -440,7 +440,11 @@ class ShellTool(Tool):
                 running = (parts[0] if parts else "").lower() == "true"
                 runtime = parts[1] if len(parts) > 1 else ""
                 policy = parts[2] if len(parts) > 2 else ""
-                controller = parts[3] if len(parts) > 3 else ""
+                # Docker renders a missing label as "<no value>"; only a real,
+                # different value means the container belongs to someone else.
+                controller = parts[3].strip() if len(parts) > 3 else ""
+                if controller in {"", "<no value>"}:
+                    controller = ""
                 if controller != controller_id():
                     raise RuntimeError(
                         "sandbox name collision with another controller's container"
