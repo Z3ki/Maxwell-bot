@@ -53,6 +53,13 @@ fi
 [[ -f .env.dev ]] || fail 'Create the isolated .env.dev first (see docs/DEV_DOCKER.md).'
 [[ ${WITH_MUSIC:-0} == 0 || ${WITH_MUSIC:-0} == 1 ]] || fail 'WITH_MUSIC must be 0 or 1.'
 [[ ${LOCAL_AI:-0} == 0 || ${LOCAL_AI:-0} == 1 ]] || fail 'LOCAL_AI must be 0 or 1.'
+# Ambient shell variables override --env-file during Compose interpolation.
+# Scrub every name .env.dev defines so the file's own values always win —
+# only variable NAMES are read here, never values.
+while IFS= read -r key; do
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    unset "$key"
+done < <(sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\?\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' .env.dev)
 COMPOSE=(docker compose --project-name maxwell-dev --env-file .env.dev -f docker-compose.dev.yml)
 if [[ ${WITH_MUSIC:-0} == 1 ]]; then COMPOSE+=(-f docker-compose.dev.music.yml); fi
 if [[ ${LOCAL_AI:-0} == 1 ]]; then COMPOSE+=(--profile local-ai); fi
