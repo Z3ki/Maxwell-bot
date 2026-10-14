@@ -333,3 +333,32 @@ def test_recovery_is_skipped_when_tools_are_disabled():
     bot = _Bot(tools_enabled=False)
     text = "<tool_call>send_message<arg_key>content</arg_key><arg_value>hola</arg_value></tool_call>"
     assert bot._recover_text_tool_calls(text) == ([], text)
+
+
+def test_recovers_namespaced_atem_invoke_blocks():
+    text = (
+        "hola<atem:function_calls>\n"
+        '<atem:invoke name="default.send_message">\n'
+        '<atem:parameter name="content">hola</atem:parameter>\n'
+        '<atem:parameter name="reply">true</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+    (calls, leftover) = _recover(text)
+    assert calls == [("send_message", {"content": "hola", "reply": True})]
+    assert leftover.strip().startswith("hola")
+    assert "<atem:invoke" not in leftover
+
+
+def test_unknown_namespaced_call_is_scrubbed_not_posted():
+    from maxwell_core.transport.output_safety import strip_model_artifact_leaks
+
+    text = (
+        "ok<atem:function_calls>\n"
+        '<atem:invoke name="default.reboot">\n'
+        '<atem:parameter name="target">prod</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+    cleaned = strip_model_artifact_leaks(text)
+    assert "atem:" not in cleaned
+    assert "invoke" not in cleaned
+    assert "parameter" not in cleaned
