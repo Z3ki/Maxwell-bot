@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased — 2026-10-08
+## 0.1.14 — 2026-10-14
 
+Install with `--version v0.1.14`. Release assets include source, installers, checksums and the versioned container image digest.
+
+- Match custom site API roots and arbitrarily nested routes before Caddy's static handler, including Dev routes; prevent working backend endpoints from returning public static-file 404s.
+- Bake pinned python-chess into the trusted shared site runtime and advertise legal-rule support without permitting generated package installs. Existing site containers remain unchanged until explicitly restarted.
+- Add owner/admin-only `site_server(action=request)` for bounded public API verification with fixed HTTP methods and JSON bodies, no redirects or path escapes, and private mutation restrictions; avoid blocked shell HTTP calls.
+- Include the configured public-root prefix in site contracts and frontend guidance so Dev sites target `/dev/bot/.../api/` instead of Main's 404 endpoints.
+- Preserve sticker-bearing final replies after tool progress by using the normal sticker delivery path instead of the text-only placeholder transition (GitHub #73).
+- Fix elapsed playing/watching/listening/competing activities to serialize Discord timestamps in milliseconds instead of calling an unavailable SDK constructor.
 - Resolve animated reactions and message emojis by live Discord ID, preserving renamed emojis and application assets with colliding server names. Accept reaction IDs/API notation, expose animation/sticker formats, support sticker ID markers and verify PNG/APNG/GIF/Lottie native dispatch. Clarify bot animation capabilities without Nitro and use compatible WebP emoji previews.
 - Keep chess model context text-only: FEN, last move and legal moves with tactical notes. Show board PNGs only in Discord, render them once per update, and avoid image payloads, duplicate text boards and growing full move histories in tool results.
 - Only explicit `[STICKER (name)]` markers become stickers. Ordinary brackets such as `[Help]`, `[OK]`, and `[100]` stay in the text.

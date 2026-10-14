@@ -10,6 +10,12 @@ build. Existing registered package lists can be reused unchanged only while
 that site's existing `maxwell-siteimg-<slug>` image remains available; changing
 to `packages=[]` selects the shared image.
 
+The trusted shared toolkit includes **python-chess==1.999** (`import chess`) for
+chess rules, alongside the web, database, authentication and rendering packages
+pinned in `docker/site-runtime/Dockerfile`. Per-site dynamic package installation
+remains forbidden; legacy dependency images are reused unchanged and do not
+automatically gain shared-toolkit additions.
+
 ## Supported host and setup
 
 The supported deployment is Linux Docker Engine with **cgroup v2, systemd cgroup
@@ -34,6 +40,27 @@ after validation, in `/etc/maxwell-sites/resource-pool-ready`. The service remov
 the marker when stopped, follows Docker's service lifecycle and revalidates on
 boot. Rerun setup after changing Docker or slice configuration. A missing shared
 image or failed probe leaves readiness absent with an actionable error.
+
+**Updating the shared toolkit**
+
+After changing the trusted image definition, rebuild its existing tag on the
+Docker host:
+
+```bash
+docker build -t maxwell-site-runtime docker/site-runtime
+```
+
+Rebuilding the tag does **not** change or restart any running site container.
+Only a site's next start/recreation through `site_server.start` or the
+owner/admin `restart` action selects the updated shared image, provided its
+registered packages are empty. A raw `docker restart` keeps the old container
+image. Restart only the intended site; other running sites remain untouched.
+Preserve legacy dependency images and package metadata: those sites continue
+using their existing images unless explicitly migrated to `packages=[]`.
+Reload/redeploy the Maxwell controller when its tool-contract code changes so
+new tool results describe the updated toolkit; this alone does not restart
+site backends. Use the one-site lifecycle command below and verify that site's
+behavior before choosing to migrate any others.
 
 The Maxwell controller requires these read-only host mounts (Linux Compose
 supplies them):
@@ -81,6 +108,31 @@ Use `const apiBase = new URL('/bot/<slug>/api/', location.origin)` and
 `fetch(new URL('notes', apiBase))` in the frontend. This also works from nested
 pages and with HTML `<base>` tags. The built-in KV store at `/api/site/<slug>/kv`
 is separate from custom Python routes.
+The returned route contract includes the configured public-root prefix. On Dev,
+use `/dev/bot/<slug>/api/` and `/dev/api/site/<slug>/kv`, not the corresponding
+Main URLs. Internal backend routes remain `/notes` on both controllers.
+
+The reverse proxy must match the API root and every nested endpoint before
+static files. Use the `path_regexp` matcher in `examples/Caddyfile.example`;
+`/bot/*/api/*` path globs can miss routes such as `/games/<id>/moves`.
+For Dev, match `^/dev/bot/[a-z0-9-]{2,30}/api(?:/.*)?$` and strip `/dev`
+before forwarding to the Dev API.
+
+Verify named routes with `site_server(action="request", name="<slug>",
+path="games/<id>", method="GET")`. To create or change data, pass a fixed HTTP
+method and `body` as native JSON or JSON text. The tool calls only that site's
+public API mount, requires its owner or an admin, does not follow redirects,
+times out after 15 seconds, and returns the actual HTTP status plus at most
+12,000 response-body bytes. Private requests cannot use mutation methods.
+Use this instead of shell HTTP calls: the shell sandbox deliberately cannot
+reach the host's public API. A 404 at `/api/` alone does not prove failure when
+the backend defines only named routes.
+
+For SQLite read-modify-write endpoints, start the write transaction before
+reading state (`BEGIN IMMEDIATE`), then validate and commit atomically; roll back
+on errors and close the connection. Otherwise concurrent requests can both
+report success while one update is lost. Exercise competing moves or joins
+through the public API, not just sequential requests.
 
 Admission is based on actual Docker containers by `maxwell.site` label or
 `maxwell-site-` name, not just `site_servers.json`. Registry locks and a separate

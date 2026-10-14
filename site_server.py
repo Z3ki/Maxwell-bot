@@ -1250,17 +1250,18 @@ if __name__ == "__main__":
 '''
 
 
-def contract(slug: str) -> str:
+def contract(slug: str, *, public_base_url: str = "") -> str:
     """The rules a site backend has to follow, handed back in tool results."""
     return (
         f"Backend server for {slug}:\n"
-        + client_guide(slug) + "\n"
+        + client_guide(slug, public_base_url=public_base_url) + "\n"
         "  One mount   : define each local route once; do not duplicate router prefixes.\n"
         "  Entry       : app.py, listening on 0.0.0.0:$PORT (the runtime sets PORT).\n"
         "  Standard    : Python 3.12 + FastAPI/Uvicorn + stdlib sqlite3; one worker, "
         "no reload, limit_concurrency=32, backlog=64. Flask/waitress remain "
         "installed for existing apps. Also available: websockets, python-multipart, "
-        "sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow. "
+        "sqlalchemy, bcrypt, pyjwt, itsdangerous, requests, httpx, jinja2, pillow, "
+        "python-chess (import chess, shared runtime). "
         "No new extra packages; existing dependency images can be reused unchanged.\n"
         "  WebSockets  : supported end to end — use FastAPI + uvicorn (waitress "
         "cannot do sockets). This is how you build multiplayer, live chat, or "

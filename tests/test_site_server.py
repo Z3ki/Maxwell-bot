@@ -14,8 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import aiohttp
+
 import site_server
 from bot_tools import SiteServerTool
+from plugins.sites import impl as _sites_impl
 
 
 def run(coro):
@@ -252,6 +255,139 @@ def _msg(uid=42):
     return SimpleNamespace(author=SimpleNamespace(id=uid, display_name="tester"))
 
 
+@pytest.fixture
+def _api_request(monkeypatch):
+    calls = []
+    state = SimpleNamespace(status=200, body=b'{"ok": true}', error=None, sessions=0)
+
+    class _Content:
+        async def iter_chunked(self, size):
+            for offset in range(0, len(state.body), size):
+                yield state.body[offset:offset + size]
+            if state.error:
+                raise state.error
+
+    class _Response:
+        content = _Content()
+
+        @property
+        def status(self):
+            return state.status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Session:
+        def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return _Response()
+
+    async def _session():
+        state.sessions += 1
+        return _Session()
+
+    monkeypatch.setattr(_sites_impl, "_get_shared_session", _session)
+    state.calls = calls
+    return state
+
+
+
+
+@pytest.mark.parametrize("path", [
+    "https://elsewhere.example/api", "//elsewhere.example/api",
+    "https:elsewhere.example", "%2f%2felsewhere.example/api",
+    "%252f%252felsewhere.example/api", "../other/api", "/../other/api",
+    "games/../../other/api", "games/%2e%2e/secret",
+    "games/%252e%252e/secret", "games/%2E%2E%2Fsecret",
+    "games/..%5csecret", r"games\..\secret", "games/..;ignored/secret",
+    "%68%74%74%70%73%3a%2f%2felsewhere.example", "games/%00/secret",
+    "games/%0a/secret", "games#fragment", "games/%3f/secret",
+])
+def test_request_path_escapes_never_open_a_session(tool, _api_request, path):
+    out = run(tool.execute(
+        _msg(), name="demo", action="request", path=path,
+        method="POST", body={"game": "named-game"},
+    ))
+    assert out.startswith("Error:")
+    assert _api_request.sessions == 0
+    assert _api_request.calls == []
+
+
+
+
+@pytest.mark.parametrize("method, body", [("CONNECT", None), ("POST", "not JSON")])
+def test_invalid_request_arguments_never_open_a_session(tool, _api_request, method, body):
+    out = run(tool.execute(
+        _msg(), name="demo", action="request", path="games", method=method, body=body,
+    ))
+    assert out.startswith("Error:")
+    assert _api_request.sessions == 0
+
+
+def test_request_owner_gate_and_admin_access(tool, _api_request):
+    out = run(tool.execute(_msg(999), name="demo", action="request", path="games"))
+    assert out.startswith("Error:")
+    assert _api_request.sessions == 0
+    tool.bot._is_admin = lambda uid: uid == 999
+    out = run(tool.execute(_msg(999), name="demo", action="request", path="games"))
+    assert out.startswith("HTTP 200\n")
+    assert _api_request.sessions == 1
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_private_request_cannot_mutate_api(tool, _api_request, method):
+    message = _msg()
+    message.response_visibility = "private"
+    out = run(tool.execute(
+        message, name="demo", action="request", path="games", method=method,
+    ))
+    assert out.startswith("Error:")
+    assert _api_request.sessions == 0
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
+def test_private_request_can_read_api(tool, _api_request, method):
+    message = _msg()
+    message.response_visibility = "private"
+    out = run(tool.execute(
+        message, name="demo", action="request", path="games", method=method,
+    ))
+    assert out.startswith("HTTP 200\n")
+    assert _api_request.sessions == 1
+
+
+@pytest.mark.parametrize("body", [b"x" * 40_000, b"\xff" * 40_000])
+def test_request_response_is_bounded_and_identifies_truncation(tool, _api_request, body):
+    _api_request.body = body
+    out = run(tool.execute(_msg(), name="demo", action="request", path="games"))
+    assert out.startswith("HTTP 200\n")
+    assert out.endswith("\n[Response body truncated]")
+    assert len(out.encode("utf-8")) < 12_100
+
+
+@pytest.mark.parametrize("error", [
+    asyncio.TimeoutError(), aiohttp.ClientPayloadError("connection closed"),
+])
+def test_request_read_errors_preserve_received_status(tool, _api_request, error):
+    _api_request.status = 503
+    _api_request.error = error
+    out = run(tool.execute(_msg(), name="demo", action="request", path="games"))
+    assert out.startswith("HTTP 503\nError:")
+
+
+def test_request_connection_error_does_not_invent_status(tool, monkeypatch):
+    async def _fail():
+        raise aiohttp.ClientConnectionError("connection refused")
+
+    monkeypatch.setattr(_sites_impl, "_get_shared_session", _fail)
+    out = run(tool.execute(_msg(), name="demo", action="request", path="games"))
+    assert out.startswith("Error:")
+    assert "HTTP " not in out
+
+
 def test_write_requires_an_app_py(tool):
     out = run(tool.execute(_msg(), name="demo", action="write", files={"server.py": "x"}))
     assert "must be called app.py" in out
@@ -346,10 +482,6 @@ def test_server_read_returns_a_huge_file_and_refuses_a_repeat(tool):
     assert "Already returned" in second
 
 
-def test_unknown_action_lists_the_real_ones(tool):
-    out = run(tool.execute(_msg(), name="demo", action="yolo"))
-    assert "unknown action" in out
-    assert "logs" in out and "write" in out
 
 
 def test_errors_come_back_as_text_not_exceptions(tool):

@@ -21,6 +21,43 @@ def _private_request(message: Any) -> bool:
     return str(getattr(message, "response_visibility", "public") or "public") == "private"
 
 
+_SITE_API_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+_SITE_API_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_SITE_API_RESPONSE_BYTES = 12_000
+
+
+def _site_api_request_url(base_url: str, slug: str, path: str | None) -> str:
+    """Keep every decoding of the endpoint inside this site's API mount."""
+    endpoint = str(path or "")
+    if any(ord(char) < 32 or ord(char) == 127 for char in endpoint):
+        raise ValueError("path must be a local API endpoint without control characters")
+    parsed = urlparse(endpoint)
+    if parsed.scheme or parsed.netloc or endpoint.startswith("//") or parsed.fragment:
+        raise ValueError("path must be a local API endpoint, not a URL or fragment")
+    route = parsed.path + (";" + parsed.params if parsed.params else "")
+    while True:
+        decoded = unquote(route)
+        parsed_route = urlparse(decoded)
+        if (
+            parsed_route.scheme
+            or parsed_route.netloc
+            or decoded.startswith("//")
+            or any(char in decoded for char in "\\?#")
+            or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+            or any(part.split(";", 1)[0] in {".", ".."} for part in decoded.split("/"))
+        ):
+            raise ValueError("path cannot escape this site's API mount")
+        if decoded == route:
+            break
+        route = decoded
+    url = f"{base_url}/{slug}/api/{quote(route.lstrip('/'), safe='/')}"
+    if parsed.query:
+        url += "?" + parsed.query
+    if not _is_safe_url(url):
+        raise ValueError("the configured public API URL is unsafe")
+    return url
+
+
 class CreateSiteTool(Tool):
     """Publish a website — one page or a whole directory, static or backed."""
     tool_name = 'create_site'
@@ -818,10 +855,11 @@ class SiteServerTool(_SiteOwnedTool):
 
 
     def get_description(self):
+        api_mount = f"{urlparse(self.base_url).path}/<name>/api/"
         return (
             "Run and edit a real backend server for one of your sites — your own "
             "Python, routes, database, and secrets, in a sandboxed container at "
-            "/bot/<name>/api/... "
+            f"{api_mount}... "
             "Use this when the site needs server-side logic: accounts, WebSockets, "
             "a hidden API key, anything a static page cannot enforce. "
             "Keep working on a live backend with these actions instead of recreating it: "
@@ -831,13 +869,18 @@ class SiteServerTool(_SiteOwnedTool):
             "pass path+content for one file or files={...} for several), replace "
             "(exact-text patch in one file, like edit_site), deploy (full snapshot, "
             "missing files disappear), start, stop, restart, status, logs, env, "
+            "request (call your deployed API: path=local endpoint, method=GET by "
+            "default or POST/PUT/PATCH/DELETE/HEAD/OPTIONS, body=native JSON or JSON "
+            "text; returns HTTP status and bounded response body without redirects), "
             "rm (delete a helper file, not app.py), delete (tear the server down). "
+            "Use request to verify API writes; shell cannot reach the public host. "
             "New apps use Python 3.12, FastAPI and Uvicorn with one worker and no "
-            "reload; app.py listens on 0.0.0.0:$PORT. Use SQLite at /data/app.db. "
+            "reload; app.py listens on 0.0.0.0:$PORT. Python-chess is baked in: "
+            "import chess for legal moves and game rules; do not hand-roll them. Use SQLite at /data/app.db. "
             "Only /data is writable and persists. Existing Flask apps remain supported. "
             "Frontend calls resolve endpoint names against the same-origin mount "
-            "/bot/<name>/api/. Define Python routes without that public prefix. "
-            "Use new URL('/bot/<name>/api/', location.origin) as apiBase, then "
+            f"{api_mount}. Define Python routes without that public prefix. "
+            f"Use new URL('{api_mount}', location.origin) as apiBase, then "
             "fetch(new URL('notes', apiBase)); this works on nested pages too. "
             "Secrets belong in env, never frontend files. "
             "Backend source, secrets, and lifecycle are owner/admin-only. "
@@ -860,6 +903,8 @@ class SiteServerTool(_SiteOwnedTool):
         replace_all: Any = None,
         lines: int = 0,
         start_line: Any = None,
+        method: str = "GET",
+        body: Any = None,
         **kwargs,
     ) -> str:
         slug, entry, _site_dir, err = self._resolve(message, name)
@@ -867,16 +912,21 @@ class SiteServerTool(_SiteOwnedTool):
             return err
         if str(entry.get("user_id") or "") != str(message.author.id) and not _caller_is_admin(self.bot, message):
             return "Error: only the site owner or an admin can access its backend."
-        if _private_request(message) and str(action or "status").strip().lower() not in {
-            "list", "ls", "files", "read", "cat", "status", "info", "logs", "log", "tail",
-        }:
+        act = str(action or "status").strip().lower()
+        request_method = str(method or "GET").strip().upper()
+        if _private_request(message) and not (
+            act in {"list", "ls", "files", "read", "cat", "status", "info", "logs", "log", "tail"}
+            or (act == "request" and request_method in _SITE_API_READ_METHODS)
+        ):
             return "Error: choose Public visibility before changing a site backend."
         data_dir = self.bot.config.DATA_DIR
-        act = str(action or "status").strip().lower()
         if act in SITE_MUTATING_ACTIONS:
             site_read_loop_guard(message, key="", label="", action=act)
         all_hits = parse_bool(replace_all if replace_all is not None else all, False)
         try:
+            if act == "request":
+                return await self._request_api(slug, path, request_method, body)
+
             if act in {"write", "update", "patch_file", "code"}:
                 payload = files
                 if not payload and content is not None:
@@ -884,7 +934,7 @@ class SiteServerTool(_SiteOwnedTool):
                 if not payload:
                     return (
                         'Error: write needs files={"app.py": "..."} or '
-                        "path+content for one file.\n" + site_server.contract(slug)
+                        "path+content for one file.\n" + site_server.contract(slug, public_base_url=getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", ""))
                     )
                 parsed = await asyncio.to_thread(site_server.parse_files, payload)
                 for source in parsed.values():
@@ -910,7 +960,7 @@ class SiteServerTool(_SiteOwnedTool):
                 return (
                     f"Backend server live: {self.base_url}/{slug}/api/ "
                     f"(updated {', '.join(written)}; other source files kept)\n"
-                    + site_server.contract(slug)
+                    + site_server.contract(slug, public_base_url=getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", ""))
                     + _site_graph_note(self.bot, slug)
                 )
 
@@ -920,7 +970,7 @@ class SiteServerTool(_SiteOwnedTool):
                         "Error: deploy needs the full snapshot in files, e.g. "
                         'files={"app.py": "..."}. Missing files are deleted. '
                         "Use action=write to change one file without wiping the rest.\n"
-                        + site_server.contract(slug)
+                        + site_server.contract(slug, public_base_url=getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", ""))
                     )
                 parsed = await asyncio.to_thread(site_server.parse_files, files)
                 for source in parsed.values():
@@ -943,7 +993,7 @@ class SiteServerTool(_SiteOwnedTool):
                 return (
                     f"Backend server live: {self.base_url}/{slug}/api/ "
                     f"(full snapshot: {', '.join(written)})\n"
-                    + site_server.contract(slug)
+                    + site_server.contract(slug, public_base_url=getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", ""))
                     + _site_graph_note(self.bot, slug)
                 )
 
@@ -1058,7 +1108,7 @@ class SiteServerTool(_SiteOwnedTool):
 
             return (
                 f"Error: unknown action '{act}'. Use list, read, write, replace, "
-                "deploy, start, stop, restart, status, logs, env, rm, or delete."
+                "deploy, start, stop, restart, status, logs, env, request, rm, or delete."
             )
         except site_server.SiteServerError as e:
             # Admission or source errors can leave the existing backend live.
@@ -1092,6 +1142,49 @@ class SiteServerTool(_SiteOwnedTool):
                             slug, entry, bool(runtime_entry.get("running"))
                         )
             return f"Error: {e}"
+
+    async def _request_api(
+        self, slug: str, path: str | None, method: str, body: Any
+    ) -> str:
+        if method not in _SITE_API_METHODS:
+            return "Error: method must be GET, POST, PUT, PATCH, DELETE, HEAD, or OPTIONS."
+        try:
+            url = _site_api_request_url(self.base_url, slug, path)
+            data = None
+            if body is not None:
+                payload = json.loads(body) if isinstance(body, str) else body
+                data = json.dumps(payload, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            return f"Error: {str(e)[:300]}"
+
+        status = None
+        try:
+            session = await _get_shared_session()
+            async with session.request(
+                method,
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"} if data is not None else {},
+                timeout=aiohttp.ClientTimeout(total=15, connect=5),
+                allow_redirects=False,
+            ) as response:
+                status = response.status
+                raw = bytearray()
+                async for chunk in response.content.iter_chunked(4096):
+                    raw.extend(chunk[: _SITE_API_RESPONSE_BYTES + 1 - len(raw)])
+                    if len(raw) > _SITE_API_RESPONSE_BYTES:
+                        break
+                text = bytes(raw[:_SITE_API_RESPONSE_BYTES]).decode("utf-8", errors="replace")
+                encoded = text.encode("utf-8")
+                truncated = len(raw) > _SITE_API_RESPONSE_BYTES or len(encoded) > _SITE_API_RESPONSE_BYTES
+                text = encoded[:_SITE_API_RESPONSE_BYTES].decode("utf-8", errors="ignore")
+                suffix = "\n[Response body truncated]" if truncated else ""
+                return f"HTTP {status}\n{text}{suffix}"
+        except asyncio.TimeoutError:
+            error = "Error: API request timed out after 15 seconds."
+        except (aiohttp.ClientError, ValueError) as e:
+            error = f"Error: API request failed: {str(e)[:300]}"
+        return (f"HTTP {status}\n" if status is not None else "") + error
 
     async def _mark_server(self, slug: str, entry: dict, on: bool) -> None:
         """Record on the site itself that it has a server, for list_sites."""

@@ -9347,6 +9347,73 @@ class MaxwellBot(_BotBase):
         await MaxwellBot._record_request_outcome(self, message, "suppressed", "channel_send_unavailable")
         return True
 
+    async def _deliver_normal_reply(self, message, response, active_progresses):
+        """Deliver final text and native stickers with a single first-chunk owner."""
+        response = _auto_format_discord(response)
+        response = self._render_custom_emojis(response, message.guild)
+        response, send_stickers = self._extract_stickers_from_text(
+            response, message.guild
+        )
+        response = ensure_web_references(response)
+        chunks = self._split_response(response, limit=1900)
+        if not chunks and send_stickers:
+            chunks = [""]
+        transitioned = False
+        if send_stickers:
+            # Progress transitions deliver text only, and their edit fallback
+            # cannot attach native stickers. Retire progress and keep delivery
+            # (including Discord errors) in the normal awaited send path.
+            for progress in active_progresses:
+                if progress is not None:
+                    with contextlib.suppress(Exception):
+                        await progress.stop()
+        elif chunks and chunks[0] and not (await MaxwellBot._request_state(self, message)):
+            for progress in reversed(active_progresses):
+                if progress is None:
+                    continue
+                with contextlib.suppress(Exception):
+                    if await progress.transition_to_final(chunks[0]):
+                        transitioned = True
+                        break
+            if transitioned:
+                await typing_suspend(self, message.channel)
+        reply_delivered = bool(transitioned)
+        async with self._reply_typing(message.channel, response, message=message):
+            for i, chunk in enumerate(chunks):
+                if i == 0 and transitioned:
+                    continue
+                elif i == 0:
+                    try:
+                        sent = await self._send_with_slowmode(
+                            message.channel,
+                            content=chunk,
+                            reply_to=message,
+                            stickers=send_stickers,
+                        )
+                    except (discord.NotFound, discord.HTTPException) as exc:
+                        # Keep the deleted-parent fallback for reply shims that
+                        # bypass the sender's own unknown-reference handling.
+                        if not _is_unknown_reference_error(exc):
+                            raise
+                        logger.warning(
+                            "message.reply parent is gone, falling back to channel.send in channel %s",
+                            getattr(message.channel, "id", "?"),
+                        )
+                        sent = await self._send_with_slowmode(
+                            message.channel, content=chunk, stickers=send_stickers
+                        )
+                    if sent is None:
+                        break
+                    reply_delivered = True
+                else:
+                    sent = await self._send_with_slowmode(
+                        message.channel, content=chunk
+                    )
+                    if sent is None:
+                        break
+                    reply_delivered = True
+        return response, reply_delivered
+
     async def _handle_message(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
@@ -10185,91 +10252,9 @@ class MaxwellBot(_BotBase):
                 await self._ensure_reasoning_trace(
                     message, all_tool_results, response, "reply"
                 )
-                response = _auto_format_discord(response)
-                response = self._render_custom_emojis(response, message.guild)
-                response, send_stickers = self._extract_stickers_from_text(
-                    response, message.guild
+                response, reply_delivered = await self._deliver_normal_reply(
+                    message, response, active_progresses
                 )
-                response = ensure_web_references(response)
-                chunks = self._split_response(response, limit=1900)
-                if not chunks and send_stickers:
-                    chunks = [""]
-                # Fast-tool fix: try to transition the live progress message
-                # (if any) into the final reply instead of deleting it and
-                # posting a fresh reply. The old code always did
-                # ``await message.reply(chunk)`` which posts a new message;
-                # the safety-net finally block had already called stop()
-                # on the progress, which deleted the placeholder — so the
-                # user saw: <placeholder> <deletion> <reply>. The
-                # transition path turns the placeholder into the reply in
-                # place, no flicker. If the progress already stopped (tool
-                # batch ran) or never posted (deferred window won the race),
-                # transition_to_final returns False and we fall through to
-                # the normal reply path.
-                transitioned = False
-                if (
-                    chunks
-                    and chunks[0]
-                    and not (await MaxwellBot._request_state(self, message))
-                ):
-                    for _prog in reversed(active_progresses):
-                        if _prog is None:
-                            continue
-                        try:
-                            with contextlib.suppress(Exception):
-                                if await _prog.transition_to_final(chunks[0]):
-                                    transitioned = True
-                                    break
-                        except Exception as _e:  # noqa: BLE001
-                            logger.debug("transition_to_final failed: %s", _e)
-                    if transitioned:
-                        # The answer is going out as a real message (which
-                        # clears Discord's typing). Make sure no typing
-                        # event can re-light the indicator behind it.
-                        await typing_suspend(self, message.channel)
-                reply_delivered = bool(transitioned)
-                async with self._reply_typing(
-                    message.channel, response, message=message
-                ):
-                    for i, chunk in enumerate(chunks):
-                        if i == 0 and transitioned:
-                            # Progress message is already the first chunk.
-                            continue
-                        elif i == 0:
-                            try:
-                                sent = await self._send_with_slowmode(
-                                    message.channel,
-                                    content=chunk,
-                                    reply_to=message,
-                                    stickers=send_stickers,
-                                )
-                            except (discord.NotFound, discord.HTTPException) as _exc:
-                                # Referenced message was deleted between read and reply;
-                                # fall back to a plain channel send so the user still sees it.
-                                # _send_with_slowmode already handles this, but keep the
-                                # outer net for reply paths that bypass it (fake_message
-                                # reply shims). Non-reference errors keep propagating.
-                                if not _is_unknown_reference_error(_exc):
-                                    raise
-                                logger.warning(
-                                    "message.reply parent is gone, falling back to channel.send in channel %s",
-                                    getattr(message.channel, "id", "?"),
-                                )
-                                sent = await self._send_with_slowmode(
-                                    message.channel,
-                                    content=chunk,
-                                    stickers=send_stickers,
-                                )
-                            if sent is None:
-                                break
-                            reply_delivered = True
-                        else:
-                            sent = await self._send_with_slowmode(
-                                message.channel, content=chunk
-                            )
-                            if sent is None:
-                                break
-                            reply_delivered = True
                 # Write the bot's own reply to channel memory. Without
                 # this the next turn sees the user's "Explain X" question
                 # but NOT the bot's answer — the user comes back and

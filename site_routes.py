@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+from urllib.parse import urlsplit
 
 SITE_MOUNT = "/bot"
 
@@ -20,10 +21,11 @@ def store_path(slug: str) -> str:
     return f"/api/site/{slug}"
 
 
-def client_guide(slug: str) -> str:
-    base = server_path(slug)
+def client_guide(slug: str, *, public_base_url: str = "") -> str:
+    prefix = urlsplit(public_base_url).path.rstrip("/")
+    base = prefix + server_path(slug)
     return (
-        f"  Page mount  : {page_path(slug)}\n"
+        f"  Page mount  : {prefix}{page_path(slug)}\n"
         f"  Server mount: {base}/ -> local routes, stripping {base} exactly once.\n"
         f"                Define /notes once; its public URL is {base}/notes.\n"
         "                Do not add /bot/<slug>/api to Python routes or router prefixes.\n"
@@ -35,7 +37,7 @@ def client_guide(slug: str) -> str:
         "  WebSocket   : const ws = new URL('ws', apiBase);\n"
         "                ws.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';\n"
         "                new WebSocket(ws);\n"
-        f"  KV store    : {store_path(slug)}/kv is a separate built-in service.\n"
+        f"  KV store    : {prefix}{store_path(slug)}/kv is a separate built-in service.\n"
         "                backend=true enables KV only; site_server runs Python."
     )
 

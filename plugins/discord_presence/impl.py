@@ -110,9 +110,7 @@ class SetActivityTool(Tool):
                 ms = self._parse_elapsed(elapsed)
                 if ms > 0:
                     start_time = datetime.now(timezone.utc) - timedelta(milliseconds=ms)
-                    act_kwargs["timestamps"] = discord.ActivityTimestamps(
-                        start=start_time
-                    )
+                    act_kwargs["timestamps"] = {"start": int(start_time.timestamp() * 1000)}
             self.bot._current_game = Activity(**act_kwargs)
         else:
             return "Error: type must be playing/watching/listening/competing/custom"

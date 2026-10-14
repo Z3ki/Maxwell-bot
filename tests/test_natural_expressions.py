@@ -29,6 +29,7 @@ from plugins.discord_messages.impl import (
 )
 from plugins.maxwell_extras.visible_output_guard import tool_result_is_visible
 from tool_schemas import build_openai_tools
+from tool_progress import ToolProgress
 
 
 class Emoji:
@@ -773,3 +774,147 @@ def test_pack_aliases_preserve_wumpus_when_sticker_names_collide():
 def test_tool_text_cannot_spoof_terminal_social_delivery():
     assert _tool_results_need_followup(["Tool shell: __GIF_SENT__"])
     assert _tool_results_need_followup(["Tool react: Error: __REACTION_SENT__"])
+
+
+class ReplyChannel:
+    """In-memory Discord messages: assertions observe delivered channel state."""
+
+    id = 2
+
+    def __init__(self):
+        self.messages = []
+        self.sticker_error = None
+        self.sticker_attempts = 0
+
+    async def send(self, content=None, **kwargs):
+        stickers = kwargs.get("stickers") or []
+        if stickers:
+            self.sticker_attempts += 1
+            if self.sticker_error:
+                raise self.sticker_error
+        with discord.http.handle_message_parameters(
+            content=content, stickers=[sticker.id for sticker in stickers]
+        ) as parameters:
+            payload = parameters.payload
+        posted = SimpleNamespace(
+            id=len(self.messages) + 1,
+            content=payload.get("content") or "",
+            sticker_ids=payload.get("sticker_ids", []),
+            reference=kwargs.get("reference"),
+            allowed_mentions=kwargs.get("allowed_mentions"),
+            deleted=False,
+        )
+
+        async def delete():
+            posted.deleted = True
+
+        async def edit(content=None, **kwargs):
+            posted.content = content
+
+        posted.delete, posted.edit = delete, edit
+        self.messages.append(posted)
+        return posted
+
+
+class NormalReplyBot:
+    _deliver_normal_reply = MaxwellBot._deliver_normal_reply
+    _send_with_slowmode = MaxwellBot._send_with_slowmode
+    _reply_typing = MaxwellBot._reply_typing
+    _render_custom_emojis = MaxwellBot._render_custom_emojis
+    _extract_stickers_from_text = MaxwellBot._extract_stickers_from_text
+    _split_response = staticmethod(MaxwellBot._split_response)
+
+    def __init__(self, sticker):
+        self._control = {"typing_indicator": False}
+        self._application_emojis = {}
+        self._standard_stickers = {"wumpus wave": sticker}
+        self.sent_channels = []
+
+    async def _respect_slowmode(self, channel):
+        pass
+
+    def _mark_bot_sent(self, channel):
+        self.sent_channels.append(channel.id)
+
+
+async def normal_reply_fixture():
+    sticker = SimpleNamespace(id=99, name="Wumpus Wave", available=True)
+    bot = NormalReplyBot(sticker)
+    channel = ReplyChannel()
+    msg = SimpleNamespace(
+        id=4, channel=channel, guild=SimpleNamespace(id=1, emojis=[], stickers=[])
+    )
+
+    async def reply(content=None, **kwargs):
+        return await channel.send(content, reference=msg.id, **kwargs)
+
+    msg.reply = reply
+    progress = ToolProgress(msg)
+    await progress.start()
+    assert progress.posted is not None
+    return bot, msg, progress, sticker
+
+
+@pytest.mark.parametrize("text", ["found it!", "first " * 500, ""], ids=["single-chunk", "multiple-chunks", "sticker-only"])
+def test_normal_sticker_reply_after_progress_delivers_once_and_retires_progress(text):
+    async def run():
+        bot, msg, progress, sticker = await normal_reply_fixture()
+        placeholder = progress.posted
+        response, delivered = await bot._deliver_normal_reply(
+            msg, text + " [STICKER (wumpus wave)]", [progress]
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        visible = [m for m in msg.channel.messages if not m.deleted]
+        assert delivered
+        assert placeholder.deleted
+        assert " ".join("".join(m.content for m in visible).split()) == " ".join(text.split())
+        assert visible[0].sticker_ids == [sticker.id]
+        assert visible[0].reference == msg.id
+        assert all(not m.sticker_ids for m in visible[1:])
+        assert msg.channel.sticker_attempts == 1
+        # Outer-turn cleanup must not retire the actual reply or send it again.
+        await progress.stop()
+        assert all(not m.deleted for m in visible)
+
+    asyncio.run(run())
+
+
+def test_normal_text_reply_keeps_progress_transition_delivery():
+    async def run():
+        bot, msg, progress, _ = await normal_reply_fixture()
+        placeholder = progress.posted
+        _, delivered = await bot._deliver_normal_reply(msg, "found it!", [progress])
+        for _ in range(50):
+            await asyncio.sleep(0)
+        visible = [m for m in msg.channel.messages if not m.deleted]
+        assert delivered
+        assert placeholder.deleted
+        assert [m.content for m in visible] == ["found it!"]
+        assert visible[0].reference == msg.id
+        assert not visible[0].sticker_ids
+
+    asyncio.run(run())
+
+
+def test_normal_sticker_failure_after_progress_reaches_reply_error_handler():
+    async def run():
+        bot, msg, progress, _ = await normal_reply_fixture()
+        placeholder = progress.posted
+        failure = discord.HTTPException(
+            SimpleNamespace(status=400, reason="Invalid"),
+            {"code": 50081, "message": "Invalid sticker sent"},
+        )
+        msg.channel.sticker_error = failure
+        with pytest.raises(discord.HTTPException) as caught:
+            await bot._deliver_normal_reply(
+                msg, "found it! [STICKER (wumpus wave)]", [progress]
+            )
+        assert caught.value is failure
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert placeholder.deleted
+        assert not [m for m in msg.channel.messages if not m.deleted]
+        assert msg.channel.sticker_attempts == 1
+
+    asyncio.run(run())

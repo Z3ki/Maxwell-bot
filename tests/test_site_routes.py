@@ -55,23 +55,27 @@ def test_bad_mount_does_not_overwrite_existing_backend(tmp_path, operation):
     assert site_server.read_code(tmp_path, "demo", "helper.py") == "keep = True"
 
 
-def test_client_urls_work_from_nested_pages_and_with_a_base_tag():
+@pytest.mark.parametrize("public_base_url,prefix", [
+    ("https://example.com", ""),
+    ("https://example.com/dev/", "/dev"),
+])
+def test_client_urls_work_from_nested_pages_and_with_a_base_tag(public_base_url, prefix):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is unavailable")
-    guide = site_routes.client_guide("demo")
+    guide = site_server.contract("demo", public_base_url=public_base_url)
     setup = next(line.strip() for line in guide.splitlines() if "const apiBase =" in line)
     setup = setup[setup.index("const apiBase ="):]
-    output = subprocess.check_output([node, "-e", """
-const location = {origin: 'https://example.com', protocol: 'https:',
-                  href: 'https://example.com/bot/demo/pages/nested/index.html'};
-const document = {baseURI: 'https://different.example/other/'};
+    output = subprocess.check_output([node, "-e", f"""
+const location = {{origin: 'https://example.com', protocol: 'https:',
+                  href: 'https://example.com{prefix}/bot/demo/pages/nested/index.html'}};
+const document = {{baseURI: 'https://different.example/other/'}};
 """ + setup + """
 const ws = new URL('ws', apiBase);
 ws.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 console.log(JSON.stringify([new URL('notes', apiBase).href, ws.href]));
 """], text=True)
-    assert json.loads(output) == ["https://example.com/bot/demo/api/notes", "wss://example.com/bot/demo/api/ws"]
+    assert json.loads(output) == [f"https://example.com{prefix}/bot/demo/api/notes", f"wss://example.com{prefix}/bot/demo/api/ws"]
 
 
 def test_frontend_duplicate_prefix_is_reported():
