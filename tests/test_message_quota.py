@@ -216,6 +216,54 @@ def test_live_turn_charges_one_message_not_followups(tmp_path):
     assert ledger.status("42", 100, 18000)["used"] == 1
 
 
+def test_experimental_premium_routing_follows_agentic_intent(tmp_path):
+    ledger = MessageQuota(tmp_path / "messages.sqlite3")
+    calls = []
+
+    async def generate(_messages, **kwargs):
+        calls.append(kwargs.get("model"))
+        return ProviderResult("ok")
+
+    bot = object.__new__(MaxwellBot)
+    bot._control = {
+        "message_quota_enabled": True,
+        "message_quota_limit": FREE_MESSAGE_LIMIT,
+        "message_quota_window_seconds": 18000,
+        "experimental_premium_model": True,
+    }
+    bot._message_quota = ledger
+    bot.config = SimpleNamespace(AI_PREMIUM_MODEL="gemini-3.8-flash")
+    bot.ai_provider = SimpleNamespace(generate_response=generate, model="gemini-3.5-flash-lite")
+    bot._night_fallback_kwargs = dict
+
+    def ask(content):
+        message = SimpleNamespace(
+            id=1,
+            author=SimpleNamespace(id=42, bot=False),
+            channel=SimpleNamespace(id=2),
+            guild=SimpleNamespace(id=7),
+            content=content,
+        )
+        token = _current_inbound.set(message)
+        try:
+            asyncio.run(
+                MaxwellBot._generate_response(
+                    bot, [{"role": "user", "content": content}], max_tokens=20
+                )
+            )
+        finally:
+            _current_inbound.reset(token)
+
+    ask("build me a script that archives the logs")
+    ask("hola que tal")
+    assert calls == ["gemini-3.8-flash", None]
+
+    calls.clear()
+    bot._control["experimental_premium_model"] = False
+    ask("build me a script that archives the logs")
+    assert calls == [None]
+
+
 def test_premium_grant_uses_the_higher_allowance_and_stronger_model(tmp_path):
     ledger = MessageQuota(tmp_path / "messages.sqlite3")
     ledger.configure("42", plan="premium")

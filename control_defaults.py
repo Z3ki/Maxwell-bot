@@ -133,6 +133,9 @@ DEFAULT_CONTROL = {
     # Prefer OpenAI-style native tool_calls when the provider supports them.
     # When this is off, the prompt teaches bare JSON lines — not XML tags.
     "native_tool_calls": True,
+    # Experimental: route action/agentic requests to AI_PREMIUM_MODEL even
+    # without a premium plan grant.
+    "experimental_premium_model": False,
     "tools_enabled": True,
     # Hours a generated site lives before the cleanup loop removes it.
     # 0 = never expire. A site created with permanent=true (or extended via

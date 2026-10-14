@@ -1146,13 +1146,8 @@ class MaxwellBot(_BotBase):
             premium_model = str(
                 getattr(getattr(self, "config", None), "AI_PREMIUM_MODEL", "") or ""
             ).strip()
-            plan_for = getattr(getattr(self, "_message_quota", None), "plan_for", None)
-            if premium_model and callable(plan_for):
-                try:
-                    if plan_for(str(quota_user_id)) == "premium":
-                        kwargs["model"] = premium_model
-                except Exception:
-                    logger.debug("premium model lookup failed", exc_info=True)
+            if premium_model and self._wants_premium_model(str(quota_user_id), message):
+                kwargs["model"] = premium_model
         # This step is working again: any typing that a previous send
         # suspended in this channel comes back only now, so the indicator
         # never trails the last delivered message.
@@ -1169,6 +1164,23 @@ class MaxwellBot(_BotBase):
                     (time.monotonic() - started) * 1000,
                     kwargs.get("model") or getattr(selected_provider, "model", ""),
                 )
+
+    def _wants_premium_model(self, quota_user_id: str, message) -> bool:
+        """Premium-plan grant, or the experimental agentic routing switch."""
+        plan_for = getattr(getattr(self, "_message_quota", None), "plan_for", None)
+        if callable(plan_for):
+            try:
+                if plan_for(quota_user_id) == "premium":
+                    return True
+            except Exception:
+                logger.debug("premium model lookup failed", exc_info=True)
+        # Experimental: requests that want something DONE (build, run, deploy,
+        # debug …) get the stronger model even on the free plan, because the
+        # small model is what usually fails them.
+        if self._control.get("experimental_premium_model", False):
+            content = str(getattr(message, "content", "") or "")
+            return bool(content and self._ACTION_TOOL_HINT_RE.search(content))
+        return False
 
     async def _get_autonomy_provider(self):
         """Return a provider for the autonomy loop.
