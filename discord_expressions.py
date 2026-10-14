@@ -188,7 +188,12 @@ async def refresh_global_expressions(bot):
         if not callable(fetch):
             continue
         try:
-            data = await asyncio.wait_for(fetch(), timeout=20)
+            # asyncio.timeout instead of wait_for: the 3.11 wait_for has a
+            # cancellation race that can leave the cancelled refresh task
+            # running forever, hanging anything that awaits the task (like a
+            # shutdown or this module's own cancellable-task contract).
+            async with asyncio.timeout(20):
+                data = await fetch()
             if attribute == "_application_emojis":
                 bot._application_emojis = {
                     e.name.lower(): str(e)
