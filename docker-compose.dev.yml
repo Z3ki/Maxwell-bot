@@ -1,7 +1,11 @@
 name: maxwell-dev
 
 # Run from a separate Dev checkout. This project has its own image, token,
-# network, and named volumes; it never mounts Production's data or Docker socket.
+# network, volumes and controller identity; Production's data is never
+# mounted. MAXWELL_CONTROLLER_ID scopes every Docker container this bot
+# creates (shell sandboxes, site backends, GitHub workspaces) so Dev and
+# Production can share one Docker daemon without touching each other's
+# containers.
 services:
   maxwell-dev:
     build:
@@ -11,28 +15,39 @@ services:
     container_name: maxwell-dev
     restart: unless-stopped
     init: true
+    # Host networking, like Production: generated-site backends publish
+    # 127.0.0.1 ports and the API/site proxy only ever targets loopback.
+    network_mode: host
     env_file:
       - .env.dev
     environment:
       MAXWELL_ENV_FILE: /app/.env.dev
       MAXWELL_DEV_MODE: "true"
-      MAXWELL_START_API: "0"
+      MAXWELL_START_API: "1"
+      MAXWELL_API_HOST: "127.0.0.1"
+      # Dev's operator API/dashboard port; Production owns 8765.
+      MAXWELL_API_PORT: "8766"
+      MAXWELL_CONTROLLER_ID: dev
+      MAXWELL_HOST_BIND: /root/maxwell-dev
+      # Site source/data live in the dev_data volume, not the checkout.
+      MAXWELL_HOST_DATA_BIND: /var/lib/docker/volumes/maxwell-dev_dev_data/_data
+      # Dev's site-backend loopback ports; Production owns 8800-8899.
+      MAXWELL_SITE_PORT_MIN: "8900"
+      MAXWELL_SITE_PORT_MAX: "9000"
       DATA_DIR: /app/data
       MAXWELL_SITE_DIR: /app/public/bot
       MAXWELL_IN_DOCKER: "1"
       MAXWELL_APP_ROOT: /app
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cpus: "1.0"
-    mem_limit: 3g
-    memswap_limit: 3g
-    pids_limit: 384
+    cpus: "2.0"
+    mem_limit: 4g
+    memswap_limit: 4g
+    pids_limit: 1024
     shm_size: 128mb
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=128m
@@ -49,8 +64,12 @@ services:
       - dev_logs:/app/logs
       - dev_public:/app/public/bot
       - dev_shell:/app/shelldocker
-    networks:
-      - dev
+      # Same host-tools contract as Production. The socket is read-only and
+      # shell execution still fails closed without the host policy markers.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/maxwell-shell:/run/maxwell-shell-policy:ro
+      - /etc/maxwell-sites:/run/maxwell-sites-policy:ro
+      - /sys/fs/cgroup:/run/maxwell-host-cgroup:ro
     stop_grace_period: 120s
 
   ollama-dev:
@@ -58,6 +77,9 @@ services:
     image: ollama/ollama@sha256:7ab595e4ead391f6818c7215297781282babe0701f6d9a9f8862ac591360a58b
     restart: unless-stopped
     init: true
+    # Reachable from the host-networked bot at http://127.0.0.1:11435.
+    ports:
+      - "127.0.0.1:11435:11434"
     cpus: "1.0"
     mem_limit: 3g
     memswap_limit: 3g

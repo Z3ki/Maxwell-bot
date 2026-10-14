@@ -43,22 +43,38 @@ from pathlib import Path
 from typing import Any
 
 from site_routes import client_guide, route_mount_errors, server_path
-from utils import FileLock, FileLockTimeout, _atomic_json_write_sync, docker_bind_path
+from utils import FileLock, FileLockTimeout, _atomic_json_write_sync, controller_id, docker_bind_path
 
 logger = logging.getLogger(__name__)
 
 IMAGE = "maxwell-site-runtime"
 DOCKERFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker", "site-runtime")
-CONTAINER_PREFIX = "maxwell-site-"
+# A second controller on the same Docker daemon (e.g. Dev) sets
+# MAXWELL_CONTROLLER_ID so its backends never collide with Production's names,
+# labels, admission slots, or cleanup.
+CONTROLLER_ID = controller_id()
+CONTAINER_PREFIX = "maxwell-site-" if not CONTROLLER_ID else f"maxwell-{CONTROLLER_ID}-site-"
 # Deliberately NOT the same prefix as CONTAINER_PREFIX. When they matched, a
 # per-site image and its container shared one identifier, and `docker inspect`
 # went on finding the image after the container was removed — so the
 # wait-for-removal loop span for its full timeout on every deploy.
-IMAGE_PREFIX = "maxwell-siteimg-"
+IMAGE_PREFIX = "maxwell-siteimg-" if not CONTROLLER_ID else f"maxwell-{CONTROLLER_ID}-siteimg-"
 CONTAINER_PORT = 8000
 
+
+def _port_range() -> range:
+    try:
+        low = int(os.environ.get("MAXWELL_SITE_PORT_MIN", "8800"))
+        high = int(os.environ.get("MAXWELL_SITE_PORT_MAX", "8900"))
+    except ValueError:
+        low, high = 8800, 8900
+    if not (1024 < low < high <= 65536):
+        low, high = 8800, 8900
+    return range(low, high)
+
+
 # Ports handed to site backends. Loopback only — the public path is the proxy.
-PORT_RANGE = range(8800, 8900)
+PORT_RANGE = _port_range()
 
 # Per-container limits. A site backend is a toy web service, not a workload.
 MEMORY = "256m"
@@ -370,6 +386,14 @@ async def _check_host_ready() -> None:
         )
 
 
+def _owns_labels(labels: str) -> bool:
+    """Only this controller's backends count against its admission slots."""
+    for label in labels.split(","):
+        if label.startswith("maxwell.site.controller="):
+            return label.split("=", 1)[1] == CONTROLLER_ID
+    return not CONTROLLER_ID
+
+
 async def _admit_backend(slug: str) -> int:
     # Query the daemon, not the registry: orphaned and stopped backends count.
     code, out, err = await _docker(
@@ -383,6 +407,8 @@ async def _admit_backend(slug: str) -> int:
             row = json.loads(line)
             name = row["Names"]
             labels = row.get("Labels", "")
+            if not _owns_labels(labels):
+                continue
             if name.startswith(CONTAINER_PREFIX) or any(
                 label.startswith("maxwell.site=") for label in labels.split(",")
             ):
@@ -978,6 +1004,7 @@ async def _start_unlocked(
         "run", "-d",
         "--name", container_name(slug),
         "--label", f"maxwell.site={slug}",
+        *(["--label", f"maxwell.site.controller={CONTROLLER_ID}"] if CONTROLLER_ID else []),
         "--runtime", "runsc",
         "--cgroup-parent", POOL_SLICE,
         "--restart", "unless-stopped",

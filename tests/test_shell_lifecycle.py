@@ -91,13 +91,21 @@ def test_shell_fails_closed_when_docker_live_restore_is_enabled(monkeypatch):
     assert len(calls) == 2
 
 
-def test_restart_recovery_removes_only_labeled_sandbox_ids(monkeypatch):
+def test_restart_recovery_removes_only_this_controllers_sandbox_ids(monkeypatch):
     calls = []
+    monkeypatch.setenv("MAXWELL_CONTROLLER_ID", "dev")
 
     async def run_docker(cls, *args, timeout=30):
         calls.append(args)
         if args[0] == "ps":
-            return (b"a" * 64 + b"\nnot-a-container-id\n" + b"b" * 12 + b"\n", b""), 0
+            return (
+                b"a" * 64 + b" dev\n"
+                + b"b" * 12 + b" dev\n"
+                + b"c" * 12 + b" \n"
+                + b"d" * 12 + b" prod\n"
+                + b"not-a-container-id dev\n",
+                b"",
+            ), 0
         return (b"", b""), 0
 
     monkeypatch.setattr(ShellTool, "_run_docker", classmethod(run_docker))
@@ -105,9 +113,53 @@ def test_restart_recovery_removes_only_labeled_sandbox_ids(monkeypatch):
 
     asyncio.run(ShellTool._recover_stale_sandboxes())
 
-    assert calls[0][:2] == ("ps", "-aq")
+    assert calls[0] == (
+        "ps", "-a", "--filter", "label=maxwell.shell.managed=true",
+        "--format", '{{.ID}} {{.Label "maxwell.shell.controller"}}',
+    )
     assert calls[1] == ("rm", "-f", "a" * 64, "b" * 12)
     assert ShellTool._recovery_complete is True
+
+
+def test_restart_recovery_default_controller_adopts_unlabeled_sandboxes(monkeypatch):
+    calls = []
+    monkeypatch.delenv("MAXWELL_CONTROLLER_ID", raising=False)
+
+    async def run_docker(cls, *args, timeout=30):
+        calls.append(args)
+        if args[0] == "ps":
+            return (b"a" * 64 + b" \n" + b"b" * 12 + b" dev\n", b""), 0
+        return (b"", b""), 0
+
+    monkeypatch.setattr(ShellTool, "_run_docker", classmethod(run_docker))
+    monkeypatch.setattr(ShellTool, "_recovery_complete", False)
+
+    asyncio.run(ShellTool._recover_stale_sandboxes())
+
+    assert calls[1] == ("rm", "-f", "a" * 64)
+    assert ShellTool._recovery_complete is True
+
+
+def test_sandbox_naming_and_labels_are_controller_scoped(monkeypatch):
+    from plugins.shell.isolation import docker_run_args, shell_tenant
+
+    class Message:
+        author = type("Author", (), {"id": "7"})()
+        guild = type("Guild", (), {"id": "9"})()
+        channel = type("Channel", (), {"id": "11"})()
+
+    monkeypatch.delenv("MAXWELL_CONTROLLER_ID", raising=False)
+    default_name = shell_tenant(Message()).container_name
+    assert "maxwell.shell.controller" not in " ".join(
+        docker_run_args(container_name=default_name, image="maxwell-shell")
+    )
+
+    monkeypatch.setenv("MAXWELL_CONTROLLER_ID", "dev")
+    dev_name = shell_tenant(Message()).container_name
+    assert dev_name != default_name
+    assert re.fullmatch(r"mwsh-[a-f0-9]{24}", dev_name)
+    args = docker_run_args(container_name=dev_name, image="maxwell-shell")
+    assert "maxwell.shell.controller=dev" in args
 
 
 def test_command_timeout_destroys_the_tenant_container(monkeypatch):

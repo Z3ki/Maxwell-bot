@@ -85,6 +85,18 @@ def is_direct_image_url(url: str) -> bool:
     return Path(path).suffix in _DIRECT_IMAGE_EXTS
 
 
+def controller_id() -> str:
+    """Identity of this Maxwell controller on a shared Docker daemon.
+
+    Production runs one controller and leaves this unset. A second controller
+    (for example the Dev worktree) must set MAXWELL_CONTROLLER_ID so its
+    sandbox/site containers get distinct names and labels, and its cleanup can
+    never remove another controller's containers.
+    """
+    raw = os.environ.get("MAXWELL_CONTROLLER_ID", "").strip().lower()
+    return raw if re.fullmatch(r"[a-z][a-z0-9]{0,11}", raw) else ""
+
+
 def docker_bind_path(path: str | Path, *, app_root: str | Path | None = None) -> str:
     """Path the Docker daemon should use for a bind mount.
 
@@ -92,10 +104,21 @@ def docker_bind_path(path: str | Path, *, app_root: str | Path | None = None) ->
     runs in a container with the repo bind-mounted, in-container paths like
     ``/app/shelldocker`` do not exist on the host. Set ``MAXWELL_HOST_BIND``
     to the host path of the repo root; paths under the process app root are
-    rewritten to that host path. Anything outside the app root is returned
-    unchanged.
+    rewritten to that host path. When persistent data lives in a Docker
+    volume instead of the checkout, set ``MAXWELL_HOST_DATA_BIND`` to that
+    volume's host path; paths under ``DATA_DIR`` are rewritten there first.
+    Anything outside those roots is returned unchanged.
     """
     raw = os.path.abspath(os.path.expanduser(str(path)))
+    data_root = os.environ.get("DATA_DIR", "").strip()
+    host_data = os.environ.get("MAXWELL_HOST_DATA_BIND", "").strip()
+    if host_data and data_root:
+        data_abs = os.path.abspath(os.path.expanduser(data_root))
+        prefix = data_abs.rstrip(os.sep) + os.sep
+        if raw.startswith(prefix):
+            return os.path.abspath(os.path.join(host_data, raw[len(prefix) :]))
+        if raw == data_abs:
+            return os.path.abspath(host_data)
     host_root = os.environ.get("MAXWELL_HOST_BIND", "").strip()
     if not host_root:
         return raw

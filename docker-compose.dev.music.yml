@@ -17,6 +17,10 @@ services:
       - ./docker/music/application.yml:/opt/Lavalink/application.yml:ro
     networks:
       - dev
+    # Dev's own loopback port (Production owns 127.0.0.1:2333), reachable
+    # from the host-networked Dev bot.
+    ports:
+      - "127.0.0.1:2334:2333"
     cpus: "1.0"
     mem_limit: 1g
     memswap_limit: 1g
@@ -59,8 +63,8 @@ services:
 
   maxwell-dev:
     environment:
-      LAVALINK_HOST: lavalink-dev
-      LAVALINK_PORT: "2333"
+      LAVALINK_HOST: 127.0.0.1
+      LAVALINK_PORT: "2334"
       LAVALINK_PASSWORD: ${LAVALINK_PASSWORD:?Set a dedicated LAVALINK_PASSWORD in .env.dev}
     depends_on:
       lavalink-dev:

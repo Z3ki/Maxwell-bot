@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 import aiohttp
 
 from tools import Tool
-from utils import FileLock, _atomic_json_write_sync
+from utils import FileLock, _atomic_json_write_sync, controller_id
 from plugins.github_projects.inspection import INSPECTION_SCRIPT
 from plugins.github_projects.credential_git import GIT_SCRIPT, validate_git_commands
 
@@ -321,7 +321,12 @@ class GitHubProjectService:
             return resp.status, text, parsed
 
     @staticmethod
-    def _container(uid: str) -> str: return "maxwell-gh-" + hashlib.sha256(uid.encode()).hexdigest()[:16]
+    def _container(uid: str) -> str:
+        # Controller-scoped: Dev and Production share one Docker daemon but
+        # must never adopt, restart, or remove each other's workspaces.
+        return "maxwell-gh-" + hashlib.sha256(
+            f"{uid}\0{controller_id()}".encode()
+        ).hexdigest()[:16]
     def user_root(self, uid: str) -> Path:
         root = (self.workspace_root/hashlib.sha256(uid.encode()).hexdigest()[:24]).resolve(); root.mkdir(parents=True, exist_ok=True); return root
     def repo_root(self, uid: str, repo: str) -> Path:

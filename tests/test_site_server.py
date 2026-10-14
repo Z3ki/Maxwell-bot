@@ -582,6 +582,25 @@ def test_replacement_keeps_its_slot_at_exact_capacity(data_dir, sandbox_host):
     assert len(sandbox_host["containers"]) == site_server.MAX_BACKENDS
 
 
+def test_backend_ownership_is_scoped_per_controller(data_dir, sandbox_host, monkeypatch):
+    monkeypatch.setattr(site_server, "CONTROLLER_ID", "dev")
+    monkeypatch.setattr(site_server, "CONTAINER_PREFIX", "maxwell-dev-site-")
+    monkeypatch.setattr(site_server, "IMAGE_PREFIX", "maxwell-dev-siteimg-")
+    containers = sandbox_host["containers"]
+    assert site_server.container_name("demo") == "maxwell-dev-site-demo"
+    assert site_server._owns_labels("maxwell.site=prod-only") is False
+    assert site_server._owns_labels("maxwell.site=demo,maxwell.site.controller=dev") is True
+    assert site_server._owns_labels("maxwell.site=demo,maxwell.site.controller=prod") is False
+    # Another controller's backends never consume this one's admission slots.
+    for index in range(site_server.MAX_BACKENDS):
+        containers[f"maxwell-site-prod-{index}"] = f"maxwell.site=prod-{index}"
+    containers["maxwell-dev-site-demo"] = "maxwell.site=demo,maxwell.site.controller=dev"
+    site_server.write_code(data_dir, "demo", {"app.py": "server"})
+    result = run(site_server.start(data_dir, "demo"))
+    assert result["running"] is True
+    assert "maxwell-dev-site-demo" in containers
+
+
 def test_overlapping_starts_cannot_both_take_the_last_slot(data_dir, sandbox_host):
     for index in range(site_server.MAX_BACKENDS - 1):
         sandbox_host["containers"][f"maxwell-site-other-{index}"] = ""

@@ -17,6 +17,7 @@ from plugins.shell.isolation import (
     shell_tenant,
     validate_runsc_runtime,
 )
+from utils import controller_id
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -356,15 +357,18 @@ class ShellTool(Tool):
     async def _recover_stale_sandboxes(cls) -> None:
         """Remove labeled containers left by a Maxwell process restart.
 
-        The deployment runs one Maxwell controller. Sandboxes are intentionally
-        ephemeral across controller restarts so an orphaned process cannot
-        continue consuming resources or retain a prior process's state.
+        Sandboxes are intentionally ephemeral across controller restarts so an
+        orphaned process cannot continue consuming resources or retain a prior
+        process's state. On a shared Docker daemon cleanup is scoped to this
+        controller's own guests (MAXWELL_CONTROLLER_ID); the default controller
+        also adopts unlabeled legacy sandboxes.
         """
         async with cls._recovery_lock:
             if cls._recovery_complete:
                 return
             (stdout, stderr), code = await cls._run_docker(
-                "ps", "-aq", "--filter", "label=maxwell.shell.managed=true",
+                "ps", "-a", "--filter", "label=maxwell.shell.managed=true",
+                "--format", '{{.ID}} {{.Label "maxwell.shell.controller"}}',
                 timeout=15,
             )
             if code != 0:
@@ -373,11 +377,15 @@ class ShellTool(Tool):
                     "shell disabled: could not recover prior sandboxes"
                     + (f" ({detail[:120]})" if detail else "")
                 )
-            ids = [
-                value.strip()
-                for value in stdout.decode(errors="replace").splitlines()
-                if re.fullmatch(r"[a-f0-9]{12,64}", value.strip())
-            ]
+            owner = controller_id()
+            ids = []
+            for line in stdout.decode(errors="replace").splitlines():
+                container_id, _, label_owner = line.partition(" ")
+                container_id = container_id.strip()
+                if label_owner.strip() != owner:
+                    continue
+                if re.fullmatch(r"[a-f0-9]{12,64}", container_id):
+                    ids.append(container_id)
             for offset in range(0, len(ids), 64):
                 (_out, err), rm_code = await cls._run_docker(
                     "rm", "-f", *ids[offset : offset + 64], timeout=30
@@ -422,7 +430,8 @@ class ShellTool(Tool):
                 "container",
                 "-f",
                 '{{.State.Running}} {{index .HostConfig "Runtime"}} '
-                '{{index .Config.Labels "maxwell.shell.policy"}}',
+                '{{index .Config.Labels "maxwell.shell.policy"}} '
+                '{{index .Config.Labels "maxwell.shell.controller"}}',
                 tenant.container_name,
                 timeout=10,
             )
@@ -431,6 +440,11 @@ class ShellTool(Tool):
                 running = (parts[0] if parts else "").lower() == "true"
                 runtime = parts[1] if len(parts) > 1 else ""
                 policy = parts[2] if len(parts) > 2 else ""
+                controller = parts[3] if len(parts) > 3 else ""
+                if controller != controller_id():
+                    raise RuntimeError(
+                        "sandbox name collision with another controller's container"
+                    )
                 if (
                     running
                     and runtime == "runsc"

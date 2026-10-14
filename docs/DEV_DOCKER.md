@@ -3,9 +3,25 @@
 Production stays on `main` at `/root/maxwell`; development runs from the separate
 `dev` worktree at `/root/maxwell-dev`. Dev has a different Discord application,
 token, guild allowlist, Compose project, network, data/log/public/shell volumes
-and optional model volume. The source bind is read-only, the API is off, no host
-ports or Docker socket are exposed, and no production data is mounted. Music is
-optional, not globally disabled: its lazy backend starts on an allowed request.
+and optional model volume. The source bind is read-only and no production data
+is mounted. Dev runs with host networking and the same host-tools contract as
+Production (read-only Docker socket, shell/site policy mounts), plus its own
+operator API on `127.0.0.1:8766`, site-backend ports `8900-8999`, Lavalink port
+`2334` and generated-site routes under `https://<host>/dev/`. Production owns
+`:8765`, `8800-8899` and `2333`. Music is optional, not globally disabled: its
+lazy backend starts on an allowed request.
+
+## One Docker daemon, two controllers
+
+Both bots share one Docker daemon, so Dev sets `MAXWELL_CONTROLLER_ID=dev`
+(`docker-compose.dev.yml`). Every container Dev creates — shell sandboxes,
+site backends, GitHub workspaces — carries that controller identity in its
+name and labels, and startup cleanup only removes its own controller's
+containers. Production keeps the unlabeled default identity and adopts only
+legacy unlabeled guests. Aggregate shell/site resource limits remain
+host-wide: both controllers' guests join the shared `maxwell-shell.slice` /
+`maxwell-sites.slice` cgroups, and Dev's `MAXWELL_SHELL_MAX_CONCURRENCY`
+keeps its admission share bounded.
 
 ## Prepare the worktree and identity
 
@@ -65,7 +81,8 @@ across lifecycle commands, especially `stopdev` to stop audio sidecars too.
 ### Optional local model
 
 There is no mandatory Ollama dependency. To opt into profile `local-ai`, set
-`.env.dev`'s AI endpoint to `http://ollama-dev:11434` and select the model:
+`.env.dev`'s AI endpoint to `http://127.0.0.1:11435` (the Dev node's loopback
+port) and select the model:
 
 ```sh
 LOCAL_AI=1 make updev
@@ -100,7 +117,8 @@ LOCAL_AI=1 WITH_MUSIC=1 make updev
 ```
 
 `WITH_MUSIC=1` adds `docker-compose.dev.music.yml`; its `lavalink-dev` and
-`yt-cipher-dev` are private to Dev, with no host ports. The cipher shares the
+`yt-cipher-dev` are private to Dev. The node publishes only
+`127.0.0.1:2334` for the host-networked Dev bot, and the cipher shares the
 Dev node's network namespace. Voice remains permission-checked and confined to
 allowlisted guilds. Without this overlay, non-music testing has no audio service
 requirement; voice requests cannot produce playback without a configured node.
