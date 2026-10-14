@@ -55,7 +55,7 @@ def test_rewrites_paths_under_the_data_volume(monkeypatch, tmp_path: Path):
 
 def test_data_volume_mapping_wins_over_app_root(monkeypatch, tmp_path: Path):
     data = tmp_path / "app" / "data"
-    data.mkdir()
+    data.mkdir(parents=True)
     monkeypatch.setenv("MAXWELL_HOST_BIND", "/host/maxwell")
     monkeypatch.setenv("DATA_DIR", str(data))
     monkeypatch.setenv("MAXWELL_HOST_DATA_BIND", "/host/volumes/dev_data/_data")
