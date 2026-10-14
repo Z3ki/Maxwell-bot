@@ -262,7 +262,15 @@ PIPE_MARKER_RE = re.compile(
 )
 
 
-LEAKED_TOOL_CALL_RE = re.compile(r"</?\s*(?:tool_call|function)\s*>", re.IGNORECASE)
+# Namespaced provider dialects leak whole tags ("<atem:function_calls>",
+# "<atem:invoke name=…>", "…parameter name=…"), so attribute-bearing and
+# prefixed variants must go too — after recovery has had its chance to turn
+# them into real calls.
+LEAKED_TOOL_CALL_RE = re.compile(
+    r"</?\s*(?:[\w.-]+:)?(?:tool_calls?|function_calls?|functions?|invoke|parameter)"
+    r"(?:\s[^<>]*)?\s*/?>",
+    re.IGNORECASE,
+)
 
 
 LEAKED_MESSAGE_TAG_RE = re.compile(r"</?\s*message\s*>", re.IGNORECASE)

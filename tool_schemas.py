@@ -1433,6 +1433,10 @@ def _clean_tool_name(name: str) -> str:
     for prefix in ("functions.", "tool_", "tools.", "namespace."):
         if cleaned.lower().startswith(prefix):
             cleaned = cleaned[len(prefix) :]
+    # Some provider templates namespace the registry ("default.send_message",
+    # "atem:send_message"); the tool registry never contains "." or ":".
+    if "." in cleaned or ":" in cleaned:
+        cleaned = re.split(r"[.:]", cleaned)[-1]
     return cleaned.strip()
 
 
