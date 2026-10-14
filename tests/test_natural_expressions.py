@@ -8,7 +8,7 @@ import aiohttp
 import discord
 import pytest
 
-from bot import MaxwellBot, _tool_results_need_followup
+from bot import MaxwellBot, _sanitize_visible_reply, _tool_results_need_followup
 from discord_expressions import (
     available_emojis,
     available_stickers,
@@ -876,6 +876,25 @@ def test_normal_sticker_reply_after_progress_delivers_once_and_retires_progress(
         # Outer-turn cleanup must not retire the actual reply or send it again.
         await progress.stop()
         assert all(not m.deleted for m in visible)
+
+    asyncio.run(run())
+
+
+def test_numeric_sticker_survives_cleanup_and_progress_as_native_payload():
+    async def run():
+        bot, msg, progress, sticker = await normal_reply_fixture()
+        sticker.id = 796140620111544330
+        raw = f"@Alice(123456789012345678) found it! [STICKER ({sticker.id})]"
+        _, delivered = await bot._deliver_normal_reply(
+            msg, _sanitize_visible_reply(raw), [progress]
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        visible = [m for m in msg.channel.messages if not m.deleted]
+        assert delivered
+        assert [(m.content, m.sticker_ids) for m in visible] == [
+            ("<@123456789012345678> found it!", [sticker.id])
+        ]
 
     asyncio.run(run())
 
