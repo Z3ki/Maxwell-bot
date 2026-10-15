@@ -236,6 +236,15 @@ class ConversationPromptBuilder:
             "Decide whether fresh web evidence is needed before answering; "
             "retrieved evidence takes precedence over conflicting model knowledge."
         )
+        model_line = getattr(host, "_active_chat_model_line", None)
+        if callable(model_line):
+            try:
+                told = str(model_line() or "").strip()
+            except Exception:
+                logger.warning("Could not name the chat model for this turn", exc_info=True)
+                told = ""
+            if told:
+                dynamic_parts.append(told)
         thread_block = self.hooks.thread_prompt_block(host, message)
         if thread_block:
             dynamic_parts.append(thread_block)

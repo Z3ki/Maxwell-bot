@@ -11,13 +11,11 @@ from maxwell_core.providers.models import ProviderPolicy
 
 from maxwell_core.providers.error_rules import (
     forbidden_body_fields,
-    requires_greedy_top_p,
 )
 from providers import (
     OpenAICompatibleProvider,
     ProviderUsageExhaustedError,
     USAGE_EXHAUSTED_MESSAGE,
-    _GREEDY_TOP_P,
     _REJECTED_BODY_FIELDS,
     _is_content_policy_block,
     _is_policy_block_text,
@@ -369,10 +367,6 @@ _MISTRAL_422 = json.dumps(
 def test_forbidden_body_fields_reads_mistral_422_locations():
     assert forbidden_body_fields(422, _MISTRAL_422) == ("reasoning", "thinking")
     assert forbidden_body_fields(200, _MISTRAL_422) == ()
-    assert requires_greedy_top_p(
-        400, "top_p must be 1 when using greedy sampling."
-    )
-    assert not requires_greedy_top_p(422, _MISTRAL_422)
 
 
 def test_byok_strips_fields_a_host_rejects_and_remembers_them():
@@ -415,45 +409,6 @@ def test_byok_strips_fields_a_host_rejects_and_remembers_them():
     assert "thinking" not in session.payloads[1]
     assert session.payloads[1]["reasoning_effort"] == "none"
     assert "secret-key" not in _MISTRAL_422
-
-
-def test_temperature_zero_retries_with_top_p_for_greedy_hosts():
-    base = "https://labs-greedy.example/v1"
-    model = "labs-leanstral-1-5-1"
-    _GREEDY_TOP_P.discard((base, model))
-    provider = OpenAICompatibleProvider(
-        base,
-        model,
-        128,
-        0,
-        api_key="secret-key",
-        disable_reasoning=False,
-        retry_attempts=1,
-        policy=ProviderPolicy(sensitive_credentials=True, max_output_tokens=128),
-    )
-    provider.available = True
-    session = FakeSequenceSession(
-        [
-            FakeErrorResponse(
-                400, "top_p must be 1 when using greedy sampling."
-            ),
-            FakeResponse(),
-        ]
-    )
-    provider._session = session
-    try:
-        message = asyncio.run(
-            provider.generate_chat_completion(
-                [{"role": "user", "content": "Reply with OK."}],
-                temperature=0,
-            )
-        )
-    finally:
-        _GREEDY_TOP_P.discard((base, model))
-    assert message["content"] == "ok"
-    assert "top_p" not in session.payloads[0]
-    assert session.payloads[1]["top_p"] == 1
-    assert session.payloads[1]["temperature"] == 0
 
 
 def test_generate_chat_completion_retries_primary_before_fallback():
@@ -1132,7 +1087,7 @@ def test_video_parts_are_not_attached():
     assert session.payloads[0]["model"] == "mimo-v2.5"
 
 
-# ---- deterministic 4xx handling: failover, media fallback, temperature ----
+# ---- deterministic 4xx handling: failover and media fallback ----
 
 
 def test_openrouter_image_unsupported_routes_to_another_endpoint():
@@ -1399,21 +1354,10 @@ def test_provider_retains_request_local_cache_metrics_from_json_and_sse(stream):
     asyncio.run(run())
 
 
-def test_temperature_constraint_is_learned_and_resent():
-    """'only 0.6 is allowed' must resend at 0.6, not burn retries."""
-    provider = OpenAICompatibleProvider("http://primary.test/v1", "picky-model", 10, 0.9)
+def test_chat_payload_omits_temperature():
+    provider = OpenAICompatibleProvider("http://primary.test/v1", "plain-model", 10, 0.9)
     provider.available = True
-    session = FakeSequenceSession(
-        [
-            FakeErrorResponse(
-                400,
-                '{"error":{"message":"Upstream request failed: [invalid_request_error] '
-                'invalid temperature: only 0.6 is allowed for this model"}}',
-            ),
-            FakeResponse(),
-            FakeResponse(),
-        ]
-    )
+    session = FakeSequenceSession([FakeResponse()])
     provider._session = session
 
     async def run():
@@ -1421,15 +1365,9 @@ def test_temperature_constraint_is_learned_and_resent():
             [{"role": "user", "content": "hi"}]
         )
         assert message["content"] == "ok"
-        again = await provider.generate_chat_completion(
-            [{"role": "user", "content": "hi again"}]
-        )
-        assert again["content"] == "ok"
 
     asyncio.run(run())
-    assert session.payloads[0]["temperature"] == 0.9
-    assert session.payloads[1]["temperature"] == 0.6
-    assert session.payloads[2]["temperature"] == 0.6
+    assert "temperature" not in session.payloads[0]
 
 
 def test_media_incapable_endpoint_is_remembered_across_calls():
@@ -1942,30 +1880,6 @@ def test_output_cap_from_failed_primary_does_not_limit_fallback():
     assert session.payloads[1]["max_tokens"] <= 512
     assert session.payloads[2]["model"] == "fallback-model"
     assert session.payloads[2]["max_tokens"] == 8192
-
-
-def test_learned_temperature_does_not_poison_primary_model_override():
-    provider = OpenAICompatibleProvider(
-        "http://primary.test/v1", "normal-model", 10, 0.9, retry_attempts=1,
-    )
-    provider.available = True
-    session = FakeSequenceSession([
-        FakeErrorResponse(400, "invalid temperature: only 0.6 is allowed"),
-        FakeResponse(), FakeResponse(), FakeResponse(),
-    ])
-    provider._session = session
-
-    async def run():
-        for model in ("picky-model", None, "picky-model"):
-            result = await provider.generate_response(
-                [{"role": "user", "content": "hello"}], model=model
-            )
-            assert result == "ok"
-
-    asyncio.run(run())
-    assert [payload["temperature"] for payload in session.payloads] == [
-        0.9, 0.6, 0.9, 0.6,
-    ]
 
 
 @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), "1e309"])

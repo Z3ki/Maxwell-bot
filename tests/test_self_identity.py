@@ -157,6 +157,42 @@ def test_build_messages_injects_guild_nick_into_dynamic_context():
     assert "You are Maxwell" in static
 
 
+def test_build_messages_names_the_model_for_this_turn():
+    bot = _bot()
+    bot._active_chat_model_line = (
+        lambda: "Chat model for this turn: astra6.unthawed/gpt-6-luna (personal connection)."
+    )
+    message = _message()
+
+    async def run():
+        return await MaxwellBot._build_messages(bot, message, "which model")
+
+    messages = asyncio.run(run())
+    volatile = _volatile(messages)
+    assert "astra6.unthawed/gpt-6-luna" in volatile
+    assert "personal connection" in volatile
+
+
+def test_active_chat_model_line_uses_personal_provider():
+    from bot import _current_request_provider
+
+    bot = SimpleNamespace(config=SimpleNamespace(AI_MODEL="gemini-3.8-flash-low"), ai_provider=None)
+    personal = SimpleNamespace(model="astra6.unthawed/gpt-6-luna")
+    token = _current_request_provider.set(personal)
+    try:
+        line = MaxwellBot._active_chat_model_line(bot)
+    finally:
+        _current_request_provider.reset(token)
+    assert "astra6.unthawed/gpt-6-luna" in line
+    assert "personal connection" in line
+    assert "gemini-3.8-flash-low" not in line
+    assert MaxwellBot._active_chat_model_line(bot) == (
+        "Chat model for this turn: gemini-3.8-flash-low (Maxwell's default model). "
+        "If asked which model you are using, answer with this id. "
+        "Do not say the model name is hidden or that you cannot tell."
+    )
+
+
 def test_build_messages_static_prompt_uses_custom_bot_name():
     bot = _bot()
     bot.bot_name = "Sparky"

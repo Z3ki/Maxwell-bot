@@ -73,7 +73,7 @@ def test_vault_encrypts_masks_rotates_and_deletes(tmp_path):
         "masked_key": "••••3456",
         "base_url": "https://api.openai.com/v1",
         "modalities": "text, vision, tools",
-        "generation": "reasoning=off max_tokens=4096 temperature=0.4",
+        "generation": "reasoning=off max_tokens=4096",
     }
     assert path.stat().st_mode & 0o777 == 0o600
 
@@ -247,7 +247,7 @@ def test_custom_endpoint_stores_model_support_and_rejects_private_urls(tmp_path)
 
     settings = parse_model_support(
         "vision, audio",
-        "reasoning=on max_tokens=8192 temperature=0.2 effort=low context=32000",
+        "reasoning=on max_tokens=8192 effort=low context=32000",
     )
     vault = CredentialVault(tmp_path / "byok.sqlite3", KEY_A)
     vault.save(
@@ -275,7 +275,6 @@ def test_custom_endpoint_stores_model_support_and_rejects_private_urls(tmp_path)
     assert client.base_url == "https://models.example/v1"
     assert client.model == "local-model"
     assert client.max_tokens == 8192
-    assert client.temperature == 0.2
     assert client.capabilities.vision is True
     assert client.capabilities.audio is True
     assert client.capabilities.native_tools is False

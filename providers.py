@@ -85,12 +85,10 @@ from maxwell_core.providers.error_rules import (
     _is_policy_block_text as _is_policy_block_text,
     _is_content_policy_block as _is_content_policy_block,
     _is_media_unsupported_error as _is_media_unsupported_error,
-    _required_temperature as _required_temperature,
     _is_stream_options_rejected as _is_stream_options_rejected,
     context_output_limit,
     forbidden_body_fields,
     maximum_output_limit,
-    requires_greedy_top_p,
 )
 from maxwell_core.providers.protocol import (
     CompletionResponse,
@@ -102,7 +100,6 @@ logger = logging.getLogger(__name__)
 # Learned per base URL and model. BYOK builds a new client for every request,
 # so an instance dict would make every message repeat the same 422.
 _REJECTED_BODY_FIELDS: dict[tuple[str, str], set[str]] = {}
-_GREEDY_TOP_P: set[tuple[str, str]] = set()
 
 # When an endpoint returns a 429 (rate-limited / usage-exhausted), we temporarily
 # steer traffic away from it for this long instead of retrying it in the same
@@ -224,7 +221,7 @@ class OpenAICompatibleProvider(ChatProvider):
         base_url: str,
         model: str,
         max_tokens: int,
-        temperature: float,
+        temperature: float = 0.7,
         api_key: str = "",
         disable_reasoning: bool = True,
         fallback_base_url: str = "",
@@ -329,9 +326,6 @@ class OpenAICompatibleProvider(ChatProvider):
         # Learned model constraints are isolated by endpoint and actual model:
         # a primary model override must not constrain normal or fallback calls.
         self._endpoint_output_caps: dict[tuple[str, str], int] = {}
-        # Same idea for models that accept exactly one temperature (Console Go
-        # rejects anything but 0.6 with a 400). Learned once, applied up front.
-        self._endpoint_temperatures: dict[tuple[str, str], float] = {}
         # Endpoints that 400 on stream_options.include_usage (older Ollama).
         # Learned once, then we stop sending it and fall back to estimating
         # completion tokens from the output text.
@@ -596,7 +590,6 @@ class OpenAICompatibleProvider(ChatProvider):
         tools: list[dict] | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
-        temperature: float | None = None,
         disable_reasoning: bool | None = None,
     ) -> dict:
         # Model override is honored ONLY on the primary endpoint. Fallback
@@ -615,16 +608,9 @@ class OpenAICompatibleProvider(ChatProvider):
             (model or endpoint.model) if endpoint.name == "primary" else endpoint.model
         )
         constraint_key = (endpoint.name, effective_model)
-        effective_temperature = self.temperature if temperature is None else temperature
-        # An endpoint that already rejected our temperature gets its demanded
-        # value up front instead of another guaranteed 400.
-        forced_temperature = self._endpoint_temperatures.get(constraint_key)
-        if forced_temperature is not None:
-            effective_temperature = forced_temperature
         data = {
             "model": effective_model,
             "messages": chat_messages,
-            "temperature": effective_temperature,
             "stream": True,
         }
         # Always include max_tokens from config or override
@@ -680,8 +666,6 @@ class OpenAICompatibleProvider(ChatProvider):
         constraint = (endpoint.base_url, str(data.get("model") or ""))
         for field in _REJECTED_BODY_FIELDS.get(constraint, ()):
             data.pop(field, None)
-        if constraint in _GREEDY_TOP_P and data.get("temperature") == 0:
-            data["top_p"] = 1
         return data
 
     async def _get_session(self):
@@ -769,6 +753,7 @@ class OpenAICompatibleProvider(ChatProvider):
         generating HTML in the tool arguments).
         """
         tools = kwargs.get("tools")
+        kwargs.pop("temperature", None)
         try:
             message = await self.generate_chat_completion(
                 messages,
@@ -961,7 +946,6 @@ class OpenAICompatibleProvider(ChatProvider):
         model: str | None = None,
         timeout: int = 3600,
         max_tokens: int | None = None,
-        temperature: float | None = None,
         disable_reasoning: bool | None = None,
         fast_fallback: bool = False,
         on_tool_call_name=None,
@@ -1144,7 +1128,7 @@ class OpenAICompatibleProvider(ChatProvider):
         # NOT a `for attempt in range(1, max_attempts + 1)`: several branches
         # below extend `max_attempts` mid-flight so a deterministic 4xx can be
         # handed to another endpoint (media-unsupported re-route, text-only
-        # retry after stripping attachments, learned temperature resend,
+        # retry after stripping attachments,
         # generic non-2xx failover). range() snapshots its bounds at loop
         # entry, so every one of those extensions was a no-op: if the failure
         # landed on the final attempt the loop just fell out and the turn died
@@ -1189,7 +1173,6 @@ class OpenAICompatibleProvider(ChatProvider):
                 tools=tools,
                 model=model,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 disable_reasoning=disable_reasoning,
             )
             if stream is not None:
@@ -1496,9 +1479,6 @@ class OpenAICompatibleProvider(ChatProvider):
                                 max_attempts = attempt + 1
                             recovery_endpoint = endpoint
                             continue
-                        # Some models accept exactly one temperature and 400 on
-                        # anything else. Learn it and resend to the SAME endpoint
-                        # rather than burning retries / falling back needlessly.
                         if _is_stream_options_rejected(
                             resp.status, error_text
                         ) and data.get("stream_options"):
@@ -1528,42 +1508,6 @@ class OpenAICompatibleProvider(ChatProvider):
                                     max_attempts = attempt + 1
                                 recovery_endpoint = endpoint
                                 continue
-                        if requires_greedy_top_p(resp.status, raw_error_text):
-                            constraint = (endpoint.base_url, str(data.get("model") or ""))
-                            if constraint not in _GREEDY_TOP_P:
-                                _GREEDY_TOP_P.add(constraint)
-                                logger.warning(
-                                    "Provider endpoint %s requires top_p=1 for temperature 0; resending",
-                                    endpoint.name,
-                                )
-                                if attempt >= max_attempts:
-                                    max_attempts = attempt + 1
-                                recovery_endpoint = endpoint
-                                continue
-                        required_temp = _required_temperature(resp.status, error_text)
-                        if (
-                            required_temp is not None
-                            and self._endpoint_temperatures.get(
-                                (endpoint.name, data["model"])
-                            )
-                            != required_temp
-                        ):
-                            logger.warning(
-                                "Provider endpoint %s requires temperature=%s; resending",
-                                endpoint.name,
-                                required_temp,
-                            )
-                            # Recorded per-endpoint only. Assigning the local
-                            # `temperature` override instead would carry this
-                            # endpoint's constraint onto every other endpoint
-                            # this call later touches.
-                            self._endpoint_temperatures[
-                                (endpoint.name, data["model"])
-                            ] = required_temp
-                            if attempt >= max_attempts:
-                                max_attempts = attempt + 1
-                            recovery_endpoint = endpoint
-                            continue
                         # Anything else non-2xx used to die right here with no
                         # failover, so a 404 "model unavailable for free" on the
                         # primary killed the whole turn while a healthy fallback

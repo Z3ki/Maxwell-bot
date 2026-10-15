@@ -23,7 +23,7 @@ key when its field is blank, and preserves that provider's URL and advanced
 settings. Keys are never prefilled into a form or displayed in full.
 
 **Advanced** has normal selectors for image input, audio input, tools and
-reasoning, plus separate forms for reply limits, creativity, reasoning effort,
+reasoning, plus separate forms for reply limits, reasoning effort,
 context token limits and the API base URL. Enable only features the chosen
 model supports. Image and audio input do not enable image or voice generation.
 Leaving a named provider's URL blank restores its official URL; custom
@@ -84,8 +84,8 @@ Personal OpenAI, OpenRouter, Groq, and custom OpenAI-compatible API keys use
 independent `OpenAICompatibleProvider` clients with a construction-time
 `ProviderPolicy`. Modalities on the saved credential control image input,
 audio input, native tools, and reasoning. `max_tokens` and `context` set that
-client's output cap and prompt budget. They do not inherit Maxwell's funded
-fallback credentials. Public
+client's output cap and prompt budget. Requests do not send a sampling temperature.
+They do not inherit Maxwell's funded fallback credentials. Public
 HTTPS validation, DNS pinning, TLS verification, redirect blocking, total time
 and response-size limits, and credential redaction are enforced by the client.
 See [PROVIDERS.md](PROVIDERS.md). ChatGPT login and OAuth are not implemented;

@@ -1037,6 +1037,25 @@ class MaxwellBot(_BotBase):
         """Drop completed task handles. Called on a soft cadence; cheap."""
         self._tasks = [t for t in self._tasks if not t.done()]
 
+    def _active_chat_model_line(self) -> str:
+        """Name the model that will answer this turn, including a personal one."""
+        provider = _current_request_provider.get()
+        source = "personal connection" if provider is not None else "Maxwell's default model"
+        model = ""
+        if provider is not None:
+            model = str(getattr(provider, "model", "") or "").strip()
+        if not model:
+            model = str(getattr(getattr(self, "config", None), "AI_MODEL", "") or "").strip()
+        if not model:
+            model = str(getattr(getattr(self, "ai_provider", None), "model", "") or "").strip()
+        if not model:
+            return ""
+        return (
+            f"Chat model for this turn: {model} ({source}). "
+            "If asked which model you are using, answer with this id. "
+            "Do not say the model name is hidden or that you cannot tell."
+        )
+
     def _make_chat_provider(self, *, name: str = "primary", **kwargs):
         """Assemble providers without coupling Discord handling to a protocol."""
         from maxwell_core.providers.factory import openai_compat_provider
@@ -1049,7 +1068,6 @@ class MaxwellBot(_BotBase):
             base_url=self.config.AI_BASE_URL,
             model=self.config.AI_MODEL,
             max_tokens=self.config.AI_MAX_OUTPUT_TOKENS,
-            temperature=self.config.AI_TEMPERATURE,
             api_key=self.config.AI_API_KEY,
             disable_reasoning=self.config.AI_DISABLE_REASONING,
             reasoning_effort=getattr(self.config, "AI_REASONING_EFFORT", "") or "",
@@ -1250,7 +1268,6 @@ class MaxwellBot(_BotBase):
                     base_url=base_url,
                     model=model or self.config.AI_MODEL,
                     max_tokens=autonomy_max_tokens,
-                    temperature=self.config.AI_TEMPERATURE,
                     api_key=api_key,
                     disable_reasoning=disable_reasoning,
                     # Inherit the main provider's fallback endpoint so a dedicated

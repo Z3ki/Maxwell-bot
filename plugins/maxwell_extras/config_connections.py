@@ -271,9 +271,8 @@ class TestButton(discord.ui.Button):
                 await _send(interaction, "Connect the selected provider first.")
                 return
             provider = make_request_provider(self.panel.bot, credential)
-            # Saved temperature and output cap are used. Forcing temperature 0
-            # makes some hosts demand top_p, and a 16-token cap cuts off a
-            # model that thinks before it answers.
+            # Saved output cap is used. A 16-token cap cuts off a model that
+            # thinks before it answers.
             await asyncio.wait_for(
                 provider.generate_response(
                     [{"role": "user", "content": "Reply with OK."}],
@@ -443,13 +442,6 @@ class AdvancedModal(discord.ui.Modal):
                     5,
                 ),
                 (
-                    "temperature",
-                    "Creativity",
-                    str(settings["temperature"]),
-                    "0 to 2; default 0.4",
-                    8,
-                ),
-                (
                     "effort",
                     "Reasoning effort (optional)",
                     settings["effort"],
@@ -472,7 +464,7 @@ class AdvancedModal(discord.ui.Modal):
                 default=default or None,
                 placeholder=placeholder,
                 max_length=size,
-                required=key in {"max_tokens", "temperature"},
+                required=key == "max_tokens",
             )
             self.fields[key] = field
             self.add_item(field)
@@ -508,7 +500,7 @@ class AdvancedModal(discord.ui.Modal):
 class AdvancedButton(discord.ui.Button):
     def __init__(self, panel: Any, *, endpoint: bool = False):
         super().__init__(
-            label="Edit API base URL" if endpoint else "Reply limits & creativity",
+            label="Edit API base URL" if endpoint else "Reply limits",
             row=3,
             custom_id=f"maxwell:config:connection:edit:{'url' if endpoint else 'response'}",
         )
@@ -623,7 +615,6 @@ def render(panel: Any) -> str:
             "Enable reasoning before setting its effort.\n\n"
             f"**Model:** {discord.utils.escape_markdown(status['model'])}\n"
             f"**API base URL:** {url}\n**Reply token limit:** {settings['max_tokens']:,}\n"
-            f"**Creativity:** {settings['temperature']}\n"
             f"**Reasoning effort:** {settings['effort'] or 'Provider default'}\n"
             f"**Context token limit:** {settings['context'] or 'Provider default'}\n\n{panel.notice}"
         )

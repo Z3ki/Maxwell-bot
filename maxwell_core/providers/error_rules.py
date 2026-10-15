@@ -217,47 +217,6 @@ def _is_media_unsupported_error(status: int, error_text: str) -> bool:
     return False
 
 
-# "invalid temperature: only 0.6 is allowed for this model" (Console Go via
-# OpenRouter). Deterministic — retrying the same payload burns every attempt
-# and then falls back for no reason, so parse the demanded value and resend.
-_TEMPERATURE_CONSTRAINT_RE = re.compile(
-    r"temperature[^.]{0,80}?only\s+([0-9]*\.?[0-9]+)\s+is\s+allowed",
-    re.IGNORECASE,
-)
-_TEMPERATURE_RANGE_RE = re.compile(
-    r"temperature[^.]{0,80}?(?:must be|should be)[^.]{0,40}?"
-    r"(?:between|in)\s+\[?\s*([0-9]*\.?[0-9]+)\s*(?:,|and|-)\s*([0-9]*\.?[0-9]+)",
-    re.IGNORECASE,
-)
-
-
-def _required_temperature(status: int, error_text: str) -> float | None:
-    """Extract the temperature an endpoint demands from a 400 body."""
-    if status != 400:
-        return None
-    text = error_text or ""
-    if "temperature" not in text.lower():
-        return None
-    match = _TEMPERATURE_CONSTRAINT_RE.search(text)
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return None
-    match = _TEMPERATURE_RANGE_RE.search(text)
-    if match:
-        try:
-            low, high = float(match.group(1)), float(match.group(2))
-        except ValueError:
-            return None
-        if low > high:
-            low, high = high, low
-        # Aim at the middle of the accepted band rather than an endpoint,
-        # which providers sometimes treat as exclusive.
-        return round((low + high) / 2, 3)
-    return None
-
-
 def _is_stream_options_rejected(status: int, error_text: str) -> bool:
     if status not in (400, 422):
         return False
@@ -267,7 +226,7 @@ def _is_stream_options_rejected(status: int, error_text: str) -> bool:
 
 # Body fields a chat completion cannot drop and still be a chat completion.
 _REQUIRED_BODY_FIELDS = frozenset(
-    {"model", "messages", "stream", "max_tokens", "temperature", "tools", "tool_choice"}
+    {"model", "messages", "stream", "max_tokens", "tools", "tool_choice"}
 )
 _EXTRA_FIELD_RE = re.compile(
     r'"loc"\s*:\s*\[\s*"body"\s*,\s*"([A-Za-z0-9_]+)"\s*\]'
@@ -296,9 +255,3 @@ def forbidden_body_fields(status: int, error_text: str) -> tuple[str, ...]:
     return tuple(found)
 
 
-def requires_greedy_top_p(status: int, error_text: str) -> bool:
-    """True when temperature 0 is rejected unless top_p is 1."""
-    if status != 400:
-        return False
-    text = (error_text or "").lower()
-    return "top_p must be 1" in text and "greedy" in text
