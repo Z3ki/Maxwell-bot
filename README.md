@@ -1,3 +1,6 @@
+This codebase is such a mess...
+
+
 # Maxwell
 
 Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
