@@ -56,6 +56,6 @@
       "chess_state",
       "chess_resign"
     ],
-    "text": "chess: you play your own moves. Tools return text-only FEN and legal moves annotated with tactical value; boards are shown in Discord only. Read the position, pick strongest, pass as move=. Use chess_state to re-sync; no image inspection needed. Nothing plays for you. Play to win."
+    "text": "chess: you play your own moves. chess_start begins a game. chess_move, chess_state, and chess_resign appear only while a game is active in this channel, including on the next step after chess_start. Tools return text-only FEN and legal moves annotated with tactical value; boards are shown in Discord only. Read the position, pick strongest, pass as move=. Use chess_state to re-sync; no image inspection needed. Nothing plays for you. Play to win."
   }
 }

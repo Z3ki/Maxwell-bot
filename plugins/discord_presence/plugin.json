@@ -21,21 +21,21 @@
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "set_activity",
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "set_nickname",
       "returns_result": true,
       "ends_turn": false,
       "is_destructive": false,
-      "requires_admin": false
+      "requires_admin": true
     },
     {
       "name": "change_avatar",

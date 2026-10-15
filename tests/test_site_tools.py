@@ -195,11 +195,25 @@ def test_replace_that_does_not_match_says_so(bot):
     assert "byte-for-byte" in out
 
 
-def test_edit_can_fix_a_site_you_did_not_create(bot, tmp_path):
+def test_edit_can_read_a_site_you_did_not_create(bot, tmp_path):
     run(CreateSiteTool(bot).execute(_msg(uid=1), name="mine", title="Mine", body=PAGE))
     out = run(EditSiteTool(bot).execute(_msg(uid=2), name="mine", action="read"))
     assert "<h1>hi</h1>" in out
     assert "belongs to someone else" not in out
+
+
+def test_edit_cannot_change_another_users_site(bot):
+    run(CreateSiteTool(bot).execute(_msg(uid=1), name="mine", title="Mine", body=PAGE))
+    out = run(
+        EditSiteTool(bot).execute(
+            _msg(uid=2), name="mine", action="write", content="<p>nope</p>"
+        )
+    )
+    assert "belongs to someone else" in out
+    taken = run(
+        CreateSiteTool(bot).execute(_msg(uid=2), name="mine", title="Mine", body=PAGE)
+    )
+    assert "already owned" in taken
 
 
 def test_edit_cannot_read_outside_the_site(bot, tmp_path):

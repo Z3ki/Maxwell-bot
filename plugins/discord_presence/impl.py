@@ -21,6 +21,7 @@ class ChangePresenceTool(Tool):
     tool_name = 'change_presence'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     def get_description(self):
@@ -46,6 +47,7 @@ class SetActivityTool(Tool):
     tool_name = 'set_activity'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     def get_description(self):
@@ -129,6 +131,7 @@ class SetNicknameTool(Tool):
     tool_name = 'set_nickname'
     returns_result = True
     ends_turn = False
+    requires_admin = True
 
 
     def get_description(self):

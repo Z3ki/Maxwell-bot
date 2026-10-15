@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Offer chess and checkers move, state, and resign tools only while that channel has a live game, and attach them on the next step after start.
+- Hide bot status, activity, avatar, and nickname tools from anyone who is not an operator. Only a site's owner can edit or overwrite it.
 - Stop sending a sampling temperature. Remove the env knob, the personal-connection creativity field, and the provider retry that rewrote temperature.
 - Tell each turn which chat model is answering, including a personal connection's model id, and return that id from get_configuration. Keys and endpoints stay hidden.
 - Document how a server's disabled chess plugin hides its tools despite successful startup registration, and how to restore it without changing other server settings.
