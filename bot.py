@@ -537,6 +537,37 @@ def _is_unknown_reference_error(exc: Exception) -> bool:
 OPERATOR_MAILBOX_TOOLS = frozenset({
     "inbox_list", "inbox_act", "email_send", "email_read_inbox", "email_get_message", "email_search",
 })
+_GLOBAL_IDENTITY_TOOLS = frozenset({
+    "change_presence", "set_activity", "change_avatar", "set_nickname",
+})
+_CHESS_FOLLOWUP_TOOLS = frozenset({"chess_move", "chess_state", "chess_resign"})
+_CHECKERS_FOLLOWUP_TOOLS = frozenset({
+    "checkers_move", "checkers_state", "checkers_resign",
+})
+
+
+def _inactive_game_tools(message) -> set[str]:
+    """Move, state, and resign stay hidden until that channel has a live game."""
+    hidden = set(_CHESS_FOLLOWUP_TOOLS | _CHECKERS_FOLLOWUP_TOOLS)
+    channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+    if not channel_id:
+        return hidden
+    try:
+        from chess_game import get_manager
+
+        game = get_manager().active(channel_id)
+        if game is not None and not getattr(game, "is_over", True):
+            hidden.difference_update(_CHESS_FOLLOWUP_TOOLS)
+    except Exception:
+        logger.debug("chess activity check failed", exc_info=True)
+    try:
+        from plugins.checkers.tools import get_game
+
+        if get_game(channel_id) is not None:
+            hidden.difference_update(_CHECKERS_FOLLOWUP_TOOLS)
+    except Exception:
+        logger.debug("checkers activity check failed", exc_info=True)
+    return hidden
 
 PUBLIC_RUNTIME_BLOCKED_TOOLS = frozenset({
     "agent_life", "user_sandbox", "spawn_background", "github_repo",
@@ -10111,6 +10142,22 @@ class MaxwellBot(_BotBase):
                                 )
                             )
 
+                    refreshed = self._build_openai_tools(
+                        platform, message=message, content=content
+                    )
+                    old_names = {
+                        (tool.get("function") or {}).get("name")
+                        for tool in (openai_tools or [])
+                    }
+                    new_names = {
+                        (tool.get("function") or {}).get("name")
+                        for tool in (refreshed or [])
+                    }
+                    if new_names != old_names:
+                        openai_tools = refreshed
+                        custom_tool_calls, provider_tools = self._select_tool_protocol(
+                            openai_tools
+                        )
                     try:
                         followup = await self._generate_response(
                             result_messages,
@@ -11473,6 +11520,9 @@ class MaxwellBot(_BotBase):
         names.difference_update({"update_base_personality", "update_server_prompt"})
         if not getattr(self, "_is_admin", lambda _uid: False)(author_id):
             names.difference_update(OPERATOR_MAILBOX_TOOLS)
+            # Status, activity, avatar, and nickname change the bot for everyone.
+            names.difference_update(_GLOBAL_IDENTITY_TOOLS)
+        names.difference_update(_inactive_game_tools(message))
         if "leave_server" in names:
             author_id = (
                 getattr(getattr(message, "author", None), "id", None)

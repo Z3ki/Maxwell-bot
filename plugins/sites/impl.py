@@ -253,16 +253,15 @@ class CreateSiteTool(Tool):
             return "Error: name must be at least 2 valid characters"
 
         user_id = str(message.author.id)
-        is_admin = bool(self.bot and self.bot._is_admin(message.author.id))
         if hasattr(self.bot, "_load_sites"):
             self.bot._load_sites(quiet=True)
         sites = self.bot._sites
 
-        # Block slug takeover: only owner or admin may overwrite an existing site.
+        # Block slug takeover: only the owner may overwrite an existing site.
         existing = sites.get(slug) if isinstance(sites, dict) else None
         if isinstance(existing, dict):
             owner = str(existing.get("user_id") or "")
-            if owner and owner != user_id and not is_admin:
+            if owner and owner != user_id:
                 return (
                     f"Error: site slug '{slug}' is already owned by another user. "
                     "Pick a different name."
@@ -415,7 +414,7 @@ class CreateSiteTool(Tool):
             }
             try:
                 committed = await asyncio.to_thread(
-                    self._commit_site_locked, slug, user_id, is_admin, site_entry
+                    self._commit_site_locked, slug, user_id, site_entry
                 )
             except Exception as e:
                 # Best-effort cleanup of orphaned HTML only when this call
@@ -477,7 +476,7 @@ class CreateSiteTool(Tool):
             return f"Error creating site: {e}"
 
     def _commit_site_locked(
-        self, slug: str, user_id: str, is_admin: bool, entry: dict
+        self, slug: str, user_id: str, entry: dict
     ) -> bool:
         """Reload sites.json under a cross-process lock, re-check ownership,
         add the entry, and save atomically. Returns True on commit.
@@ -502,7 +501,7 @@ class CreateSiteTool(Tool):
             existing = sites.get(slug)
             if isinstance(existing, dict):
                 owner = str(existing.get("user_id") or "")
-                if owner and owner != user_id and not is_admin:
+                if owner and owner != user_id:
                     return False
             sites[slug] = entry
             _atomic_json_write_sync(path, sites)
@@ -585,6 +584,10 @@ class EditSiteTool(_SiteOwnedTool):
             return err
         act = str(action or "list").strip().lower()
         if act in SITE_MUTATING_ACTIONS:
+            owner = str(entry.get("user_id") or "")
+            author = str(getattr(getattr(message, "author", None), "id", "") or "")
+            if owner and author and owner != author:
+                return f"Error: site '{slug}' belongs to someone else"
             site_read_loop_guard(message, key="", label="", action=act)
         url = f"{self.base_url}/{slug}/"
 

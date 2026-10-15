@@ -76,6 +76,69 @@ def test_plugin_cannot_extend_the_shared_personality():
     assert "keep replies concise" in result.lower()
 
 
+def test_game_and_identity_tools_stay_out_until_they_apply(monkeypatch):
+    from bot import _inactive_game_tools
+
+    bot = SimpleNamespace(
+        tools={
+            "send_message",
+            "chess_start",
+            "chess_move",
+            "chess_state",
+            "chess_resign",
+            "checkers_start",
+            "checkers_move",
+            "checkers_state",
+            "checkers_resign",
+            "change_presence",
+            "set_activity",
+            "change_avatar",
+            "set_nickname",
+        },
+        _control={"disabled_tools": []},
+        plugin_manager=None,
+        _is_admin=lambda uid: str(uid) == "1",
+    )
+    message = SimpleNamespace(
+        author=SimpleNamespace(id=5, bot=False),
+        guild=None,
+        channel=SimpleNamespace(id="99", guild=SimpleNamespace(id=1), type=None),
+    )
+    monkeypatch.setattr(
+        "chess_game.get_manager",
+        lambda: SimpleNamespace(active=lambda _cid: None),
+    )
+    monkeypatch.setattr("plugins.checkers.tools.get_game", lambda _cid: None)
+    idle = MaxwellBot._turn_tool_names(bot, "discord", message)
+    assert "chess_start" in idle and "checkers_start" in idle
+    assert not idle & {"chess_move", "chess_state", "chess_resign"}
+    assert not idle & {"checkers_move", "checkers_state", "checkers_resign"}
+    assert not idle & {"change_presence", "set_activity", "change_avatar", "set_nickname"}
+
+    monkeypatch.setattr(
+        "chess_game.get_manager",
+        lambda: SimpleNamespace(active=lambda _cid: SimpleNamespace(is_over=False)),
+    )
+    monkeypatch.setattr(
+        "plugins.checkers.tools.get_game", lambda _cid: SimpleNamespace()
+    )
+    live = MaxwellBot._turn_tool_names(bot, "discord", message)
+    assert {"chess_move", "chess_state", "chess_resign"} <= live
+    assert {"checkers_move", "checkers_state", "checkers_resign"} <= live
+
+    message.author.id = 1
+    operator = MaxwellBot._turn_tool_names(bot, "discord", message)
+    assert {"change_presence", "set_activity", "change_avatar", "set_nickname"} <= operator
+    assert _inactive_game_tools(None) == {
+        "chess_move",
+        "chess_state",
+        "chess_resign",
+        "checkers_move",
+        "checkers_state",
+        "checkers_resign",
+    }
+
+
 def test_turn_tool_catalog_hides_stale_prompt_edit_tools():
     bot = SimpleNamespace(
         tools={"update_base_personality", "update_server_prompt", "send_message"},
