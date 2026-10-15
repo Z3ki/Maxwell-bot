@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Document how a server's disabled chess plugin hides its tools despite successful startup registration, and how to restore it without changing other server settings.
+
 ## 0.1.14 — 2026-10-14
 
 Install with `--version v0.1.14`. Release assets include source, installers, checksums and the versioned container image digest.
