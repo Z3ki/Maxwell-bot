@@ -130,6 +130,24 @@ Maxwell's shared system prompt cannot be edited through `/config`.
 
 Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, plan, token quota, or paid tier.
 
+### A loaded tool is missing in one server
+
+Plugin loading does not imply that a server's model can use its tools. A saved
+`guild_plugin_overrides["<guild_id>"]["chess"] = false` hides `chess_start`,
+`chess_move`, `chess_state` and `chess_resign` from that server's tool schemas
+and chess instructions even when startup logs say the chess plugin loaded.
+
+To restore chess, open `/config` → **Server settings** → **Extra tools** in
+the affected server and include **Chess** among the enabled plugins. Preserve
+the other selections. An operator can instead update that server's `chess`
+override to `true` through the authenticated control API, preserving other
+guilds and plugin overrides. Controls reload without a restart.
+
+If tools are still missing, check the master `tools_enabled` switch,
+`disabled_tools`, server tool-group restrictions and explicit per-user plugin
+denials. A missing `python-chess` dependency prevents chess from loading at all;
+installing it in a shell sandbox does not change the bot's Python environment.
+
 ## Runtime controls
 
 Defaults live in `control_defaults.py`. `bot_control.json` overrides them at runtime.
