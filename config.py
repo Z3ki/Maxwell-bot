@@ -44,7 +44,6 @@ _AI_LEGACY_ENV = {
     "AI_BASE_URL": "OLLAMA_BASE_URL",
     "AI_API_KEY": "OLLAMA_API_KEY",
     "AI_MODEL": "OLLAMA_MODEL",
-    "AI_TEMPERATURE": "OLLAMA_TEMPERATURE",
     "AI_DISABLE_REASONING": "OLLAMA_DISABLE_REASONING",
     "AI_REASONING_EFFORT": "OLLAMA_REASONING_EFFORT",
     "AI_FALLBACK_BASE_URL": "OLLAMA_FALLBACK_BASE_URL",
@@ -248,12 +247,6 @@ class Config:
     AI_MAX_OUTPUT_TOKENS = _int_env(
         "AI_MAX_OUTPUT_TOKENS", 16384, min_value=1, max_value=131072
     )
-    # 0.7 rather than 1.0: at 1.0 the tail of the distribution is wide enough
-    # that a chat model wanders — it picks a tic and rides it, which is the
-    # generation-side half of the repetition the scrubber cleans up after.
-    # 0.7 keeps him improvising without letting the sampler pick the odd token
-    # for its own sake. Raise it back per-install with AI_TEMPERATURE.
-    AI_TEMPERATURE = _float_env("AI_TEMPERATURE", 0.7, min_value=0.0)
     AI_DISABLE_REASONING = _bool_env("AI_DISABLE_REASONING", True)
     # Optional chat-completions reasoning_effort (e.g. "low"). Ignored when
     # AI_DISABLE_REASONING is on. Blank leaves the field off the payload.
@@ -284,7 +277,6 @@ class Config:
     OLLAMA_BASE_URL = AI_BASE_URL
     OLLAMA_API_KEY = AI_API_KEY
     OLLAMA_MODEL = AI_MODEL
-    OLLAMA_TEMPERATURE = AI_TEMPERATURE
     OLLAMA_DISABLE_REASONING = AI_DISABLE_REASONING
     OLLAMA_REASONING_EFFORT = AI_REASONING_EFFORT
     OLLAMA_FALLBACK_BASE_URL = AI_FALLBACK_BASE_URL

@@ -115,9 +115,13 @@ def test_byok_reads_only_presence_and_lists_private_form_options(tmp_path):
     bot._byok_vault = vault
     result = run(GetConfigurationTool(bot), message())
     assert result["current"]["byok_connected"]
+    assert result["current"]["model"] == "test-model"
+    assert result["current"]["model_source"] == "personal"
+    assert result["current"]["provider"] == "OpenAI"
     assert result["options"]["providers"] == ["openai", "openrouter", "groq", "custom"]
     assert "sk-private" not in json.dumps(result)
     assert "api_key" not in result["current"]
+    assert "base_url" not in result["current"]
 
 
 def test_server_managers_cannot_change_global_settings(tmp_path):

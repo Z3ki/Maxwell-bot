@@ -68,7 +68,6 @@ _LEGACY_SETTINGS: dict[str, Any] = {
     "tools": True,
     "reasoning": False,
     "max_tokens": 4096,
-    "temperature": 0.4,
     "effort": "",
     "context": None,
 }
@@ -78,7 +77,6 @@ _NEW_SETTINGS: dict[str, Any] = {
     "tools": True,
     "reasoning": False,
     "max_tokens": 4096,
-    "temperature": 0.4,
     "effort": "",
     "context": None,
 }
@@ -144,20 +142,10 @@ def format_modalities(settings: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _format_temperature(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = 0.4
-    text = f"{number:.2f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
 def format_generation(settings: dict[str, Any]) -> str:
     parts = [
         f"reasoning={'on' if settings.get('reasoning') else 'off'}",
         f"max_tokens={int(settings.get('max_tokens') or 4096)}",
-        f"temperature={_format_temperature(settings.get('temperature', 0.4))}",
     ]
     effort = str(settings.get("effort") or "").strip()
     if effort:
@@ -193,7 +181,7 @@ def _parse_bool(value: str, label: str) -> bool:
 
 
 def parse_generation(text: str) -> dict[str, Any]:
-    """Read reasoning, max_tokens, temperature, effort, and context."""
+    """Read reasoning, max_tokens, effort, and context."""
     result = dict(_NEW_SETTINGS)
     raw = str(text or "").strip()
     if not raw:
@@ -217,14 +205,6 @@ def parse_generation(text: str) -> dict[str, Any]:
             if not 16 <= tokens <= _MAX_OUTPUT_TOKENS:
                 raise ValueError(f"max_tokens must be from 16 to {_MAX_OUTPUT_TOKENS}")
             result["max_tokens"] = tokens
-        elif key in {"temperature", "temp"}:
-            try:
-                temperature = float(value)
-            except ValueError:
-                raise ValueError("temperature must be a number from 0 to 2") from None
-            if not 0 <= temperature <= 2:
-                raise ValueError("temperature must be a number from 0 to 2")
-            result["temperature"] = round(temperature, 2)
         elif key in {"effort", "reasoning_effort"}:
             effort = value.strip().lower()
             if effort not in _EFFORTS:
@@ -243,7 +223,7 @@ def parse_generation(text: str) -> dict[str, Any]:
                 result["context"] = window
         else:
             raise ValueError(
-                "generation keys are reasoning, max_tokens, temperature, effort, and context"
+                "generation keys are reasoning, max_tokens, effort, and context"
             )
     if not result["reasoning"]:
         result["effort"] = ""
@@ -569,7 +549,6 @@ def make_request_provider(bot: Any, credential: dict[str, Any]):
         base_url=base_url,
         model=credential["model"],
         max_tokens=max_tokens,
-        temperature=float(settings["temperature"]),
         api_key=credential["api_key"],
         disable_reasoning=not bool(settings["reasoning"]),
         reasoning_effort=str(settings["effort"] or ""),

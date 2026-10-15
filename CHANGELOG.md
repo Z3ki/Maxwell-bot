@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stop sending a sampling temperature. Remove the env knob, the personal-connection creativity field, and the provider retry that rewrote temperature.
+- Tell each turn which chat model is answering, including a personal connection's model id, and return that id from get_configuration. Keys and endpoints stay hidden.
 - Document how a server's disabled chess plugin hides its tools despite successful startup registration, and how to restore it without changing other server settings.
 
 ## 0.1.14 — 2026-10-14

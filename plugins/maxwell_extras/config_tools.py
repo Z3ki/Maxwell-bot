@@ -87,10 +87,23 @@ async def settings_snapshot(bot, context, scope):
     if scope == "personal":
         personal = await asyncio.to_thread(_store(bot).get, str(context.user.id))
         vault = getattr(bot, "_byok_vault", None)
-        # Only credential presence crosses into model context. No keys, endpoints,
-        # or raw credentials are read by these tools.
-        present = await asyncio.to_thread(vault.has_credential, str(context.user.id)) if vault else False
-        return {**personal, "byok_connected": present}
+        # Model id and provider label are visible. Keys, endpoints, and raw
+        # credentials stay out of model context.
+        uid = str(context.user.id)
+        present = await asyncio.to_thread(vault.has_credential, uid) if vault else False
+        default_model = str(getattr(getattr(bot, "config", None), "AI_MODEL", "") or "").strip()
+        snapshot = {**personal, "byok_connected": present, "model": default_model, "model_source": "default"}
+        if present and vault is not None:
+            try:
+                status = await asyncio.to_thread(vault.status, uid)
+            except Exception:
+                logger.warning("Could not read personal model label", exc_info=True)
+                status = None
+            if status:
+                snapshot["model"] = status["model"]
+                snapshot["provider"] = status["provider_label"]
+                snapshot["model_source"] = "personal"
+        return snapshot
     if scope == "server":
         gid = str(context.guild.id)
         state = await asyncio.to_thread(server_settings, _root(bot), gid)
@@ -206,7 +219,7 @@ class GetConfigurationTool(Tool):
     def get_description(self):
         return ("Read your requester's current /config settings, available options and permissions. "
                 "scope: personal (default), server (current server managers), owner (configured app owners). "
-                "Returns your own supported configuration; no secrets or other users' data. "
+                "Returns your own supported configuration, including the chat model id for this account. No secrets or other users' data. "
                 "Use before changing settings or explaining your setup. For running version/commits use get_maxwell_updates; for allowance use usage.")
 
     async def execute(self, message, scope="personal", **kwargs):

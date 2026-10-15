@@ -93,7 +93,7 @@ def seed(panel, vault, provider="openai", *, custom=False):
         base_url="https://example.com/v1" if custom or provider == "custom" else "",
         settings=parse_model_support(
             "text, vision, tools",
-            "reasoning=on max_tokens=8192 temperature=0.7 effort=high context=128000",
+            "reasoning=on max_tokens=8192 effort=high context=128000",
         ),
     )
     asyncio.run(panel._refresh_connection())
@@ -274,7 +274,6 @@ def test_advanced_controls_change_support_and_limits_without_replacing_credentia
     modal = connections.AdvancedModal(panel)
     for key, value in {
         "max_tokens": "2048",
-        "temperature": "0.2",
         "effort": "low",
         "context": "64000",
     }.items():

@@ -63,8 +63,6 @@ def test_all_legacy_environment_inputs_and_neutral_precedence(old, new):
             "False",
             "True",
         )
-    elif new == "AI_TEMPERATURE":
-        legacy, neutral, expected_legacy, expected_neutral = "0.2", "0.4", "0.2", "0.4"
     elif new.endswith(("RETRIES", "ATTEMPTS")) or new in {
         "AI_MAX_OUTPUT_TOKENS",
         "AI_ENDPOINT_COOLDOWN_SECONDS",

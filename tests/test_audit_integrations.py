@@ -199,7 +199,7 @@ def test_state_updates_from_separate_store_instances_do_not_lose_keys(tmp_path):
 
 @pytest.mark.parametrize(
     "error",
-    ["unknown field stream_options", "invalid temperature: only 0.6 is allowed"],
+    ["unknown field stream_options"],
 )
 def test_provider_parameter_repair_retries_same_endpoint(error):
     class ErrorResponse(_Response):

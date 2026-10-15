@@ -22,7 +22,6 @@ retain the existing default/clamping behavior.
 | `AI_API_KEY` | `OLLAMA_API_KEY`, then `OPENAI_COMPAT_API_KEY` |
 | `AI_MODEL` | `OLLAMA_MODEL` |
 | `AI_MAX_OUTPUT_TOKENS` | `OLLAMA_MAX_TOKENS` |
-| `AI_TEMPERATURE` | `OLLAMA_TEMPERATURE` |
 | `AI_DISABLE_REASONING` | `OLLAMA_DISABLE_REASONING` |
 | `AI_REASONING_EFFORT` | `OLLAMA_REASONING_EFFORT` |
 | `AI_RETRY_ATTEMPTS` | `OLLAMA_RETRY_ATTEMPTS` |
@@ -135,8 +134,7 @@ are sanitized. OAuth credentials must use a separate future storage subsystem.
 
 OpenCode requires `x-opencode-session` on its compatible chat endpoint; this is
 a small host-specific header adapter, not a provider kind. Older compatible
-servers reject streaming usage options, tool definitions, certain temperatures
-or output limits. These workarounds remain covered by provider tests. DeepSeek
+servers reject streaming usage options, tool definitions, or output limits. These workarounds remain covered by provider tests. DeepSeek
 answer-in-reasoning handling stays restricted to known models to avoid exposing
 other models' internal reasoning. Audio/video adaptation and empty streamed
 response recovery also remain supported.
