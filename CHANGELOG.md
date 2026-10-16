@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Do not post a "Maxwell is using" line for reactions, silence, typing, waits, or message edits, deletes, and pins. Those actions are the response, and the status line only appears and disappears.
 - Remove generic working acknowledgements during streaming and app commands, and the persistent shell status that repeated once per command. Keep concrete tool progress and final answers.
 
 - Offer chess and checkers move, state, and resign tools only while that channel has a live game, and attach them on the next step after start.

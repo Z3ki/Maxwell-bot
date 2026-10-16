@@ -243,8 +243,27 @@ async def _note_interaction_tool(
         await _flush_tool_status(state)
 
 
+def _dismiss_silent_interaction(name: str, result: str) -> bool:
+    """True when a reaction or silence is the whole reply.
+
+    The deferred interaction would otherwise stay on screen as
+    "Maxwell is using: `react`" or Discord's thinking placeholder.
+    """
+    text = str(result or "")
+    if text.lstrip().lower().startswith("error"):
+        return False
+    if str(name or "").strip().lower() == "no_response":
+        return "__NO_RESPONSE__" in text
+    if str(name or "").strip().lower() == "react":
+        return "__REACTION_SENT__" in text
+    return False
+
+
 async def _clear_working_status(
-    state: _InteractionProgressState, *, delete: bool = True
+    state: _InteractionProgressState,
+    *,
+    delete: bool = True,
+    dismiss_deferred: bool = False,
 ) -> None:
     """Finish the status; keep it when a slow answer will reply to it."""
     pending = state.tool_status_task
@@ -254,7 +273,9 @@ async def _clear_working_status(
     async with state.lock:
         if state.completed:
             return
-        should_delete = delete and state.escalated and state.status_set
+        should_delete = delete and (
+            (state.escalated and state.status_set) or dismiss_deferred
+        )
         state.completed = True
         _cancel_timer(state)
         pending = state.tool_status_task
@@ -552,14 +573,15 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
     async def after_tool(payload) -> None:
         data = getattr(payload, "data", payload) or {}
         message = data.get("message")
+        name = str(data.get("name") or "")
         if (
             message is not None
             and is_user_install_message(message)
-            and str(data.get("name") or "") == "no_response"
+            and _dismiss_silent_interaction(name, str(data.get("result") or ""))
         ):
             state = _state_for_message(message)
             if state is not None:
-                await _clear_working_status(state)
+                await _clear_working_status(state, dismiss_deferred=True)
 
     if ctx is not None and hasattr(ctx, "register_hook"):
         ctx.register_hook("before_tool", before_tool, priority=40)

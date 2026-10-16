@@ -114,7 +114,25 @@ _DEFERRED_POST_WINDOW = 0.8
 
 # Placeholder string for "tool name announced but no reasoning yet".
 _GENERATING_PLACEHOLDER = "generating…"
-_HIDDEN_PROGRESS_TOOLS = frozenset({"send_message"})
+# The action is the whole response, or it leaves no chat message. Naming it
+# posts "Maxwell is using: `react`" (or silence, a delete, a pin) and that
+# line is deleted as soon as the action finishes.
+_HIDDEN_PROGRESS_TOOLS = frozenset(
+    {
+        "send_message",
+        "react",
+        "no_response",
+        "typing",
+        "delete_message",
+        "purge_messages",
+        "edit_message",
+        "pin_message",
+        "wait",
+        "sleep",
+        "clear_sleep",
+        "more_tools",
+    }
+)
 
 
 def is_hidden_progress_tool(tool_name: str | None) -> bool:
@@ -557,6 +575,8 @@ class ToolProgress:
             counts: dict[str, int] = {}
             order: list[str] = []
             for name in self._tools_used:
+                if is_hidden_progress_tool(name):
+                    continue
                 if name not in counts:
                     counts[name] = 0
                     order.append(name)
@@ -567,7 +587,8 @@ class ToolProgress:
             ]
             if len(order) > 8:
                 visible.append(f"+{len(order) - 8} more")
-            return "Maxwell is using: " + ", ".join(visible)
+            if visible:
+                return "Maxwell is using: " + ", ".join(visible)
 
         raw = self._reasoning_buffer.strip()
         # A provider may stream the old acknowledgement in several deltas.
@@ -580,7 +601,7 @@ class ToolProgress:
         if not raw:
             # No reasoning yet. If a tool name was announced, say so
             # plainly so the user knows what the model committed to.
-            if self._current_tool:
+            if self._current_tool and not is_hidden_progress_tool(self._current_tool):
                 head = f"using {self._current_tool}…"
             else:
                 return ""
@@ -618,7 +639,11 @@ class ToolProgress:
                 if first_ws != -1 and first_ws < _VISIBLE_BUDGET // 2:
                     head2 = head2[first_ws + 1 :]
                 sentence = head2.strip()
-            tag = f" → {self._current_tool}" if self._current_tool else ""
+            tag = (
+                f" → {self._current_tool}"
+                if self._current_tool and not is_hidden_progress_tool(self._current_tool)
+                else ""
+            )
             head = f"thinking: {sentence}{tag}"
         if self._snippet_buffer:
             return f"{head}\n⤷ {self._snippet_buffer}"

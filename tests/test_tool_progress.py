@@ -191,6 +191,23 @@ def test_send_message_is_omitted_from_progress():
     asyncio.run(run())
 
 
+def test_silent_and_vanishing_tools_are_omitted_from_progress():
+    async def run():
+        msg = FakeMessage()
+        prog = tool_progress.ToolProgress(msg)
+        for name in ("react", "no_response", "typing", "delete_message", "purge_messages", "edit_message", "pin_message"):
+            await prog.update(name, "doing it")
+            await prog.note_tool(name)
+            await prog.tick(tool_name=name)
+        assert msg.channel.sent == []
+        assert prog._tools_used == []
+        assert prog._current_tool == ""
+        prog._tools_used = ["web_search", "react", "no_response", "fetch_url"]
+        assert prog._render() == "Maxwell is using: `web_search`, `fetch_url`"
+        await prog.stop()
+    asyncio.run(run())
+
+
 def test_tool_status_compacts_repeated_calls():
     msg = FakeMessage()
     prog = _progress_for_known_tool(msg)
