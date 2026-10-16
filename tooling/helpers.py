@@ -3867,63 +3867,6 @@ async def resolve_send_reply_target(message, reply=True, reply_to=None, bot=None
     return message
 
 
-class _ShellProgressTurn:
-    """One Discord `$ cmd` message for a single user-message turn."""
-
-    __slots__ = ("posted", "parts", "lock", "last_flush_at")
-
-    def __init__(self) -> None:
-        self.posted = None
-        self.parts: list[str] = []
-        self.lock = asyncio.Lock()
-        self.last_flush_at = 0.0
-
-
-def _shell_progress_turn_key(message) -> str:
-    """Key shell progress by channel + triggering user message (one turn)."""
-    channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
-    message_id = str(getattr(message, "id", "") or "")
-    if not message_id:
-        message_id = str(id(message))
-    return f"{channel_id}:{message_id}"
-
-
-def _shell_progress_store(bot, message) -> dict:
-    owner = bot if bot is not None else message
-    store = getattr(owner, "_shell_progress_by_turn", None)
-    if store is None:
-        store = {}
-        owner._shell_progress_by_turn = store
-    return store
-
-
-def _get_shell_progress_turn(bot, message) -> _ShellProgressTurn:
-    store = _shell_progress_store(bot, message)
-    key = _shell_progress_turn_key(message)
-    sess = store.get(key)
-    if sess is None:
-        sess = _ShellProgressTurn()
-        store[key] = sess
-    return sess
-
-
-def forget_shell_progress(bot, message) -> None:
-    """Drop this turn's in-memory shell-progress session.
-
-    The Discord message is left in the channel; a later user message is a
-    new turn and posts a fresh shell progress message.
-    """
-    if message is None:
-        return
-    key = _shell_progress_turn_key(message)
-    for owner in (bot, message):
-        if owner is None:
-            continue
-        store = getattr(owner, "_shell_progress_by_turn", None)
-        if store:
-            store.pop(key, None)
-
-
 # class SendMessageTool(Tool):  — moved to a plugin
 
 

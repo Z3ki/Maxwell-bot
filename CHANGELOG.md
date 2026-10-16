@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove generic working acknowledgements during streaming and app commands, and the persistent shell status that repeated once per command. Keep concrete tool progress and final answers.
+
 - Offer chess and checkers move, state, and resign tools only while that channel has a live game, and attach them on the next step after start.
 - Hide bot status, activity, avatar, and nickname tools from anyone who is not an operator. Only a site's owner can edit or overwrite it.
 - Stop sending a sampling temperature. Remove the env knob, the personal-connection creativity field, and the provider retry that rewrote temperature.

@@ -138,7 +138,7 @@ def test_send_message_does_not_create_or_escalate_interaction_progress():
 
 
 def test_interaction_progress_renderer_filters_hidden_tools_defensively():
-    assert mod._tool_status_text(["send_message"]) == "working on it…"
+    assert mod._tool_status_text(["send_message"]) == ""
     assert mod._tool_status_text(["web_search", "send_message", "fetch_url"]) == (
         "Maxwell is using: `web_search`, `fetch_url`"
     )
@@ -167,10 +167,10 @@ def test_tool_escalation_keeps_status_and_replies_to_it():
         state = _state(interaction)
         session = UserInstallSession(interaction, visibility="public")
         await interaction.response.defer()
-        await mod._mark_working(state)
+        await mod._note_interaction_tool(state, "shell")
         sent = await session.send("final answer")
-        assert interaction.original.content == mod._STATUS_TEXT
-        assert interaction.edits == [mod._STATUS_TEXT]
+        assert interaction.original.content == "Maxwell is using: `shell`"
+        assert all(text == "Maxwell is using: `shell`" for text in interaction.edits)
         assert interaction.original_deleted is False
         assert interaction.original.deleted is False
         assert interaction.channel.sent[0][0]["reference"] is interaction.original
@@ -200,21 +200,21 @@ def test_answer_between_five_and_ten_seconds_stays_original():
     asyncio.run(run())
 
 
-def test_answer_after_ten_seconds_replies_to_working_status():
+def test_slow_text_answer_replaces_original_without_any_placeholder():
     async def run():
         mod._patch_session()
         interaction = _Interaction(4)
         state = _state(interaction, age=11.0)
         session = UserInstallSession(interaction, visibility="public")
+        await mod._slow_timer(state)
+        assert interaction.edits == []
         sent = await session.send("late answer")
-        assert interaction.original.content == mod._STATUS_TEXT
-        assert interaction.original_deleted is False
-        assert interaction.channel.sent[0][0]["reference"] is interaction.original
-        assert interaction.channel.sent[0][0]["content"] == "late answer"
-        assert sent is interaction.channel.sent[0][1]
+        assert interaction.edits == ["late answer"]
+        assert interaction.channel.sent == []
         assert interaction.followup.sent == []
-        assert state.escalated is True
-
+        assert sent is interaction.original
+        assert state.escalated is False
+        assert state.completed is True
     asyncio.run(run())
 
 
@@ -294,6 +294,7 @@ def test_slow_reply_falls_back_to_editing_status_when_channel_send_fails():
         interaction.channel.fail_send = True
         state = _state(interaction, age=11.0)
         session = UserInstallSession(interaction, visibility="public")
+        await mod._note_interaction_tool(state, "shell")
 
         sent = await session.send("late answer")
         assert interaction.channel.sent == []
@@ -310,8 +311,9 @@ def test_ephemeral_working_status_is_not_replied_to_publicly():
         mod._patch_session()
         interaction = _Interaction(8)
         interaction.original.flags.ephemeral = True
-        _state(interaction, age=11.0)
+        state = _state(interaction, age=11.0)
         session = UserInstallSession(interaction, visibility="public")
+        await mod._note_interaction_tool(state, "shell")
 
         sent = await session.send("private late answer")
         assert interaction.channel.sent == []
@@ -326,11 +328,12 @@ def test_ephemeral_answer_does_not_replace_public_working_status():
     async def run():
         mod._patch_session()
         interaction = _Interaction(9)
-        _state(interaction, age=11.0)
+        state = _state(interaction, age=11.0)
         session = UserInstallSession(interaction, visibility="private")
+        await mod._note_interaction_tool(state, "shell")
 
         sent = await session.send("private late answer", ephemeral=True)
-        assert interaction.original.content == mod._STATUS_TEXT
+        assert interaction.original.content == "Maxwell is using: `shell`"
         assert interaction.channel.sent == []
         assert interaction.followup.sent[0][0]["ephemeral"] is True
         mentions = interaction.followup.sent[0][0]["allowed_mentions"]
@@ -376,8 +379,9 @@ def test_private_session_never_sends_slow_answer_to_channel():
     async def run():
         mod._patch_session()
         interaction = _Interaction(987)
-        _state(interaction, age=11.0)
+        state = _state(interaction, age=11.0)
         session = UserInstallSession(interaction, visibility="private")
+        await mod._note_interaction_tool(state, "shell")
         # Even missing or misleading status flags cannot publish a private answer.
         await session.send("private result")
         assert interaction.channel.sent == []
