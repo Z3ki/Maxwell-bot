@@ -1,9 +1,8 @@
 """Discord user-install progress behavior for slow/tool-backed commands.
 
-Fast commands keep Discord's deferred interaction as the answer. If a command
-runs a tool or is still unanswered after ten seconds, the deferred interaction
-is changed to a stable ``working on it…`` status and the eventual answer is
-sent as a separate follow-up message.
+Commands keep Discord's deferred interaction as the answer until a tool is
+actually dispatched. Tool-backed commands show the concrete tool names; slow
+text-only answers never create a generic acknowledgement message.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from user_install import (
 )
 
 _SLOW_AFTER_SECONDS = 10.0
-_STATUS_TEXT = "working on it…"
 _STATE_TTL_SECONDS = 15 * 60.0
 _STATES: dict[str, "_InteractionProgressState"] = {}
 _SESSION_PATCHED = False
@@ -147,6 +145,9 @@ async def _mark_working(state: _InteractionProgressState) -> Any | None:
     async with state.lock:
         if state.completed:
             return None
+        status = _tool_status_text(state.tool_calls)
+        if not status:
+            return None
         state.escalated = True
         _cancel_timer(state)
         if state.session is not None:
@@ -163,7 +164,7 @@ async def _mark_working(state: _InteractionProgressState) -> Any | None:
                     return state.status_message
             return state.status_message
         try:
-            posted = await _edit_original(state.interaction, _STATUS_TEXT)
+            posted = await _edit_original(state.interaction, status)
         except Exception:
             # A tool can race the initial defer. Keep ``escalated`` true so the
             # answer still becomes a follow-up; the next send retries the status.
@@ -190,7 +191,7 @@ def _tool_status_text(calls: list[str]) -> str:
     ]
     if len(order) > 8:
         visible.append(f"+{len(order) - 8} more")
-    return "Maxwell is using: " + ", ".join(visible) if visible else _STATUS_TEXT
+    return "Maxwell is using: " + ", ".join(visible) if visible else ""
 
 
 async def _flush_tool_status(state: _InteractionProgressState) -> None:
@@ -221,11 +222,14 @@ async def _note_interaction_tool(
 ) -> None:
     if not str(name or "").strip() or is_hidden_progress_tool(name):
         return
-    await _mark_working(state)
     async with state.lock:
         if state.completed:
             return
         state.tool_calls.append(str(name or "").strip())
+    await _mark_working(state)
+    async with state.lock:
+        if state.completed:
+            return
         delay = 1.05 - (time.monotonic() - state.tool_status_last_edit)
         if delay <= 0:
             flush_now = True
@@ -336,9 +340,8 @@ def _patch_session() -> None:
         has_file_payload = file is not None or bool(extra_files)
         has_followup_only_payload = kwargs.get("poll") is not None
 
-        # A fast response should replace Discord's deferred interaction instead
-        # of creating a second message. Use the same lock as the slow timer so
-        # "working on it…" can never overwrite a final answer at the boundary.
+        # Text answers replace the deferred interaction regardless of latency.
+        # Share the tool-status lock so progress cannot overwrite a final answer.
         promote_after_fast_attempt = False
         if (
             not has_file_payload
@@ -347,36 +350,30 @@ def _patch_session() -> None:
         ):
             async with state.lock:
                 if not state.escalated and not state.completed:
-                    # Re-check the cutoff while holding the lock. This closes
-                    # the gap between the earlier elapsed check and this edit.
-                    if time.monotonic() - state.started >= _SLOW_AFTER_SECONDS:
-                        promote_after_fast_attempt = True
-                    else:
-                        text = None if content is None else str(content)
-                        if text == "":
-                            text = None
-                        visible_content = text
-                        if visible_content is None and not fast_payload:
-                            visible_content = "\u200b"
-                        try:
-                            sent = await _edit_original(
-                                self.interaction,
-                                visible_content,
-                                **fast_payload,
-                            )
-                        except Exception:
-                            sent = None
-                        if sent is not None:
-                            state.completed = True
-                            _cancel_timer(state)
-                            self._sent = 1
-                            self._last = sent
-                            return sent
-                        promote_after_fast_attempt = True
+                    text = None if content is None else str(content)
+                    if text == "":
+                        text = None
+                    visible_content = text
+                    if visible_content is None and not fast_payload:
+                        visible_content = "\u200b"
+                    try:
+                        sent = await _edit_original(
+                            self.interaction,
+                            visible_content,
+                            **fast_payload,
+                        )
+                    except Exception:
+                        sent = None
+                    if sent is not None:
+                        state.completed = True
+                        _cancel_timer(state)
+                        self._sent = 1
+                        self._last = sent
+                        return sent
+                    promote_after_fast_attempt = True
 
-        # If the cutoff arrived while the fast path was being considered, or
-        # Discord rejected the original-response edit, promote after releasing
-        # the lock and send the answer as a follow-up.
+        # If Discord rejected the original-response edit, retain an existing
+        # tool status and send the answer as a follow-up.
         if promote_after_fast_attempt:
             await _mark_working(state)
 
@@ -523,7 +520,7 @@ def _patch_tool_progress() -> None:
 
 
 def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
-    """Install the 10-second/tool escalation behavior once for this bot."""
+    """Install concrete tool-status delivery once for this bot."""
     if getattr(bot, "_maxwell_interaction_progress_installed", False):
         return
 

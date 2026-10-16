@@ -14,7 +14,6 @@ from bot_tools import SendMemeTool
 from bot_tools import ShellTool
 from bot_tools import SendMessageTool
 from bot_tools import ReasoningLogTool
-from bot_tools import forget_shell_progress
 
 
 class FakePosted:
@@ -352,38 +351,26 @@ def test_attachment_reply_denials_do_not_resend(status, code):
         stream.close()
 
 
-def test_shell_tool_runs_without_author_gate():
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
-
-    tool = ShellTool(bot=FakeBot())
+def test_shell_tool_runs_without_posting_progress():
+    tool = ShellTool(bot=SimpleNamespace())
     message = FakeMessage()
 
     async def run():
         async def fake_run_shell(command, tenant, on_progress=None):
-            assert len(message.channel.sent) == 1
-            assert "working on it…" in message.channel.sent[0].content
+            assert message.channel.sent == []
             return b"hi", b"", 0
 
         tool._run_shell_command = fake_run_shell
-
         result = await tool.execute(message, command="printf hi")
         assert result == "hi"
-        assert len(message.files) == 0
-        assert len(message.channel.sent) == 1
-        assert "working on it…" in message.channel.sent[0].content
-
+        assert message.files == []
+        assert message.channel.sent == []
     asyncio.run(run())
 
 
 def test_shell_tool_keeps_output_despite_retired_limit(monkeypatch):
     monkeypatch.setenv("MAXWELL_SHELL_MAX_OUTPUT", "100")
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
-
-    tool = ShellTool(bot=FakeBot())
+    tool = ShellTool(bot=SimpleNamespace())
     message = FakeMessage()
     blob = ("line of shell output\n" * 80_000).encode()
 
@@ -394,129 +381,48 @@ def test_shell_tool_keeps_output_despite_retired_limit(monkeypatch):
         tool._run_shell_command = fake_run_shell
         result = await tool.execute(message, command="cat huge.log")
         assert result == blob.decode().strip()
-        assert len(message.channel.sent) == 1
-        posted = message.channel.sent[0]
-        assert posted.content == "working on it…"
-
-    asyncio.run(run())
-
-
-def test_shell_progress_respects_shared_server_setting():
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
-
-        def _progress_enabled(self, server_id):
-            return False
-
-    tool = ShellTool(bot=FakeBot())
-    message = FakeMessage()
-    message.guild = SimpleNamespace(id=99)
-
-    async def run():
-        async def fake_run_shell(command, tenant, on_progress=None):
-            return b"quiet", b"", 0
-
-        tool._run_shell_command = fake_run_shell
-        result = await tool.execute(message, command="printf quiet")
-        assert result == "quiet"
         assert message.channel.sent == []
-
     asyncio.run(run())
 
 
-def test_same_turn_shell_calls_update_one_progress_message():
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
-
-    tool = ShellTool(bot=FakeBot())
-    message = FakeMessage()
-
-    async def run():
-        async def fake_run_shell(command, tenant, on_progress=None):
-            return command.encode(), b"", 0
-
-        tool._run_shell_command = fake_run_shell
-        await tool.execute(message, command="date")
-        await tool.execute(message, command="uname")
-        assert len(message.channel.sent) == 1
-        posted = message.channel.sent[0]
-        assert "working on it…" in posted.content
-        assert posted.edits
-        assert not posted.deleted
-        forget_shell_progress(tool.bot, message)
-        assert not posted.deleted
-
-    asyncio.run(run())
-
-
-def test_shell_progress_edits_while_command_runs():
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
-
-    tool = ShellTool(bot=FakeBot())
-    message = FakeMessage()
-
-    async def run():
-        async def fake_run_shell(command, tenant, on_progress=None):
-            if on_progress is not None:
-                await on_progress(b"", b"", 0.0)
-                await on_progress(b"downloading 1/3\n", b"", 1.4)
-                await on_progress(b"downloading 1/3\n2/3\n", b"", 2.6)
-            return b"downloading 1/3\n2/3\ndone\n", b"", 0
-
-        tool._run_shell_command = fake_run_shell
-        result = await tool.execute(message, command="fetch.sh")
-        assert len(message.channel.sent) == 1
-        posted = message.channel.sent[0]
-        assert "working on it…" in posted.content
-        assert result.endswith("done")
-
-    asyncio.run(run())
-
-
-def test_new_user_message_gets_a_fresh_shell_progress_message():
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
-
-    tool = ShellTool(bot=FakeBot())
+@pytest.mark.parametrize("progress_enabled", [True, False])
+def test_repeated_shell_calls_never_leave_working_placeholders(progress_enabled):
+    tool = ShellTool(bot=SimpleNamespace(_progress_enabled=lambda _: progress_enabled))
     first = FakeMessage()
+    first.guild = SimpleNamespace(id=99)
     second = FakeMessage()
     second.channel = first.channel
+    second.guild = first.guild
 
     async def run():
         async def fake_run_shell(command, tenant, on_progress=None):
+            assert on_progress is None
             return command.encode(), b"", 0
 
         tool._run_shell_command = fake_run_shell
-        await tool.execute(first, command="date")
-        await tool.execute(second, command="uname")
-        assert len(first.channel.sent) == 2
-        posted_first, posted_second = first.channel.sent
-        assert "working on it…" in posted_first.content
-        assert "working on it…" in posted_second.content
-        assert posted_first is not posted_second
-        assert not posted_first.deleted
-        assert not posted_second.deleted
-
+        for message in [first, first, first, second]:
+            assert await tool.execute(message, command="date") == "date"
+        assert first.channel.sent == []
     asyncio.run(run())
 
 
-def test_send_message_leaves_shell_progress():
-    class FakeBot:
-        def _is_admin(self, user_id):
-            return True
+@pytest.mark.parametrize("failure", [asyncio.TimeoutError, RuntimeError])
+def test_shell_errors_return_to_model_without_posting_status(failure):
+    tool = ShellTool(bot=SimpleNamespace())
+    message = FakeMessage()
 
-        def _render_custom_emojis(self, text, guild):
-            return text
+    async def run():
+        async def fake_run_shell(command, tenant, on_progress=None):
+            raise failure()
 
-        def _extract_stickers_from_text(self, text, guild):
-            return text, []
+        tool._run_shell_command = fake_run_shell
+        assert (await tool.execute(message, command="date")).startswith("Error:")
+        assert message.channel.sent == []
+    asyncio.run(run())
 
-    bot = FakeBot()
+
+def test_send_message_after_shell_posts_only_the_answer():
+    bot = SimpleNamespace()
     shell = ShellTool(bot=bot)
     send = SendMessageTool(bot=bot)
     message = FakeMessage()
@@ -527,13 +433,9 @@ def test_send_message_leaves_shell_progress():
 
         shell._run_shell_command = fake_run_shell
         await shell.execute(message, command="pwd")
-        posted = message.channel.sent[0]
-        assert not posted.deleted
         result = await send.execute(message, content="done")
         assert result.startswith("__MESSAGE_SENT__")
-        assert not posted.deleted
-        assert len(message.channel.sent) == 2
-
+        assert [posted.content for posted in message.channel.sent] == ["done"]
     asyncio.run(run())
 
 

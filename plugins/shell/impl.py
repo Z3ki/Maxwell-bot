@@ -742,51 +742,6 @@ class ShellTool(Tool):
                 timeout=10,
             )
 
-    def _format_ansi_message(self, text: str) -> str:
-        """Format shell status message under Discord's 2000 cap."""
-        return str(text or "")[:1990]
-
-    async def _flush_shell_progress_unlocked(
-        self, message: Message, sess: _ShellProgressTurn
-    ) -> None:
-        rendered = "\n\n".join(part for part in sess.parts if part)
-        formatted = self._format_ansi_message(rendered)
-        if sess.posted is None:
-            sess.posted = await message.channel.send(formatted)
-            sess.last_flush_at = time.monotonic()
-            return
-        if getattr(sess.posted, "content", None) == formatted:
-            return
-        edit = getattr(sess.posted, "edit", None)
-        if not callable(edit):
-            sess.posted = await message.channel.send(formatted)
-            sess.last_flush_at = time.monotonic()
-            return
-        try:
-            await edit(content=formatted)
-            sess.last_flush_at = time.monotonic()
-        except Exception:
-            # Rate-limits / transient Discord errors: keep the existing
-            # message and let the next tick retry. Do not post a second dump.
-            return
-
-    async def _begin_shell_progress(self, message: Message, text: str):
-        sess = _get_shell_progress_turn(self.bot, message)
-        async with sess.lock:
-            slot = len(sess.parts)
-            sess.parts.append(text)
-            await self._flush_shell_progress_unlocked(message, sess)
-            return sess, slot
-
-    async def _finish_shell_progress(
-        self, message: Message, sess: _ShellProgressTurn, slot: int, text: str
-    ) -> None:
-        async with sess.lock:
-            while len(sess.parts) <= slot:
-                sess.parts.append("")
-            sess.parts[slot] = text
-            await self._flush_shell_progress_unlocked(message, sess)
-
     async def execute(
         self,
         message: Message,
@@ -818,68 +773,16 @@ class ShellTool(Tool):
         if tenant is None:
             return "Error: shell needs an authenticated Discord user and request scope"
 
-        sess = None
-        slot = None
-        # In DMs, never spam shell progress status messages
-        # Real discord.Message always exposes ``guild`` (None for a DM).
-        # Lightweight callers/tests may omit it; treat those as channel-like
-        # so the durable progress message remains observable.
-        is_dm = hasattr(message, "guild") and not getattr(message, "guild", None)
-        progress_enabled = not is_dm
-        progress_checker = getattr(self.bot, "_progress_enabled", None)
-        if progress_enabled and callable(progress_checker):
-            guild = getattr(message, "guild", None)
-            if guild is not None:
-                progress_enabled = bool(
-                    progress_checker(str(getattr(guild, "id", "") or ""))
-                )
-        if progress_enabled:
-            try:
-                # Keep one durable, user-visible liveness message for this shell
-                # call when the shared per-server progress setting permits it.
-                # The normal tool-progress message is owned by bot.py and may
-                # be stopped as soon as the tool posts; shell commands need
-                # their own turn-scoped message when progress is enabled.
-                sess, slot = await self._begin_shell_progress(message, "working on it…")
-            except Exception:
-                # A progress post must never prevent the command itself from
-                # running in a restricted channel or a non-Discord caller.
-                sess, slot = None, None
-        self._signal_streaming(message)
-
-        async def _on_progress(stdout_b, stderr_b, elapsed) -> None:
-            if sess is None or slot is None:
-                return
-            # Keep the channel indicator terse. Captured output belongs in the
-            # tool result; mirroring it into Discord can expose secrets and
-            # turns a long command into an edit-rate-limit stream.
-            del stdout_b, stderr_b, elapsed
-            await self._finish_shell_progress(message, sess, slot, "working on it…")
-
+        # The dispatcher owns the temporary tool status. Shell must not post
+        # another persistent message for each command in the same turn.
         try:
             stdout, stderr, exit_code = await self._run_shell_command(
-                normalized, tenant, on_progress=_on_progress
+                normalized, tenant
             )
         except asyncio.TimeoutError:
-            if sess is not None and slot is not None:
-                with contextlib.suppress(Exception):
-                    await self._finish_shell_progress(
-                        message,
-                        sess,
-                        slot,
-                        f"Command timed out after {self._timeout_seconds()}s",
-                    )
             return f"Error: Command timed out after {self._timeout_seconds()}s"
         except Exception as e:
             logger.warning("shell execution failed (%s)", type(e).__name__)
-            if sess is not None and slot is not None:
-                with contextlib.suppress(Exception):
-                    await self._finish_shell_progress(
-                        message,
-                        sess,
-                        slot,
-                        "Shell isolation is unavailable; no host fallback was attempted.",
-                    )
             return (
                 "Error: isolated shell is unavailable. Check that Docker has "
                 "gVisor runsc, the filtered egress policy, and bounded storage configured."

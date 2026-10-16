@@ -850,7 +850,8 @@ async def normal_reply_fixture():
 
     msg.reply = reply
     progress = ToolProgress(msg)
-    await progress.start()
+    await progress.note_tool("list_expressions")
+    await progress._post_task
     assert progress.posted is not None
     return bot, msg, progress, sticker
 

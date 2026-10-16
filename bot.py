@@ -71,7 +71,6 @@ from generated_artifacts import begin_generated_files, reset_generated_files  # 
 from tooling.helpers import (  # noqa: E402
     ReasoningLogTool,
     notify_owner,
-    forget_shell_progress,
     _IMAGE_FETCH_UA,
     _ALL_MOD_TOOLS,
     DM_BLOCKED_TOOLS,
@@ -764,7 +763,6 @@ class MaxwellBot(_BotBase):
         # One live `$ cmd` Discord message per user-message turn. Edited in
         # place for later shell calls on that turn; left in the channel when
         # the turn ends. The next user message posts a new one.
-        self._shell_progress_by_turn: dict[str, Any] = {}
         self._stop_until: dict[str, float] = {}
         self._drugged_until: dict[str, float] = {}
         # Global sleep state. The bot is one entity — at most one sleep
@@ -9783,11 +9781,11 @@ class MaxwellBot(_BotBase):
         # the background. If the LLM generation finishes in <800ms with a
         # tool call (create_site, send_message, memory lookup) the deferred
         # post never lands — no flash, no delete, no flicker. If generation
-        # runs longer, the user sees 'working on it…' as before. The
+        # runs longer, progress waits for meaningful content or a tool name. The
         # awaitable form (start()) would block the LLM call for 800ms which
         # defeats the point.
         gen_progress = None
-        # In DMs, disable progress messages so it doesn't spam 'working on it…' to the user
+        # DMs keep only the final response.
         if message.guild and self._progress_enabled(str(message.guild.id)):
             gen_progress = _make_tool_progress(message)
             with contextlib.suppress(Exception):
@@ -9804,7 +9802,7 @@ class MaxwellBot(_BotBase):
 
         # Callback fired by the SSE stream reader the moment a tool_call name
         # arrives mid-generation. Updates the progress message from
-        # "working on it…" to "tool_name: generating…" so the user sees WHAT
+        # an announced tool status to "tool_name: generating…" so the user sees WHAT
         # the model is building while it's still generating the arguments
         # (e.g. the full HTML body for create_site).
         async def _on_tool_call_name(tool_name: str, reasoning: str = ""):
@@ -9838,7 +9836,7 @@ class MaxwellBot(_BotBase):
         # Per-token callback. Fires on EVERY reasoning/content delta so the
         # progress message can show the model's own thoughts streaming by.
         # Critical for long generations: without this, the user stares at
-        # "working on it…" for the entire 10-30s the model takes to think
+        # a static tool label for the entire 10-30s the model takes to think
         # before the final tool_call delta arrives (which is the only thing
         # the legacy _on_tool_call_name path catches). Tick rate-limits
         # internally to stay under Discord's 5/5s edit limit.
@@ -9937,7 +9935,7 @@ class MaxwellBot(_BotBase):
                 native_calls, response = self._recover_text_tool_calls(response)
             # If the model returned tool calls, hand the generation progress off
             # to the tool dispatch so the same Discord message transitions from
-            # "working on it…" to "tool_name: reasoning" and gets deleted when
+            # tool status to "tool_name: reasoning" and gets deleted when
             # tools finish. If no tool calls (plain text reply), stop the
             # progress now (fire-and-forget delete) so the caller can post the
             # reply immediately without waiting on a Discord round-trip.
@@ -10107,7 +10105,7 @@ class MaxwellBot(_BotBase):
                     # as gen_progress. If the followup completes with a
                     # no-tool reply in <800ms, the deferred post never lands
                     # and the user just sees the final reply. The old code
-                    # would post 'working on it…', delete it via the
+                    # would post another tool status, delete it via the
                     # _handle_message finally block, then the reply — the
                     # exact flicker the user complained about.
                     followup_progress = None
@@ -10413,7 +10411,7 @@ class MaxwellBot(_BotBase):
             await self._release_turn_context(turn_context)
             # Safety net: walk every progress object this turn ever created
             # and stop() anything still alive, so we never leave an orphan
-            # "working on it…", "thinking: …", or "<tool>: …" message
+            # "thinking: …" or "<tool>: …" message
             # after the bot's reply has gone out. Covers LLM errors,
             # empty responses, no-tool-call branches, followup leaks, etc.
             for _prog in active_progresses:
@@ -10422,8 +10420,6 @@ class MaxwellBot(_BotBase):
                 with contextlib.suppress(Exception):
                     await _prog.stop()
             active_progresses.clear()
-            with contextlib.suppress(Exception):
-                forget_shell_progress(self, message)
             # Drop this channel's entry from the per-channel progress
             # dict so it doesn't accumulate over the bot's lifetime
             # under load. The next message in this channel will
@@ -10916,7 +10912,7 @@ class MaxwellBot(_BotBase):
         # See tool_progress.py for the full design.
         # If the caller already created+started a progress message (e.g. during
         # the LLM generation phase in _handle_message), reuse it so the same
-        # Discord message transitions smoothly from "working on it…" to
+        # Discord message transitions smoothly from generation progress to
         # "tool_name: reasoning" instead of being deleted and re-posted.
         if existing_progress is not None:
             progress = existing_progress
@@ -11165,10 +11161,10 @@ class MaxwellBot(_BotBase):
             tools_ran = True
             await run_all()
 
-        # Post the progress message before the batch starts so users see
-        # liveness before any tool begins. stop() in finally guarantees
+        # Prepare progress before dispatch. The first tool notification supplies
+        # visible content; an empty progress object stays silent. finally guarantees
         # the message disappears whether the batch succeeds, raises, or
-        # is cancelled — no orphan "working on it…" lines.
+        # is cancelled — no orphan tool status lines.
         # Skip start() if we're reusing an existing progress that's already
         # been posted (from the generation phase).
         # Parallel siblings share one progress owner. Restoring it per tool
@@ -11281,7 +11277,7 @@ class MaxwellBot(_BotBase):
 
         If ``existing_progress`` is provided (a ToolProgress already started
         during the LLM generation phase), it's forwarded to the tool processor
-        so the same Discord message transitions from "working on it…" to the
+        so the same Discord message transitions from the tool status to the
         tool's name/reasoning instead of being deleted and re-posted.
 
         Defensive sanitization via strip_tool_payload_leaks still runs so any

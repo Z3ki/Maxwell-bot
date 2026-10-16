@@ -43,9 +43,8 @@ def setup(bot, ctx):
     # guards, style-freedom, autonomy routing, and visible-output suppression
     # live in the host. Do not wrap those methods here.
 
-    # Discord app commands keep fast answers in the deferred interaction. Tool
-    # use or >10s latency promotes it to a stable "working on it…" status and
-    # sends the eventual answer as a separate follow-up.
+    # App commands keep text answers in the deferred interaction. Actual tool
+    # dispatch can show concrete tool names while the answer is prepared.
     install_interaction_progress(bot, ctx)
 
     # Keep AI answers as normal Discord text; explicit rich-message tools still work.

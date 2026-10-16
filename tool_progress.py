@@ -2,8 +2,8 @@
 
 What this is
 ------------
-Every time the bot dispatches a non-terminal tool (or a batch of them), we
-post a single "working on it…" status message in the channel. While the
+Progress stays silent until a tool name or meaningful streamed content is
+available. There is no generic acknowledgement message. While the
 tools run, we EDIT that same message with a rolling tail of the model's
 own streamed text. When the tool batch finishes success or fail, we DELETE
 the status message so the channel is left with only the tool's real output.
@@ -19,7 +19,7 @@ Discord vs Telegram
 -------------------
 Discord supports message.edit() natively. The Telegram adapter in this
 codebase does NOT (thin shim around sendMessage). On Telegram we
-degrade to: post a single "working…" message at start, delete at end,
+degrade to: post a known tool status when available, delete at end,
 no live edits.
 
 Rate limits
@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 from typing import Any
 
@@ -103,7 +104,7 @@ _SNIPPET_BUDGET = 80
 _SNIPPET_JOIN_CHAR = " "
 
 # Fast-tool fix. start() is called before generation / tool dispatch and
-# posts a 'working on it…' message. For fast paths the progress message
+# posts a tool status when content is available. For fast paths the progress message
 # posts, sits for a few ms, then gets deleted by stop() — and a fresh
 # message.reply(response) lands right after. The user sees flicker.
 #
@@ -166,7 +167,7 @@ def _latest_complete_sentence(text: str) -> str:
 
 
 class ToolProgress:
-    """One-per-channel ephemeral "working on it…" status message.
+    """One-per-channel temporary status, with no generic placeholder.
 
     Lifecycle:
         prog = ToolProgress(message)
@@ -212,7 +213,7 @@ class ToolProgress:
         # committed to a tool.
         self._last_tool_name_announced: bool = False
         # The very first tick() after start() is also exempt from the
-        # rate limit — the user just posted 'working on it…' and is
+        # rate limit — the user just saw the first status and is
         # staring at it; showing them SOMETHING (the model's first
         # reasoning tokens) is worth a Discord edit slot.
         self._first_tick_done: bool = False
@@ -226,8 +227,11 @@ class ToolProgress:
             return
         if self._platform != "discord":
             try:
+                content = self._render()
+                if not content:
+                    return
                 self._posted = True
-                posted = await self._post_reply("working on it…")
+                posted = await self._post_reply(content)
                 if self._stopped:
                     if posted is not None:
                         await self._bg_delete(posted)
@@ -269,6 +273,8 @@ class ToolProgress:
             if self._stopped or self._tool_streaming or self._posted is not None:
                 return
             content = self._render()
+            if not content:
+                return
             posted = await self._post_reply(content)
             if self._stopped:
                 if posted is not None:
@@ -380,6 +386,8 @@ class ToolProgress:
             self._snippet_buffer = normalized
 
         if not self._posted:
+            if self._render():
+                await self.start_defer()
             return
 
         content = self._render()
@@ -412,7 +420,10 @@ class ToolProgress:
         # User-install commands update their original interaction response in
         # interaction_progress.before_tool, which also works when no
         # ToolProgress object was created for a DM.
-        if not self._posted or self._platform == "user_install":
+        if self._platform == "user_install":
+            return
+        if not self._posted:
+            await self.start_defer()
             return
         content = self._render()
         if content == self._last_content:
@@ -451,6 +462,8 @@ class ToolProgress:
             self._append(reasoning_delta)
 
         if not self._posted:
+            if self._render():
+                await self.start_defer()
             return
 
         now = time.monotonic()
@@ -470,6 +483,8 @@ class ToolProgress:
         self._first_tick_done = True
 
     async def _flush(self, content: str) -> None:
+        if not content:
+            return
         async with self._lock:
             if self._stopped or not self._posted or self._edits_disabled:
                 return
@@ -555,13 +570,20 @@ class ToolProgress:
             return "Maxwell is using: " + ", ".join(visible)
 
         raw = self._reasoning_buffer.strip()
+        # A provider may stream the old acknowledgement in several deltas.
+        # Never publish it as progress, including repeated copies.
+        acknowledgement = re.sub(r"[\s.…!,-]+", " ", raw).strip().casefold()
+        while acknowledgement.startswith("working on it"):
+            acknowledgement = acknowledgement[len("working on it"):].lstrip()
+        if not acknowledgement or "working on it".startswith(acknowledgement):
+            raw = ""
         if not raw:
             # No reasoning yet. If a tool name was announced, say so
             # plainly so the user knows what the model committed to.
             if self._current_tool:
                 head = f"using {self._current_tool}…"
             else:
-                head = "working on it…"
+                return ""
         else:
             # Strip JSON / code artefacts that show up when the model is
             # mid-tool-call (custom protocol emits a bare-JSON object in
