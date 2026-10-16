@@ -230,7 +230,10 @@ from user_install import (  # noqa: E402
     handle_user_install_interaction,
     is_user_install_message,
 )
-from tool_progress import make_progress as _make_tool_progress  # noqa: E402
+from tool_progress import (  # noqa: E402
+    is_hidden_progress_tool,
+    make_progress as _make_tool_progress,
+)
 from tool_registry import (  # noqa: E402 — reasoning now rides inside tool calls
     extract_reasoning,
     record_reasoning,
@@ -10899,8 +10902,8 @@ class MaxwellBot(_BotBase):
         # site edits and image generation are not independent merely because
         # they don't end a turn. Only adjacent explicitly read-only tools may
         # overlap; this also finishes a fetched-content taint before a write.
-        non_terminal = [
-            c for c in calls if c["name"] not in {"send_message", "no_response", "wait"}
+        progress_calls = [
+            c for c in calls if not is_hidden_progress_tool(c["name"])
         ]
 
         result_by_id: dict[str, str] = {}
@@ -10918,7 +10921,7 @@ class MaxwellBot(_BotBase):
             progress = existing_progress
         else:
             progress_enabled = (
-                bool(non_terminal)
+                bool(progress_calls)
                 and bool(message.guild)
                 and self._progress_enabled(str(message.guild.id))
             )

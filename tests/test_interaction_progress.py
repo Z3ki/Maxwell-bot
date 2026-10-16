@@ -139,9 +139,33 @@ def test_send_message_does_not_create_or_escalate_interaction_progress():
 
 def test_interaction_progress_renderer_filters_hidden_tools_defensively():
     assert mod._tool_status_text(["send_message"]) == ""
-    assert mod._tool_status_text(["web_search", "send_message", "fetch_url"]) == (
+    assert mod._tool_status_text(["react"]) == ""
+    assert mod._tool_status_text(["no_response", "delete_message"]) == ""
+    assert mod._tool_status_text(["web_search", "send_message", "react", "fetch_url"]) == (
         "Maxwell is using: `web_search`, `fetch_url`"
     )
+
+
+def test_react_and_silence_do_not_leave_an_interaction_status():
+    async def run():
+        interaction = _Interaction(902)
+        state = _state(interaction)
+        await mod._note_interaction_tool(state, "react")
+        await mod._note_interaction_tool(state, "no_response")
+        await mod._note_interaction_tool(state, "delete_message")
+        assert state.tool_calls == []
+        assert state.escalated is False
+        assert interaction.edits == []
+        assert mod._dismiss_silent_interaction("react", "__REACTION_SENT__ Reacted with 😂")
+        assert mod._dismiss_silent_interaction("no_response", "__NO_RESPONSE__")
+        assert not mod._dismiss_silent_interaction("react", "Error: missing permissions")
+        assert not mod._dismiss_silent_interaction("delete_message", "Deleted 1 message")
+        await mod._clear_working_status(
+            state, dismiss_deferred=True
+        )
+        assert interaction.original_deleted is True
+        assert state.completed is True
+    asyncio.run(run())
 
 
 def test_fast_answer_uses_original_interaction():
