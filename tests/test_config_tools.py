@@ -89,7 +89,7 @@ def test_tracking_off_deletes_that_account_and_rejects_unknown_values(tmp_path):
     assert result["saved"]
     assert deleted == ["100"]
     assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
-    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "on"
+    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "off"
     assert "error" in run(ConfigureTool(bot), message(), setting="tracking", value="maybe")
     assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
 
@@ -158,10 +158,10 @@ def test_server_changes_recheck_live_permissions_and_reject_private_requests(tmp
 def test_application_owner_does_not_bypass_guild_permissions(tmp_path):
     bot = fixture_bot(tmp_path)
     assert "error" in run(ConfigureTool(bot), message(900), scope="server", setting="progress", value="on")
-    result = run(ConfigureTool(bot), message(900), scope="owner", setting="autonomy_enabled", value=False)
+    result = run(ConfigureTool(bot), message(900), scope="owner", setting="tools_enabled", value=False)
     assert result["saved"]
-    assert json.loads((tmp_path / "bot_control.json").read_text())["autonomy_enabled"] is False
-    assert run(ConfigureTool(bot), message(900), scope="owner", setting="autonomy_enabled", action="reset")["saved"]
+    assert json.loads((tmp_path / "bot_control.json").read_text())["tools_enabled"] is False
+    assert run(ConfigureTool(bot), message(900), scope="owner", setting="tools_enabled", action="reset")["saved"]
 
 
 @pytest.mark.parametrize("setting,value,state_key,expected", [
@@ -207,10 +207,8 @@ def test_channel_changes_validate_bot_access_and_restore_autonomy(tmp_path):
     perms.send_messages = True
     assert run(ConfigureTool(bot), msg, scope="server", setting="channels", value="25")["saved"]
     assert bot._control["guild_solo_channel"]["10"] == "25"
-    assert "10" in bot._control["autonomy_blocked_servers"]
     assert run(ConfigureTool(bot), msg, scope="server", setting="channels", action="reset")["saved"]
     assert "10" not in bot._control["guild_solo_channel"]
-    assert "10" not in bot._control["autonomy_blocked_servers"]
 
 
 def test_reload_is_owner_only_and_failure_is_not_claimed_as_saved(tmp_path):

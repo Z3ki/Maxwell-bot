@@ -167,69 +167,15 @@ DEFAULT_CONTROL = {
     "disabled_commands": [],
     # {guild_id: channel_id}. When a server has an entry, Maxwell only speaks
     # in that one channel there — every other channel in that server is dead to
-    # him, including autonomy. Set with `/solo`, cleared with `/solo arguments:off`.
+    # him. Set with `/solo`, cleared with `/solo arguments:off`.
     # Scoped per server on purpose: allowed_channels is global, so using it to
     # quiet one server silences him everywhere.
     "guild_solo_channel": {},
-    # Guild ids whose autonomy blacklist entry was added BY `/solo`. Only these
-    # are handed back on `/solo arguments:off` — a server an admin silenced by hand stays
-    # silenced.
-    "guild_solo_autonomy_added": [],
     "base_personality": (
         "Natural, friendly, respectful and direct. Keep replies concise, "
         "and explain more when the user or task needs it."
     ),
-    "autonomy_enabled": False,
-    "autonomy_interval_seconds": 300,
-    "autonomy_base_url": "",  # "" = use main provider's base_url
-    "autonomy_api_key": "",  # "" = use main provider's key
-    "autonomy_model": "",  # "" = use main provider's model
-    "autonomy_disable_reasoning": True,  # False for endpoints that reject the reasoning param (e.g. NVIDIA)
-    "autonomy_min_post_gap_seconds": 0,  # deprecated — no longer enforced, kept for compat
-    # Legacy single-purpose cooldown. Superseded by autonomy_floor_* below, which
-    # subsumes it; kept because it's honored as a FLOOR on the new cooldown, so an
-    # operator who tuned this up doesn't silently get a shorter window. 0 = defer
-    # entirely to autonomy_floor_cooldown_seconds.
-    "autonomy_recent_reply_block_seconds": 0,
-    # --- Conversational turn-taking (autonomy_social.py) ---------------------
-    # Autonomy runs on a timer; conversation runs on turns. These decide whether
-    # Maxwell holds the floor in a room before he's allowed to speak unprompted.
-    # They gate ONLY speaking — memory and goal actions are untouched.
-    # Off means the planner still sees the room read but execute() stops
-    # enforcing it: a debugging escape hatch, not a mode to run in.
-    "autonomy_floor_enabled": True,
-    # Quiet window after an *autonomy* post before another unprompted line.
-    # Live replies do not start this window. Being addressed bypasses it.
-    "autonomy_floor_cooldown_seconds": 300,
-    # How long he keeps holding the floor after speaking into silence. Past this
-    # the room has plainly moved on and starting something fresh is fair.
-    "autonomy_floor_hold_release_seconds": 1800,
-    # Several messages from several people inside this window = an exchange in
-    # progress; cutting in is what makes a bot feel like an interruption.
-    "autonomy_floor_mid_flow_seconds": 45,
-    "autonomy_floor_mid_flow_messages": 2,
-    # Silence past this and the room reads as idle rather than active.
-    "autonomy_floor_idle_seconds": 600,
-    # Autonomy-specific blacklists (separate from general blocked_channels/allowed_channels).
-    # These prevent autonomy from posting/DMing or acting in listed channels or servers (guilds),
-    # while normal bot replies (mentions etc) can still work if not otherwise blocked.
-    "autonomy_blocked_channels": [],
-    "autonomy_blocked_servers": [],
-    # Goals not acted on for this many days are flagged STALE in context (candidates for
-    # the complete_goal action). Not auto-deleted — the bot decides to retire them.
-    "autonomy_goal_stale_days": 14,
-    # Periodic reflection nudge injected into context roughly every N seconds so Maxwell
-    # self-reviews goals/memory and sets new objectives on its own cadence.
-    "autonomy_reflect_enabled": True,
-    "autonomy_reflect_interval_seconds": 3600,
-    # Messages read per DM/group-DM when building the planner context. Each 100
-    # is one REST round-trip, and the rendered section is char-capped anyway,
-    # so reading more than this is paid for and then truncated away.
-    "autonomy_dm_messages": 40,
-    # Hard ceiling on the whole observe stage (all the Discord reads that build
-    # planner context). Exceeding it fails the tick rather than wedging the
-    # loop; gather_context logs per-phase timings so you can see what is slow.
-    "autonomy_observe_timeout_seconds": 180,
+
 }
 
 DEAD_CONTROL_KEYS = frozenset(

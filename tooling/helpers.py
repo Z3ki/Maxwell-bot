@@ -577,6 +577,23 @@ async def _resolve_guild(bot, message: Message, guild_id: str | None = None):
     return None, "Error: guild_id is required when using this from DMs or group chats"
 
 
+def _visible_to(channel, requester):
+    if requester is None:
+        return False
+    permissions = getattr(channel, "permissions_for", None)
+    try:
+        return callable(permissions) and bool(permissions(requester).view_channel)
+    except Exception:
+        return False
+
+
+async def _resolve_listing_guild(bot, message, guild_id=None):
+    guild = getattr(message, "guild", None)
+    if guild is None or (guild_id and str(guild_id) != str(guild.id)):
+        return None, "Error: server listings are restricted to the current server."
+    return guild, ""
+
+
 def _guild_me(guild):
     return getattr(guild, "me", None) or getattr(guild, "self_member", None)
 
@@ -1569,7 +1586,7 @@ def _format_channel_line(channel, *, include_topic: bool = True) -> str:
     return " | ".join(bits)
 
 
-def _format_member_line(member) -> str:
+def _format_member_line(member, *, requester=None) -> str:
     uid = getattr(member, "id", "?")
     username = getattr(member, "name", None) or str(uid)
     display = getattr(member, "display_name", None) or username
@@ -1615,7 +1632,7 @@ def _format_member_line(member) -> str:
     if timeout:
         bits.append("timed_out_until=" + _dt_day(timeout))
     voice = getattr(getattr(member, "voice", None), "channel", None)
-    if voice is not None:
+    if voice is not None and (requester is None or _visible_to(voice, requester)):
         bits.append("voice=" + _channel_label(voice))
     return " | ".join(bits)
 
@@ -1657,12 +1674,15 @@ def _render_channel_map(
     category_id: str | None = None,
     limit: int = 80,
     include_topic: bool = True,
+    requester=None,
 ) -> str:
     wanted_kind = str(kind or "all").strip().lower()
     if wanted_kind in {"", "all", "*"}:
         wanted_kind = "all"
     cat_filter = _parse_snowflake(category_id)
     channels = _guild_channels(guild)
+    if requester is not None:
+        channels = [ch for ch in channels if _visible_to(ch, requester)]
     categories = [ch for ch in channels if _channel_kind(ch) == "category"]
     categories.sort(key=lambda ch: int(getattr(ch, "position", 0) or 0))
     children: dict[object, list] = {}
@@ -1678,6 +1698,8 @@ def _render_channel_map(
         ):
             continue
         parent = _channel_category_id(channel)
+        if requester is not None and parent not in {getattr(cat, "id", None) for cat in categories}:
+            parent = None
         if cat_filter is not None and parent != cat_filter:
             continue
         if parent is None:
@@ -1775,6 +1797,7 @@ def _render_member_list(
     role_spec: str | None = None,
     status: str | None = None,
     limit: int = 40,
+    requester=None,
 ) -> str:
     members = list(getattr(guild, "members", []) or [])
     approx = getattr(guild, "member_count", None) or len(members)
@@ -1816,7 +1839,7 @@ def _render_member_list(
         return (rank, name)
 
     matched.sort(key=_sort_key)
-    lines = [_format_member_line(m) for m in matched[:limit]]
+    lines = [_format_member_line(m, requester=requester) for m in matched[:limit]]
     header = (
         f"Members in {getattr(guild, 'name', 'server')} "
         f"({getattr(guild, 'id', '?')}): showing {min(len(matched), limit)} of "
@@ -1860,6 +1883,7 @@ def _guild_room_context(
     recent_users=None,
     *,
     max_chars: int = 2200,
+    requester=None,
 ) -> str:
     """Compact server map for the per-turn prompt. Empty outside a guild."""
     if guild is None:
@@ -1890,7 +1914,7 @@ def _guild_room_context(
     if channels:
         parts.append(
             _render_channel_map(
-                guild, limit=24, include_topic=False
+                guild, limit=24, include_topic=False, requester=requester
             )
         )
     roles = list(getattr(guild, "roles", []) or [])
@@ -1909,7 +1933,7 @@ def _guild_room_context(
             with contextlib.suppress(Exception):
                 member = getter(int(uid) if str(uid).isdigit() else uid)
         if member is not None:
-            people.append(_format_member_line(member))
+            people.append(_format_member_line(member, requester=requester))
         else:
             people.append(f"{name} ({uid})")
     if _channel_kind(channel) in {"voice", "stage"}:
@@ -1917,7 +1941,7 @@ def _guild_room_context(
             uid_s = str(getattr(member, "id", ""))
             if uid_s and uid_s not in seen:
                 seen.add(uid_s)
-                people.append(_format_member_line(member))
+                people.append(_format_member_line(member, requester=requester))
     if people:
         parts.append("People in this room:\n" + "\n".join(people[:12]))
     text = "\n".join(p for p in parts if p)
@@ -2867,6 +2891,8 @@ SITE_READ_LOOP_MARKER = "__SITE_READ_LOOP__"
 SITE_FILE_READ_ACTIONS = frozenset({"read", "cat", "get"})
 SITE_MUTATING_ACTIONS = frozenset(
     {
+        "rename", "title", "retitle", "backend", "store", "data",
+        "extend", "renew", "keep",
         "write",
         "put",
         "set",
@@ -4673,7 +4699,7 @@ def _report_context_lines(message) -> list[str]:
         lines.append(f"message_id: {mid}")
     content = str(getattr(message, "content", "") or "").replace("\n", " ").strip()
     if content:
-        lines.append("said: " + content[:400])
+        lines.append(f"request_chars: {len(content)}")
     return lines
 
 
@@ -4699,7 +4725,7 @@ async def notify_owner(
     if getattr(bot, "_owner_notify_sending", False):
         return "Error: already sending an owner report"
     kind = str(kind or "report").strip().lower() or "report"
-    if kind not in {"report", "error", "info"}:
+    if kind not in {"report", "error", "info", "privacy"}:
         kind = "report"
     title = _redact_report_text(str(title or "").strip())[:240]
     if not title:
@@ -4747,8 +4773,8 @@ async def notify_owner(
         lines.append("details:")
         lines.append(extra[:1500])
     if exc is not None:
-        lines.append(f"error: {type(exc).__name__}: {_redact_report_text(str(exc))[:400]}")
-        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        lines.append(f"error: {type(exc).__name__}")
+        tb = "".join(traceback.format_list(traceback.extract_tb(exc.__traceback__)))
         tb = _redact_report_text(tb).strip()
         if tb:
             if len(tb) > 1200:

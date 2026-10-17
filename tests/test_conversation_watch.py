@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from autonomy import _reply_relation_bit
+from maxwell_core.prompts.history import _reply_relation_bit
 from bot import MaxwellBot
 from concurrency_safety import KeyedLocks
 from control_defaults import DEFAULT_CONTROL

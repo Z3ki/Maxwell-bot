@@ -161,6 +161,13 @@
                     >
                   </div>
                 </details>
+                <details><summary>Privacy and saved history</summary>
+                  <p>Current requests and necessary context are sent to the selected AI provider, including fallbacks. Provider retention is separate. Automatic learned facts and embeddings are retired.</p>
+                  <label>Optional conversation history<select name="tracking"><option value="off">Off — do not save conversations</option><option value="on">On — I choose to save conversations</option></select></label>
+                  <p>Off deletes saved conversation content. Tool workspaces, published content, previous provider copies and backups need operator review.</p>
+                  <button type="button" id="privacy-review">Review optional choices</button>
+                  <button type="button" id="privacy-delete">Delete my data</button>
+                </details>
                 <div class="actions">
                   <button class="primary" type="submit">Save my settings</button
                   ><span id="personal-saved" class="muted"></span>
@@ -403,7 +410,7 @@
       </div>
     </main>
     <footer>
-      Built for Discord. <code>/config</code> is always there when you need it.
+      <a href="../terms/">Terms</a> · <a href="../privacy/">Privacy</a> · <a href="../contact/">Contact</a><br>Built for Discord. <code>/config</code> is always there when you need it.
     </footer>
   </body>
 </html>

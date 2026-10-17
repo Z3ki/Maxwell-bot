@@ -52,7 +52,6 @@ _SERVER_SETTINGS = {
 _OWNER_SETTINGS = {
     "diagnostics": ("Diagnostics", "View redacted application diagnostics."),
     "tools_enabled": ("Tools across the bot", "Enable or disable model tool execution globally."),
-    "autonomy_enabled": ("Automatic activity", "Enable or disable autonomous activity globally."),
     "reload": ("Reload controls", "Reload the trusted bot_control.json file."),
 }
 _PERSONAL_VALUE_CHOICES = {
@@ -96,7 +95,7 @@ _SETTING_HELP = {
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",
     "byok": "Paste a public HTTPS OpenAI-compatible endpoint, the model ID, and the modalities that model accepts. The key is encrypted. Private hosts are rejected.",
-    "tracking": "On saves your messages and facts stored for your account. Off stops saving them and deletes what is already stored. A request you send is still answered.",
+    "tracking": "On opts into optional saved history. Off stops saving and deletes your history. External AI processing still occurs for requests.",
     "channels": "Choose a response channel, or use Allow all channels. The channel picker includes every text channel in this server.",
     "plugins": "Select the optional tools to allow in this server. Reset inherits the existing global and personal choices.",
     "capabilities": "Selected groups are allowed. Unselect a group to disable its tools. Discord permissions still apply.",
@@ -266,18 +265,15 @@ def _choice_description(key: str, value: str) -> str | None:
     if key == "language" and value == "auto":
         return "Follow the conversation language."
     if key == "tracking" and value == "on":
-        return "Save your messages and facts about you."
+        return "I choose optional saved history; AI processing already occurs for requests."
     if key == "tracking" and value == "off":
         return "Stop saving and delete what is stored for you."
     return _CHOICE_HELP.get(value)
 
 
 def _privacy_policy_url(bot: Any) -> str:
-    cfg = getattr(bot, "config", None)
-    base = str(getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
-    if not base:
-        base = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    return f"{base}/privacy/" if base else ""
+    from privacy import policy_urls
+    return policy_urls(getattr(bot, "config", None)).get("privacy", "")
 
 
 class _ConfigNavButton(discord.ui.Button):
@@ -804,7 +800,11 @@ class _ConfigPanel(discord.ui.View):
                 self.add_item(_ConfigValueSelect(self, choices))
             if self.selected_key in {"language", "style"}:
                 self.add_item(_ConfigEditButton(self))
-            self.add_item(_ConfigResetButton(self))
+            if self.selected_key == "tracking":
+                from .privacy_ui import add_privacy_controls
+                add_privacy_controls(self)
+            else:
+                self.add_item(_ConfigResetButton(self))
             return
         if self.scope == "server":
             if self.selected_key == "channels":
@@ -821,7 +821,7 @@ class _ConfigPanel(discord.ui.View):
             return
         if self.selected_key == "diagnostics":
             self.add_item(_OwnerDiagnosticsSelect(self, 1))
-        elif self.selected_key in {"tools_enabled", "autonomy_enabled"}:
+        elif self.selected_key in {"tools_enabled"}:
             self.add_item(_ConfigValueSelect(self, [("Enabled", "on"), ("Disabled", "off")]))
         elif self.selected_key == "reload":
             self.add_item(_OwnerReloadButton(self, 1))
@@ -870,7 +870,7 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "owner":
             if self.selected_key == "diagnostics":
                 return "Redacted diagnostics and exports"
-            if self.selected_key in {"tools_enabled", "autonomy_enabled"}:
+            if self.selected_key in {"tools_enabled"}:
                 from .admin_commands import _control
 
                 return "On" if _control(self.bot).get(self.selected_key) else "Off"
@@ -951,8 +951,10 @@ class _ConfigPanel(discord.ui.View):
         )
         return (
             "## Privacy\n"
-            "Choose whether Maxwell stores your message content.\n\n"
-            f"**Message storage:** {current}\n\n"
+            "Optional saved history is off until you choose On.\n\n"
+            f"**Message storage:** {current}\n"
+            "**Persistent learned memory:** unavailable; automatic facts/embeddings are retired.\n"
+            "**AI processing:** current requests and necessary context still go to the selected provider, including fallbacks/BYOK. Provider retention is separate.\n\n"
             "Off stops saving your messages and deletes stored messages, Maxwell's replies to you, tool records from those turns, and facts for your account. "
             "A request you send is still answered, and that request is still sent to the AI provider. "
             "It is not added to saved history afterwards. "
@@ -966,7 +968,7 @@ class _ConfigPanel(discord.ui.View):
         try:
             await forget_author(getattr(self.bot, "memory", None), self.user_id)
         except Exception:
-            logger.warning("Could not delete stored message content", exc_info=True)
+            logger.warning("Could not delete stored message content", exc_info=False)
             return (
                 "**Saved.** Message storage is off, but stored messages could not be deleted. "
                 "Choose Off again to retry."
@@ -1015,7 +1017,7 @@ class _ConfigPanel(discord.ui.View):
                 logger.warning("Could not update moderation policy (%s)", type(exc).__name__)
                 await _send(interaction, "Could not save the moderation policy.")
                 return
-        elif key in {"tools_enabled", "autonomy_enabled"} and self.scope == "owner":
+        elif key in {"tools_enabled"} and self.scope == "owner":
             if not _is_application_owner(self.bot, interaction) or value not in {"on", "off"}:
                 await _send(interaction, "That global setting is unavailable.")
                 return
@@ -1139,7 +1141,7 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "personal":
             await self._refresh_personal()
         self.notice = (
-            "**Reset.** Message storage is on again. Messages deleted earlier stay deleted."
+            "**Reset.** Message storage stays off. Use the clearly labeled On choice to enable optional saved history."
             if tracking_was_off else
             "**Reset.** The default is restored."
         )

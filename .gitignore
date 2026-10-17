@@ -28,7 +28,7 @@ build/
 
 subagents/
 progress.md
-core.*
+core.[0-9]*
 
 # =============================================================================
 # Additional ignores for unnecessary / runtime / generated stuff

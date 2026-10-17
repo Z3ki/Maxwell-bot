@@ -317,7 +317,7 @@ class Config:
     )
     ENABLE_AVATAR = _feature_env("ENABLE_AVATAR")
 
-    ENABLE_AUTONOMY = _feature_env("ENABLE_AUTONOMY", default=False)
+    ENABLE_AUTONOMY = False  # retired; old environment flags cannot restart it
     # image_generator is text-to-image on the Gemini image model. hd_image
     # is that same model plus edits, and stays off until a model is set.
     ENABLE_IMAGE_GEN = _feature_env("ENABLE_IMAGE_GEN")
@@ -391,14 +391,6 @@ class Config:
 
     # Optional secondary auth fallback for the primary LLM endpoint.
     OPENAI_COMPAT_API_KEY = os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
-
-    AUTONOMY_BASE_URL = os.getenv("AUTONOMY_BASE_URL", "").strip()
-    AUTONOMY_API_KEY = os.getenv(
-        "AUTONOMY_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")
-    ).strip()
-    AUTONOMY_MODEL = os.getenv("AUTONOMY_MODEL", "").strip()
-    AUTONOMY_DISABLE_REASONING = _bool_env("AUTONOMY_DISABLE_REASONING", False)
-
 
     # Live tool progress messages are on by default. A per-server
     # `/progress arguments:off` silences a noisy server; MAXWELL_PROGRESS_MESSAGES=false
@@ -504,7 +496,6 @@ class Config:
         ("ENABLE_CREATE_SITE", "site generation"),
         ("ENABLE_AVATAR", "avatar changes"),
         ("ENABLE_SHELL", "shell (docker sandbox)"),
-        ("ENABLE_AUTONOMY", "autonomy engine"),
     )
 
     @classmethod

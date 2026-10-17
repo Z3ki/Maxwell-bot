@@ -1062,6 +1062,8 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
             interaction, defaults=defaults, fallback=turn.get("visibility") or "public"
         )
         history_limit = resolve_context_limit(interaction, defaults=defaults)
+        if defaults is not None and defaults.get("tracking", "off") != "on":
+            history_limit = 0
         response = getattr(interaction, "response", None)
         is_done = getattr(response, "is_done", None)
         if not (callable(is_done) and is_done()):
@@ -1071,6 +1073,8 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
     except Exception:
         logger.exception("user-install defer failed")
         return True
+    from privacy import maybe_notice
+    await maybe_notice(bot, interaction)
     source_context = interaction_source_context(interaction, getattr(turn.get("reference"), "resolved", None))
     history = (
         await snapshot_channel_history(bot, interaction, limit=history_limit)

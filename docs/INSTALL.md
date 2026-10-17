@@ -39,7 +39,7 @@ hosting. RAG needs `MAXWELL_EMBED_MODEL` (or `EMBED_MODEL`) after you install
 that embedding model. HD images need `GEMINI_IMAGE_MODEL` supported by your
 provider. Shell stays off until `--with-shell` prepares the backend. Features without
 setup, such as keyless web search and image generation, remain available.
-Conversational autonomy is opt-in; memory agents and delegated workers have been removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. Generated sites do not expire
+Autonomous background activity is removed; memory agents and delegated workers have been removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. Generated sites do not expire
 by default; set `site_ttl_hours` in owner controls if you want expiry.
 
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
@@ -83,7 +83,7 @@ The full installer can configure:
 2. Primary provider URL/model/key.
 3. Identity and owner IDs.
 4. Operator API credentials.
-5. Optional conversational autonomy.
+5. Optional user-requested integrations.
 
 Prompts read from `/dev/tty`, so an interactive `curl | bash` install still works. When there is no controlling TTY, the installer switches to non-interactive mode and reads environment variables.
 
@@ -379,3 +379,22 @@ python -m pytest
 ```
 
 GitHub Actions runs the repository's configured lint/test matrix. Live external-service behavior still requires the corresponding services/credentials and should not be inferred from mocked unit tests alone.
+
+
+### Privacy migration and public release
+
+Read [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) before upgrading to 0.1.15. Conversation
+storage now defaults off, and historical default-on values are not valid opt-in
+evidence. Existing explicit opt-outs are preserved. Startup cleanup removes old
+unverified history, facts and reasoning traces; take a protected operational
+backup first, apply its deletion/retention policy, and never restore deleted
+content without replaying suppression records. The migration is privacy-affecting
+and content deletion is intentional.
+
+Set your own HTTPS policy URLs and verify the corresponding fields in Discord's
+Developer Portal manually. Test `/help`, `/config → Privacy`, dashboard settings,
+private support, a failed deletion and backup restoration. Supply actual operator,
+provider, encryption, retention and legal-review evidence in
+`release-readiness.json`; `python scripts/check_release_readiness.py` blocks public
+release while review is incomplete. Deploying source does not configure the Portal
+or certify legal compliance. Do not enable Premium sales before billing review.

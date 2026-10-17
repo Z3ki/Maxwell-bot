@@ -100,6 +100,7 @@ def _delete_author_rows(db, author_id: str) -> dict:
     empty = {"messages": 0, "facts": 0, "profiles": 0}
     if not uid.isdigit():
         return dict(empty)
+    db.execute("PRAGMA secure_delete=ON")
     db.execute("BEGIN IMMEDIATE")
     try:
         rows = db.execute(
@@ -188,13 +189,17 @@ def _tracking_blocks(memory, message: dict) -> bool:
         reply_to = str(message.get("reply_to_author_id") or "")
         if reply_to.isdigit():
             subjects.append(reply_to)
-    if message.get("is_tool") or message.get("tool_name"):
-        requested = str(message.get("requested_by") or "")
-        if requested.isdigit():
-            subjects.append(requested)
+    requested = str(message.get("requested_by") or "")
+    if requested.isdigit():
+        subjects.append(requested)
+    if (message.get("author_is_bot") or _is_tool_metadata(message)) and not subjects:
+        return True
     for uid in subjects:
         try:
+            preferences = getattr(memory, "preferences", None)
             allowed = checker(uid)
+            if allowed and preferences is not None and message.get("privacy_started_at"):
+                allowed = preferences.content_allowed(uid, message["privacy_started_at"])
         except Exception:
             return True
         if not allowed:
@@ -221,6 +226,10 @@ class ConversationMemoryManager:
         self._db = sqlite3.connect(str(self.db_path), isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA secure_delete=ON")
+        from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+        self.preferences = UserPreferenceStore(self.data_dir / "plugins/maxwell_extras/user_preferences.json")
+        self.tracks_message_content = self.preferences.content_allowed
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA cache_size=-8000")
         self._db.execute("""CREATE TABLE IF NOT EXISTS vectors (
@@ -311,7 +320,7 @@ class ConversationMemoryManager:
             "message_id": row["id"], "author": row["author"],
             "author_id": row["author_id"], "content": row["content"],
             "timestamp": row["timestamp"],
-        }) for row in reversed(rows)]
+        }) for row in reversed(rows) if not _tracking_blocks(self, _decode_metadata(row["metadata"]) | {"author_id": row["author_id"]})]
 
     async def get_relevant_channel_memory(
         self, channel_id: str, query: str, *, requester: MemoryRequester | None = None,
@@ -348,7 +357,7 @@ class ConversationMemoryManager:
         result = []
         for row in rows:
             metadata = _decode_metadata(row["metadata"])
-            if metadata.get("is_tool"):
+            if metadata.get("is_tool") or _tracking_blocks(self, metadata | {"author_id": row["author_id"]}):
                 continue
             result.append(sanitize_media_memory(metadata | {
                 "message_id": row["id"], "author": row["author"],
@@ -360,7 +369,9 @@ class ConversationMemoryManager:
         return result
 
     async def add_to_channel_memory(self, channel_id: str, message: dict) -> None:
-        await self._run_db(self._add_to_channel_memory, channel_id, message)
+        entry = dict(message)
+        entry.setdefault("privacy_started_at", time.time())
+        await self._run_db(self._add_to_channel_memory, channel_id, entry)
 
     async def delete_author_content(self, author_id: str) -> dict:
         """Delete transcript rows and facts stored for one Discord account."""
@@ -391,6 +402,14 @@ class ConversationMemoryManager:
         # All database operations use the same worker, including complete transactions.
         self._db.execute("BEGIN IMMEDIATE")
         try:
+            # Re-check after acquiring the write transaction: a dashboard deletion
+            # may have completed while this worker waited for SQLite.
+            if _tracking_blocks(self, entry):
+                self._db.execute("ROLLBACK")
+                return
+            reply_uid = str(entry.get("reply_to_author_id") or "")
+            if reply_uid.isdigit() and not self.tracks_message_content(reply_uid):
+                metadata.pop("reply_to_content", None)
             self._db.execute("DELETE FROM vectors WHERE id=?", (mid,))
             self._db.execute(
                 "INSERT INTO vectors (id,kind,channel_id,guild_id,author,author_id,source,"

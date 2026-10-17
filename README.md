@@ -1,3 +1,6 @@
+This codebase is such a mess...
+
+
 # Maxwell
 
 Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
@@ -17,7 +20,7 @@ preserved when updating.
 Optional tools appear only after setup: set `MAXWELL_PUBLIC_BASE_URL` for
 websites and `GEMINI_IMAGE_MODEL` for HD images. Add `--with-shell` for the
 shell backend.
-Conversational autonomy remains opt-in. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` accepts an attachment or a direct public HTTP(S) audio/video URL; `reference_audio_url` is an explicit URL alias. URLs need not be attached and can be found online. Use permitted voice samples. The full sample is sent without local byte/duration caps, and the provider validates it. References are never saved. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
+Autonomous background activity is removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` accepts an attachment or a direct public HTTP(S) audio/video URL; `reference_audio_url` is an explicit URL alias. URLs need not be attached and can be found online. Use permitted voice samples. The full sample is sent without local byte/duration caps, and the provider validates it. References are never saved. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
 
 The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.11`, select `--version v0.1.11`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
 
@@ -197,7 +200,7 @@ Before deploying backends, run `sudo bash scripts/setup_site_host.sh` on the Doc
 - Fail-closed handling for destructive tools after fetched/web content has tainted the current turn.
 - Personal, server, and restricted application-owner settings through `/config`.
 - Scoped recent conversation history in SQLite, without embeddings, vector search, or local inference workers.
-- Optional autonomy/background actions with runtime controls.
+- User-initiated tools with explicit permissions.
 - Generated static sites and custom FastAPI/SQLite backend containers with server-side secrets and aggregate resource limits.
 
 - Docker-first runtime so host Python/package versions do not fight the bot.

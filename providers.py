@@ -1315,7 +1315,7 @@ class OpenAICompatibleProvider(ChatProvider):
                             resp.status,
                             headers_ms,
                             len(error_text),
-                            error_text[:200],
+                            "[provider body omitted]",
                         )
                         if (
                             has_media
@@ -1344,7 +1344,7 @@ class OpenAICompatibleProvider(ChatProvider):
                                 if _strip_media_parts(chat_messages):
                                     logger.warning(
                                         "No endpoint accepts this media; retrying text-only: %s",
-                                        error_text[:200],
+                                        "[provider body omitted]",
                                     )
                                     has_media = False
                                     media_broken.clear()
@@ -1422,7 +1422,7 @@ class OpenAICompatibleProvider(ChatProvider):
                                 "Provider endpoint %s blocked the prompt on content policy; "
                                 "failing over: %s",
                                 endpoint.name,
-                                error_text[:200],
+                                "[provider body omitted]",
                             )
                             if await self._retry_after_attempt(
                                 attempt,

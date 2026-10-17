@@ -342,6 +342,7 @@ personalForm.addEventListener("submit", (event) => {
       "mode",
       "web",
       "context",
+      "tracking",
     ])
       defaults[key] =
         key === "context"
@@ -518,3 +519,14 @@ async function start() {
   }
 }
 start();
+
+$("privacy-review").addEventListener("click", () => action(async () => {
+  const data = await api("privacy");
+  notice(data.processing + " Choices: " + (data.consents.map(c => c.kind + ": " + c.status).join(", ") || "none"));
+}));
+$("privacy-delete").addEventListener("click", () => action(async () => {
+  if (!window.confirm("Delete supported active personal data and turn history off? Published files/workspaces, provider copies and backups need operator review. You will be signed out.")) return;
+  const result = await api("privacy", "DELETE");
+  notice("History is off. " + (result.failed.length ? "Failed stores: " + result.failed.join(", ") + ". " : "Supported active stores processed. ") + result.manual_required.join(" ") + " " + result.retained);
+  personalForm.querySelector('[name="tracking"]').value = "off";
+}));

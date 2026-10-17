@@ -100,7 +100,10 @@ def test_tts_sends_the_emotion_voice_and_marks_delivery(monkeypatch):
     TtsTool._last_tts.clear()
     tool = TtsTool(
         SimpleNamespace(
-            config=None, _record_delivery=AsyncMock(side_effect=lambda *_a: seen.setdefault("recorded", True))
+            config=None,
+            _record_delivery=AsyncMock(
+                side_effect=lambda *_a: seen.setdefault("recorded", True)
+            ),
         )
     )
     message = SimpleNamespace(channel=SimpleNamespace(id=7))
@@ -205,6 +208,24 @@ def _bot(tmp_path, **config):
     return SimpleNamespace(config=SimpleNamespace(**fields))
 
 
+def _authorized_bot(tmp_path, reference):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+    from privacy import VOICE_VERSION, voice_policy
+
+    bot = _bot(tmp_path)
+    bot._user_preferences = UserPreferenceStore(
+        tmp_path / "plugins/maxwell_extras/user_preferences.json"
+    )
+    bot._user_preferences.consents.record(
+        "1",
+        voice_policy(reference),
+        VOICE_VERSION,
+        "voice_authorization",
+        affirmative=True,
+    )
+    return bot
+
+
 def test_a_saved_clone_name_is_not_reused(tmp_path, monkeypatch):
     store = tmp_path / "plugins" / "tts_voice"
     store.mkdir(parents=True)
@@ -252,8 +273,9 @@ def test_reference_clones_one_attachment_and_does_not_save_it(tmp_path, monkeypa
     monkeypatch.setattr("plugins.tts_voice.impl.deliver_speech", fake_deliver)
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     TtsTool._last_tts.clear()
-    tool = TtsTool(_bot(tmp_path))
+    tool = TtsTool(_authorized_bot(tmp_path, _clip().url))
     message = SimpleNamespace(
+        author=SimpleNamespace(id=1),
         channel=SimpleNamespace(id=22),
         attachments=[_clip()],
         reference=None,
@@ -272,28 +294,39 @@ def test_reference_clones_one_attachment_and_does_not_save_it(tmp_path, monkeypa
 @pytest.mark.parametrize("parameter", ["reference", "reference_audio_url"])
 def test_reference_accepts_url_without_attachment(tmp_path, monkeypatch, parameter):
     seen = {}
+
     async def download(url):
-        seen['url'] = url
-        return b'raw-audio'
+        seen["url"] = url
+        return b"raw-audio"
+
     async def prepare(raw):
-        assert raw == b'raw-audio'
-        return b'ID3sample'
-    def synth(text, voice_id, api_key, model, ref_audio=''):
-        seen['ref_audio'] = ref_audio
+        assert raw == b"raw-audio"
+        return b"ID3sample"
+
+    def synth(text, voice_id, api_key, model, ref_audio=""):
+        seen["ref_audio"] = ref_audio
         assert not voice_id
-        return b'mp3'
+        return b"mp3"
+
     async def deliver(*_args):
         return SimpleNamespace(id=4)
-    monkeypatch.setattr('plugins.tts_voice.impl.download_reference_audio', download)
-    monkeypatch.setattr('plugins.tts_voice.impl.prepare_sample', prepare)
-    monkeypatch.setattr('plugins.tts_voice.impl.synthesize_speech', synth)
-    monkeypatch.setattr('plugins.tts_voice.impl.deliver_speech', deliver)
+
+    monkeypatch.setattr("plugins.tts_voice.impl.download_reference_audio", download)
+    monkeypatch.setattr("plugins.tts_voice.impl.prepare_sample", prepare)
+    monkeypatch.setattr("plugins.tts_voice.impl.synthesize_speech", synth)
+    monkeypatch.setattr("plugins.tts_voice.impl.deliver_speech", deliver)
     TtsTool._last_tts.clear()
-    message = SimpleNamespace(channel=SimpleNamespace(id=23), attachments=[])
-    result = asyncio.run(TtsTool(_bot(tmp_path)).execute(message, text='hello', **{parameter: 'https://example.com/voice.wav'}))
-    assert result.startswith('__TTS_SENT__')
-    assert seen['url'] == 'https://example.com/voice.wav' and seen['ref_audio']
-    assert not (tmp_path / 'plugins' / 'tts_voice').exists()
+    message = SimpleNamespace(
+        author=SimpleNamespace(id=1), channel=SimpleNamespace(id=23), attachments=[]
+    )
+    result = asyncio.run(
+        TtsTool(_authorized_bot(tmp_path, "https://example.com/voice.wav")).execute(
+            message, text="hello", **{parameter: "https://example.com/voice.wav"}
+        )
+    )
+    assert result.startswith("__TTS_SENT__")
+    assert seen["url"] == "https://example.com/voice.wav" and seen["ref_audio"]
+    assert not (tmp_path / "plugins" / "tts_voice").exists()
     TtsTool._last_tts.clear()
 
 
@@ -580,7 +613,39 @@ def test_prepare_sample_keeps_short_and_full_length_clips():
     assert sample.startswith(b"ID3") or sample[0] == 0xFF
 
     long_sample = asyncio.run(prepare_sample(sine(23)))
-    _duration = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', '-i', 'pipe:0'], input=long_sample, capture_output=True)
+    _duration = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            "-i",
+            "pipe:0",
+        ],
+        input=long_sample,
+        capture_output=True,
+    )
     # Pipe MP3 duration can be N/A; measure decoded PCM samples instead.
-    decoded = subprocess.run(['ffmpeg', '-v', 'error', '-i', 'pipe:0', '-f', 's16le', '-ac', '1', '-ar', '24000', 'pipe:1'], input=long_sample, capture_output=True, check=True)
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "pipe:1",
+        ],
+        input=long_sample,
+        capture_output=True,
+        check=True,
+    )
     assert len(decoded.stdout) / (24000 * 2) > 22.5

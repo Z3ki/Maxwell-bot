@@ -5,6 +5,9 @@ from __future__ import annotations
 import copy
 import json
 import threading
+import time
+
+from privacy import ConsentStore, STORAGE_VERSION
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +22,7 @@ _DEFAULTS: dict[str, Any] = {
     "language": "",
     "visibility": "public",
     # on: store this person's message content. off: do not store it.
-    "tracking": "on",
+    "tracking": "off",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800
@@ -31,6 +34,7 @@ class UserPreferenceStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.consents = ConsentStore(self.path.parent / "privacy.sqlite3")
         self._cache: dict[str, Any] | None = None
         self._cache_signature: tuple[int, int, int, int] | None = None
 
@@ -90,6 +94,13 @@ class UserPreferenceStore:
                         if key in _ALLOWED_DEFAULTS
                     }
                 )
+            # Historical default-on is not proof of an affirmative storage choice.
+            # Preserve every opt-out; require new evidence before retaining content.
+            if (
+                defaults.get("tracking") == "on"
+                and row.get("storage_choice_version") != STORAGE_VERSION
+            ):
+                defaults["tracking"] = "off"
             personality = str(row.get("personality") or "")[:_PERSONALITY_LIMIT]
             return {"defaults": defaults, "personality": personality}
 
@@ -105,6 +116,22 @@ class UserPreferenceStore:
             defaults = row.get("defaults")
             if not isinstance(defaults, dict):
                 defaults = {}
+            if key == "tracking":
+                if value not in {"on", "off"}:
+                    raise ValueError("invalid storage choice")
+                if value == "on":
+                    self.consents.record(
+                        uid,
+                        "history",
+                        STORAGE_VERSION,
+                        "optional_storage",
+                        affirmative=True,
+                    )
+                else:
+                    self.consents.withdraw(uid, "history")
+                    row["deleted_at"] = time.time()
+                row["storage_choice_version"] = STORAGE_VERSION
+                row["storage_choice_at"] = time.time()
             defaults[key] = value
             row["defaults"] = defaults
             root["users"][uid] = row
@@ -115,6 +142,10 @@ class UserPreferenceStore:
         key = str(key or "").strip()
         if not uid or key not in _ALLOWED_DEFAULTS:
             raise ValueError("invalid user preference")
+        if key == "tracking":
+            # Reset never grants optional storage or erases a privacy opt-out.
+            self.set_default(uid, "tracking", "off")
+            return
         with _LOCK, FileLock(self.path, timeout=5):
             root = copy.deepcopy(self._read(for_write=True))
             row = root["users"].get(uid)
@@ -171,23 +202,68 @@ class UserPreferenceStore:
             row = dict(row) if isinstance(row, dict) else {}
             saved = row.get("defaults")
             saved = dict(saved) if isinstance(saved, dict) else {}
+            if "tracking" in defaults:
+                choice = defaults["tracking"]
+                if choice not in {"on", "off"}:
+                    raise ValueError("invalid storage choice")
+                if choice == "on":
+                    self.consents.record(
+                        uid,
+                        "history",
+                        STORAGE_VERSION,
+                        "optional_storage",
+                        affirmative=True,
+                    )
+                else:
+                    self.consents.withdraw(uid, "history")
+                    row["deleted_at"] = time.time()
+                row["storage_choice_version"] = STORAGE_VERSION
+                row["storage_choice_at"] = time.time()
             saved.update(defaults)
             row.update(defaults=saved, personality=personality.strip())
             root["users"][uid] = row
             self._write(root)
 
+    def delete_personal(self, user_id):
+        uid = str(user_id)
+        with _LOCK, FileLock(self.path, timeout=5):
+            root = copy.deepcopy(self._read(for_write=True))
+            root["users"][uid] = {
+                "defaults": {"tracking": "off"},
+                "deleted_at": time.time(),
+            }
+            self._write(root)
+
+    def request_allowed(self, user_id, started_at):
+        with _LOCK:
+            root = self._read()
+            if root.get("unavailable"):
+                return False
+            row = root["users"].get(str(user_id), {})
+            return float(started_at) > float(row.get("deleted_at") or 0)
+
+    def content_allowed(self, user_id, started_at=None):
+        uid = str(user_id)
+        if self.get(uid)["defaults"]["tracking"] != "on":
+            return False
+        with _LOCK:
+            row = self._read()["users"].get(uid, {})
+            return not (
+                started_at and float(started_at) <= float(row.get("deleted_at") or 0)
+            )
+
 
 def tracks_message_content(store: Any, user_id: Any) -> bool:
     """False when this person opted out, or their choice cannot be read.
 
-    A missing store keeps the historical default and still stores content.
+    A missing or unreadable store fails closed for personal content.
     System and bot ids are not personal opt-outs.
     """
     uid = str(user_id or "").strip()
     if not uid.isdigit():
         return True
     if store is None:
-        return True
+        return False
     try:
         row = store.get(uid)
     except Exception:
@@ -195,7 +271,7 @@ def tracks_message_content(store: Any, user_id: Any) -> bool:
     defaults = row.get("defaults") if isinstance(row, dict) else None
     if not isinstance(defaults, dict):
         return False
-    return str(defaults.get("tracking", "on")) != "off"
+    return str(defaults.get("tracking", "off")) == "on"
 
 
 def bind_message_tracking(bot: Any, store: Any) -> None:
@@ -207,6 +283,7 @@ def bind_message_tracking(bot: Any, store: Any) -> None:
     def allowed(user_id: str, _store: Any = store) -> bool:
         return tracks_message_content(_store, user_id)
 
+    memory.preferences = store
     memory.tracks_message_content = allowed
 
 

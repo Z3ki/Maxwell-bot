@@ -1,0 +1,13 @@
+{
+  "candidate": "0.1.15",
+  "status": "operator_review_required",
+  "reviewed": false,
+  "evidence": {},
+  "blockers": [
+    "Operator identity, contract formation and applicable law need operator/legal review.",
+    "Verify the actual primary/fallback/media providers, privacy terms, age eligibility and data-transfer safeguards.",
+    "Test private operator support delivery and set this deployment's trusted policy URLs in the Discord Developer Portal.",
+    "Verify encryption at rest, log/backup retention, manual plugin/workspace deletion and deletion suppression after backup restoration.",
+    "Publish actual billing/cancellation/refund information before enabling Premium sales."
+  ]
+}

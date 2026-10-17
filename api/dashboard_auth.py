@@ -165,3 +165,15 @@ class DashboardSessions:
     def delete(self, cookie: str):
         with self.db() as db:
             db.execute("DELETE FROM sessions WHERE id=?", (_digest(cookie),))
+
+    def delete_user(self, user_id):
+        with self.db() as db:
+            for identity, payload in db.execute("SELECT id,payload FROM sessions").fetchall():
+                try:
+                    data = json.loads(self.cipher.decrypt(payload[:12], payload[12:], identity.encode()))
+                except Exception:
+                    # Unreadable sessions are unusable and should not be retained.
+                    db.execute("DELETE FROM sessions WHERE id=?", (identity,))
+                    continue
+                if str(data.get("user", {}).get("id")) == str(user_id):
+                    db.execute("DELETE FROM sessions WHERE id=?", (identity,))

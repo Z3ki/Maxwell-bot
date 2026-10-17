@@ -84,7 +84,7 @@ _HELP_TOPICS = {
     "owner": (
         "Application owner settings",
         [
-            "Configured application owners can open the Application owner section of `/config` for redacted diagnostics, global tool/autonomy/quota switches, quota overrides, and trusted control reload.",
+            "Configured application owners can open the Application owner section of `/config` for redacted diagnostics, global tool/quota switches, quota overrides, and trusted control reload.",
             "Guild ownership and server administrator permissions do not grant access to application-owner settings.",
         ],
     ),
@@ -168,6 +168,9 @@ async def handle_discovery_interaction(bot: Any, interaction: Any) -> bool:
     if name == "help":
         options = dict(ui._option_pairs(data.get("options")))
         text = command_help_text(topic=options.get("topic"))
+        from privacy import policy_urls
+        links = policy_urls(getattr(bot, "config", None))
+        text = "Privacy: `/config → Privacy` manages optional history and deletion. Requests still use AI providers.\n" + " · ".join(f"[{key.title()}]({url})" for key, url in links.items()) + "\n\n" + text
     else:
         text = usage_text_for(bot, _user_id(interaction))
     try:

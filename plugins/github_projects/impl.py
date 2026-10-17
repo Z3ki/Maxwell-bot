@@ -183,14 +183,26 @@ class PolicyStore:
     async def all(self) -> dict[str, Any]:
         async with self.lock:
             return self._read()
+    def _set_sync(self, uid, repo, changes, started_at):
+        with FileLock(self.path, timeout=5):
+            from privacy import owned_write_allowed
+            if not owned_write_allowed(self.path.parent.parent.parent, uid, started_at):
+                raise ValueError("Request predates a privacy deletion; submit a new request")
+            data = self._read()
+            users = data.setdefault(uid, {})
+            current = users.get(repo)
+            current = dict(current) if isinstance(current, dict) else {}
+            current.update(changes)
+            current = {key: value for key, value in current.items() if key not in _RETIRED_POLICY_KEYS}
+            current["updated_at"] = time.time()
+            users[repo] = current
+            _json_atomic(self.path, data)
+            return dict(current)
+
     async def set(self, uid: str, repo: str, changes: dict[str, Any]) -> dict[str, Any]:
+        from privacy import request_started_at
         async with self.lock:
-            data = self._read(); users = data.setdefault(uid, {}); cur = users.get(repo)
-            if not isinstance(cur, dict): cur = {}
-            cur.update(changes)
-            cur = {k: v for k, v in cur.items() if k not in _RETIRED_POLICY_KEYS}
-            cur["updated_at"] = time.time(); users[repo] = cur
-            _json_atomic(self.path, data); return dict(cur)
+            return await asyncio.to_thread(self._set_sync, uid, repo, changes, request_started_at())
 
 class TokenStore:
     """Serialize token snapshots across the bot and OAuth API processes.
@@ -253,21 +265,29 @@ class RepoKnowledge:
             return raw if isinstance(raw, dict) else {}
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return {}
-    async def update(self, uid: str, repo: str, **facts: Any) -> None:
-        async with self.lock:
-            data = self._read(); key = f"{uid}:{repo.lower()}"; row = data.get(key)
-            if not isinstance(row, dict): row = {"user_id": uid, "repo": repo, "events": []}
-            row.update({k:v for k,v in facts.items() if v is not None}); row["updated_at"] = time.time()
+    def _update_sync(self, uid, repo, facts, started_at):
+        with FileLock(self.path, timeout=5):
+            from privacy import owned_write_allowed
+            if not owned_write_allowed(self.path.parent.parent.parent, uid, started_at):
+                raise ValueError("Request predates a privacy deletion; submit a new request")
+            data = self._read()
+            key = f"{uid}:{repo.lower()}"
+            row = data.get(key)
+            if not isinstance(row, dict):
+                row = {"user_id": uid, "repo": repo, "events": []}
+            row.update({key: value for key, value in facts.items() if value is not None})
+            row["updated_at"] = time.time()
             events = row.get("events") if isinstance(row.get("events"), list) else []
-            if facts.get("event"): events.append({"at": time.time(), "text": str(facts["event"])[:600]})
-            row["events"] = events[-80:]; data[key] = row; _json_atomic(self.path, data)
-            graph = getattr(getattr(self.bot, "memory", None), "graph", None)
-            if graph is not None:
-                with contextlib.suppress(Exception):
-                    un, rn = f"user:{uid}", "repo:" + repo.lower()
-                    graph.upsert_node(un, "user", uid, {"user_id":uid})
-                    graph.upsert_node(rn, "repository", repo, {"full_name":repo})
-                    graph.upsert_edge(un, "WORKS_ON", rn, {"source":"github_projects"})
+            if facts.get("event"):
+                events.append({"at": time.time(), "text": str(facts["event"])[:600]})
+            row["events"] = events[-80:]
+            data[key] = row
+            _json_atomic(self.path, data)
+
+    async def update(self, uid: str, repo: str, **facts: Any) -> None:
+        from privacy import request_started_at
+        async with self.lock:
+            await asyncio.to_thread(self._update_sync, uid, repo, facts, request_started_at())
     async def get(self, uid: str, repo: str) -> dict[str, Any]:
         async with self.lock:
             row = self._read().get(f"{uid}:{repo.lower()}") or {}
@@ -325,7 +345,7 @@ class GitHubProjectService:
         # Controller-scoped: Dev and Production share one Docker daemon but
         # must never adopt, restart, or remove each other's workspaces.
         return "maxwell-gh-" + hashlib.sha256(
-            f"{uid}\0{controller_id()}".encode()
+            (f"{uid}\0{controller_id()}" if controller_id() else uid).encode()
         ).hexdigest()[:16]
     def user_root(self, uid: str) -> Path:
         root = (self.workspace_root/hashlib.sha256(uid.encode()).hexdigest()[:24]).resolve(); root.mkdir(parents=True, exist_ok=True); return root

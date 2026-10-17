@@ -555,6 +555,7 @@ def test_private_dm_app_receives_live_context_and_participant_metadata(tmp_path,
     from plugins.maxwell_extras.user_preferences import UserPreferenceStore
     store = UserPreferenceStore(tmp_path / "prefs.json")
     store.set_default(1, "visibility", "private")
+    store.set_default(1, "tracking", "on")
     monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [])
     observed = []
 
