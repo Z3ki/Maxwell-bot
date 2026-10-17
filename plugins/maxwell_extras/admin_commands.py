@@ -13,6 +13,7 @@ import discord
 import user_install as ui
 from api.state import _sanitize_control
 from control_defaults import DEFAULT_CONTROL
+from message_quota import FREE_MESSAGE_LIMIT, PREMIUM_MESSAGE_LIMIT
 from identity import configured_admin_ids
 
 DIAGNOSTICS_COMMAND_NAME = "diagnostics"
@@ -30,7 +31,6 @@ _DIAGNOSTIC_CHOICES = [
     {"name": "Runtime", "value": "runtime"},
     {"name": "Controls", "value": "controls"},
     {"name": "Memory", "value": "memory"},
-    {"name": "Autonomy", "value": "autonomy"},
     {"name": "Tools", "value": "tools"},
     {"name": "Plugins", "value": "plugins"},
     {"name": "Full data export", "value": "data"},
@@ -48,6 +48,8 @@ _MAINTENANCE_CHOICES = [
     {"name": "Reset user messages", "value": "quota_reset"},
     {"name": "Exempt user from limit", "value": "quota_exempt"},
     {"name": "Remove user exemption", "value": "quota_unexempt"},
+    {"name": "Grant premium allowance", "value": "quota_premium"},
+    {"name": "Return user to free allowance", "value": "quota_free"},
 ]
 
 _ADMIN_COMMAND_META = {
@@ -301,25 +303,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
         if section == "memory":
             return embed
 
-    if section in {"overview", "autonomy"}:
-        embed.add_field(
-            name="Autonomy",
-            value=_field_lines(
-                control,
-                (
-                    "autonomy_enabled",
-                    "autonomy_interval_seconds",
-                    "autonomy_floor_enabled",
-                    "autonomy_floor_cooldown_seconds",
-                    "autonomy_disable_reasoning",
-                    "enable_night_fallback",
-                ),
-            ),
-            inline=False,
-        )
-        if section == "autonomy":
-            return embed
-
     if section in {"overview", "tools"}:
         disabled = control.get("disabled_tools") or []
         embed.add_field(
@@ -487,7 +470,7 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
     opts = _options(interaction)
     if name == DIAGNOSTICS_COMMAND_NAME:
         section = str(opts.get("section") or "overview").strip().lower()
-        if section not in {"overview", "runtime", "controls", "memory", "autonomy", "tools", "plugins", "data"}:
+        if section not in {"overview", "runtime", "controls", "memory", "tools", "plugins", "data"}:
             await _send(interaction, content="Unknown diagnostics section.")
         elif section == "controls":
             await _send(
@@ -534,7 +517,10 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
             await _send(interaction, content="Reloaded `bot_control.json` into the live bot.")
         return True
 
-    if action in {"quota", "quota_set", "quota_clear", "quota_reset", "quota_exempt", "quota_unexempt"}:
+    if action in {
+        "quota", "quota_set", "quota_clear", "quota_reset",
+        "quota_exempt", "quota_unexempt", "quota_premium", "quota_free",
+    }:
         if not (key.isdecimal() and len(key) <= 20):
             await _send(interaction, content="Provide a Discord user ID in `key`.")
             return True
@@ -557,9 +543,13 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
                 ledger.configure(key, exempt=True)
             elif action == "quota_unexempt":
                 ledger.configure(key, exempt=False)
+            elif action == "quota_premium":
+                ledger.configure(key, plan="premium")
+            elif action == "quota_free":
+                ledger.configure(key, plan="free")
             state = ledger.status(
                 key,
-                int(control.get("message_quota_limit") or 300),
+                int(control.get("message_quota_limit") or FREE_MESSAGE_LIMIT),
                 int(control.get("message_quota_window_seconds") or 18000),
             )
         except (TypeError, ValueError) as exc:
@@ -568,7 +558,13 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
         await _send(interaction, content=(
             f"User `{key}` · {state['used']}/{state['limit']} messages "
             f"in the last {state['window_seconds']}s · "
-            f"exempt: {'yes' if state['exempt'] else 'no'}"
+            f"exempt: {'yes' if state['exempt'] else 'no'} · "
+            f"plan: {state.get('plan') or 'free'}"
+            + (
+                f" · premium allowance {PREMIUM_MESSAGE_LIMIT}"
+                if state.get("plan") == "premium" and state.get("override") is None
+                else ""
+            )
         ))
         return True
 

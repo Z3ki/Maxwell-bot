@@ -135,7 +135,7 @@ class HDImageGeneratorTool(Tool):
             # No Pillow (or an image it cannot open): send the bytes through
             # untouched, but label them from their magic number rather than
             # guessing — a JPEG announced as image/png gets rejected upstream.
-            logger.debug(f"hd_image input downscale skipped: {e}")
+            logger.debug(f"hd_image input downscale skipped: {type(e).__name__}")
             return raw, _sniff_image_mime(raw)
 
     async def _load_one(self, ref: str) -> tuple[bytes | None, str]:
@@ -316,7 +316,7 @@ class HDImageGeneratorTool(Tool):
                     try:
                         data = json.loads(body)
                     except Exception:
-                        logger.error(f"HD image non-JSON response: {body[:300]}")
+                        logger.error("HD image non-JSON response: [body omitted]")
                         return "Error: HD image endpoint returned a non-JSON response"
             except asyncio.TimeoutError:
                 logger.warning(
@@ -326,7 +326,7 @@ class HDImageGeneratorTool(Tool):
                 last_error = f"Error: HD image generation timed out after {timeout_s}s"
                 continue
             except Exception as e:
-                logger.error(f"HD image generation request error: {e}")
+                logger.error(f"HD image generation request error: {type(e).__name__}")
                 return f"Error generating HD image: {e}"
 
             choices = data.get("choices") or []
@@ -376,7 +376,7 @@ class HDImageGeneratorTool(Tool):
         try:
             image_bytes = base64.b64decode(b64)
         except Exception as e:
-            logger.error(f"HD image base64 decode failed: {e}")
+            logger.error(f"HD image base64 decode failed: {type(e).__name__}")
             return "Error: HD image data was not decodable"
 
         verb = "Edited" if loaded else "Generated"

@@ -8,8 +8,10 @@ import pytest
 
 from api.state import _sanitize_control
 from bot import DISCORD_CHAT_PROTOCOL, MaxwellBot, _current_inbound
+from control_defaults import DEFAULT_CONTROL
 from message_quota import (
     FREE_MESSAGE_LIMIT,
+    PREMIUM_MESSAGE_LIMIT,
     MessageQuota,
     MessageQuotaExceeded,
     enforced_message_limit,
@@ -97,7 +99,9 @@ def test_plan_and_billing_controls_are_discarded():
     assert "message_quota_personal_plus_limit" not in sanitized
     assert "message_quota_server_plus_limit" not in sanitized
     assert enforced_message_limit(sanitized) == 40
-    assert FREE_MESSAGE_LIMIT == 300
+    assert FREE_MESSAGE_LIMIT == 200
+    assert DEFAULT_CONTROL["message_quota_limit"] == FREE_MESSAGE_LIMIT
+    assert _sanitize_control({})["message_quota_limit"] == FREE_MESSAGE_LIMIT
 
 
 def test_retired_daily_token_controls_are_discarded():
@@ -135,7 +139,8 @@ def test_help_browses_topics_and_returns_only_the_selected_section():
         "owner",
     }
     assert "/config" in command_help_text(topic="personal")
-    assert "Bring your own key" in command_help_text(topic="personal")
+    assert "My AI provider" in command_help_text(topic="personal")
+    assert "timeouts, context and reasoning" in command_help_text(topic="personal")
     assert "/personality" not in command_help_text(topic="personal")
     assert "/image" not in command_help_text(topic="personal")
 
@@ -162,7 +167,7 @@ def test_help_interaction_uses_selected_topic():
     )
     assert sent and sent[0][1] is True
     assert "/config" in sent[0][0]
-    assert "Bring your own key" in sent[0][0]
+    assert "My AI provider" in sent[0][0]
     assert "/personality" not in sent[0][0]
     assert "/image" not in sent[0][0]
 
@@ -210,5 +215,132 @@ def test_live_turn_charges_one_message_not_followups(tmp_path):
         _current_inbound.reset(token)
     assert len(calls) == 2
     assert ledger.status("42", 100, 18000)["used"] == 1
+
+
+def test_experimental_premium_routing_follows_agentic_intent(tmp_path):
+    ledger = MessageQuota(tmp_path / "messages.sqlite3")
+    calls = []
+
+    async def generate(_messages, **kwargs):
+        calls.append(kwargs.get("model"))
+        return ProviderResult("ok")
+
+    bot = object.__new__(MaxwellBot)
+    bot._control = {
+        "message_quota_enabled": True,
+        "message_quota_limit": FREE_MESSAGE_LIMIT,
+        "message_quota_window_seconds": 18000,
+        "experimental_premium_model": True,
+    }
+    bot._message_quota = ledger
+    bot.config = SimpleNamespace(AI_PREMIUM_MODEL="gemini-3.8-flash")
+    bot.ai_provider = SimpleNamespace(generate_response=generate, model="gemini-3.5-flash-lite")
+    bot._night_fallback_kwargs = dict
+
+    def ask(content):
+        message = SimpleNamespace(
+            id=1,
+            author=SimpleNamespace(id=42, bot=False),
+            channel=SimpleNamespace(id=2),
+            guild=SimpleNamespace(id=7),
+            content=content,
+        )
+        token = _current_inbound.set(message)
+        try:
+            asyncio.run(
+                MaxwellBot._generate_response(
+                    bot, [{"role": "user", "content": content}], max_tokens=20
+                )
+            )
+        finally:
+            _current_inbound.reset(token)
+
+    ask("build me a script that archives the logs")
+    ask("hola que tal")
+    assert calls == ["gemini-3.8-flash", None]
+
+    calls.clear()
+    bot._control["experimental_premium_model"] = False
+    ask("build me a script that archives the logs")
+    assert calls == [None]
+
+    # The agentic switch is about request complexity, so it also routes
+    # bot/webhook-authored turns that never get a quota identity.
+    calls.clear()
+    bot._control["experimental_premium_model"] = True
+    bot._message_quota = None
+    message = SimpleNamespace(
+        id=1,
+        author=SimpleNamespace(id=42, bot=True),
+        channel=SimpleNamespace(id=2),
+        guild=SimpleNamespace(id=7),
+        content="build and ship the todo app end to end",
+    )
+    token = _current_inbound.set(message)
+    try:
+        asyncio.run(
+            MaxwellBot._generate_response(
+                bot, [{"role": "user", "content": "build"}], max_tokens=20
+            )
+        )
+    finally:
+        _current_inbound.reset(token)
+    assert calls == ["gemini-3.8-flash"]
+
+
+def test_premium_grant_uses_the_higher_allowance_and_stronger_model(tmp_path):
+    ledger = MessageQuota(tmp_path / "messages.sqlite3")
+    ledger.configure("42", plan="premium")
+    state = ledger.status("42", FREE_MESSAGE_LIMIT, 18000)
+    assert state["plan"] == "premium"
+    assert state["limit"] == PREMIUM_MESSAGE_LIMIT == 2000
+    assert state["used"] == 0
+    calls = []
+
+    async def generate(_messages, **kwargs):
+        calls.append(kwargs.get("model"))
+        return ProviderResult("ok")
+
+    bot = object.__new__(MaxwellBot)
+    bot._control = {
+        "message_quota_enabled": True,
+        "message_quota_limit": FREE_MESSAGE_LIMIT,
+        "message_quota_window_seconds": 18000,
+    }
+    bot._message_quota = ledger
+    bot.config = SimpleNamespace(AI_PREMIUM_MODEL="gemini-3.8-flash")
+    bot.ai_provider = SimpleNamespace(generate_response=generate, model="gemini-3.5-flash-lite")
+    bot._night_fallback_kwargs = dict
+    message = SimpleNamespace(
+        id=1,
+        author=SimpleNamespace(id=42, bot=False),
+        channel=SimpleNamespace(id=2),
+        guild=SimpleNamespace(id=7),
+    )
+    token = _current_inbound.set(message)
+    try:
+        async def run():
+            await MaxwellBot._generate_response(
+                bot, [{"role": "user", "content": "hi"}], charge_message=True, max_tokens=20
+            )
+            await MaxwellBot._generate_response(
+                bot,
+                [{"role": "user", "content": "own key"}],
+                provider=SimpleNamespace(generate_response=generate, model="personal"),
+                max_tokens=20,
+            )
+
+        asyncio.run(run())
+    finally:
+        _current_inbound.reset(token)
+    assert calls == ["gemini-3.8-flash", None]
+    assert ledger.status("42", FREE_MESSAGE_LIMIT, 18000)["used"] == 1
+    shown = usage_status_text(ledger.status("42", FREE_MESSAGE_LIMIT, 18000))
+    assert "Premium message allowance" in shown
+    assert "$" not in shown
+    assert "/premium" not in shown
+    ledger.configure("42", plan="free")
+    assert ledger.plan_for("42") == "free"
+    assert ledger.status("42", FREE_MESSAGE_LIMIT, 18000)["limit"] == FREE_MESSAGE_LIMIT
 
 

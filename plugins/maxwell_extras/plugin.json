@@ -50,6 +50,18 @@
       "ends_turn": false,
       "requires_admin": false,
       "is_destructive": false
+    },
+    {
+      "name": "delegate_task",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false
+    },
+    {
+      "name": "manage_task_agent",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false
     }
   ]
 }

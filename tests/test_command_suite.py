@@ -24,7 +24,7 @@ def test_prompt_edit_slash_commands_and_config_fields_are_removed():
         "channels", "plugins", "capabilities", "moderation", "progress", "ticket"
     }
     assert set(command_suite._OWNER_SETTINGS) == {
-        "diagnostics", "tools_enabled", "autonomy_enabled",
+        "diagnostics", "tools_enabled",
         "reload",
     }
 
@@ -543,6 +543,7 @@ def test_config_home_offers_direct_controls_and_compact_embed(tmp_path):
 def test_privacy_opt_out_deletes_stored_content_and_blocks_later_writes(tmp_path, monkeypatch):
     monkeypatch.delenv("MAXWELL_PUBLIC_BASE_URL", raising=False)
     store = UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default("200", "tracking", "on")
     deleted = []
 
     class Memory:
@@ -627,8 +628,8 @@ def test_privacy_opt_out_deletes_stored_content_and_blocks_later_writes(tmp_path
     ))
     assert [row[1]["author_id"] for row in memory.rows] == ["200"]
     asyncio.run(panel.reset(interaction))
-    assert store.get("100")["defaults"]["tracking"] == "on"
-    assert "stay deleted" in panel.notice
+    assert store.get("100")["defaults"]["tracking"] == "off"
+    assert "stays off" in panel.notice
     assert deleted == ["100"]
 
 

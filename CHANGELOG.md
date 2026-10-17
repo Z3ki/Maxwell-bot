@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.15 — 2026-10-17 (release candidate; operator review required)
+
+- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium request-scoped task workers, custom profiles and model-selected tool permissions within caller authorization.
+
+- Remove hosted-provider presets and vendor-specific key links; use explicit endpoint/model/key connections, migrating encrypted historical records safely.
+- Optional conversation storage now requires an affirmative choice. Historical defaults do not imply consent; resets preserve privacy opt-outs.
+- Versioned optional consent and one-time private interaction disclosures; no legal DMs, public consent messages or blanket agreement gate.
+- Privacy controls now review/withdraw choices, authorize an exact voice reference, request private operator support, and report deletion failures and manual/external limitations accurately. Discord and dashboard share settings.
+- History, trace, usage and authentication retention cleanup; retired facts and legacy reasoning payloads are removed. Automatic error reports no longer copy the requesting message.
+- Restrict server listings and voice presence to authorized context; close site metadata/KV ownership gaps; fix private backend reads, subpath KV guides and production GitHub workspace names. Fixes #74, #75, #76, #79, #80, #81.
+- Integrate the modular bot split (#82), restore its missing core module, and preserve dev quota behavior. Remove the unused autonomous activity engine, routing and operator endpoints.
+- Rewrite Terms, Privacy and Contact without invented jurisdiction/operator facts or blanket compliance claims. Publication is gated by `release-readiness.json` and reviewed deployment evidence. Premium sales remain subject to operator review.
+
+
 ## Unreleased
 
 - Do not post a "Maxwell is using" line for reactions, silence, typing, waits, or message edits, deletes, and pins. Those actions are the response, and the status line only appears and disappears.
@@ -29,6 +43,10 @@ Install with `--version v0.1.14`. Release assets include source, installers, che
 - Add a `/config` Privacy choice for message-content storage. Off stops saving that account's messages and deletes stored messages and facts for that Discord user. A live request is still answered and still sent to the AI provider.
 - Add optional Giphy GIF replies, reaction-only completion and read-only-channel ping acknowledgements without forced text or retry loops.
 - Refresh application emojis and official Discord sticker packs every five minutes; handle live server emoji/sticker updates, animated expressions, joins and removals while preserving server isolation.
+- Keep a pointer such as "this" when the same message already has an attachment, embed, or sticker. Drop it only when there is no media and no earlier message to resolve.
+- Keep qualified Last.fm plays when the provider returns error 8, an HTTP 5xx response, or an operator key error (10, 13, or 26). Retry those with the existing backoff. Remove a play only for a real per-track rejection.
+- Lower the default free message allowance from 300 to 200 messages per five hours. An operator-granted premium plan uses 2,000 messages in that window and `AI_PREMIUM_MODEL` when it is set. Billing, prices, and checkout stay off. A fresh install still leaves the quota disabled.
+
 - Remove automatic first-use Terms/Privacy DMs and their per-user records/locks from the runtime. Keep operator-specific policy links in shared model context even with tools disabled; offer them when asked, never invent another instance's policies. Preserve existing notice/consent data without reading or rewriting it.
 - Add guarded isolated Dev lifecycle and offline ephemeral pytest commands, optional local-model/music services, and a reviewed dev-to-main promotion workflow without automatic public deployment.
 - Stamp Dev images with their checkout revision and document draining the bind-mounted public bot before updating source, so restart/promotion diagnostics identify the applied revision without mixed live code.

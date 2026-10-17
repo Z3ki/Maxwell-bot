@@ -439,7 +439,7 @@ class CreateSiteTool(Tool):
             if len(written) > 1:
                 result += f"\nFiles: {', '.join(written)}"
             if wants_backend:
-                result += "\n" + site_backend.client_guide(site_routes.store_path(slug))
+                result += "\n" + site_backend.client_guide(urlparse(str(getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", "") or "")).path.rstrip("/") + site_routes.store_path(slug))
                 result += "\nFor custom routes, auth, server-side secrets, or WebSockets, use site_server."
             result += f"\nLifetime: {site_expiry_label(site_entry, control)}."
             # Placeholders shipped in the HTML are invisible in a 200 response
@@ -586,7 +586,7 @@ class EditSiteTool(_SiteOwnedTool):
         if act in SITE_MUTATING_ACTIONS:
             owner = str(entry.get("user_id") or "")
             author = str(getattr(getattr(message, "author", None), "id", "") or "")
-            if owner and author and owner != author:
+            if not owner or not author or owner != author:
                 return f"Error: site '{slug}' belongs to someone else"
             site_read_loop_guard(message, key="", label="", action=act)
         url = f"{self.base_url}/{slug}/"
@@ -777,9 +777,9 @@ class EditSiteTool(_SiteOwnedTool):
             entry["backend"] = enabled
             await asyncio.to_thread(self._save_entry, slug, entry)
             if not enabled:
-                return f"Backend off for {slug} (data kept; /api/site/{slug} now 404s)."
+                return f"Backend off for {slug} (data kept; its configured KV endpoint now returns 404)."
             return f"Backend on for {slug}.\n" + site_backend.client_guide(
-                site_routes.store_path(slug)
+                urlparse(str(getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", "") or "")).path.rstrip("/") + site_routes.store_path(slug)
             )
 
         if act in {"extend", "renew", "keep"}:

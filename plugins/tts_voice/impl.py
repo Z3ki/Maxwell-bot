@@ -649,6 +649,20 @@ class TtsTool(Tool):
         if reference_audio_url and reference and reference_audio_url != reference:
             return "Error: choose one reference source, reference or reference_audio_url"
         reference = reference_audio_url or reference or kwargs.get("ref") or kwargs.get("sample") or ""
+        if reference:
+            from privacy import VOICE_VERSION, voice_policy
+            preferences = getattr(self.bot, "_user_preferences", None)
+            uid = str(getattr(getattr(message, "author", None), "id", ""))
+            try:
+                source = str(reference).strip()
+                if not source.lower().startswith(("https://", "http://")):
+                    _filename, source = select_audio(message, source)
+                authorized = preferences is not None and await asyncio.to_thread(
+                    preferences.consents.granted, uid, voice_policy(source), VOICE_VERSION, "voice_authorization")
+            except Exception:
+                authorized = False
+            if not authorized:
+                return "Error: authorize this exact voice reference URL (including the attachment URL) in /config → Privacy → Authorize voice reference first. A public URL is not proof the speaker permitted cloning. Preset voices remain available."
         try:
             voice_id, ref_audio, label = await _pick_voice(
                 message,

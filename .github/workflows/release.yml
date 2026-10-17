@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags: ['v*.*.*']
-    paths: ['VERSION', '.github/workflows/release.yml']
+    paths: ['VERSION', 'release-readiness.json', '.github/workflows/release.yml']
 
 permissions:
   contents: write
@@ -38,7 +38,17 @@ jobs:
           echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
           echo "release_tag=v$version" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY,,}:v$version" >> "$GITHUB_OUTPUT"
+      - name: Check operator release review
+        id: readiness
+        shell: bash
+        run: |
+          if python scripts/check_release_readiness.py; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Check release tag before publication
+        if: steps.readiness.outputs.ready == 'true'
         id: guard
         shell: bash
         run: |

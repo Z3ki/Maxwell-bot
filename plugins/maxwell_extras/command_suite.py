@@ -39,6 +39,7 @@ _PERSONAL_SETTINGS = {
     "language": ("Language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("AI connection", "Connect your own AI account with an API key."),
+    "agents": ("Custom agents", "Save and manage your own task-worker instructions and tool permissions."),
     "tracking": ("Privacy", "Choose whether Maxwell stores your message content."),
 }
 _SERVER_SETTINGS = {
@@ -52,7 +53,6 @@ _SERVER_SETTINGS = {
 _OWNER_SETTINGS = {
     "diagnostics": ("Diagnostics", "View redacted application diagnostics."),
     "tools_enabled": ("Tools across the bot", "Enable or disable model tool execution globally."),
-    "autonomy_enabled": ("Automatic activity", "Enable or disable autonomous activity globally."),
     "reload": ("Reload controls", "Reload the trusted bot_control.json file."),
 }
 _PERSONAL_VALUE_CHOICES = {
@@ -96,7 +96,7 @@ _SETTING_HELP = {
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",
     "byok": "Paste a public HTTPS OpenAI-compatible endpoint, the model ID, and the modalities that model accepts. The key is encrypted. Private hosts are rejected.",
-    "tracking": "On saves your messages and facts stored for your account. Off stops saving them and deletes what is already stored. A request you send is still answered.",
+    "tracking": "On opts into optional saved history. Off stops saving and deletes your history. External AI processing still occurs for requests.",
     "channels": "Choose a response channel, or use Allow all channels. The channel picker includes every text channel in this server.",
     "plugins": "Select the optional tools to allow in this server. Reset inherits the existing global and personal choices.",
     "capabilities": "Selected groups are allowed. Unselect a group to disable its tools. Discord permissions still apply.",
@@ -266,18 +266,15 @@ def _choice_description(key: str, value: str) -> str | None:
     if key == "language" and value == "auto":
         return "Follow the conversation language."
     if key == "tracking" and value == "on":
-        return "Save your messages and facts about you."
+        return "I choose optional saved history; AI processing already occurs for requests."
     if key == "tracking" and value == "off":
         return "Stop saving and delete what is stored for you."
     return _CHOICE_HELP.get(value)
 
 
 def _privacy_policy_url(bot: Any) -> str:
-    cfg = getattr(bot, "config", None)
-    base = str(getattr(cfg, "MAXWELL_PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
-    if not base:
-        base = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    return f"{base}/privacy/" if base else ""
+    from privacy import policy_urls
+    return policy_urls(getattr(bot, "config", None)).get("privacy", "")
 
 
 class _ConfigNavButton(discord.ui.Button):
@@ -681,7 +678,8 @@ class _ConfigPanel(discord.ui.View):
         self.scope = "personal"
         self.selected_key = "overview"
         self.notice = ""
-        self.selected_provider = "openai"
+        self.selected_provider = "custom"
+        self.agent_profiles = []
         self.connection_status = None
         self.connection_present = False
         self.connection_error = "" if connections.available(self) else "unavailable"
@@ -701,6 +699,8 @@ class _ConfigPanel(discord.ui.View):
     async def _refresh_personal(self) -> None:
         self.personal = await asyncio.to_thread(self.store.get, self.user_id)
         await self._refresh_connection()
+        agents = getattr(self.bot, "_task_agents", None)
+        self.agent_profiles = await asyncio.to_thread(agents.list, self.user_id) if agents else []
 
     async def _refresh_connection(self) -> None:
         vault = getattr(self.bot, "_byok_vault", None)
@@ -769,7 +769,7 @@ class _ConfigPanel(discord.ui.View):
         self.add_item(_ConfigCloseButton(self))
         if self.selected_key != "overview":
             parent = "byok" if self.selected_key in {"byok_advanced", "byok_remove"} else (
-                "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context"} else "overview")
+                "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context", "agents"} else "overview")
             self.add_item(_ConfigNavButton(self, parent, label="Back", row=4))
         if self.selected_key == "overview":
             if self.scope == "personal":
@@ -784,6 +784,9 @@ class _ConfigPanel(discord.ui.View):
                 ):
                     self.add_item(_ConfigNavButton(self, key, label=label, row=4))
                 return
+            if self.scope == "owner":
+                from .premium_ui import PremiumGrantButton
+                self.add_item(PremiumGrantButton(self))
             keys = tuple(
                 _SERVER_SETTINGS if self.scope == "server" else _OWNER_SETTINGS)
             for i, key in enumerate(keys):
@@ -793,10 +796,14 @@ class _ConfigPanel(discord.ui.View):
             connections.build(self, _ConfigNavButton)
             return
         if self.scope == "personal":
+            if self.selected_key == "agents":
+                from .task_agents_ui import AgentProfileButton
+                self.add_item(AgentProfileButton(self))
+                return
             if self.selected_key == "replies":
                 for row, key in ((1, "visibility"), (2, "detail")):
                     self.add_item(_ConfigValueSelect(self, _PERSONAL_VALUE_CHOICES[key], key=key, row=row))
-                for key in ("mode", "web", "context"):
+                for key in ("mode", "web", "context", "agents"):
                     self.add_item(_ConfigNavButton(self, key, row=3))
                 return
             choices = _PERSONAL_VALUE_CHOICES.get(self.selected_key)
@@ -804,7 +811,11 @@ class _ConfigPanel(discord.ui.View):
                 self.add_item(_ConfigValueSelect(self, choices))
             if self.selected_key in {"language", "style"}:
                 self.add_item(_ConfigEditButton(self))
-            self.add_item(_ConfigResetButton(self))
+            if self.selected_key == "tracking":
+                from .privacy_ui import add_privacy_controls
+                add_privacy_controls(self)
+            else:
+                self.add_item(_ConfigResetButton(self))
             return
         if self.scope == "server":
             if self.selected_key == "channels":
@@ -821,7 +832,7 @@ class _ConfigPanel(discord.ui.View):
             return
         if self.selected_key == "diagnostics":
             self.add_item(_OwnerDiagnosticsSelect(self, 1))
-        elif self.selected_key in {"tools_enabled", "autonomy_enabled"}:
+        elif self.selected_key in {"tools_enabled"}:
             self.add_item(_ConfigValueSelect(self, [("Enabled", "on"), ("Disabled", "off")]))
         elif self.selected_key == "reload":
             self.add_item(_OwnerReloadButton(self, 1))
@@ -870,7 +881,7 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "owner":
             if self.selected_key == "diagnostics":
                 return "Redacted diagnostics and exports"
-            if self.selected_key in {"tools_enabled", "autonomy_enabled"}:
+            if self.selected_key in {"tools_enabled"}:
                 from .admin_commands import _control
 
                 return "On" if _control(self.bot).get(self.selected_key) else "Off"
@@ -899,6 +910,9 @@ class _ConfigPanel(discord.ui.View):
             return self.overview()
         if self.scope == "personal" and self.selected_key.startswith("byok"):
             return connections.render(self)
+        if self.scope == "personal" and self.selected_key == "agents":
+            lines = [f"`{row['name']}` · {row['kind']} · {', '.join(row['tools'])}" for row in self.agent_profiles]
+            return ("## Your custom task agents\nPremium can save up to ten profiles. Maxwell can choose tool permissions within your available tools. Profiles use your selected AI connection.\n\n" + ("\n".join(lines) or "No saved agents.") + "\n\nUse Manage agent to save/edit or delete an ID. Instructions are optional saved settings, expire 90 days after editing by default and are included in Delete my data. Do not include credentials. You can also ask Maxwell to manage your agents.\n\n" + self.notice)[:1900]
         if self.scope == "personal" and self.selected_key == "tracking":
             return self._privacy_screen()
         if self.scope == "personal" and self.selected_key == "replies":
@@ -939,7 +953,7 @@ class _ConfigPanel(discord.ui.View):
                     "Choose a button below. You need Manage Server to change these settings.")
         return ("## Application owner settings\nThese controls affect the entire bot.\n\n"
                 "Open diagnostics, manage global features or reload saved controls. "
-                "Choose a button below. Only configured bot owners have access.")
+                "Choose a button below. Only configured bot owners have access. Premium grants are manual and do not charge users.")
 
     def _privacy_screen(self) -> str:
         current = _friendly_personal_value("tracking", self.personal["defaults"].get("tracking"))
@@ -951,8 +965,10 @@ class _ConfigPanel(discord.ui.View):
         )
         return (
             "## Privacy\n"
-            "Choose whether Maxwell stores your message content.\n\n"
-            f"**Message storage:** {current}\n\n"
+            "Optional saved history is off until you choose On.\n\n"
+            f"**Message storage:** {current}\n"
+            "**Persistent learned memory:** unavailable; automatic facts/embeddings are retired.\n"
+            "**AI processing:** current requests and necessary context still go to the selected provider, including fallbacks/BYOK. Provider retention is separate.\n\n"
             "Off stops saving your messages and deletes stored messages, Maxwell's replies to you, tool records from those turns, and facts for your account. "
             "A request you send is still answered, and that request is still sent to the AI provider. "
             "It is not added to saved history afterwards. "
@@ -966,7 +982,7 @@ class _ConfigPanel(discord.ui.View):
         try:
             await forget_author(getattr(self.bot, "memory", None), self.user_id)
         except Exception:
-            logger.warning("Could not delete stored message content", exc_info=True)
+            logger.warning("Could not delete stored message content", exc_info=False)
             return (
                 "**Saved.** Message storage is off, but stored messages could not be deleted. "
                 "Choose Off again to retry."
@@ -1015,7 +1031,7 @@ class _ConfigPanel(discord.ui.View):
                 logger.warning("Could not update moderation policy (%s)", type(exc).__name__)
                 await _send(interaction, "Could not save the moderation policy.")
                 return
-        elif key in {"tools_enabled", "autonomy_enabled"} and self.scope == "owner":
+        elif key in {"tools_enabled"} and self.scope == "owner":
             if not _is_application_owner(self.bot, interaction) or value not in {"on", "off"}:
                 await _send(interaction, "That global setting is unavailable.")
                 return
@@ -1139,7 +1155,7 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "personal":
             await self._refresh_personal()
         self.notice = (
-            "**Reset.** Message storage is on again. Messages deleted earlier stay deleted."
+            "**Reset.** Message storage stays off. Use the clearly labeled On choice to enable optional saved history."
             if tracking_was_off else
             "**Reset.** The default is restored."
         )

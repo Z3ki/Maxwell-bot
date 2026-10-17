@@ -6,28 +6,13 @@ replaces that model for every message that person sends, including chat,
 mentions, `/maxwell`, and message app actions. Other people stay on Maxwell's
 model.
 
-1. Choose OpenAI, OpenRouter, Groq, or **Other provider**. Selecting a provider
-   only changes the setup screen; it does not replace an active connection.
-2. Choose **Connect provider** and enter your API key and model name. Named
-   providers use their official URL. Other provider also asks for a public
-   HTTPS OpenAI-compatible API base URL.
-3. Save, then use **Test connection**. The test sends a small request that may
-   use provider credit. Results explain whether to check the key, model,
-   billing, rate limits or endpoint. OpenAI API billing is separate from
-   a ChatGPT subscription; this is an API-key connection, not ChatGPT login.
+1. Choose **Connect API endpoint** and enter its public HTTPS base URL, model ID and API key.
+2. Save, then use **Test connection**. This sends a small request and may use provider credit.
+3. Open **Advanced** to configure image/audio input, tools, reasoning and effort, output tokens, context size, LLM request timeout and whole-task timeout. Choose only capabilities your model supports. These settings are shared with the dashboard.
 
-The screen shows the active provider and model separately from the provider
-being configured. Only one personal connection is saved at a time. Saving a
-new provider replaces the old connection. **Edit connection** keeps the saved
-key when its field is blank, and preserves that provider's URL and advanced
-settings. Keys are never prefilled into a form or displayed in full.
+There are no hosted-service presets. Older encrypted connections migrate to the generic connection with their exact original destination, key and model. Changing a destination requires entering a key again; leaving it blank may keep a key only at the same endpoint. Keys are never prefilled or displayed in full.
 
-**Advanced** has normal selectors for image input, audio input, tools and
-reasoning, plus separate forms for reply limits, reasoning effort,
-context token limits and the API base URL. Enable only features the chosen
-model supports. Image and audio input do not enable image or voice generation.
-Leaving a named provider's URL blank restores its official URL; custom
-providers always require one.
+Reasoning levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; availability depends on the selected endpoint/model. Turning reasoning off clears effort. Request timeouts accept 10–1800 seconds (default 300); whole-task timeouts accept 10–7200 seconds (default 900) and must be at least the request timeout. Context accepts 1024–2000000 tokens; blank keeps the normal prompt budget. Raising a timeout does not raise the step or tool-call budget.
 
 **Use Maxwell's AI** opens a confirmation screen. **Keep connection** cancels;
 **Remove key & use Maxwell** deletes the encrypted record and returns app
@@ -46,10 +31,9 @@ and authenticated against the Discord user ID and provider. The SQLite file is
 mode `0600`; its containing directory is mode `0700`. Keys are not passed to
 prompts, tools, shell containers, or logs. Each request creates a fresh client
 for the selected provider, with TLS verification, no redirects, public-address
-DNS checks, bounded responses, one retry, a 5-minute request ceiling, and at
+DNS checks, bounded responses, one retry, the configured request deadline, and at
 most eight tool calls. Maxwell-funded fallback providers are not used after a
-BYOK failure. Named providers use their official HTTPS endpoints unless the
-user supplies another one. Custom endpoints must be public HTTPS OpenAI-compatible
+BYOK failure. Configured endpoints must be public HTTPS OpenAI-compatible
 URLs with no login, query, or fragment. Loopback, private, link-local, and
 `.local` / `.internal` hosts are rejected. The provider client still checks
 DNS and blocks redirects.
@@ -80,7 +64,7 @@ or the new key is lost after commit, saved credentials cannot be recovered;
 users must save their provider keys again.
 # Provider architecture
 
-Personal OpenAI, OpenRouter, Groq, and custom OpenAI-compatible API keys use
+Personal compatible API keys use
 independent `OpenAICompatibleProvider` clients with a construction-time
 `ProviderPolicy`. Modalities on the saved credential control image input,
 audio input, native tools, and reasoning. `max_tokens` and `context` set that

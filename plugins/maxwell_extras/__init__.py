@@ -21,6 +21,8 @@ def setup(bot, ctx):
         deliver_due_reminders,
     )
     from .user_preferences import UserPreferenceStore, bind_message_tracking
+    from .task_agents import TaskAgentStore, ManageTaskAgentTool
+    from .task_workers import DelegateTaskTool
     from .byok import CredentialVault
 
     store = ReminderStore(ctx.store_path("reminders.json"))
@@ -36,6 +38,7 @@ def setup(bot, ctx):
     bot._user_preferences = preferences
     bind_message_tracking(bot, preferences)
     bot._byok_vault = CredentialVault(ctx.store_path("byok.sqlite3"))
+    bot._task_agents = TaskAgentStore(ctx.store_path("task_agents.sqlite3"))
     install_user_install_features(bot)
     install_command_suite(bot, preferences)
 
@@ -61,6 +64,8 @@ def setup(bot, ctx):
     install_rich_interactions(bot, ctx, rich_tool)
 
     return [
+        DelegateTaskTool(bot),
+        ManageTaskAgentTool(bot),
         MaxwellUpdatesTool(bot),
         GetConfigurationTool(bot),
         ConfigureTool(bot),

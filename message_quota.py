@@ -12,8 +12,19 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-FREE_MESSAGE_LIMIT = 300
+FREE_MESSAGE_LIMIT = 200
+PREMIUM_MESSAGE_LIMIT = 2000
+PREMIUM_PLAN = "premium"
 FREE_WINDOW_SECONDS = 5 * 60 * 60
+
+
+def resolved_message_limit(default_limit: int, override_limit, plan: str) -> int:
+    """Custom overrides win. Premium otherwise uses the higher allowance."""
+    if override_limit is not None:
+        return max(1, int(override_limit))
+    if plan == PREMIUM_PLAN:
+        return PREMIUM_MESSAGE_LIMIT
+    return max(1, int(default_limit))
 
 
 class MessageQuotaExceeded(Exception):
@@ -71,8 +82,14 @@ class MessageQuota:
             )
             db.execute(
                 "CREATE TABLE IF NOT EXISTS overrides ("
-                "user_id TEXT PRIMARY KEY, message_limit INTEGER, exempt INTEGER NOT NULL DEFAULT 0)"
+                "user_id TEXT PRIMARY KEY, message_limit INTEGER, exempt INTEGER NOT NULL DEFAULT 0, "
+                "plan TEXT NOT NULL DEFAULT '')"
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(overrides)")}
+            if "plan" not in columns:
+                db.execute(
+                    "ALTER TABLE overrides ADD COLUMN plan TEXT NOT NULL DEFAULT ''"
+                )
 
     @contextmanager
     def _db(self):
@@ -103,10 +120,11 @@ class MessageQuota:
                 (user_id, cutoff),
             ).fetchone()[0]
             override = db.execute(
-                "SELECT message_limit, exempt FROM overrides WHERE user_id=?",
+                "SELECT message_limit, exempt, plan FROM overrides WHERE user_id=?",
                 (user_id,),
-            ).fetchone() or (None, 0)
-        limit = override[0] if override[0] is not None else int(default_limit)
+            ).fetchone() or (None, 0, "")
+        plan = override[2] if override[2] == PREMIUM_PLAN else "free"
+        limit = resolved_message_limit(default_limit, override[0], plan)
         resets_in = 0
         if oldest is not None:
             resets_in = max(0, int(oldest + window_seconds - now))
@@ -117,8 +135,21 @@ class MessageQuota:
             "window_seconds": window_seconds,
             "override": override[0],
             "exempt": bool(override[1]),
+            "plan": plan,
             "resets_in": resets_in,
         }
+
+    def plan_for(self, user_id: str) -> str:
+        """Return ``premium`` or ``free`` without changing the ledger."""
+        user_id = str(user_id)
+        with self._db() as db:
+            row = db.execute(
+                "SELECT plan FROM overrides WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+        if row and row[0] == PREMIUM_PLAN:
+            return PREMIUM_PLAN
+        return "free"
 
     def charge(
         self,
@@ -137,12 +168,13 @@ class MessageQuota:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM messages WHERE user_id=? AND charged_at<?", (user_id, cutoff))
             override = db.execute(
-                "SELECT message_limit, exempt FROM overrides WHERE user_id=?",
+                "SELECT message_limit, exempt, plan FROM overrides WHERE user_id=?",
                 (user_id,),
-            ).fetchone() or (None, 0)
+            ).fetchone() or (None, 0, "")
             if override[1]:
                 return None
-            limit = override[0] if override[0] is not None else int(default_limit)
+            plan = override[2] if override[2] == PREMIUM_PLAN else "free"
+            limit = resolved_message_limit(default_limit, override[0], plan)
             used = db.execute(
                 "SELECT COUNT(*) FROM messages WHERE user_id=? AND charged_at>=?",
                 (user_id, cutoff),
@@ -162,6 +194,7 @@ class MessageQuota:
         *,
         limit: int | None = None,
         exempt: bool | None = None,
+        plan: str | None = None,
         clear: bool = False,
         reset: bool = False,
     ) -> None:
@@ -170,18 +203,30 @@ class MessageQuota:
             db.execute("BEGIN IMMEDIATE")
             if clear:
                 db.execute("DELETE FROM overrides WHERE user_id=?", (user_id,))
-            elif limit is not None or exempt is not None:
+            elif limit is not None or exempt is not None or plan is not None:
                 row = db.execute(
-                    "SELECT message_limit, exempt FROM overrides WHERE user_id=?",
+                    "SELECT message_limit, exempt, plan FROM overrides WHERE user_id=?",
                     (user_id,),
-                ).fetchone() or (None, 0)
+                ).fetchone() or (None, 0, "")
                 new_limit = row[0] if limit is None else max(1, int(limit))
                 new_exempt = row[1] if exempt is None else int(bool(exempt))
+                if plan is None:
+                    new_plan = row[2] or ""
+                else:
+                    normalized = str(plan).strip().lower()
+                    if normalized in {"", "free"}:
+                        new_plan = ""
+                    elif normalized == PREMIUM_PLAN:
+                        new_plan = PREMIUM_PLAN
+                    else:
+                        raise ValueError("plan must be free or premium")
                 db.execute(
-                    "INSERT INTO overrides(user_id, message_limit, exempt) VALUES(?,?,?) "
+                    "INSERT INTO overrides(user_id, message_limit, exempt, plan) "
+                    "VALUES(?,?,?,?) "
                     "ON CONFLICT(user_id) DO UPDATE SET "
-                    "message_limit=excluded.message_limit, exempt=excluded.exempt",
-                    (user_id, new_limit, new_exempt),
+                    "message_limit=excluded.message_limit, exempt=excluded.exempt, "
+                    "plan=excluded.plan",
+                    (user_id, new_limit, new_exempt, new_plan),
                 )
             if reset:
                 db.execute("DELETE FROM messages WHERE user_id=?", (user_id,))

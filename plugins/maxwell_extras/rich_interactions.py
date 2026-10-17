@@ -13,6 +13,8 @@ the gateway dispatcher themselves.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
 import secrets
@@ -88,6 +90,15 @@ class RichInteractionStore:
         os.replace(temp, self.path)
 
     def add(self, row: dict[str, Any]) -> str:
+        from utils import FileLock
+        with FileLock(self.path, timeout=5):
+            return self._add_locked(row)
+
+    def _add_locked(self, row):
+        from privacy import owned_write_allowed, request_started_at
+        uid = str(row.get("owner_id") or "")
+        if uid and not owned_write_allowed(self.path.parent.parent.parent, uid, request_started_at()):
+            raise ValueError("Request predates a privacy deletion; submit a new request")
         actions = self._read()
         token = secrets.token_urlsafe(9).replace("-", "a").replace("_", "b")[:14]
         while token in actions:
@@ -99,6 +110,11 @@ class RichInteractionStore:
         return token
 
     def get(self, token: str) -> dict[str, Any] | None:
+        from utils import FileLock
+        with FileLock(self.path, timeout=5):
+            return self._get_locked(token)
+
+    def _get_locked(self, token):
         actions = self._read()
         row = actions.get(str(token))
         if row is None:
@@ -134,7 +150,9 @@ def _message_context_from_execute(args: tuple[Any, ...], kwargs: dict[str, Any])
         title = args[1]
     if description is None and len(args) >= 3:
         description = args[2]
+    message = args[0] if args else kwargs.get("message")
     return {
+        "owner_id": str(getattr(getattr(message, "author", None), "id", "")),
         "title": str(title or "")[:256],
         "description": str(description or "")[:2000],
     }
@@ -150,8 +168,12 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
     original_description = tool.get_description
 
     async def execute_wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
-        token = _CURRENT_MESSAGE.set(_message_context_from_execute(args, kwargs))
+        context = _message_context_from_execute(args, kwargs)
+        token = _CURRENT_MESSAGE.set(context)
         try:
+            raw = inspect.signature(original_execute).bind_partial(*args, **kwargs).arguments.get("buttons")
+            # Registry locks/fsync must not block the Discord event loop.
+            context["prepared_buttons"] = await asyncio.to_thread(button_builder, self, raw)
             return await original_execute(*args, **kwargs)
         finally:
             _CURRENT_MESSAGE.reset(token)
@@ -159,6 +181,8 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
     def button_builder(self: Any, raw: Any) -> list[discord.ui.Button]:
         out: list[discord.ui.Button] = []
         context = _CURRENT_MESSAGE.get() or {}
+        if "prepared_buttons" in context:
+            return context["prepared_buttons"]
         for item in _json_list(raw)[:5]:
             style_name = str(item.get("style") or ("link" if item.get("url") else "secondary"))
             style_key = style_name.strip().lower()
@@ -196,6 +220,7 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
             token = store.add(
                 {
                     "label": label,
+                    "owner_id": context.get("owner_id", ""),
                     "prompt": prompt,
                     "title": context.get("title", ""),
                     "description": context.get("description", ""),
@@ -328,7 +353,7 @@ def install_rich_interactions(bot: Any, ctx: PluginContext, tool: Any) -> RichIn
         if not custom_id.startswith(_PREFIX):
             return
         token = custom_id[len(_PREFIX) :]
-        row = store.get(token)
+        row = await asyncio.to_thread(store.get, token)
         if row is None:
             await _expired(interaction)
             return

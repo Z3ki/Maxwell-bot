@@ -392,15 +392,12 @@ configure_env() {
   api_key_default="${AI_API_KEY-${OLLAMA_API_KEY-}}"
   if [ "$NONINTERACTIVE" != "1" ] && [ -z "${AI_BASE_URL:-}" ] && [ -z "${AI_API_URL:-}" ] && [ -z "${OLLAMA_BASE_URL:-}" ] && [ -z "${AI_MODEL:-}" ] && [ -z "${OLLAMA_MODEL:-}" ]; then
     printf '  Choose an OpenAI-compatible provider:\n' > "$TTY"
-    printf '    1) Local Ollama (http://localhost:11434)\n    2) OpenRouter (https://openrouter.ai/api/v1, key from openrouter.ai/keys, free model moonshotai/kimi-k2.6:free)\n    3) OpenAI (https://api.openai.com/v1)\n    4) LM Studio (http://localhost:1234/v1)\n    5) Custom OpenAI-compatible URL\n' > "$TTY"
-    provider=$(prompt "Provider" "1")
+    printf '    1) Local model server (http://localhost:11434)\n    2) Custom compatible API endpoint\n' > "$TTY"
+    provider=$(prompt "Connection" "1")
     case "$provider" in
       1) base_default=http://localhost:11434; model_default=qwen3:8b; api_key_default="" ;;
-      2) base_default=https://openrouter.ai/api/v1; model_default=moonshotai/kimi-k2.6:free ;;
-      3) base_default=https://api.openai.com/v1; model_default=gpt-4.1-mini ;;
-      4) base_default=http://localhost:1234/v1; model_default="local-model"; api_key_default="" ;;
-      5) base_default=$(prompt "Custom base URL" "$base_default"); model_default="" ;;
-      *) warn "Unknown choice; using Local Ollama defaults." ;;
+      2) base_default=$(prompt "API base URL" "$base_default"); model_default="" ;;
+      *) warn "Unknown choice; using local model-server defaults." ;;
     esac
     if [ "$provider" = "1" ]; then
       ollama_choice=$(yes_no "Install Ollama on this host and pull the selected model?" "no" "")

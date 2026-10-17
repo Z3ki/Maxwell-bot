@@ -37,6 +37,7 @@ Do not set conflicting values in both namespaces.
 | `DISCORD_TOKEN` | Deprecated alias | Used only when the official bot-token setting is empty. |
 | `AI_BASE_URL` / legacy `OLLAMA_BASE_URL` | Yes | Primary OpenAI-compatible endpoint. |
 | `AI_MODEL` / legacy `OLLAMA_MODEL` | Yes | Primary chat model. |
+| `AI_PREMIUM_MODEL` | Optional | Stronger chat model for an operator-granted premium plan. Blank keeps premium on `AI_MODEL`. |
 | `AI_API_KEY` / legacy `OLLAMA_API_KEY` | Sometimes | Provider key; blank can be valid for local endpoints. |
 | `MAXWELL_OWNER_IDS` | Strongly recommended | Comma-separated Discord IDs authorized for owner/admin features. |
 | `MAXWELL_ADMIN_USER` | Optional | Operator API HTTP Basic username; defaults to `admin`. |
@@ -128,7 +129,25 @@ on every action; retired message-limit controls are no longer advertised.
 prefix commands and standalone personality/owner settings commands are retired.
 Maxwell's shared system prompt cannot be edited through `/config`.
 
-Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, plan, token quota, or paid tier.
+Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, checkout, price, or token quota. When the quota is on, the free allowance defaults to 200 messages per five hours. An operator can grant premium, which raises that allowance to 2,000 messages in the same window and uses `AI_PREMIUM_MODEL` when that variable is set.
+
+### A loaded tool is missing in one server
+
+Plugin loading does not imply that a server's model can use its tools. A saved
+`guild_plugin_overrides["<guild_id>"]["chess"] = false` hides `chess_start`,
+`chess_move`, `chess_state` and `chess_resign` from that server's tool schemas
+and chess instructions even when startup logs say the chess plugin loaded.
+
+To restore chess, open `/config` → **Server settings** → **Extra tools** in
+the affected server and include **Chess** among the enabled plugins. Preserve
+the other selections. An operator can instead update that server's `chess`
+override to `true` through the authenticated control API, preserving other
+guilds and plugin overrides. Controls reload without a restart.
+
+If tools are still missing, check the master `tools_enabled` switch,
+`disabled_tools`, server tool-group restrictions and explicit per-user plugin
+denials. A missing `python-chess` dependency prevents chess from loading at all;
+installing it in a shell sandbox does not change the bot's Python environment.
 
 ### A loaded tool is missing in one server
 
@@ -155,7 +174,7 @@ Defaults live in `control_defaults.py`. `bot_control.json` overrides them at run
 Live replies have no bot-wide request, inference, or provider connection cap,
 including primary and fallback models. Independent channels and servers start
 concurrently. Legacy `ai_concurrency` and `MAX_PENDING_REPLY_REQUESTS` settings
-are ignored, and saved message quotas are forced off. Turns in one conversation
+are ignored. A saved `message_quota_enabled` value is enforced. Turns in one conversation
 retain their order with no backlog admission cap. Tool dispatch has no shared
 budget, while shell isolation, search-worker bounds, request deadlines, Discord
 rate limits, and upstream provider limits still apply. Removing local admission
@@ -182,11 +201,10 @@ Frequently used controls include:
 | `prompt_context_budget` | Approximate prompt/context budget |
 | `memory_context_budget` | Approximate memory contribution budget |
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
-| `message_quota_limit` | Free messages per rolling window (default 300) |
+| `message_quota_limit` | Free messages per rolling window (default 200) |
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
 | `message_quota_enabled` | Forced off for unlimited request admission |
 | `store_memory` | Conversation-memory storage switch |
-| `autonomy_enabled` | Runtime autonomy switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
 The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the authenticated operator API or `/maintenance` to editing `bot_control.json` while Maxwell is running. There is no browser admin frontend or Discord browser OAuth login.
@@ -223,7 +241,7 @@ sandbox destinations reachable.
 
 ## Optional/background features
 
-Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Examples include `ENABLE_AUTONOMY` and `ENABLE_SHELL`; `ENABLE_RAG` is permanently disabled.
+Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Examples include `ENABLE_SHELL` and `ENABLE_CREATE_SITE`; `ENABLE_RAG` is permanently disabled.
 
 Simple installs keep token-spending background loops off by default. The exact dependency detection is implemented in `config.py` and reported by `doctor.py`.
 

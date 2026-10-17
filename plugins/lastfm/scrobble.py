@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 
-from .client import LastFmError
+from .client import HELD_PROVIDER_CODES, LastFmError
 
 log = logging.getLogger(__name__)
 _BATCH = 64
@@ -463,7 +463,11 @@ class ScrobbleManager:
                 self._forgotten_links.setdefault(job.user_id, set()).add(job.link_id)
                 await self.accounts.invalidate(job.user_id, job.link_id)
                 return 'identity'
-            return 'retry' if exc.retryable else 'rejected'
+            # Error 8, HTTP 5xx (marked retryable by the client), and operator
+            # key errors must not delete a qualified play.
+            if exc.retryable or exc.code in HELD_PROVIDER_CODES:
+                return 'retry'
+            return 'rejected'
         except Exception as exc:
             # Transport/client surprises must not lose a qualified play, and
             # exception text may contain secrets or a signed request.

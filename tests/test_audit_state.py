@@ -7,8 +7,6 @@ import sqlite3
 import numpy as np
 import pytest
 
-from autonomy import AutonomyStore, _truncate_keep_tail
-from autonomy_social import FloorSettings
 from concurrency_safety import ChannelWorkQueues, KeyedLocks
 from context_budget import TIER_ORDER, allocate
 from inbox import InboxStore
@@ -30,17 +28,6 @@ def _admin_requester():
     return _requester(user_id="operator", is_admin=True)
 
 
-def test_floor_settings_honor_zero_and_reject_infinity():
-    settings = FloorSettings.from_control(
-        {
-            "autonomy_floor_cooldown_seconds": 0,
-            "autonomy_floor_hold_release_seconds": 0,
-            "autonomy_floor_mid_flow_messages": float("inf"),
-        }
-    )
-    assert settings.cooldown_seconds == 0
-    assert settings.hold_release_seconds == 0
-    assert settings.mid_flow_min_messages == FloorSettings.mid_flow_min_messages
 
 
 @pytest.mark.parametrize("raw", ['{"items":', "[]", '{"items": {}}'])
@@ -55,18 +42,6 @@ def test_inbox_mutation_preserves_corrupt_file(tmp_path, raw):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    "raw", ['{"goals":', "[]", '{"goals": {}}', '{"goals": [null]}']
-)
-def test_goal_mutation_preserves_corrupt_file(tmp_path, raw):
-    async def run():
-        store = AutonomyStore(str(tmp_path))
-        store.goals_file.write_text(raw)
-        with pytest.raises(ValueError):
-            await store.add_goal("new")
-        assert store.goals_file.read_text() == raw
-
-    asyncio.run(run())
 
 
 def test_entity_profiles_exclude_restricted_or_expired_shared_facts(memory):
@@ -249,9 +224,6 @@ def test_batch_embedding_does_not_overwrite_edited_content(memory, monkeypatch):
     )
 
 
-def test_zero_tail_budget_is_empty():
-    assert _truncate_keep_tail("secret context", 0) == ""
-    assert _truncate_keep_tail("secret context", -1) == ""
 
 
 def test_rounding_does_not_exceed_tier_caps():
