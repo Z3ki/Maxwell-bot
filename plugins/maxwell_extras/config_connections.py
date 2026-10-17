@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import discord
@@ -43,8 +44,20 @@ async def refresh_panel(panel: Any, interaction: Any, notice: str) -> None:
         logger.debug("Could not refresh AI connection panel", exc_info=True)
 
 
+def worker_connection(panel: Any) -> bool:
+    return panel.selected_key.startswith("worker_byok")
+
+
+def page(panel: Any, suffix: str = "") -> str:
+    return ("worker_byok" if worker_connection(panel) else "byok") + suffix
+
+
+def vault_for(panel: Any):
+    return getattr(panel.bot, "_worker_byok_vault" if worker_connection(panel) else "_byok_vault", None)
+
+
 def available(panel: Any) -> bool:
-    vault = getattr(panel.bot, "_byok_vault", None)
+    vault = vault_for(panel)
     return bool(vault is not None and getattr(vault, "enabled", False))
 
 
@@ -60,6 +73,7 @@ class ConnectModal(discord.ui.Modal):
             title=f"Connect {PROVIDERS[provider]['label']}"[:45], timeout=180
         )
         self.panel = panel
+        self.started_at = time.time()
         self.provider = provider
         self._config_context = (panel.scope, panel.selected_key)
         saved = panel.connection_status if active_selected(panel) else None
@@ -106,7 +120,7 @@ class ConnectModal(discord.ui.Modal):
                 interaction, "The selected provider changed. Open Connect again."
             )
             return
-        vault = self.panel.bot._byok_vault
+        vault = vault_for(self.panel)
         try:
             existing = await asyncio.to_thread(vault.get, self.panel.user_id)
             same = (
@@ -144,6 +158,7 @@ class ConnectModal(discord.ui.Modal):
                 secret,
                 base_url=endpoint,
                 settings=settings,
+                started_at=self.started_at,
             )
         except ValueError as exc:
             await _send(interaction, str(exc))
@@ -158,7 +173,7 @@ class ConnectModal(discord.ui.Modal):
         await refresh_panel(
             self.panel,
             interaction,
-            "Saved. Your messages will use this connection. Test it below.",
+            "Saved. Subagents will use this connection. Test it below." if worker_connection(self.panel) else "Saved. Your messages will use this connection. Test it below.",
         )
 
 
@@ -234,7 +249,7 @@ class TestButton(discord.ui.Button):
                 await _send(interaction, "Personal AI connections are unavailable.")
                 return
             credential = await asyncio.to_thread(
-                self.panel.bot._byok_vault.get, self.panel.user_id
+                vault_for(self.panel).get, self.panel.user_id
             )
             if not credential or credential["provider"] != self.panel.selected_provider:
                 await _send(interaction, "Connect the selected provider first.")
@@ -279,7 +294,7 @@ class TestButton(discord.ui.Button):
 async def update_settings(
     panel: Any, interaction: Any, settings: dict, *, endpoint: str | None = None
 ) -> None:
-    vault = panel.bot._byok_vault
+    vault = vault_for(panel)
     credential = await asyncio.to_thread(vault.get, panel.user_id)
     if not credential or credential["provider"] != panel.selected_provider:
         await _send(interaction, "Connect the selected provider first.")
@@ -299,6 +314,7 @@ async def update_settings(
         credential["api_key"],
         base_url=credential["base_url"] if endpoint is None else endpoint,
         settings=settings,
+        started_at=getattr(interaction, "created_at", None).timestamp() if getattr(interaction, "created_at", None) else time.time(),
     )
     await refresh_panel(
         panel, interaction, "Saved. Your next app request will use these settings."
@@ -518,7 +534,7 @@ class AdvancedButton(discord.ui.Button):
 class DisconnectButton(discord.ui.Button):
     def __init__(self, panel: Any):
         super().__init__(
-            label="Remove key & use Maxwell",
+            label="Remove subagent key" if worker_connection(panel) else "Remove key & use Maxwell",
             style=discord.ButtonStyle.danger,
             row=2,
             custom_id="maxwell:config:connection:confirm_remove",
@@ -527,26 +543,26 @@ class DisconnectButton(discord.ui.Button):
 
     @_config_action(thinking=True)
     async def callback(self, interaction: Any) -> None:
-        vault = getattr(self.panel.bot, "_byok_vault", None)
+        vault = vault_for(self.panel)
         if vault is None:
             await _send(interaction, "Connection settings are unavailable.")
             return
         await asyncio.to_thread(vault.delete, self.panel.user_id)
-        self.panel.selected_key = "byok"
+        self.panel.selected_key = page(self.panel)
         await refresh_panel(
             self.panel,
             interaction,
-            "Personal key removed. Your messages now use Maxwell's default AI.",
+            "Subagent key removed. Workers inherit your chat BYOK or the operator default." if worker_connection(self.panel) else "Personal key removed. Your messages now use Maxwell's default AI.",
         )
 
 
 def build(panel: Any, nav_button: Any) -> None:
-    if panel.selected_key == "byok_remove":
+    if panel.selected_key == page(panel, "_remove"):
         panel.add_item(DisconnectButton(panel))
-        panel.add_item(nav_button(panel, "byok", label="Keep connection", row=2))
-    elif panel.selected_key == "byok_advanced":
+        panel.add_item(nav_button(panel, page(panel), label="Keep connection", row=2))
+    elif panel.selected_key == page(panel, "_advanced"):
         if not active_selected(panel) or not available(panel):
-            panel.add_item(nav_button(panel, "byok", label="Back to connection", row=1))
+            panel.add_item(nav_button(panel, page(panel), label="Back to connection", row=1))
             return
         panel.add_item(FeaturesSelect(panel))
         panel.add_item(ReasoningSelect(panel))
@@ -554,11 +570,11 @@ def build(panel: Any, nav_button: Any) -> None:
     else:
         panel.add_item(ConnectButton(panel))
         if active_selected(panel) and available(panel):
-            panel.add_item(nav_button(panel, "byok_advanced", label="Advanced", row=2))
+            panel.add_item(nav_button(panel, page(panel, "_advanced"), label="Advanced", row=2))
         panel.add_item(TestButton(panel))
         if panel.connection_present:
             panel.add_item(
-                nav_button(panel, "byok_remove", label="Use Maxwell's AI", row=3)
+                nav_button(panel, page(panel, "_remove"), label="Inherit default route" if worker_connection(panel) else "Use Maxwell's AI", row=3)
             )
 
 
@@ -570,16 +586,16 @@ def summary(panel: Any) -> str:
     status = panel.connection_status
     if status:
         return f"{status['provider_label']} · {status['model']}"
-    return "Maxwell's default AI"
+    return "Chat BYOK or operator worker default" if worker_connection(panel) else "Maxwell's default AI"
 
 
 def render(panel: Any) -> str:
-    if panel.selected_key == "byok_remove":
+    if panel.selected_key == page(panel, "_remove"):
         return (
-            "## Use Maxwell's AI\nRemove your personal API key and return to Maxwell's default AI for your messages?\n\n"
+            "## Remove this AI connection\nRemove this saved API key? Chat and subagent connections are independent. Subagents without their own key inherit chat BYOK or the operator worker default.\n\n"
             "You can connect again later. Choose **Keep connection** to cancel."
         )
-    if panel.selected_key == "byok_advanced":
+    if panel.selected_key == page(panel, "_advanced"):
         status = panel.connection_status
         if not active_selected(panel) or not available(panel):
             return (
@@ -600,14 +616,18 @@ def render(panel: Any) -> str:
         )
     status = panel.connection_status
     active = discord.utils.escape_markdown(summary(panel))
-    text = f"## Your AI connection\n**Currently using:** {active}\n\n"
+    title = "Subagent AI connection" if worker_connection(panel) else "Your AI connection"
+    text = f"## {title}\n**Currently using:** {active}\n\n"
     if panel.connection_error:
         text += "Personal connections are unavailable right now. Ask the bot operator for help.\n"
         if panel.connection_present:
             text += "Your saved key is still present. Remove it below to return to Maxwell's AI.\n"
     else:
-        text += "Optional: replace Maxwell's model with your own provider for your messages, "
-        text += "including chat, mentions, and app actions.\n\n"
+        if worker_connection(panel):
+            from provider_limits import worker_timeout_seconds
+            text += f"Use a separate provider and model for Premium subagents. Your chat connection stays independent. Worker deadline ceiling: {worker_timeout_seconds(panel.bot):g}s. Tools must be enabled.\n\n"
+        else:
+            text += "Optional: replace Maxwell's model with your own provider for chat, mentions, and app actions.\n\n"
         text += "**Connect your API endpoint** with its URL, model and API key.\n"
         if status:
             text += f"\n**Saved key:** {status['masked_key']}\n"

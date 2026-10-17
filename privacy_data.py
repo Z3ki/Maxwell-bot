@@ -98,6 +98,8 @@ def delete_data(root, user_id, preferences, *, sessions=None):
 
     if (extra / "byok.sqlite3").is_file():
         run("byok", lambda: CredentialVault(extra / "byok.sqlite3").delete(uid))
+    if (extra / "worker_byok.sqlite3").is_file():
+        run("worker_byok", lambda: CredentialVault(extra / "worker_byok.sqlite3").delete(uid))
     for name, path, keys, nested in (
         ("traces", root / "llm_traces.json", ("user_id",), None),
         ("reminders", extra / "reminders.json", ("owner_id",), None),

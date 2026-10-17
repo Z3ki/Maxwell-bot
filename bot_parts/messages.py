@@ -1941,6 +1941,7 @@ class MessagesMixin:
                 response
                 and not all_tool_results
                 and "create_site" in self.tools
+                and "delegate_task" not in MaxwellBot._turn_tool_names(self, self._message_tool_platform(message), message)
                 and "create_site" not in (self._control.get("disabled_tools", []) or [])
                 and self._looks_like_site_request(content or "")
                 and self._looks_like_html_document(response)

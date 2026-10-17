@@ -237,6 +237,19 @@ class RequestPipelineMixin:
         control = getattr(self, "_control", None) or {}
         if not control.get("tools_enabled", True):
             return "refused: tools are disabled"
+        from premium_access import premium_for_current_request
+        from plugins.maxwell_extras.task_workers import GITHUB_ACCOUNT_ACTIONS, WORKER_TOOLS, _inside_worker
+        if (
+            canonical in WORKER_TOOLS and not _inside_worker.get()
+            and not (canonical == "github_repo" and (arguments or {}).get("action") in GITHUB_ACCOUNT_ACTIONS)
+            and premium_for_current_request(getattr(author, "id", ""))
+            and control.get("premium_task_workers_enabled", True)
+            and "delegate_task" in (getattr(self, "tools", {}) or {})
+            and "delegate_task" not in set(control.get("disabled_tools", []) or [])
+        ):
+            return "refused: delegate this task through delegate_task; task tools run inside workers"
+        if _inside_worker.get() and canonical == "github_repo" and ((arguments or {}).get("action") in GITHUB_ACCOUNT_ACTIONS or "token" in (arguments or {})):
+            return "refused: workers cannot change accounts or repository permissions"
         if _current_request_provider.get() is not None:
             budget = _current_byok_tool_budget.get()
             if not isinstance(budget, dict) or budget.get("calls", 0) >= 8:
@@ -464,8 +477,8 @@ class RequestPipelineMixin:
             request_provider = await self._personal_provider(message)
             if request_provider is not None:
                 _current_request_provider.set(request_provider)
-            from provider_limits import turn_timeout_seconds
-            timeout = turn_timeout_seconds(self, request_provider)
+            from provider_limits import request_turn_timeout_seconds
+            timeout = request_turn_timeout_seconds(self, request_provider, premium=current_plan.get() == (uid, "premium"))
             async with asyncio.timeout(timeout):
                 if row:
                     reason = self._queued_request_policy_reason(message)

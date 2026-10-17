@@ -16,7 +16,7 @@ from tools import Tool
 from .task_workers import has_premium, WORKER_TOOLS, _FAMILIES
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-KINDS = ("shell", "website", "research", "custom")
+KINDS = ("shell", "website", "research", "general", "custom")
 
 
 class TaskAgentStore:
@@ -73,7 +73,7 @@ class TaskAgentStore:
             ]
             for row in rows:
                 row["tools"] = json.loads(row["tools"]) or sorted(
-                    _FAMILIES[row["kind"]]
+                    {"shell", "create_site", "edit_site", "list_sites", "site_server", "web_search", "fetch_url"} if row["kind"] == "custom" else _FAMILIES[row["kind"]]
                 )
             return rows
 
@@ -91,7 +91,7 @@ class TaskAgentStore:
             or not 1 <= len(instructions.strip()) <= 4000
         ):
             raise ValueError(
-                "Choose shell, website, research or custom and 1–4000 characters of instructions"
+                "Choose shell, website, research, general or custom and 1–4000 characters of instructions"
             )
         if tools is not None and (
             not isinstance(tools, list)
@@ -148,7 +148,7 @@ class ManageTaskAgentTool(Tool):
             "tools": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 7,
+                "maxItems": len(WORKER_TOOLS),
                 "uniqueItems": True,
                 "items": {"type": "string", "enum": sorted(WORKER_TOOLS)},
             },
@@ -201,4 +201,4 @@ class ManageTaskAgentTool(Tool):
             )
         except ValueError as exc:
             return f"Error: {exc}"
-        return f"Saved custom agent {name}. It uses your selected AI connection and existing permissions."
+        return f"Saved custom agent {name}. It uses your selected subagent AI connection and existing permissions."

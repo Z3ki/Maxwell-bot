@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode, urlsplit
@@ -77,11 +78,14 @@ def validate_personal(body):
     return defaults, personality
 
 
+_PRIVACY_STARTED = web.RequestKey("privacy_started_at", float)
+
+
 class Dashboard:
     def __init__(self, data_dir, config=None):
         self.data_dir = data_dir
         self.config = config
-        self.sessions = self.preferences = self.vault = self.http = None
+        self.sessions = self.preferences = self.vault = self.worker_vault = self.http = None
         self.login_limit = RateLimiter(rate=1 / 60, burst=5)
         self.test_limit = RateLimiter(rate=1 / 30, burst=2)
 
@@ -104,6 +108,7 @@ class Dashboard:
             extra = root / "plugins" / "maxwell_extras"
             self.preferences = UserPreferenceStore(extra / "user_preferences.json")
             self.vault = CredentialVault(extra / "byok.sqlite3")
+            self.worker_vault = CredentialVault(extra / "worker_byok.sqlite3")
 
         await asyncio.to_thread(stores)
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
@@ -185,6 +190,7 @@ class Dashboard:
         return value
 
     async def dispatch(self, request, handler, *, public=False):
+        request[_PRIVACY_STARTED] = time.time()
         try:
             if self.config and request.host != urlsplit(self.config.origin).netloc:
                 raise web.HTTPForbidden(text="Use the dashboard address.")
@@ -490,12 +496,13 @@ class Dashboard:
             }
         )
 
-    async def connection(self, request, session):
+    async def connection(self, request, session, *, worker=False):
+        vault = self.worker_vault if worker else self.vault
         user_id = session["user"]["id"]
         if request.method == "DELETE":
-            await asyncio.to_thread(self.vault.delete, user_id)
+            await asyncio.to_thread(vault.delete, user_id)
         elif request.method == "PUT":
-            if not self.vault.enabled:
+            if not vault.enabled:
                 raise web.HTTPServiceUnavailable(
                     text="Personal AI connections are unavailable. Ask the operator."
                 )
@@ -509,7 +516,7 @@ class Dashboard:
                 "generation",
             }:
                 raise ValueError("Unsupported connection setting.")
-            existing = await asyncio.to_thread(self.vault.get, user_id)
+            existing = await asyncio.to_thread(vault.get, user_id)
             same = (
                 existing
                 if existing and existing["provider"] == body.get("provider")
@@ -529,38 +536,41 @@ class Dashboard:
                 else parse_model_support("text, tools", "")
             )
             await asyncio.to_thread(
-                self.vault.save,
+                vault.save,
                 user_id,
                 body.get("provider", "custom"),
                 body.get("model", ""),
                 secret,
                 base_url=body.get("base_url", (same or {}).get("base_url", "")),
                 settings=settings,
+                started_at=request.get(_PRIVACY_STARTED, time.time()),
             )
         status, unreadable = None, False
-        present = await asyncio.to_thread(self.vault.has_credential, user_id)
-        if present and self.vault.enabled:
+        present = await asyncio.to_thread(vault.has_credential, user_id)
+        if present and vault.enabled:
             try:
-                status = await asyncio.to_thread(self.vault.status, user_id)
+                status = await asyncio.to_thread(vault.status, user_id)
             except Exception:
                 unreadable = True
         return self.response(
             {
-                "enabled": self.vault.enabled,
+                "enabled": vault.enabled,
                 "present": present,
                 "unreadable": unreadable,
                 "connection": status,
                 "providers": PROVIDERS,
+                "scope": "worker" if worker else "chat",
             }
         )
 
-    async def test_connection(self, request, session):
+    async def test_connection(self, request, session, *, worker=False):
+        vault = self.worker_vault if worker else self.vault
         from maxwell_core.providers.factory import openai_compat_provider
 
         user_id = session["user"]["id"]
         if not self.test_limit.allow(user_id):
             raise web.HTTPTooManyRequests(text="Wait 30 seconds before testing again.")
-        credential = await asyncio.to_thread(self.vault.get, user_id)
+        credential = await asyncio.to_thread(vault.get, user_id)
         if not credential:
             raise web.HTTPBadRequest(text="Save a connection first.")
         provider = make_request_provider(
@@ -582,9 +592,16 @@ class Dashboard:
         return self.response(
             {
                 "ok": True,
-                "message": "Connection works. Your messages will use this AI.",
+                "message": "Connection works. Premium subagents will use this AI." if worker else "Connection works. Your messages will use this AI.",
             }
         )
+
+
+    async def worker_connection(self, request, session):
+        return await self.connection(request, session, worker=True)
+
+    async def test_worker_connection(self, request, session):
+        return await self.test_connection(request, session, worker=True)
 
 
 def register_dashboard(app, data_dir, config=None):
@@ -610,6 +627,10 @@ def register_dashboard(app, data_dir, config=None):
         ("PUT", "/api/dashboard/connection", dashboard.connection, False),
         ("DELETE", "/api/dashboard/connection", dashboard.connection, False),
         ("POST", "/api/dashboard/connection/test", dashboard.test_connection, False),
+        ("GET", "/api/dashboard/worker-connection", dashboard.worker_connection, False),
+        ("PUT", "/api/dashboard/worker-connection", dashboard.worker_connection, False),
+        ("DELETE", "/api/dashboard/worker-connection", dashboard.worker_connection, False),
+        ("POST", "/api/dashboard/worker-connection/test", dashboard.test_worker_connection, False),
     ):
 
         async def route(request, handler=handler, public=public):

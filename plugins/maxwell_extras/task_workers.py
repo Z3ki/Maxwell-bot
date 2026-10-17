@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextvars import ContextVar
 from typing import ClassVar
 
 from tools import Tool
-from provider_limits import request_timeout_seconds, turn_timeout_seconds
+from provider_limits import (
+    request_timeout_seconds,
+    turn_timeout_seconds,
+    worker_timeout_seconds,
+)
 
 _inside_worker = ContextVar("maxwell_inside_task_worker", default=False)
 _FAMILIES = {
@@ -17,8 +22,60 @@ _FAMILIES = {
     "research": frozenset({"web_search", "fetch_url"}),
 }
 
-WORKER_TOOLS = frozenset().union(*_FAMILIES.values())
+# Explicitly reviewed task tools. Communication, settings, credentials, moderation,
+# consent and recursive delegation remain on the coordinator's side.
+WORKER_TOOLS = frozenset().union(
+    *_FAMILIES.values(),
+    {
+        "github_repo",
+        "see_image",
+        "see_video",
+        "search_messages",
+        "lookup_user",
+        "list_channels",
+        "list_roles",
+        "list_members",
+        "list_permissions",
+    },
+)
+_FAMILIES["general"] = WORKER_TOOLS
 _FAMILIES["custom"] = WORKER_TOOLS
+# GitHub's multifunction tool keeps account/policy changes on the coordinator.
+GITHUB_ACCOUNT_ACTIONS = frozenset(
+    {"auth", "auth_set", "auth_clear", "policy_get", "policy_set"}
+)
+
+
+def task_instructions(bot, names, platform, message):
+    """Carry applicable tool rules without copying chat history or personality."""
+    manager = getattr(bot, "prompts", None)
+    plugins = getattr(bot, "plugin_manager", None)
+    if manager is None or plugins is None:
+        return ""
+    from maxwell_core.prompts.component import PromptRequest
+
+    uid = str(message.author.id)
+    gid = str(getattr(getattr(message, "guild", None), "id", "") or "")
+    enabled = tuple(
+        name
+        for name in plugins.loaded_plugins
+        if plugins.is_plugin_enabled_for_user(name, uid, gid)
+    )
+    request = PromptRequest(
+        scope=platform,
+        platform=platform,
+        plugin_ids=enabled,
+        tool_names=tuple(names),
+        user_id=uid,
+        guild_id=gid or None,
+        channel_id=str(message.channel.id),
+    )
+    components = sorted(manager.components(), key=lambda c: (c.priority, c.id))
+    return "\n\n".join(
+        c.body(request)
+        for c in components
+        if c.plugin in enabled and c.requires_tools and c.applies(request)
+    )
 
 
 def has_premium(bot, user_id):
@@ -56,7 +113,7 @@ class DelegateTaskTool(Tool):
                         "tools": {
                             "type": "array",
                             "minItems": 1,
-                            "maxItems": 7,
+                            "maxItems": len(WORKER_TOOLS),
                             "uniqueItems": True,
                             "items": {"type": "string", "enum": sorted(WORKER_TOOLS)},
                         },
@@ -78,8 +135,8 @@ class DelegateTaskTool(Tool):
 
     def get_description(self):
         return (
-            "Premium: delegate one or two shell, website, research or custom tasks. Use a saved profile by name, or set kind and optionally choose its tools. Maxwell may select permissions within available caller tools. "
-            "Workers use the current AI connection and caller permissions, with bounded "
+            "Premium: delegate all substantial work: websites, code, shell, research, media analysis, repository tasks and multi-step investigations. Use general for tasks spanning tools. Delegate one or two focused tasks. Use a saved profile by name, or set kind and optionally choose its tools. Maxwell may select permissions within available caller tools. "
+            "Workers use a dedicated personal worker connection, your chat BYOK, the operator worker model, or the default AI, in that order, with caller permissions and bounded "
             "steps and time. Wait for their reports before changing the same files. "
             "They cannot send chat messages, export files, delegate again or run after "
             "this request ends. Reports can describe partial work; do not claim success "
@@ -149,14 +206,24 @@ class DelegateTaskTool(Tool):
             return "Error: task workers are busy; no task was started"
         self._users.add(uid)
         self._active += len(tasks)
-        provider = _current_request_provider.get()
-        timeout = min(
-            turn_timeout_seconds(self.bot, provider),
-            _limit(control, "task_workers_timeout_seconds", 600, 7200),
-        )
+        provider, owned = None, False
         # Sibling tool calls serialize; their model calls may overlap.
         execution_lock = asyncio.Lock()
         try:
+            from .worker_providers import select_worker_provider
+
+            try:
+                provider, owned = await select_worker_provider(
+                    self.bot, uid, _current_request_provider.get()
+                )
+            except Exception:
+                return "Error: worker AI connection is unavailable; no task started. Review /config → More options → Subagent AI provider or ask the operator."
+            timeout = min(
+                turn_timeout_seconds(self.bot, provider)
+                if getattr(provider, "turn_timeout_seconds", None)
+                else worker_timeout_seconds(self.bot),
+                worker_timeout_seconds(self.bot),
+            )
             async with asyncio.timeout(timeout):
                 reports = await asyncio.gather(
                     *(
@@ -170,12 +237,21 @@ class DelegateTaskTool(Tool):
         finally:
             self._users.discard(uid)
             self._active -= len(tasks)
+            if owned and provider is not None:
+                try:
+                    await provider.close()
+                except Exception:
+                    pass  # No secret-bearing exception strings in logs or reports.
 
     async def _worker(self, message, task, provider, execution_lock):
-        from bot import MaxwellBot
+        from bot import MaxwellBot, _current_request_provider
         from tool_schemas import build_openai_tools
 
         token = _inside_worker.set(True)
+        personal = bool(
+            getattr(getattr(provider, "policy", None), "sensitive_credentials", False)
+        )
+        provider_token = _current_request_provider.set(provider if personal else None)
         completed = []
         try:
             platform = self.bot._message_tool_platform(message)
@@ -184,7 +260,26 @@ class DelegateTaskTool(Tool):
             names &= _FAMILIES[task["kind"]]
             if "tools" in task:
                 names &= set(task["tools"])
+            selected = provider or getattr(self.bot, "ai_provider", None)
+            caps = getattr(selected, "capabilities", None)
+            if not getattr(caps, "vision", False):
+                names.discard("see_image")
+            if not (getattr(caps, "vision", False) or getattr(caps, "audio", False)):
+                names.discard("see_video")
             schemas = build_openai_tools(available, allowed_names=names)
+            for schema in schemas:
+                if schema["function"]["name"] == "github_repo":
+                    # Schema edits must not mutate the shared tool's parameters.
+                    schema["function"]["parameters"] = json.loads(
+                        json.dumps(schema["function"]["parameters"])
+                    )
+                    params = schema["function"]["parameters"]
+                    actions = params["properties"]["action"]["enum"]
+                    params["properties"]["action"]["enum"] = [
+                        a for a in actions if a not in GITHUB_ACCOUNT_ACTIONS
+                    ]
+                    params["properties"].pop("token", None)
+                    params["additionalProperties"] = False
             if not schemas:
                 return {
                     "kind": task["kind"],
@@ -192,13 +287,26 @@ class DelegateTaskTool(Tool):
                     "report": "No permitted tools for this task",
                 }
             control = getattr(self.bot, "_control", {}) or {}
-            steps = _limit(control, "task_workers_max_steps", 6, 12)
+            steps = _limit(control, "task_workers_max_steps", 12, 32)
             selected = provider or getattr(self.bot, "ai_provider", None)
+            if not getattr(
+                getattr(selected, "capabilities", None), "native_tools", True
+            ):
+                return {
+                    "kind": task["kind"],
+                    "status": "unavailable",
+                    "report": "Enable tool support in the subagent AI connection",
+                }
             window = getattr(
                 getattr(selected, "capabilities", None), "context_window", None
             )
-            output_tokens = min(4096, getattr(selected, "max_tokens", 4096) or 4096)
-            budget = 64000
+            output_tokens = min(
+                131072,
+                getattr(getattr(selected, "policy", None), "max_output_tokens", None)
+                or getattr(selected, "max_tokens", 4096)
+                or 4096,
+            )
+            budget = _limit(control, "task_workers_context_chars", 128000, 2000000)
             if isinstance(window, int) and window > 0:
                 output_tokens = min(output_tokens, max(16, window // 4))
                 budget = min(budget, (window - output_tokens) * 4)
@@ -217,6 +325,9 @@ class DelegateTaskTool(Tool):
                 },
                 {"role": "user", "content": task["task"]},
             ]
+            rules = task_instructions(self.bot, names, platform, message)
+            if rules:
+                base.insert(1, {"role": "system", "content": rules})
             if task.get("instructions"):
                 base.insert(
                     1,
@@ -233,6 +344,7 @@ class DelegateTaskTool(Tool):
                     "report": "Task and tool schemas exceed the model context budget",
                 }
             chunks = []
+            media = []
             for _ in range(steps):
                 if not await self._eligible(message):
                     return {
@@ -257,6 +369,7 @@ class DelegateTaskTool(Tool):
                     timeout=request_timeout_seconds(self.bot, selected),
                     max_tokens=output_tokens,
                     charge_message=False,
+                    media=media,
                 )
                 calls = getattr(result, "tool_calls", None) or []
                 if not calls:
@@ -286,6 +399,12 @@ class DelegateTaskTool(Tool):
                         or any(str(k).startswith("_") for k in args)
                     ):
                         raise ValueError("worker attempted an unavailable tool")
+                    if name == "github_repo" and (
+                        args.get("action") in GITHUB_ACCOUNT_ACTIONS or "token" in args
+                    ):
+                        raise ValueError(
+                            "account and permission changes require the coordinator"
+                        )
                     if name == "shell" and args.get("files"):
                         raise ValueError("worker cannot export files")
                     async with execution_lock:
@@ -314,6 +433,45 @@ class DelegateTaskTool(Tool):
                             ),
                             compatible=names,
                         )
+                    from media_payloads import strip_media_payloads
+
+                    # Binary payloads are transient model inputs, never pasted into text,
+                    # reports or persisted history. Keep a bounded amount per worker.
+                    for match in re.finditer(
+                        r"__IMAGE_B64__data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)__END_IMAGE_B64__",
+                        str(output),
+                    ):
+                        if (
+                            getattr(caps, "vision", False)
+                            and len(media) < 12
+                            and len(match[2]) < 5_000_000
+                        ):
+                            media.append(
+                                {
+                                    "b64": match[2],
+                                    "mime_type": match[1],
+                                    "filename": "worker-image",
+                                    "is_image": True,
+                                }
+                            )
+                    for match in re.finditer(
+                        r"__AUDIO_B64__([A-Za-z0-9+/=\s]+)__END_AUDIO_B64__",
+                        str(output),
+                    ):
+                        if (
+                            getattr(caps, "audio", False)
+                            and len(media) < 12
+                            and len(match[1]) < 5_000_000
+                        ):
+                            media.append(
+                                {
+                                    "b64": match[1],
+                                    "mime_type": "audio/wav",
+                                    "filename": "worker-audio.wav",
+                                    "is_image": False,
+                                }
+                            )
+                    output = strip_media_payloads(str(output))
                     body = str(output).removeprefix(f"Tool {name}:").strip().lower()
                     failed = body.startswith(
                         ("error", "refused", "failed", "could not")
@@ -344,4 +502,5 @@ class DelegateTaskTool(Tool):
                 "report": f"Worker stopped ({type(exc).__name__}); partial changes may remain",
             }
         finally:
+            _current_request_provider.reset(provider_token)
             _inside_worker.reset(token)
