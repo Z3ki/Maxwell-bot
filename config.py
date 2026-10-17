@@ -242,6 +242,18 @@ class Config:
     # Stronger chat model for an operator-granted premium plan. Blank keeps
     # premium on AI_MODEL and only raises the message allowance. No checkout.
     AI_PREMIUM_MODEL = os.getenv("AI_PREMIUM_MODEL", "").strip()
+    # Independent Premium task-worker route. Blank model inherits the chat route.
+    AI_WORKER_BASE_URL = os.getenv("AI_WORKER_BASE_URL", "").strip()
+    AI_WORKER_API_KEY = os.getenv("AI_WORKER_API_KEY")  # None permits same-endpoint inheritance.
+    if AI_WORKER_API_KEY is not None:
+        AI_WORKER_API_KEY = AI_WORKER_API_KEY.strip()
+    AI_WORKER_MODEL = os.getenv("AI_WORKER_MODEL", "").strip()
+    AI_WORKER_MAX_OUTPUT_TOKENS = _int_env("AI_WORKER_MAX_OUTPUT_TOKENS", 8192, min_value=16, max_value=131072)
+    AI_WORKER_CONTEXT_WINDOW = _int_env("AI_WORKER_CONTEXT_WINDOW", 0, min_value=0, max_value=2000000)
+    AI_WORKER_DISABLE_REASONING = _bool_env("AI_WORKER_DISABLE_REASONING", True)
+    AI_WORKER_REASONING_EFFORT = os.getenv("AI_WORKER_REASONING_EFFORT", "").strip()
+    AI_WORKER_REQUEST_TIMEOUT_SECONDS = _int_env("AI_WORKER_REQUEST_TIMEOUT_SECONDS", 600, min_value=10, max_value=7200)
+    AI_WORKER_TURN_TIMEOUT_SECONDS = _int_env("AI_WORKER_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=7200)
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     AI_MAX_OUTPUT_TOKENS = _int_env(

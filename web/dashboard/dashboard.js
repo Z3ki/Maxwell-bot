@@ -5,6 +5,7 @@ let csrf = "",
   clientId = "",
   selected = null,
   connection = null,
+  connectionScope = "chat",
   providers = {},
   serverData = null;
 let dirty = false,
@@ -198,6 +199,9 @@ function providerChanged() {
   $("test-connection").hidden = !same;
   $("test-connection").disabled = !same;
 }
+function connectionApi() {
+  return connectionScope === "worker" ? "worker-connection" : "connection";
+}
 function fillConnection(data) {
   connection = data.connection;
   providers = data.providers;
@@ -213,7 +217,7 @@ function fillConnection(data) {
         connection.model +
         " · key " +
         connection.masked_key
-      : "Using Maxwell’s included AI. No setup needed.";
+      : connectionScope === "worker" ? "Inheriting chat BYOK or the operator worker default." : "Using Maxwell’s included AI. No setup needed.";
   if (!data.enabled)
     $("connection-status").textContent =
       "Personal AI connections are unavailable on this bot. Ask the operator to enable them.";
@@ -227,7 +231,7 @@ async function openPersonal(initial = false) {
   if (!initial && !canNavigate()) return;
   const [personal, ai] = await Promise.all([
     api("personal"),
-    api("connection"),
+    api(connectionApi()),
   ]);
   selected = null;
   scope(true);
@@ -367,7 +371,7 @@ connectionForm.addEventListener("submit", (event) => {
         body.generation +=
           " context=" + field(connectionForm, "model_context").value;
     }
-    fillConnection(await api("connection", "PUT", body));
+    fillConnection(await api(connectionApi(), "PUT", body));
     checkpoint(connectionForm);
     notice("AI connection saved. Test it to check the key and model.");
   }, event.submitter);
@@ -408,6 +412,18 @@ serverForm.addEventListener("submit", (event) => {
     );
   }, event.submitter);
 });
+$("connection-scope").addEventListener("change", (event) => {
+  const next = event.target.value;
+  event.target.value = connectionScope;
+  if (busy || (dirtyForms.has(connectionForm.id) && !window.confirm("Discard unsaved AI connection changes?"))) return;
+  action(async () => {
+    const data = await api(next === "worker" ? "worker-connection" : "connection");
+    connectionScope = next;
+    event.target.value = next;
+    fillConnection(data); // Clears the secret input before editing the other slot.
+    checkpoint(connectionForm);
+  });
+});
 $("provider").addEventListener("change", providerChanged);
 $("connection-advanced").addEventListener("input", () => {
   connectionDirty = true;
@@ -420,14 +436,14 @@ $("cancel-remove").addEventListener("click", () => {
 });
 $("confirm-remove").addEventListener("click", (event) =>
   action(async () => {
-    fillConnection(await api("connection", "DELETE"));
+    fillConnection(await api(connectionApi(), "DELETE"));
     checkpoint(connectionForm);
-    notice("Connection removed. You are using Maxwell’s included AI.");
+    notice(connectionScope === "worker" ? "Subagent connection removed. Workers inherit chat BYOK or the operator default." : "Connection removed. You are using Maxwell’s included AI.");
   }, event.target),
 );
 $("test-connection").addEventListener("click", (event) =>
   action(async () => {
-    const result = await api("connection/test", "POST", {});
+    const result = await api(connectionApi() + "/test", "POST", {});
     notice(result.message);
   }, event.target),
 );

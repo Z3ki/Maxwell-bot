@@ -242,3 +242,18 @@ failure reports. New tests cover grants/revocation/restarts, failed plan writes,
 worker cancellation, privacy suppression, rejected tools/exports/recursion,
 capacity and context budgets. These workers do not restore the deleted autonomous
 engine or its legacy controls.
+
+
+### Independent worker providers and coordinator routing
+
+Premium substantial tasks now use request-scoped workers with separate operator
+`AI_WORKER_*` settings or an independent personal worker BYOK slot. Dedicated
+worker BYOK wins over chat BYOK, then operator workers, then the primary provider.
+Task text, selected tool results and supported transient media go to that route;
+chat remains on its own connection. No fallback bypasses a saved unavailable key.
+Worker BYOK records live in `plugins/maxwell_extras/worker_byok.sqlite3`, encrypted
+under the same master key as chat BYOK, retained until removal/full deletion.
+Full deletion reports worker-vault failures separately and invalidates stale
+credential saves. Rotate both databases before switching the master key.
+Worker transcripts remain transient; no separate worker history or consent gate.
+Broader reviewed task tools retain central caller, plugin and scope checks.

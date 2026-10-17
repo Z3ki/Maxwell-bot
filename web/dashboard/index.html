@@ -183,10 +183,17 @@
                   </h2>
                   <p>
                     Maxwell already includes AI. Connect a provider only if you
-                    want your messages to use your own API account.
+                    want chat or Premium subagents to use your own API account.
                   </p>
                 </div>
               </div>
+              <label>AI connection for
+                <select id="connection-scope">
+                  <option value="chat">Chat</option>
+                  <option value="worker">Subagents (Premium)</option>
+                </select>
+              </label>
+              <p class="muted">Subagents can use their own endpoint, key, model, reasoning, context and deadlines. Without a separate key they inherit your chat BYOK, then the operator worker default. Operator worker limits still apply.</p>
               <p id="connection-status" class="connection-status">
                 Loading connection…
               </p>

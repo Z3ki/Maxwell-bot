@@ -72,7 +72,8 @@ def _choices(bot, scope):
         return {"providers": list(PROVIDERS), **{key: sorted(values) for key, values in suite._PERSONAL_DEFAULT_VALUES.items()},
                 "language": "A language up to 80 characters, or auto",
                 "style": "Your personal reply personality, up to 800 characters",
-                "byok": "Private form for provider, model, API key, advanced settings, test and removal"}
+                "byok": "Private form for chat provider, model, API key, advanced settings, test and removal",
+                "worker_byok": "Independent subagent provider/model/BYOK and generation settings in a private form"}
     if scope == "server":
         return {"channels": "One text channel ID in this server, or all",
                 "capabilities": list(GUILD_CAPABILITIES),
@@ -103,6 +104,24 @@ async def settings_snapshot(bot, context, scope):
                 snapshot["model"] = status["model"]
                 snapshot["provider"] = status["provider_label"]
                 snapshot["model_source"] = "personal"
+        worker_vault = getattr(bot, "_worker_byok_vault", None)
+        worker_present = await asyncio.to_thread(worker_vault.has_credential, uid) if worker_vault else False
+        snapshot["worker_byok_connected"] = worker_present
+        if worker_present:
+            try:
+                worker_status = await asyncio.to_thread(worker_vault.status, uid)
+            except Exception:
+                worker_status = None
+            snapshot["worker_model"] = worker_status["model"] if worker_status else "unavailable"
+            snapshot["worker_model_source"] = "personal_worker" if worker_status else "unavailable"
+        elif present:
+            snapshot["worker_model"] = snapshot["model"] if status else "unavailable"
+            snapshot["worker_model_source"] = "personal_chat" if status else "unavailable"
+        else:
+            worker_model = str(getattr(getattr(bot, "config", None), "AI_WORKER_MODEL", "") or "").strip()
+            incomplete = bool(getattr(getattr(bot, "config", None), "AI_WORKER_BASE_URL", "") and not worker_model)
+            snapshot["worker_model"] = "unavailable" if incomplete else worker_model or default_model
+            snapshot["worker_model_source"] = "unavailable" if incomplete else "operator_worker" if worker_model else "primary"
         return snapshot
     if scope == "server":
         gid = str(context.guild.id)
@@ -122,7 +141,7 @@ async def change_setting(bot, context, scope, setting, value, *, reset=False):
         store = _store(bot)
         if setting == "tracking" and value == "on" and not reset:
             raise ValueError("Enable optional history yourself in /config → Privacy or the dashboard; a model cannot grant consent.")
-        if setting in {"byok", "agents"}:
+        if setting in {"byok", "worker_byok", "agents"}:
             raise ValueError("Use the private configuration form for this setting; custom agents also support manage_task_agent.")
         if reset:
             if setting == "style":
@@ -303,7 +322,7 @@ class _OpenSettingsButton(discord.ui.Button):
             panel = suite._ConfigPanel(self.bot, store, interaction, personal=personal)
             panel.scope, panel.selected_key = self.scope, self.setting
             await panel._refresh_connection()
-            panel.selected_provider = self.provider or (panel.connection_status or {}).get("provider", "openai")
+            panel.selected_provider = self.provider or (panel.connection_status or {}).get("provider", "custom")
             panel.can_manage_server = suite._can_manage_server(self.bot, context)
             panel._build()
             await interaction.edit_original_response(content=None, embed=panel.embed(), view=panel,
@@ -326,7 +345,7 @@ class OpenConfigurationTool(Tool):
 
     def get_description(self):
         return ("Present a user-bound button that opens the existing private /config menu. "
-                "Use setting=byok for API keys/connect/edit/test, byok_advanced for connection options, byok_remove for confirmed removal. "
+                "Use setting=worker_byok for a separate subagent model/provider and BYOK; byok for chat API keys/connect/edit/test, byok_advanced for connection options, byok_remove for confirmed removal. "
                 "Optionally choose a provider ID (get_configuration lists supported providers). "
                 "Any personal/server/owner menu can be opened with its normal permissions. "
                 "Discord requires the user to click before opening a private menu/form. Never ask for API keys in chat or put credentials in tool arguments. "
@@ -335,10 +354,10 @@ class OpenConfigurationTool(Tool):
     async def execute(self, message, scope="personal", setting="overview", provider="", **kwargs):
         try:
             context = await requester_context(self.bot, message, scope)
-            if setting not in {"overview", *_SCOPES[scope]} and not (scope == "personal" and setting in {"byok_advanced", "byok_remove"}):
+            if setting not in {"overview", *_SCOPES[scope]} and not (scope == "personal" and setting in {"byok_advanced", "byok_remove", "worker_byok_advanced", "worker_byok_remove"}):
                 raise ValueError("That screen is not available in this scope.")
             from .byok import PROVIDERS
-            if provider and (provider not in PROVIDERS or scope != "personal" or not setting.startswith("byok")):
+            if provider and (provider not in PROVIDERS or scope != "personal" or not setting.startswith(("byok", "worker_byok"))):
                 raise ValueError("Choose a supported provider for the personal AI connection screen.")
             _store(self.bot)
             uid = str(context.user.id)

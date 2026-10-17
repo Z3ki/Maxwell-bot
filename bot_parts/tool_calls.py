@@ -1149,6 +1149,10 @@ class ToolCallsMixin:
             == "off"
         ):
             names.difference_update({"web_search", "fetch_url"})
+        if "delegate_task" in names:
+            from plugins.maxwell_extras.task_workers import WORKER_TOOLS, _inside_worker
+            if not _inside_worker.get():
+                names.difference_update(WORKER_TOOLS - {"github_repo"})
         return names
 
     def _tools_for_turn(self, platform: str, message=None) -> dict[str, Any]:
@@ -1232,7 +1236,15 @@ class ToolCallsMixin:
         if not tools or not self._native_tools_enabled():
             return []
         allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
-        return build_openai_tools(tools, allowed_names=allowed)
+        schemas = build_openai_tools(tools, allowed_names=allowed)
+        if "delegate_task" in allowed:
+            from plugins.maxwell_extras.task_workers import GITHUB_ACCOUNT_ACTIONS, _inside_worker
+            if not _inside_worker.get():
+                for schema in schemas:
+                    if schema["function"]["name"] == "github_repo":
+                        schema["function"]["parameters"] = json.loads(json.dumps(schema["function"]["parameters"]))
+                        schema["function"]["parameters"]["properties"]["action"]["enum"] = sorted(GITHUB_ACCOUNT_ACTIONS)
+        return schemas
 
     def _tool_system_prompt(
         self, platform: str = "discord", *, message=None, content: str | None = None,
@@ -1292,6 +1304,18 @@ class ToolCallsMixin:
                 "One bare JSON object per line, no fences, no XML:\n"
                 '{"name":"<tool>","arguments":{...}}\n'
                 "Use send_message for the visible reply."
+            )
+        if "delegate_task" in names:
+            header += (
+                "\n\nYou are the coordinator. Delegate website creation/edits, code, shell, "
+                "research, repository work, media analysis and other substantial or multi-step "
+                "tasks through delegate_task. Use kind=general across tool families; choose "
+                "the smallest useful tool set. Pass concrete requirements and relevant context, "
+                "never secrets or the whole conversation. Split independent tasks when useful. "
+                "Do not write the full website/code in chat or execute worker tools yourself. "
+                "Wait for reports, check their status and communicate results and remaining work. "
+                "Ordinary conversation and brief answers need no worker. Direct communication, "
+                "account/privacy settings and moderation remain your responsibility."
             )
         extra = ""
         prompts = getattr(self, "prompts", None)

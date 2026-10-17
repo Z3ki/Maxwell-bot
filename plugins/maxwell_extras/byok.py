@@ -394,6 +394,7 @@ class CredentialVault:
         *,
         base_url: str = "",
         settings: dict[str, Any] | None = None,
+        started_at: float | None = None,
     ) -> None:
         owner = self._owner(user_id)
         selected_provider = self._provider(provider)
@@ -418,7 +419,13 @@ class CredentialVault:
         ciphertext = AESGCM(key).encrypt(
             nonce, secret, self._aad(owner, selected_provider)
         )
-        with self._db() as db:
+        from privacy import owned_write_allowed, request_started_at
+
+        started_at = request_started_at() if started_at is None else started_at
+        with self._db() as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if not owned_write_allowed(self.path.parent.parent.parent, owner, started_at):
+                raise ValueError("Request predates privacy deletion; start a new request")
             db.execute(
                 """INSERT INTO credentials(
                        user_id, provider, model, nonce, ciphertext, updated_at,

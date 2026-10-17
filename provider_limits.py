@@ -42,3 +42,27 @@ def turn_timeout_seconds(bot, provider=None):
         or (getattr(bot, "_control", {}) or {}).get("live_turn_timeout_seconds", 180),
         180,
     )
+
+
+def worker_timeout_seconds(bot):
+    """Operator ceiling for all workers, including personal connections."""
+    configured = getattr(
+        getattr(bot, "config", None), "AI_WORKER_TURN_TIMEOUT_SECONDS", 0
+    )
+    return _bounded(
+        configured
+        or (getattr(bot, "_control", {}) or {}).get(
+            "task_workers_timeout_seconds", 600
+        ),
+        600,
+    )
+
+
+def request_turn_timeout_seconds(bot, provider=None, *, premium=False):
+    timeout = turn_timeout_seconds(bot, provider)
+    if premium and (getattr(bot, "_control", {}) or {}).get(
+        "premium_task_workers_enabled", True
+    ):
+        # Leave room for the coordinator to report after a worker deadline.
+        timeout = max(timeout, worker_timeout_seconds(bot) + 30)
+    return timeout
