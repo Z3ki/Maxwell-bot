@@ -1122,11 +1122,8 @@ class ToolCallsMixin:
         # stale call does not error, but do not offer it.
         names.discard("more_tools")
         if "delegate_task" in names:
-            from plugins.maxwell_extras.task_workers import has_premium
-            try:
-                eligible = has_premium(self, author_id)
-            except Exception:
-                eligible = False
+            from premium_access import premium_for_current_request
+            eligible = premium_for_current_request(author_id)
             if not eligible or not self._control.get("premium_task_workers_enabled", True):
                 names.discard("delegate_task")
         channel = getattr(message, "channel", None) if message is not None else None

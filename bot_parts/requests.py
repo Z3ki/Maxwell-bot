@@ -426,6 +426,8 @@ class RequestPipelineMixin:
 
         token = _current_inbound.set(message)
         inbox_token = _current_inbox_notices.set(())
+        from premium_access import current_plan, load_plan
+        plan_token = current_plan.set(None)
         request_provider_token = _current_request_provider.set(None)
         byok_budget_token = _current_byok_tool_budget.set({"calls": 0})
         web_references_token = begin_web_references()
@@ -457,6 +459,8 @@ class RequestPipelineMixin:
             if row and row["attempts"] >= max_attempts:
                 await self._request_failure(message, "retry_budget_exhausted")
                 return
+            uid = str(getattr(message.author, "id", ""))
+            current_plan.set((uid, await load_plan(self, uid)))
             request_provider = await self._personal_provider(message)
             if request_provider is not None:
                 _current_request_provider.set(request_provider)
@@ -519,6 +523,7 @@ class RequestPipelineMixin:
             if request_provider is not None:
                 with contextlib.suppress(Exception):
                     await request_provider.close()
+            current_plan.reset(plan_token)
             _current_request_provider.reset(request_provider_token)
             _current_byok_tool_budget.reset(byok_budget_token)
             reset_web_references(web_references_token)
