@@ -417,3 +417,16 @@ def test_next_release_is_blocked_without_review_evidence():
     blockers = release_blockers(Path(__file__).resolve().parents[1])
     assert "Operator review is not approved" in blockers
     assert any("provider_inventory" in row for row in blockers)
+
+
+def test_delete_data_revokes_manual_premium_grant_but_retains_short_usage_metadata(tmp_path):
+    from message_quota import MessageQuota
+    ledger = MessageQuota(tmp_path / "message_quota.sqlite3")
+    ledger.configure("123", plan="premium")
+    ledger.configure("456", plan="premium")
+    ledger.charge("123", 200, 18000)
+    result = delete_data(tmp_path, "123", preferences(tmp_path))
+    assert "plan_grants" not in result["failed"]
+    assert ledger.plan_for("123") == "free"
+    assert ledger.plan_for("456") == "premium"
+    assert ledger.status("123", 200, 18000)["used"] == 1

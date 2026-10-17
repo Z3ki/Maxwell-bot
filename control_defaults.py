@@ -75,6 +75,10 @@ DEFAULT_CONTROL = {
     "require_direct_response": True,
     "respond_to_edited_mentions": True,
     "live_turn_timeout_seconds": 180,
+    "premium_task_workers_enabled": True,
+    "task_workers_max_active": 4,
+    "task_workers_max_steps": 6,
+    "task_workers_timeout_seconds": 600,
     "inbound_retry_attempts": 2,
     "inbound_retry_delay_seconds": 5,
     # Unused for answering: startup skips the offline backlog instead of

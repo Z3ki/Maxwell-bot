@@ -39,6 +39,7 @@ _PERSONAL_SETTINGS = {
     "language": ("Language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("AI connection", "Connect your own AI account with an API key."),
+    "agents": ("Custom agents", "Save and manage your own task-worker instructions and tool permissions."),
     "tracking": ("Privacy", "Choose whether Maxwell stores your message content."),
 }
 _SERVER_SETTINGS = {
@@ -677,7 +678,8 @@ class _ConfigPanel(discord.ui.View):
         self.scope = "personal"
         self.selected_key = "overview"
         self.notice = ""
-        self.selected_provider = "openai"
+        self.selected_provider = "custom"
+        self.agent_profiles = []
         self.connection_status = None
         self.connection_present = False
         self.connection_error = "" if connections.available(self) else "unavailable"
@@ -697,6 +699,8 @@ class _ConfigPanel(discord.ui.View):
     async def _refresh_personal(self) -> None:
         self.personal = await asyncio.to_thread(self.store.get, self.user_id)
         await self._refresh_connection()
+        agents = getattr(self.bot, "_task_agents", None)
+        self.agent_profiles = await asyncio.to_thread(agents.list, self.user_id) if agents else []
 
     async def _refresh_connection(self) -> None:
         vault = getattr(self.bot, "_byok_vault", None)
@@ -765,7 +769,7 @@ class _ConfigPanel(discord.ui.View):
         self.add_item(_ConfigCloseButton(self))
         if self.selected_key != "overview":
             parent = "byok" if self.selected_key in {"byok_advanced", "byok_remove"} else (
-                "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context"} else "overview")
+                "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context", "agents"} else "overview")
             self.add_item(_ConfigNavButton(self, parent, label="Back", row=4))
         if self.selected_key == "overview":
             if self.scope == "personal":
@@ -780,6 +784,9 @@ class _ConfigPanel(discord.ui.View):
                 ):
                     self.add_item(_ConfigNavButton(self, key, label=label, row=4))
                 return
+            if self.scope == "owner":
+                from .premium_ui import PremiumGrantButton
+                self.add_item(PremiumGrantButton(self))
             keys = tuple(
                 _SERVER_SETTINGS if self.scope == "server" else _OWNER_SETTINGS)
             for i, key in enumerate(keys):
@@ -789,10 +796,14 @@ class _ConfigPanel(discord.ui.View):
             connections.build(self, _ConfigNavButton)
             return
         if self.scope == "personal":
+            if self.selected_key == "agents":
+                from .task_agents_ui import AgentProfileButton
+                self.add_item(AgentProfileButton(self))
+                return
             if self.selected_key == "replies":
                 for row, key in ((1, "visibility"), (2, "detail")):
                     self.add_item(_ConfigValueSelect(self, _PERSONAL_VALUE_CHOICES[key], key=key, row=row))
-                for key in ("mode", "web", "context"):
+                for key in ("mode", "web", "context", "agents"):
                     self.add_item(_ConfigNavButton(self, key, row=3))
                 return
             choices = _PERSONAL_VALUE_CHOICES.get(self.selected_key)
@@ -899,6 +910,9 @@ class _ConfigPanel(discord.ui.View):
             return self.overview()
         if self.scope == "personal" and self.selected_key.startswith("byok"):
             return connections.render(self)
+        if self.scope == "personal" and self.selected_key == "agents":
+            lines = [f"`{row['name']}` · {row['kind']} · {', '.join(row['tools'])}" for row in self.agent_profiles]
+            return ("## Your custom task agents\nPremium can save up to ten profiles. Maxwell can choose tool permissions within your available tools. Profiles use your selected AI connection.\n\n" + ("\n".join(lines) or "No saved agents.") + "\n\nUse Manage agent to save/edit or delete an ID. Instructions are optional saved settings, expire 90 days after editing by default and are included in Delete my data. Do not include credentials. You can also ask Maxwell to manage your agents.\n\n" + self.notice)[:1900]
         if self.scope == "personal" and self.selected_key == "tracking":
             return self._privacy_screen()
         if self.scope == "personal" and self.selected_key == "replies":
@@ -939,7 +953,7 @@ class _ConfigPanel(discord.ui.View):
                     "Choose a button below. You need Manage Server to change these settings.")
         return ("## Application owner settings\nThese controls affect the entire bot.\n\n"
                 "Open diagnostics, manage global features or reload saved controls. "
-                "Choose a button below. Only configured bot owners have access.")
+                "Choose a button below. Only configured bot owners have access. Premium grants are manual and do not charge users.")
 
     def _privacy_screen(self) -> str:
         current = _friendly_personal_value("tracking", self.personal["defaults"].get("tracking"))

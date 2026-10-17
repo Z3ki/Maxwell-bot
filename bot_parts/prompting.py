@@ -115,7 +115,7 @@ class PromptingMixin:
             ),
         )
         output_reserve = max(16000, raw_budget // 4)
-        provider = _current_request_provider.get()
+        provider = _current_request_provider.get() or getattr(self, "ai_provider", None)
         window = getattr(getattr(provider, "capabilities", None), "context_window", None)
         if isinstance(window, int) and window > 0:
             raw_budget = min(raw_budget, max(4000, window * 4))

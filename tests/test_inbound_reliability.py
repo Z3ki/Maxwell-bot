@@ -865,7 +865,7 @@ def test_provider_call_receives_request_id_for_local_trace(tmp_path, caplog):
 
     with caplog.at_level("INFO"):
         asyncio.run(run())
-    bot.ai_provider.generate_response.assert_awaited_once_with([], request_id="101")
+    bot.ai_provider.generate_response.assert_awaited_once_with([], timeout=3600, request_id="101")
     assert "requested_model=configured-model" in caplog.text
 
 

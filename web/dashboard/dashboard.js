@@ -149,7 +149,8 @@ function setSupport(settings = {}) {
     field(connectionForm, key).checked =
       key === "tools" ? settings[key] !== false : settings[key] === true;
   field(connectionForm, "max_tokens").value = settings.max_tokens || 4096;
-  field(connectionForm, "temperature").value = settings.temperature ?? 0.4;
+  field(connectionForm, "request_timeout").value = settings.timeout || 300;
+  field(connectionForm, "turn_timeout").value = settings.turn_timeout || 900;
   field(connectionForm, "effort").value = settings.effort || "";
   field(connectionForm, "model_context").value = settings.context || "";
 }
@@ -169,7 +170,7 @@ function parseConnection(status) {
       values[key] =
         key === "reasoning"
           ? value === "on"
-          : ["max_tokens", "temperature", "context"].includes(key)
+          : ["max_tokens", "context", "timeout", "turn_timeout"].includes(key)
             ? Number(value)
             : value;
     });
@@ -187,44 +188,20 @@ function providerChanged() {
     ? connection.model
     : providers[provider]?.suggested_model || "";
   $("custom-endpoint").hidden = provider !== "custom";
-  $("endpoint-override").hidden = provider === "custom";
+
   field(connectionForm, "base_url").required = provider === "custom";
   field(connectionForm, "base_url").value =
     same && provider === "custom" ? connection.base_url : "";
-  field(connectionForm, "advanced_url").value =
-    same && connection.base_url !== providers[provider]?.base_url
-      ? connection.base_url
-      : "";
   setSupport(same ? parseConnection(connection) : {});
   connectionDirty = false;
   $("provider-help").replaceChildren();
-  const keyUrls = {
-    openai: "https://platform.openai.com/api-keys",
-    openrouter: "https://openrouter.ai/settings/keys",
-    groq: "https://console.groq.com/keys",
-  };
-  if (keyUrls[provider]) {
-    const link = document.createElement("a");
-    link.href = keyUrls[provider];
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent =
-      "Get an API key from " + providers[provider].label + " ↗";
-    $("provider-help").append(link);
-  }
   $("test-connection").hidden = !same;
   $("test-connection").disabled = !same;
 }
 function fillConnection(data) {
   connection = data.connection;
   providers = data.providers;
-  const selectedProvider =
-    connection?.provider || field(connectionForm, "provider").value || "openai";
-  $("provider").replaceChildren(
-    ...Object.entries(providers).map(([key, item]) =>
-      option(key, key === "custom" ? "Other provider" : item.label),
-    ),
-  );
+  const selectedProvider = "custom";
   $("provider").value = selectedProvider;
   providerChanged();
   $("connection-status").textContent = data.unreadable
@@ -369,8 +346,7 @@ connectionForm.addEventListener("submit", (event) => {
     };
     if (provider === "custom")
       body.base_url = field(connectionForm, "base_url").value.trim();
-    else if (connectionDirty)
-      body.base_url = field(connectionForm, "advanced_url").value.trim();
+
     if (connectionDirty) {
       body.modalities = [
         "text",
@@ -383,8 +359,8 @@ connectionForm.addEventListener("submit", (event) => {
         (field(connectionForm, "reasoning").checked ? "on" : "off") +
         " max_tokens=" +
         field(connectionForm, "max_tokens").value +
-        " temperature=" +
-        field(connectionForm, "temperature").value;
+        " timeout=" + field(connectionForm, "request_timeout").value +
+        " turn_timeout=" + field(connectionForm, "turn_timeout").value;
       if (field(connectionForm, "effort").value)
         body.generation += " effort=" + field(connectionForm, "effort").value;
       if (field(connectionForm, "model_context").value)

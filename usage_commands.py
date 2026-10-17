@@ -71,7 +71,7 @@ _HELP_TOPICS = {
             "`/config` — open the private settings menu for response mode, research, detail, context, language, and reply style.",
             "`/config` → Personality — set or clear a personal writing preference.",
             "`/config` → Reply visibility — choose private or public replies; public is the default.",
-            "`/config` → Bring your own key — save, test, view status, or delete a supported provider key privately.",
+            "`/config` → My AI provider — connect a custom endpoint, configure timeouts, context and reasoning, test it, or remove its key privately.",
         ],
     ),
     "server": (
@@ -84,7 +84,7 @@ _HELP_TOPICS = {
     "owner": (
         "Application owner settings",
         [
-            "Configured application owners can open the Application owner section of `/config` for redacted diagnostics, global tool/quota switches, quota overrides, and trusted control reload.",
+            "Configured application owners can open `/config` → Bot controls for redacted diagnostics, global tools, manual Premium grants/revocation and trusted control reload.",
             "Guild ownership and server administrator permissions do not grant access to application-owner settings.",
         ],
     ),

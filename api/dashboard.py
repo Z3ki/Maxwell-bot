@@ -515,6 +515,11 @@ class Dashboard:
                 if existing and existing["provider"] == body.get("provider")
                 else None
             )
+            if same and not body.get("api_key"):
+                from plugins.maxwell_extras.byok import validate_public_endpoint
+                endpoint = validate_public_endpoint(body.get("base_url", same["base_url"]), required=True)
+                if endpoint != same["base_url"]:
+                    raise ValueError("Paste an API key when changing the endpoint.")
             secret = body.get("api_key") or (same or {}).get("api_key", "")
             settings = (
                 parse_model_support(body["modalities"], body["generation"])
@@ -526,7 +531,7 @@ class Dashboard:
             await asyncio.to_thread(
                 self.vault.save,
                 user_id,
-                body.get("provider", ""),
+                body.get("provider", "custom"),
                 body.get("model", ""),
                 secret,
                 base_url=body.get("base_url", (same or {}).get("base_url", "")),

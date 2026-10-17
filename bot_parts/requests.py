@@ -457,11 +457,11 @@ class RequestPipelineMixin:
             if row and row["attempts"] >= max_attempts:
                 await self._request_failure(message, "retry_budget_exhausted")
                 return
-            timeout = self._inbound_setting("live_turn_timeout_seconds", 180, 1, 7200)
             request_provider = await self._personal_provider(message)
             if request_provider is not None:
                 _current_request_provider.set(request_provider)
-                timeout = min(float(timeout), 300.0)
+            from provider_limits import turn_timeout_seconds
+            timeout = turn_timeout_seconds(self, request_provider)
             async with asyncio.timeout(timeout):
                 if row:
                     reason = self._queued_request_policy_reason(message)

@@ -57,6 +57,8 @@ class AIMixin:
         quota_user_id = kwargs.pop("quota_user_id", None)
         charge_message = bool(kwargs.pop("charge_message", False))
         selected_provider = provider or self.ai_provider
+        from provider_limits import request_timeout_seconds
+        kwargs.setdefault("timeout", request_timeout_seconds(self, selected_provider))
         if provider is None:
             for key, value in self._night_fallback_kwargs().items():
                 kwargs.setdefault(key, value)

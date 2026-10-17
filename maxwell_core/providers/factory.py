@@ -9,9 +9,7 @@ from .base import ChatProvider
 from .models import GenerationDefaults, ProviderCapabilities, ProviderConfig
 from .routing import ProviderRouter
 
-OPENAI_COMPAT_KINDS = frozenset(
-    {"openai_compat", "openai", "ollama", "openrouter", "groq", "lmstudio", "custom"}
-)
+OPENAI_COMPAT_KINDS = frozenset({"openai_compat", "custom"})
 
 
 def provider_from_config(config: ProviderConfig, **kwargs: Any) -> ChatProvider:
@@ -82,6 +80,7 @@ def openai_compat_provider(
     from .models import ProviderPolicy
 
     caps = ProviderCapabilities(
+        context_window=kwargs.pop("context_window", None),
         vision=True,
         audio=kwargs.get("enable_audio_input", False),
         reasoning=True,

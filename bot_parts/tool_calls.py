@@ -235,7 +235,7 @@ class ToolCallsMixin:
                     logger.info(
                         "Tool %s finished: %s",
                         name,
-                        result_text[:200].replace("\n", " "),
+                        f"[{len(result_text)} chars]",
                     )
                     head = result_text.lstrip().upper()
                     if head.startswith(("ERROR", "COULD NOT")):
@@ -1121,6 +1121,14 @@ class ToolCallsMixin:
         # leftover no-op from the old gated catalog — keep the handler so a
         # stale call does not error, but do not offer it.
         names.discard("more_tools")
+        if "delegate_task" in names:
+            from plugins.maxwell_extras.task_workers import has_premium
+            try:
+                eligible = has_premium(self, author_id)
+            except Exception:
+                eligible = False
+            if not eligible or not self._control.get("premium_task_workers_enabled", True):
+                names.discard("delegate_task")
         channel = getattr(message, "channel", None) if message is not None else None
         if is_discord_thread(channel):
             names.discard("create_thread")

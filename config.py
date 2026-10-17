@@ -247,6 +247,9 @@ class Config:
     AI_MAX_OUTPUT_TOKENS = _int_env(
         "AI_MAX_OUTPUT_TOKENS", 16384, min_value=1, max_value=131072
     )
+    AI_REQUEST_TIMEOUT_SECONDS = _int_env("AI_REQUEST_TIMEOUT_SECONDS", 3600, min_value=10, max_value=7200)
+    AI_TURN_TIMEOUT_SECONDS = _int_env("AI_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=7200)
+    AI_CONTEXT_WINDOW = _int_env("AI_CONTEXT_WINDOW", 0, min_value=0, max_value=2000000)
     AI_DISABLE_REASONING = _bool_env("AI_DISABLE_REASONING", True)
     # Optional chat-completions reasoning_effort (e.g. "low"). Ignored when
     # AI_DISABLE_REASONING is on. Blank leaves the field off the payload.
@@ -529,7 +532,7 @@ class Config:
         if not cls.AI_BASE_URL:
             raise ValueError(
                 "AI_BASE_URL is required — point it at any OpenAI-compatible "
-                "endpoint (local Ollama, OpenRouter, LM Studio, ...)."
+                "endpoint with its own URL, model and key."
             )
         if not cls.AI_MODEL:
             raise ValueError(

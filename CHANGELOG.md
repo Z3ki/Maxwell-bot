@@ -2,6 +2,9 @@
 
 ## 0.1.15 — 2026-10-17 (release candidate; operator review required)
 
+- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium request-scoped task workers, custom profiles and model-selected tool permissions within caller authorization.
+
+- Remove hosted-provider presets and vendor-specific key links; use explicit endpoint/model/key connections, migrating encrypted historical records safely.
 - Optional conversation storage now requires an affirmative choice. Historical defaults do not imply consent; resets preserve privacy opt-outs.
 - Versioned optional consent and one-time private interaction disclosures; no legal DMs, public consent messages or blanket agreement gate.
 - Privacy controls now review/withdraw choices, authorize an exact voice reference, request private operator support, and report deletion failures and manual/external limitations accurately. Discord and dashboard share settings.

@@ -1175,13 +1175,8 @@ class MessagesMixin:
         # can skip posting into it and avoid racing the real reply.
         self._replying_channels.add(channel_id)
         current_task = asyncio.current_task()
-        ai_timeout = max(
-            10,
-            min(
-                _safe_int(self._control.get("ai_timeout_seconds", 3600) or 3600, 3600),
-                7200,
-            ),
-        )
+        from provider_limits import request_timeout_seconds, turn_timeout_seconds
+        ai_timeout = request_timeout_seconds(self, _current_request_provider.get())
         max_out_tokens = min(
             getattr(self.config, "AI_MAX_OUTPUT_TOKENS", 16384) or 16384,
             max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
@@ -1655,7 +1650,7 @@ class MessagesMixin:
                 self._control.get("tool_iteration_timeout_seconds", 3600) or 3600
             )
             if byok_active:
-                tool_timeout = min(tool_timeout, 300.0)
+                tool_timeout = min(tool_timeout, turn_timeout_seconds(self, _current_request_provider.get()))
             tool_deadline = time.monotonic() + max(1.0, tool_timeout)
             all_tool_results = []
             all_tool_images = []

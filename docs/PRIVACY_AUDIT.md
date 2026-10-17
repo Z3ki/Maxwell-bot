@@ -96,8 +96,9 @@ before release; no fabricated address was added.
 | Personal settings JSON | Until changed/deleted. Full deletion replaces the row with storage-off plus a suppression timestamp. This minimal privacy record intentionally remains. |
 | `privacy.sqlite3` | Active optional choices until withdrawal/deletion. Withdrawn choices: 365 days by default. Notice ID/version/time remains to avoid repeated unchanged notices, unless the user deletes it. |
 | `llm_traces.json` | Metadata only; seven days / 300 rows. Legacy raw reasoning payloads are scrubbed. Full deletion removes matching user rows. |
-| `inbound_requests.sqlite3`, quota DB | Seven days by default; no message bodies. Short-lived usage/security metadata may remain after personal-data deletion to prevent quota abuse. Existing quota/window pruning also applies. |
+| `inbound_requests.sqlite3`, quota DB | Seven days by default; no message bodies. Short-lived usage/security metadata may remain after personal-data deletion to prevent quota abuse. Existing quota/window pruning also applies. Manual plan/limit grants last until revoked or full deletion. |
 | Dashboard flows/sessions | Five-minute flows, at most eight-hour sessions; prune during auth and periodic cleanup. User sessions are revoked on full deletion when the session key/store is available; failures are reported. |
+| `task_agents.sqlite3` custom profiles | Explicitly saved instructions/scopes/tool permissions; ten per user, 90 days since last edit by default, periodic pruning and full deletion with stale-write suppression. Worker transcripts remain in memory only. |
 | Encrypted BYOK credentials | Until explicit removal/full deletion; encrypted using the operator's configured master key. No key value is returned to a user/model. |
 | Reminders / rich callback registry | Explicit feature records. Delivered/cancelled reminders are removed; callbacks have a TTL and periodic pruning. Full deletion filters supported owner records under the same file lock as writers. |
 | GitHub token/policy/knowledge JSON | Removed for the user by full deletion. Running GitHub containers and filesystem workspaces need operator quiescence/removal. Environment-provisioned credentials need operator removal. |
@@ -150,12 +151,12 @@ and privileged-intent requirements in the Portal separately.
 ## Provider review
 
 The architecture supports configured primary/fallback/vision HTTP providers,
-OpenAI/OpenRouter/Groq/custom BYOK, search providers, NVIDIA/image generation and
+generic endpoint BYOK, search providers, NVIDIA/image generation and
 Mistral TTS. No live embedding provider is used. Source alone cannot identify
 which account tier, route, endpoint or retention settings are active in production.
 Provider secrets/endpoints are not disclosed by the privacy UI.
 
-- [OpenRouter provider logging](https://openrouter.ai/docs/guides/privacy/provider-logging): retention can vary across provider endpoints; do not infer it from a model name.
+- Verify the configured API endpoint’s own published retention, subprocessors and routing rules; do not infer those guarantees from a model name.
 - [Mistral voice usage](https://docs.mistral.ai/studio/audio/text_to_speech/voices): explicit speaker consent matters; public media is insufficient.
 - [Mistral ZDR](https://docs.mistral.ai/admin/monitor-comply/zero-data-retention): availability/configuration must be checked, not presumed.
 - [Gemini API terms](https://ai.google.dev/gemini-api/terms): service tier and age/use eligibility require review before routing general Discord users there.
@@ -197,11 +198,11 @@ and age/transfer assessment; encryption for all stored data; host/proxy log and
 backup expiry; manual plugin/workspace deletion and restore drill; real billing,
 renewal, cancellation, tax and refund terms before Premium sales.
 
-Automated verification results and final Git references are recorded in the PR and
+Expanded provider/worker verification results and final Git references are recorded in the PR and
 final delivery report. No deployment/restart or Portal modification is implied by
 merging source.
 
-## Local verification before promotion
+## Initial privacy-only verification
 
 - Python 3.12: 3,149 tests passed, two explicitly skipped (no local Chromium and
   no real provider API key), nine existing Discord UI deprecation warnings.
@@ -214,3 +215,30 @@ merging source.
   to the repository's GitHub Actions workflows, not claimed as local passes.
 - The release-readiness check intentionally blocks publication pending operator
   evidence. No live Discord/Portal/provider or backup-restore validation is claimed.
+
+## Provider preset retirement
+
+Hosted-service presets and key-purchase links have been removed. Discord,
+dashboard and installers use explicit URL/model/key connections. Only the generic
+protocol kind is offered for new BYOK saves. Earlier encrypted preset rows are
+migrated with a compare-and-swap to the generic identifier, preserving their exact
+original endpoint and key; deletion or a concurrent edit wins the migration.
+Changing an endpoint requires entering its API key again. The read-only legacy
+upgrade map cannot create new presets or route fallback traffic.
+
+## Provider controls and Premium workers
+
+The follow-up engineering scope adds request and whole-task timeouts, context size
+and reasoning effort controls, shared between Discord and dashboard. See
+[PROVIDERS.md](PROVIDERS.md) and [BYOK.md](BYOK.md) for bounds. Manual Premium grants
+are available only to configured owners in `/config → Bot controls`. Paid checkout
+remains disabled. Full deletion revokes manual plan/limit grants; short-lived quota
+metadata remains under the documented retention policy.
+
+[PREMIUM_TASKS.md](PREMIUM_TASKS.md) documents request-scoped workers: same caller,
+provider and permission checks, no saved transcripts/background scheduler, bounded
+steps/time/concurrency, cancellation joined with the parent, and explicit partial
+failure reports. New tests cover grants/revocation/restarts, failed plan writes,
+worker cancellation, privacy suppression, rejected tools/exports/recursion,
+capacity and context budgets. These workers do not restore the deleted autonomous
+engine or its legacy controls.

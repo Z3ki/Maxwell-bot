@@ -382,6 +382,7 @@ class CoreMixin:
     def _setup_ai(self):
         self.ai_provider = self._make_chat_provider(
             name="primary",
+            context_window=getattr(self.config, "AI_CONTEXT_WINDOW", 0) or None,
             base_url=self.config.AI_BASE_URL,
             model=self.config.AI_MODEL,
             max_tokens=self.config.AI_MAX_OUTPUT_TOKENS,

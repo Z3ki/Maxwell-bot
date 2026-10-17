@@ -99,7 +99,7 @@ def test_endpoint_precedence_and_blank_optional_credentials():
 
 @pytest.mark.parametrize(
     "kind",
-    ["openai_compat", "ollama", "openai", "openrouter", "groq", "lmstudio", "custom"],
+    ["openai_compat", "custom"],
 )
 def test_factory_maps_protocol_aliases_and_honors_explicit_configuration(kind):
     config = ProviderConfig(
@@ -375,9 +375,11 @@ def test_media_routing_reaches_primary_after_vision_and_fallback_fail(monkeypatc
     primary = Endpoint("primary", succeeds=True)
     vision, fallback = Endpoint("vision"), Endpoint("fallback")
     router = ProviderRouter(primary, fallback, vision, retry_attempts=3)
-    result = asyncio.run(router.generate_response(
-        [{"role": "user", "content": "inspect"}], images=["AA=="]
-    ))
+    result = asyncio.run(
+        router.generate_response(
+            [{"role": "user", "content": "inspect"}], images=["AA=="]
+        )
+    )
     assert result.provider == "primary"
     assert primary.calls == 1
 
@@ -397,10 +399,15 @@ def test_media_degradation_tells_the_model_the_image_was_not_delivered():
             return ProviderResult("Please attach a supported image.")
 
     router = ProviderRouter(Endpoint(), retry_attempts=1)
-    assert asyncio.run(router.generate_response(
-        [{"role": "user", "content": "what color is this?"}],
-        media=[{"b64": "AA==", "mime_type": "image/png"}],
-    )) == "Please attach a supported image."
+    assert (
+        asyncio.run(
+            router.generate_response(
+                [{"role": "user", "content": "what color is this?"}],
+                media=[{"b64": "AA==", "mime_type": "image/png"}],
+            )
+        )
+        == "Please attach a supported image."
+    )
 
 
 def test_concurrent_results_never_exchange_tool_calls_usage_models_or_timing():
@@ -434,7 +441,9 @@ def test_concurrent_results_never_exchange_tool_calls_usage_models_or_timing():
                     "usage": {
                         "prompt_tokens": 11 if self.marker == "one" else 22,
                         "completion_tokens": 1,
-                        "prompt_tokens_details": {"cached_tokens": 5 if self.marker == "one" else 15},
+                        "prompt_tokens_details": {
+                            "cached_tokens": 5 if self.marker == "one" else 15
+                        },
                     },
                 }
 
@@ -458,7 +467,10 @@ def test_concurrent_results_never_exchange_tool_calls_usage_models_or_timing():
         assert (first.tool_calls[0]["id"], second.tool_calls[0]["id"]) == ("one", "two")
         assert (first.usage["prompt_tokens"], second.usage["prompt_tokens"]) == (11, 22)
         assert (first.usage["cached_tokens"], second.usage["cached_tokens"]) == (5, 15)
-        assert (first.timing["cached_tokens"], second.timing["cached_tokens"]) == (5, 15)
+        assert (first.timing["cached_tokens"], second.timing["cached_tokens"]) == (
+            5,
+            15,
+        )
         assert (first.model, second.model) == ("first", "second")
         assert (first.timing["model"], second.timing["model"]) == ("first", "second")
         first.assistant_message["tool_calls"][0]["id"] = "changed"
@@ -542,7 +554,12 @@ def test_byok_public_resolver_and_verified_tls_are_installed_before_first_sessio
             type(
                 "Bot", (), {"_make_chat_provider": staticmethod(openai_compat_provider)}
             )(),
-            {"provider": "openrouter", "model": "m", "api_key": "key"},
+            {
+                "provider": "custom",
+                "model": "m",
+                "api_key": "key",
+                "base_url": "https://api.example.com/v1",
+            },
         )
         try:
             session = await client._get_session()

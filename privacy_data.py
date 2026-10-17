@@ -76,6 +76,21 @@ def delete_data(root, user_id, preferences, *, sessions=None):
             )
 
     run("consents", lambda: preferences.consents.delete(uid))
+    agent_path = extra / "task_agents.sqlite3"
+    if agent_path.is_file():
+        from plugins.maxwell_extras.task_agents import TaskAgentStore
+
+        run("custom_agents", lambda: TaskAgentStore(agent_path).delete(uid))
+    quota_path = root / "message_quota.sqlite3"
+    if quota_path.is_file():
+
+        def remove_plan():
+            with closing(sqlite3.connect(quota_path, timeout=10)) as db, db:
+                return db.execute(
+                    "DELETE FROM overrides WHERE user_id=?", (uid,)
+                ).rowcount
+
+        run("plan_grants", remove_plan)
     run(
         "conversation", lambda: delete_author_content_file(root / "maxwell_rag.db", uid)
     )
@@ -192,6 +207,11 @@ def cleanup_data(root, preferences):
     """Run at startup and every ten minutes. No raw diagnostic content is needed."""
     root = Path(root)
     now = time.time()
+    agent_path = root / "plugins/maxwell_extras/task_agents.sqlite3"
+    if agent_path.is_file():
+        from plugins.maxwell_extras.task_agents import TaskAgentStore
+
+        TaskAgentStore(agent_path).prune()
     db_path = root / "maxwell_rag.db"
     if db_path.is_file():
         with closing(sqlite3.connect(db_path, timeout=30)) as db:

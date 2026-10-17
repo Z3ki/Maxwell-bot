@@ -75,7 +75,7 @@ Use the full wizard when you want advanced settings during installation:
 curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh | bash
 ```
 
-The full wizard writes `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`, plus `OLLAMA_*` compatibility aliases. Those names do not mean Maxwell requires Ollama; OpenRouter, OpenAI, LM Studio, and other compatible endpoints work too.
+The full wizard writes `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY`, plus `OLLAMA_*` compatibility aliases. Those names do not mean Maxwell requires Ollama; any configured compatible endpoint works.
 
 The full installer can configure:
 
@@ -130,9 +130,9 @@ For the full installer, export the values it understands and run non-interactive
 MAXWELL_NONINTERACTIVE=1 \
 MAXWELL_INSTALL_DIR="$HOME/maxwell" \
 DISCORD_BOT_TOKEN="your-discord-bot-token" \
-AI_BASE_URL="https://openrouter.ai/api/v1" \
-AI_MODEL="moonshotai/kimi-k2.6:free" \
-AI_API_KEY="your-openrouter-key" \
+AI_BASE_URL="https://api.example.com/v1" \
+AI_MODEL="your-model-id" \
+AI_API_KEY="your-api-key" \
 MAXWELL_OWNER_IDS="123456789012345678" \
 MAXWELL_ADMIN_PASSWORD="change-me" \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/install.sh)"
@@ -199,20 +199,12 @@ AI_API_KEY=
 
 If RAG embeddings use local Ollama too, configure the embedding endpoint/model in the advanced config and pull that embedding model on the host.
 
-### OpenRouter
+### Custom API endpoint
 
 ```ini
-AI_BASE_URL=https://openrouter.ai/api/v1
-AI_MODEL=moonshotai/kimi-k2.6:free
-AI_API_KEY=your-openrouter-key
-```
-
-### OpenAI
-
-```ini
-AI_BASE_URL=https://api.openai.com/v1
-AI_MODEL=gpt-4.1-mini
-AI_API_KEY=your-openai-key
+AI_BASE_URL=https://api.example.com/v1
+AI_MODEL=your-model-id
+AI_API_KEY=your-api-key
 ```
 
 ### LM Studio

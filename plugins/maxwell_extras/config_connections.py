@@ -20,14 +20,9 @@ from .byok import (
     make_request_provider,
     parse_model_support,
 )
-from .config_ui import _config_action, _edit_panel, _send
+from .config_ui import _config_action, _send
 
 logger = logging.getLogger(__name__)
-KEY_URLS = {
-    "openai": "https://platform.openai.com/api-keys",
-    "openrouter": "https://openrouter.ai/settings/keys",
-    "groq": "https://console.groq.com/keys",
-}
 
 
 async def refresh_panel(panel: Any, interaction: Any, notice: str) -> None:
@@ -56,41 +51,6 @@ def available(panel: Any) -> bool:
 def active_selected(panel: Any) -> bool:
     status = panel.connection_status
     return bool(status and status["provider"] == panel.selected_provider)
-
-
-class ProviderSelect(discord.ui.Select):
-    def __init__(self, panel: Any):
-        super().__init__(
-            placeholder="1. Choose an AI provider",
-            row=1,
-            custom_id="maxwell:config:connection:provider",
-            options=[
-                discord.SelectOption(
-                    label=("Other provider" if key == "custom" else value["label"]),
-                    value=key,
-                    default=key == panel.selected_provider,
-                    description=(
-                        "Use a custom OpenAI-compatible API"
-                        if key == "custom"
-                        else "Connect with your own API key"
-                    ),
-                )
-                for key, value in PROVIDERS.items()
-            ],
-            disabled=not available(panel) or bool(panel.connection_error),
-        )
-        self.panel = panel
-
-    @_config_action()
-    async def callback(self, interaction: Any) -> None:
-        if self.values[0] not in PROVIDERS:
-            return
-        self.panel.selected_provider = self.values[0]
-        self.panel.notice = "Provider selected. Save a connection to use it."
-        self.panel._build()
-        await _edit_panel(
-            interaction, content=None, embed=self.panel.embed(), view=self.panel
-        )
 
 
 class ConnectModal(discord.ui.Modal):
@@ -152,9 +112,8 @@ class ConnectModal(discord.ui.Modal):
             same = (
                 existing if existing and existing["provider"] == self.provider else None
             )
-            secret = str(self.api_key.value or "").strip() or (same or {}).get(
-                "api_key", ""
-            )
+            entered_key = str(self.api_key.value or "").strip()
+            secret = entered_key or (same or {}).get("api_key", "")
             if not secret:
                 raise ValueError("Paste an API key for this provider.")
             settings = (
@@ -167,6 +126,16 @@ class ConnectModal(discord.ui.Modal):
                 if self.endpoint
                 else (same or {}).get("base_url", "")
             )
+            if same and not entered_key:
+                from .byok import validate_public_endpoint
+
+                if (
+                    validate_public_endpoint(endpoint, required=True)
+                    != same["base_url"]
+                ):
+                    raise ValueError(
+                        "Paste an API key when changing the endpoint; saved keys are never sent to a new destination automatically."
+                    )
             await asyncio.to_thread(
                 vault.save,
                 self.panel.user_id,
@@ -198,7 +167,7 @@ class ConnectButton(discord.ui.Button):
         super().__init__(
             label="Edit connection"
             if active_selected(panel)
-            else "2. Connect provider",
+            else "Connect API endpoint",
             style=discord.ButtonStyle.primary,
             row=2,
             custom_id="maxwell:config:connection:connect",
@@ -315,6 +284,13 @@ async def update_settings(
     if not credential or credential["provider"] != panel.selected_provider:
         await _send(interaction, "Connect the selected provider first.")
         return
+    if endpoint is not None:
+        from .byok import validate_public_endpoint
+
+        if validate_public_endpoint(endpoint, required=True) != credential["base_url"]:
+            raise ValueError(
+                "Use Edit connection and enter an API key to change the destination."
+            )
     await asyncio.to_thread(
         vault.save,
         panel.user_id,
@@ -428,7 +404,7 @@ class AdvancedModal(discord.ui.Modal):
                     "base_url",
                     "API base URL",
                     status["base_url"],
-                    "Public HTTPS URL; blank restores the official URL",
+                    "Changing destinations requires Edit connection and a key",
                     300,
                 )
             ]
@@ -445,7 +421,7 @@ class AdvancedModal(discord.ui.Modal):
                     "effort",
                     "Reasoning effort (optional)",
                     settings["effort"],
-                    "none, minimal, low, medium, high, max",
+                    "none, minimal, low, medium, high, xhigh, max",
                     10,
                 ),
                 (
@@ -454,6 +430,20 @@ class AdvancedModal(discord.ui.Modal):
                     str(settings["context"] or ""),
                     "Leave blank for the provider default",
                     9,
+                ),
+                (
+                    "timeout",
+                    "LLM request timeout (seconds)",
+                    str(settings["timeout"]),
+                    "10 to 1800 seconds",
+                    4,
+                ),
+                (
+                    "turn_timeout",
+                    "Whole task timeout (seconds)",
+                    str(settings["turn_timeout"]),
+                    "10 to 7200 seconds; at least request timeout",
+                    4,
                 ),
             ]
         )
@@ -561,9 +551,7 @@ def build(panel: Any, nav_button: Any) -> None:
         panel.add_item(FeaturesSelect(panel))
         panel.add_item(ReasoningSelect(panel))
         panel.add_item(AdvancedButton(panel))
-        panel.add_item(AdvancedButton(panel, endpoint=True))
     else:
-        panel.add_item(ProviderSelect(panel))
         panel.add_item(ConnectButton(panel))
         if active_selected(panel) and available(panel):
             panel.add_item(nav_button(panel, "byok_advanced", label="Advanced", row=2))
@@ -571,16 +559,6 @@ def build(panel: Any, nav_button: Any) -> None:
         if panel.connection_present:
             panel.add_item(
                 nav_button(panel, "byok_remove", label="Use Maxwell's AI", row=3)
-            )
-        if (
-            available(panel)
-            and not panel.connection_error
-            and panel.selected_provider in KEY_URLS
-        ):
-            panel.add_item(
-                discord.ui.Button(
-                    label="Get an API key", url=KEY_URLS[panel.selected_provider], row=3
-                )
             )
 
 
@@ -616,7 +594,9 @@ def render(panel: Any) -> str:
             f"**Model:** {discord.utils.escape_markdown(status['model'])}\n"
             f"**API base URL:** {url}\n**Reply token limit:** {settings['max_tokens']:,}\n"
             f"**Reasoning effort:** {settings['effort'] or 'Provider default'}\n"
-            f"**Context token limit:** {settings['context'] or 'Provider default'}\n\n{panel.notice}"
+            f"**Context token limit:** {settings['context'] or 'Provider default'}\n"
+            f"**LLM request deadline:** {settings['timeout']}s\n"
+            f"**Whole task deadline:** {settings['turn_timeout']}s\n\n{panel.notice}"
         )
     status = panel.connection_status
     active = discord.utils.escape_markdown(summary(panel))
@@ -628,14 +608,11 @@ def render(panel: Any) -> str:
     else:
         text += "Optional: replace Maxwell's model with your own provider for your messages, "
         text += "including chat, mentions, and app actions.\n\n"
-        selected = PROVIDERS[panel.selected_provider]["label"]
-        text += f"**1. Choose a provider**\n**2. Connect {selected}** with your API key and model name.\n"
+        text += "**Connect your API endpoint** with its URL, model and API key.\n"
         if status:
             text += f"\n**Saved key:** {status['masked_key']}\n"
             if not active_selected(panel):
                 text += "Saving another provider replaces this connection. Picking a provider alone changes nothing.\n"
-        if panel.selected_provider == "openai":
-            text += "\nOpenAI uses API billing, separate from a ChatGPT subscription.\n"
         text += "\nThe provider receives your request and its included context. Keys are stored encrypted. "
         text += (
             "Test connection sends a small API request and may use provider credit.\n"

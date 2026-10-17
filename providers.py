@@ -636,10 +636,10 @@ class OpenAICompatibleProvider(ChatProvider):
             # OR nested `reasoning: {"effort": "none"}`. The literal string
             # "none" is what the docs list as a valid value (alongside "low",
             # "medium", "high", "max") — sending boolean false or
-            # {"exclude": true} (OpenRouter-style) was a no-op against Ollama,
+            # {"exclude": true} was a no-op against this compatible server,
             # which is why reasoning kept streaming even with
             # disable_reasoning=True. Emit both shapes so the same payload
-            # works across Ollama and OpenRouter without branching.
+            # works across compatible servers without destination presets.
             data["reasoning_effort"] = "none"
             data["reasoning"] = {"effort": "none"}
             data["thinking"] = {"type": "disabled", "budget_tokens": 0}
@@ -987,7 +987,7 @@ class OpenAICompatibleProvider(ChatProvider):
             )
         if byok_request:
             try:
-                timeout = max(1, min(int(timeout), 300))
+                timeout = max(1, min(int(timeout), self.policy.max_request_seconds or 300))
             except (TypeError, ValueError):
                 timeout = 120
             ceiling = self.policy.max_output_tokens or 4096

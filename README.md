@@ -3,7 +3,7 @@ This codebase is such a mess...
 
 # Maxwell
 
-Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, moderation tools, image generation, web tools, generated sites, and optional second transports. It can use Ollama, OpenRouter, OpenAI, LM Studio, or another OpenAI-compatible API.
+Maxwell is an official Discord AI bot with multimodal chat, tool calling, memory, operator controls, moderation tools, image generation, web tools, generated sites, and optional second transports. It connects to a configured OpenAI-compatible API endpoint.
 
 ## Install — easiest path
 
@@ -44,8 +44,8 @@ Example:
 
 ```env
 DISCORD_BOT_TOKEN=your-discord-bot-token
-AI_BASE_URL=https://openrouter.ai/api/v1
-AI_MODEL=moonshotai/kimi-k2.6:free
+AI_BASE_URL=https://api.example.com/v1
+AI_MODEL=your-model-id
 AI_API_KEY=your-api-key
 MAXWELL_OWNER_IDS=123456789012345678
 MAXWELL_ADMIN_USER=admin
@@ -74,21 +74,15 @@ AI_API_KEY=
 
 The easy installer can offer to install Ollama on Linux if it is missing.
 
-### OpenRouter
+### Custom API endpoint
 
 ```env
-AI_BASE_URL=https://openrouter.ai/api/v1
-AI_MODEL=moonshotai/kimi-k2.6:free
-AI_API_KEY=your-openrouter-key
+AI_BASE_URL=https://api.example.com/v1
+AI_MODEL=your-model-id
+AI_API_KEY=your-api-key
 ```
 
-### OpenAI
-
-```env
-AI_BASE_URL=https://api.openai.com/v1
-AI_MODEL=gpt-4.1-mini
-AI_API_KEY=your-openai-key
-```
+Use the endpoint's actual model ID and key. No hosted provider preset is required.
 
 ### LM Studio
 
