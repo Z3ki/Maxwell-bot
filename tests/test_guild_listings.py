@@ -224,6 +224,7 @@ def test_room_context_mentions_list_tools_and_recent_people():
 def test_list_tools_execute_against_current_guild():
     guild, general, _mod, _ada = _guild()
     msg = SimpleNamespace(guild=guild, author=SimpleNamespace(id=5), channel=general)
+    general.permissions_for = lambda _user: SimpleNamespace(view_channel=True)
     bot = SimpleNamespace(get_guild=lambda _gid: None)
 
     channels = asyncio.run(ListChannelsTool(bot).execute(msg, kind="text"))
@@ -233,7 +234,7 @@ def test_list_tools_execute_against_current_guild():
     members = asyncio.run(ListMembersTool(bot).execute(msg, query="ada", limit="10"))
     assert "Ada (2)" in members
     servers = asyncio.run(
-        ListServersTool(SimpleNamespace(guilds=[guild], private_channels=[])).execute(
+        ListServersTool(SimpleNamespace(guilds=[guild], private_channels=[], _is_admin=lambda uid: True)).execute(
             msg
         )
     )

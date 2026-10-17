@@ -270,7 +270,12 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
 ):
     async def run():
         async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
-            payload = {"provider": "openai", "model": "test-model", "api_key": SECRET}
+            payload = {
+                "provider": "custom",
+                "model": "test-model",
+                "api_key": SECRET,
+                "base_url": "https://api.example.com/v1",
+            }
             response = await client.put(
                 "/api/dashboard/connection", json=payload, headers=headers
             )
@@ -280,7 +285,12 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
             assert not dashboard.vault.has_credential("200")
             response = await client.put(
                 "/api/dashboard/connection",
-                json={"provider": "openai", "model": "new-model", "api_key": ""},
+                json={
+                    "provider": "custom",
+                    "model": "new-model",
+                    "api_key": "",
+                    "base_url": "https://api.example.com/v1",
+                },
                 headers=headers,
             )
             assert response.status == 200
@@ -288,11 +298,16 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
             assert (
                 await client.put(
                     "/api/dashboard/connection",
-                    json={"provider": "groq", "model": "model", "api_key": ""},
+                    json={
+                        "provider": "custom",
+                        "model": "model",
+                        "api_key": "",
+                        "base_url": "https://second.example.com/v1",
+                    },
                     headers=headers,
                 )
             ).status == 400
-            assert dashboard.vault.get("100")["provider"] == "openai"
+            assert dashboard.vault.get("100")["provider"] == "custom"
             assert (
                 await client.put(
                     "/api/dashboard/connection",
@@ -459,3 +474,15 @@ def test_discord_and_web_preferences_survive_separate_process_writes(tmp_path):
     store = UserPreferenceStore(path)
     assert store.get("100")["defaults"]["language"] == "language-19"
     assert store.get("200")["defaults"]["language"] == "language-19"
+
+
+def test_dashboard_roundtrips_slow_model_settings_used_by_discord(tmp_path, monkeypatch):
+    async def run():
+        async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
+            response = await client.put("/api/dashboard/connection", json={"provider": "custom", "model": "slow", "api_key": SECRET, "base_url": "https://api.example.com/v1", "modalities": "text, tools", "generation": "reasoning=on effort=high context=128000 timeout=1200 turn_timeout=2400"}, headers=headers)
+            assert response.status == 200
+            assert "timeout=1200" in (await response.json())["connection"]["generation"]
+            from plugins.maxwell_extras.byok import CredentialVault
+            stored = CredentialVault(dashboard.vault.path, dashboard.vault._key).get("100")["settings"]
+            assert (stored["timeout"], stored["turn_timeout"], stored["context"], stored["effort"]) == (1200, 2400, 128000, "high")
+    asyncio.run(run())

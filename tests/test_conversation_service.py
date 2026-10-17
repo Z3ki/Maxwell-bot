@@ -303,6 +303,7 @@ def test_older_relevant_history_is_recalled_without_changing_recent_prefix(tmp_p
     async def scenario():
         builder, message, _ = service(memory_history_messages=2, tool_history_messages=0)
         memory = ConversationMemoryManager(str(tmp_path))
+        memory.preferences.set_default("42", "tracking", "on")
         builder.host.memory = memory
         try:
             for index in range(8):

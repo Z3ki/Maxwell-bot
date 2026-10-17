@@ -31,7 +31,6 @@ _DIAGNOSTIC_CHOICES = [
     {"name": "Runtime", "value": "runtime"},
     {"name": "Controls", "value": "controls"},
     {"name": "Memory", "value": "memory"},
-    {"name": "Autonomy", "value": "autonomy"},
     {"name": "Tools", "value": "tools"},
     {"name": "Plugins", "value": "plugins"},
     {"name": "Full data export", "value": "data"},
@@ -304,25 +303,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
         if section == "memory":
             return embed
 
-    if section in {"overview", "autonomy"}:
-        embed.add_field(
-            name="Autonomy",
-            value=_field_lines(
-                control,
-                (
-                    "autonomy_enabled",
-                    "autonomy_interval_seconds",
-                    "autonomy_floor_enabled",
-                    "autonomy_floor_cooldown_seconds",
-                    "autonomy_disable_reasoning",
-                    "enable_night_fallback",
-                ),
-            ),
-            inline=False,
-        )
-        if section == "autonomy":
-            return embed
-
     if section in {"overview", "tools"}:
         disabled = control.get("disabled_tools") or []
         embed.add_field(
@@ -490,7 +470,7 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
     opts = _options(interaction)
     if name == DIAGNOSTICS_COMMAND_NAME:
         section = str(opts.get("section") or "overview").strip().lower()
-        if section not in {"overview", "runtime", "controls", "memory", "autonomy", "tools", "plugins", "data"}:
+        if section not in {"overview", "runtime", "controls", "memory", "tools", "plugins", "data"}:
             await _send(interaction, content="Unknown diagnostics section.")
         elif section == "controls":
             await _send(

@@ -4,7 +4,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from plugins.maxwell_extras import autonomy_routing
 from plugins.maxwell_extras import maxwell_embed_output
 from plugins.maxwell_extras import taint_gate_cleanup
 
@@ -25,53 +24,10 @@ def test_maxwell_slash_reply_uses_plain_text(monkeypatch):
     assert payload["ephemeral"] is False
 
 
-def test_autonomy_route_rejects_context_only_guild_channel():
-    bot = SimpleNamespace(
-        _auto_channels={"100"},
-        get_channel=lambda _cid: SimpleNamespace(guild=SimpleNamespace(id=9)),
-    )
-    engine = SimpleNamespace(
-        bot=bot,
-        _context_index=SimpleNamespace(kind_by_id={"200": "guild"}),
-        _channel_allowed=lambda _cid: True,
-    )
-
-    allowed, cid, reason = autonomy_routing._route_allowed(engine, "200")
-    assert allowed is False
-    assert cid == "200"
-    assert "context-only" in reason
 
 
-def test_autonomy_route_accepts_configured_guild_channel():
-    bot = SimpleNamespace(
-        _auto_channels={"100"},
-        get_channel=lambda _cid: SimpleNamespace(guild=SimpleNamespace(id=9)),
-    )
-    engine = SimpleNamespace(
-        bot=bot,
-        _context_index=SimpleNamespace(kind_by_id={"100": "guild"}),
-        _channel_allowed=lambda _cid: True,
-    )
-
-    allowed, cid, reason = autonomy_routing._route_allowed(engine, "100")
-    assert allowed is True
-    assert cid == "100"
-    assert reason == ""
 
 
-def test_autonomy_reply_must_stay_in_source_channel():
-    index = SimpleNamespace(
-        msg_idx_by_id={"555": 1},
-        message_channel_by_idx={1: "100"},
-    )
-    engine = SimpleNamespace(_context_index=index)
-    ok, reason = autonomy_routing._reply_matches_route(
-        engine,
-        {"reply_to_message_id": "555"},
-        "200",
-    )
-    assert ok is False
-    assert "channel 100" in reason
 
 
 def test_tainted_destructive_tool_is_blocked_and_confirm_state_is_cleared():

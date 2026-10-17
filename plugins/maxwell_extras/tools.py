@@ -75,87 +75,69 @@ def _parse_iso(value: str) -> float:
 
 
 class ReminderStore:
-    """Small atomic JSON store used by the reminder polling job."""
-
-    def __init__(self, path: Path) -> None:
+    """Atomic feature records; mutation locks are shared with privacy deletion."""
+    def __init__(self, path: Path):
         self.path = Path(path)
         self._lock = asyncio.Lock()
 
-    def _read_sync(self) -> list[dict]:
+    def _read_sync(self):
         if not self.path.exists():
             return []
-        try:
-            raw = json.loads(self.path.read_text("utf-8"))
-        except Exception:
-            logger.exception("Failed to read reminder store %s", self.path)
-            return []
-        if not isinstance(raw, list):
-            return []
-        return [item for item in raw if isinstance(item, dict)]
+        value = json.loads(self.path.read_text("utf-8"))
+        if not isinstance(value, list):
+            raise TypeError("Unexpected reminder store")
+        return [row for row in value if isinstance(row, dict)]
 
-    def _write_sync(self, rows: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rows, indent=2, ensure_ascii=False), "utf-8")
-        tmp.replace(self.path)
+    def _write_sync(self, rows):
+        from utils import _atomic_json_write_sync
+        _atomic_json_write_sync(self.path, rows)
 
-    async def add(
-        self,
-        *,
-        owner_id: str,
-        channel_id: str,
-        text: str,
-        due_at: float,
-    ) -> dict:
-        async with self._lock:
+    def _add_sync(self, owner_id, channel_id, text, due_at, started_at):
+        from utils import FileLock
+        with FileLock(self.path, timeout=5):
+            from privacy import owned_write_allowed
+            if not owned_write_allowed(self.path.parent.parent.parent, owner_id, started_at):
+                raise ValueError("Request predates a privacy deletion; submit a new reminder request")
             rows = self._read_sync()
-            row = {
-                "id": uuid.uuid4().hex[:12],
-                "owner_id": str(owner_id),
-                "channel_id": str(channel_id),
-                "text": str(text)[:1800],
-                "due_at": float(due_at),
-                "created_at": time.time(),
-            }
+            row = {"id": uuid.uuid4().hex[:12], "owner_id": str(owner_id),
+                   "channel_id": str(channel_id), "text": str(text)[:1800],
+                   "due_at": float(due_at), "created_at": time.time()}
             rows.append(row)
             rows.sort(key=lambda item: float(item.get("due_at") or 0))
             self._write_sync(rows)
             return dict(row)
 
-    async def list_for(self, owner_id: str) -> list[dict]:
+    async def add(self, *, owner_id, channel_id, text, due_at):
+        from privacy import request_started_at
+        started_at = request_started_at()
         async with self._lock:
-            rows = self._read_sync()
-        return [
-            dict(item)
-            for item in rows
-            if str(item.get("owner_id") or "") == str(owner_id)
-        ]
+            return await asyncio.to_thread(self._add_sync, owner_id, channel_id, text, due_at, started_at)
 
-    async def remove(self, reminder_id: str, owner_id: str | None = None) -> bool:
+    async def list_for(self, owner_id):
         async with self._lock:
+            rows = await asyncio.to_thread(self._read_sync)
+        return [dict(row) for row in rows if str(row.get("owner_id") or "") == str(owner_id)]
+
+    def _remove_sync(self, reminder_id, owner_id):
+        from utils import FileLock
+        with FileLock(self.path, timeout=5):
             rows = self._read_sync()
-            kept = []
-            removed = False
-            for item in rows:
-                same_id = str(item.get("id") or "") == str(reminder_id)
-                owner_ok = owner_id is None or str(item.get("owner_id") or "") == str(owner_id)
-                if same_id and owner_ok:
-                    removed = True
-                    continue
-                kept.append(item)
-            if removed:
+            kept = [row for row in rows if not (str(row.get("id") or "") == str(reminder_id)
+                    and (owner_id is None or str(row.get("owner_id") or "") == str(owner_id)))]
+            if len(rows) != len(kept):
                 self._write_sync(kept)
-            return removed
+                return True
+            return False
 
-    async def due(self, now: float | None = None) -> list[dict]:
+    async def remove(self, reminder_id, owner_id=None):
+        async with self._lock:
+            return await asyncio.to_thread(self._remove_sync, reminder_id, owner_id)
+
+    async def due(self, now=None):
         cutoff = float(time.time() if now is None else now)
         async with self._lock:
-            rows = self._read_sync()
-        return [
-            dict(item)
-            for item in rows
-            if float(item.get("due_at") or 0) <= cutoff
-        ]
+            rows = await asyncio.to_thread(self._read_sync)
+        return [dict(row) for row in rows if float(row.get("due_at") or 0) <= cutoff]
 
 
 class ReminderTool(Tool):

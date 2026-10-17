@@ -392,7 +392,7 @@ class Dashboard:
                         user_id,
                     )
                 except Exception:
-                    logger.warning("Could not delete stored message content", exc_info=True)
+                    logger.warning("Could not delete stored message content", exc_info=False)
                     raise web.HTTPBadRequest(
                         text="Message storage is off, but stored messages could not be deleted. Try again."
                     ) from None
@@ -401,6 +401,19 @@ class Dashboard:
         result = await asyncio.to_thread(self.preferences.get, user_id)
         result["context_counts"] = USER_INSTALL_CONTEXT_COUNTS
         return self.response(result)
+
+    async def privacy(self, request, session):
+        from privacy import policy_urls
+        from privacy_data import delete_data
+        uid = session["user"]["id"]
+        if request.method == "DELETE":
+            result = await asyncio.to_thread(delete_data, self.data_dir(), uid, self.preferences, sessions=self.sessions)
+            return self.response(result, 207 if result["failed"] else 200)
+        return self.response({"policies": policy_urls(), "consents": await asyncio.to_thread(self.preferences.consents.review, uid),
+            "storage": (await asyncio.to_thread(self.preferences.get, uid))["defaults"]["tracking"],
+            "processing": "Requests and necessary context go to selected AI providers, including fallbacks and BYOK. Disabling history does not change provider processing or provider retention.",
+            "support": policy_urls().get("contact", "Use /config → Privacy → Request private support in Discord."),
+            "persistent_memory": "Automatic facts and embeddings are retired."})
 
     async def servers(self, request, session):
         users, bots = await asyncio.gather(self.guilds(session["token"]), self.guilds())
@@ -502,6 +515,11 @@ class Dashboard:
                 if existing and existing["provider"] == body.get("provider")
                 else None
             )
+            if same and not body.get("api_key"):
+                from plugins.maxwell_extras.byok import validate_public_endpoint
+                endpoint = validate_public_endpoint(body.get("base_url", same["base_url"]), required=True)
+                if endpoint != same["base_url"]:
+                    raise ValueError("Paste an API key when changing the endpoint.")
             secret = body.get("api_key") or (same or {}).get("api_key", "")
             settings = (
                 parse_model_support(body["modalities"], body["generation"])
@@ -513,7 +531,7 @@ class Dashboard:
             await asyncio.to_thread(
                 self.vault.save,
                 user_id,
-                body.get("provider", ""),
+                body.get("provider", "custom"),
                 body.get("model", ""),
                 secret,
                 base_url=body.get("base_url", (same or {}).get("base_url", "")),
@@ -582,6 +600,8 @@ def register_dashboard(app, data_dir, config=None):
         ("GET", "/api/dashboard/session", dashboard.session, True),
         ("POST", "/api/dashboard/logout", dashboard.logout, False),
         ("GET", "/api/dashboard/personal", dashboard.personal, False),
+        ("GET", "/api/dashboard/privacy", dashboard.privacy, False),
+        ("DELETE", "/api/dashboard/privacy", dashboard.privacy, False),
         ("PUT", "/api/dashboard/personal", dashboard.personal, False),
         ("GET", "/api/dashboard/servers", dashboard.servers, False),
         ("GET", "/api/dashboard/servers/{guild_id}", dashboard.server, False),

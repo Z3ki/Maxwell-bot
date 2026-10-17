@@ -195,3 +195,19 @@ def canonical_history(
                 continue
         result.append(row)
     return result
+
+
+def _reply_relation_bit(msg: dict) -> str | None:
+    """`reply_to=Name(id) "short quote"` for transcript and planner lines."""
+    if not msg.get("reply_to_author"):
+        return None
+    reply_label = str(msg.get("reply_to_author"))
+    reply_id = str(msg.get("reply_to_author_id") or "")
+    if msg.get("reply_to_self"):
+        reply_label = "you/Maxwell"
+    bit = f"reply_to={reply_label}({reply_id})" if reply_id else f"reply_to={reply_label}"
+    quoted = " ".join(str(msg.get("reply_to_content") or "").split())[:80]
+    if quoted:
+        quoted = quoted.replace('"', "'")
+        bit += f' "{quoted}"'
+    return bit

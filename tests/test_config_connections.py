@@ -84,13 +84,13 @@ def component(panel, cls):
     return next(item for item in panel.children if isinstance(item, cls))
 
 
-def seed(panel, vault, provider="openai", *, custom=False):
+def seed(panel, vault, provider="custom", *, custom=False):
     vault.save(
         "100",
         provider,
         "example-model",
         SECRET,
-        base_url="https://example.com/v1" if custom or provider == "custom" else "",
+        base_url="https://example.com/v1",
         settings=parse_model_support(
             "text, vision, tools",
             "reasoning=on max_tokens=8192 effort=high context=128000",
@@ -177,9 +177,7 @@ def test_channel_picker_explains_missing_bot_permissions_without_saving(setup):
     assert "channel permissions" in click.notices[-1]
 
 
-@pytest.mark.parametrize(
-    "provider,count", [("openai", 2), ("openrouter", 2), ("groq", 2), ("custom", 3)]
-)
+@pytest.mark.parametrize("provider,count", [("custom", 3)])
 def test_connect_form_is_short_and_cancel_does_not_save(setup, provider, count):
     panel, _, vault, _ = setup
     panel.selected_provider = provider
@@ -214,27 +212,24 @@ def test_connect_save_and_edit_preserve_key_endpoint_and_advanced_settings(setup
     assert SECRET not in json.dumps(panel.to_components()) + panel.render()
 
 
-def test_switching_provider_requires_its_key_and_never_reuses_another_key(setup):
+def test_changing_endpoint_requires_key_and_never_reuses_saved_key(setup):
     panel, _, vault, _ = setup
     seed(panel, vault)
     open_page(panel, "byok")
-    selector = component(panel, connections.ProviderSelect)
-    selector._values = ["groq"]
-    asyncio.run(selector.callback(Interaction()))
-    assert vault.get("100")["provider"] == "openai"
-    assert "OpenAI" in panel.render() and "replaces" in panel.render()
+    assert not any(isinstance(item, discord.ui.Select) for item in panel.children)
     modal = connections.ConnectModal(panel)
-    modal.model._value = "groq-model"
+    modal.model._value = "new-model"
+    modal.endpoint._value = "https://different.example.com/v1"
     modal.api_key._value = ""
     click = Interaction()
     asyncio.run(modal.on_submit(click))
     assert "Paste an API key" in click.notices[-1]
-    assert vault.get("100")["provider"] == "openai"
-    modal.api_key._value = "new-provider-key-987654"
+    assert vault.get("100")["base_url"] == "https://example.com/v1"
+    modal.api_key._value = "new-endpoint-key-987654"
     asyncio.run(modal.on_submit(Interaction()))
-    assert vault.get("100")["provider"] == "groq"
-    assert vault.get("100")["base_url"] == ""
-    assert vault.get("100")["settings"]["vision"] is False
+    assert vault.get("100")["provider"] == "custom"
+    assert vault.get("100")["base_url"] == "https://different.example.com/v1"
+    assert vault.get("100")["api_key"] == "new-endpoint-key-987654"
 
 
 @pytest.mark.parametrize(
@@ -252,7 +247,7 @@ def test_late_or_unauthorized_connect_form_cannot_write(setup, kind):
     if kind == "other_page":
         open_page(panel, "style")
     if kind == "other_provider":
-        panel.selected_provider = "groq"
+        panel.selected_provider = "retired-provider"
     if kind == "closed":
         panel.stop()
     asyncio.run(modal.on_submit(click))
@@ -510,3 +505,92 @@ def test_bot_controls_do_not_advertise_retired_message_limits(setup):
     ]
     assert not any("allowance" in label.lower() for label in labels)
     assert not {"message_quota_enabled", "user_quota"} & settings._OWNER_SETTINGS.keys()
+
+
+def test_owner_can_grant_and_revoke_any_user_premium_privately(setup):
+    from message_quota import MessageQuota
+    from plugins.maxwell_extras.premium_ui import PremiumGrantButton, PremiumGrantModal
+    panel, bot, _, _ = setup
+    bot._message_quota = MessageQuota(bot._user_preferences.path.parent / "quota.sqlite3")
+    open_page(panel, "overview", scope="owner")
+    button = component(panel, PremiumGrantButton)
+    click = Interaction()
+    asyncio.run(button.callback(click))
+    assert click.modals and not click.done  # modal is the initial Discord response
+    modal = click.modals[0]
+    modal.user_id._value = "200"
+    modal.plan._value = "premium"
+    asyncio.run(modal.on_submit(Interaction()))
+    assert bot._message_quota.plan_for("200") == "premium"
+    revoke = PremiumGrantModal(panel)
+    revoke.user_id._value = "200"
+    revoke.plan._value = "free"
+    asyncio.run(revoke.on_submit(Interaction()))
+    assert bot._message_quota.plan_for("200") == "free"
+    modal.plan._value = "premium"
+    asyncio.run(modal.on_submit(Interaction(user_id=200)))
+    assert bot._message_quota.plan_for("200") == "free"
+
+
+def test_owner_grant_rechecks_owner_and_does_not_claim_failed_write(setup):
+    from unittest.mock import Mock
+    from plugins.maxwell_extras.premium_ui import PremiumGrantModal
+    panel, bot, _, _ = setup
+    open_page(panel, "overview", scope="owner")
+    bot._message_quota = SimpleNamespace(configure=Mock(side_effect=OSError("private-secret")))
+    modal = PremiumGrantModal(panel)
+    modal.user_id._value = "200"
+    modal.plan._value = "premium"
+    click = Interaction()
+    asyncio.run(modal.on_submit(click))
+    assert any("could not be confirmed" in s for s in click.notices)
+    assert not any("private-secret" in s for s in click.notices)
+    bot.config.MAXWELL_OWNER_IDS = set()
+    bot._message_quota.configure.reset_mock()
+    asyncio.run(modal.on_submit(Interaction()))
+    bot._message_quota.configure.assert_not_called()
+
+
+def test_reply_limit_modal_round_trips_deadlines_and_reasoning_effort(setup):
+    panel, _, vault, _ = setup
+    seed(panel, vault)
+    open_page(panel, "byok_advanced")
+    reasoning = component(panel, connections.ReasoningSelect)
+    reasoning._values = ["on"]
+    asyncio.run(reasoning.callback(Interaction()))
+    modal = connections.AdvancedModal(panel)
+    assert len(modal.children) == 5
+    for name, value in {"timeout": "1200", "turn_timeout": "2400", "context": "128000", "effort": "high", "max_tokens": "8192"}.items():
+        modal.fields[name]._value = value
+    asyncio.run(modal.on_submit(Interaction()))
+    saved = vault.get("100")["settings"]
+    assert (saved["timeout"], saved["turn_timeout"], saved["context"], saved["effort"]) == (1200, 2400, 128000, "high")
+
+
+def test_custom_agent_private_modal_saves_permissions_and_deletes_without_premium(setup):
+    from message_quota import MessageQuota
+    from plugins.maxwell_extras.task_agents import TaskAgentStore
+    from plugins.maxwell_extras.task_agents_ui import AgentProfileButton, AgentProfileModal
+    panel, bot, _, _ = setup
+    bot._message_quota = MessageQuota(bot._user_preferences.path.parent / "quota.sqlite3")
+    bot._message_quota.configure("100", plan="premium")
+    bot._task_agents = TaskAgentStore(bot._user_preferences.path.parent / "agents.sqlite3")
+    open_page(panel, "agents")
+    click = Interaction()
+    asyncio.run(component(panel, AgentProfileButton).callback(click))
+    modal = click.modals[0]
+    assert not click.done and len(modal.children) == 5
+    modal.agent_id._value = "builder"
+    modal.kind._value = "custom"
+    modal.instructions._value = "Verify accessibility"
+    modal.tools._value = "shell, edit_site"
+    modal.action._value = "save"
+    asyncio.run(modal.on_submit(Interaction()))
+    assert bot._task_agents.get("100", "builder")["tools"] == ["edit_site", "shell"]
+    assert "builder" in panel.render()
+    bot._message_quota.configure("100", plan="free")
+    delete = AgentProfileModal(panel)
+    delete.agent_id._value = "builder"
+    delete.action._value = "delete"
+    asyncio.run(delete.on_submit(Interaction()))
+    assert bot._task_agents.list("100") == []

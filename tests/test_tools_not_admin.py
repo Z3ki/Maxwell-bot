@@ -92,7 +92,7 @@ def test_leave_server_refuses_a_non_admin():
     assert "admin" in result.lower()
 
 
-def test_list_servers_works_for_anyone():
+def test_list_servers_rejects_nonowners():
     bot = SimpleNamespace(
         guilds=[SimpleNamespace(name="Villa", id=1)],
         private_channels=[],
@@ -101,7 +101,8 @@ def test_list_servers_works_for_anyone():
     msg = SimpleNamespace(author=SimpleNamespace(id=999))
     result = asyncio.run(ListServersTool(bot).execute(msg))
     assert "admin-only" not in result
-    assert "Villa" in result
+    assert "Villa" not in result
+    assert "restricted" in result
 
 
 def test_create_invite_requires_server_from_dms():

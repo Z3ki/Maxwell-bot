@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.15 — 2026-10-17 (release candidate; operator review required)
+
+- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium request-scoped task workers, custom profiles and model-selected tool permissions within caller authorization.
+
+- Remove hosted-provider presets and vendor-specific key links; use explicit endpoint/model/key connections, migrating encrypted historical records safely.
+- Optional conversation storage now requires an affirmative choice. Historical defaults do not imply consent; resets preserve privacy opt-outs.
+- Versioned optional consent and one-time private interaction disclosures; no legal DMs, public consent messages or blanket agreement gate.
+- Privacy controls now review/withdraw choices, authorize an exact voice reference, request private operator support, and report deletion failures and manual/external limitations accurately. Discord and dashboard share settings.
+- History, trace, usage and authentication retention cleanup; retired facts and legacy reasoning payloads are removed. Automatic error reports no longer copy the requesting message.
+- Restrict server listings and voice presence to authorized context; close site metadata/KV ownership gaps; fix private backend reads, subpath KV guides and production GitHub workspace names. Fixes #74, #75, #76, #79, #80, #81.
+- Integrate the modular bot split (#82), restore its missing core module, and preserve dev quota behavior. Remove the unused autonomous activity engine, routing and operator endpoints.
+- Rewrite Terms, Privacy and Contact without invented jurisdiction/operator facts or blanket compliance claims. Publication is gated by `release-readiness.json` and reviewed deployment evidence. Premium sales remain subject to operator review.
+
+
 ## Unreleased
 
 - Do not post a "Maxwell is using" line for reactions, silence, typing, waits, or message edits, deletes, and pins. Those actions are the response, and the status line only appears and disappears.

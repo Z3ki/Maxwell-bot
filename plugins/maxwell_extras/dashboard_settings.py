@@ -98,18 +98,6 @@ def save_server_settings(
             else:
                 mapping.pop(guild_id, None)
             control["guild_solo_channel"] = mapping
-            blocked = set(control.get("autonomy_blocked_servers", []))
-            owned = set(control.get("guild_solo_autonomy_added", []))
-            if changes["channel"] and guild_id not in blocked:
-                blocked.add(guild_id)
-                owned.add(guild_id)
-            elif not changes["channel"] and guild_id in owned:
-                blocked.discard(guild_id)
-                owned.discard(guild_id)
-            control.update(
-                autonomy_blocked_servers=sorted(blocked),
-                guild_solo_autonomy_added=sorted(owned),
-            )
         for field, key, value in (
             (
                 "capabilities",

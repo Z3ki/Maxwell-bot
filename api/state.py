@@ -15,9 +15,6 @@ from api.config import (
     MAX_LTM_LINES,
 )
 from api.storage import (
-    _autonomy_goals_path,
-    _autonomy_log_path,
-    _autonomy_state_path,
     _commands_path,
     _context_path,
     _control_path,
@@ -202,41 +199,9 @@ def _sanitize_control(control):
     out["x_mention_poll_seconds"] = max(
         60, min(_safe_int(out.get("x_mention_poll_seconds"), 300), 3600)
     )
-    out["autonomy_interval_seconds"] = max(
-        30, _safe_int(out.get("autonomy_interval_seconds"), 300)
-    )
-    out["autonomy_recent_reply_block_seconds"] = max(
-        0, min(_safe_int(out.get("autonomy_recent_reply_block_seconds"), 0), 86400)
-    )
     # Conversational turn-taking windows (autonomy_social.py). Clamped so a
     # fat-fingered dashboard value can't either disable turn-taking outright
     # (0 everywhere) or wedge autonomy silent for a day.
-    out["autonomy_floor_cooldown_seconds"] = max(
-        0,
-        min(_safe_int(out.get("autonomy_floor_cooldown_seconds"), 300), 3600),
-    )
-    out["autonomy_floor_hold_release_seconds"] = max(
-        60,
-        min(
-            _safe_int(out.get("autonomy_floor_hold_release_seconds"), 1800),
-            86400,
-        ),
-    )
-    out["autonomy_floor_mid_flow_seconds"] = max(
-        0,
-        min(_safe_int(out.get("autonomy_floor_mid_flow_seconds"), 45), 600),
-    )
-    out["autonomy_floor_mid_flow_messages"] = max(
-        2,
-        min(_safe_int(out.get("autonomy_floor_mid_flow_messages"), 2), 20),
-    )
-    out["autonomy_floor_idle_seconds"] = max(
-        60,
-        min(_safe_int(out.get("autonomy_floor_idle_seconds"), 600), 86400),
-    )
-    out["autonomy_base_url"] = str(out.get("autonomy_base_url", "") or "")[:512]
-    out["autonomy_api_key"] = str(out.get("autonomy_api_key", "") or "")[:512]
-    out["autonomy_model"] = str(out.get("autonomy_model", "") or "")[:200]
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 2000))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
     out["tool_history_messages"] = max(
@@ -264,21 +229,13 @@ def _sanitize_control(control):
     )
     out["max_tool_iterations"] = max(0, min(out["max_tool_iterations"], 100))
     out["max_response_chars"] = max(80, min(out["max_response_chars"], 8000))
-    out["autonomy_goal_stale_days"] = max(
-        1, min(_safe_int(out.get("autonomy_goal_stale_days"), 14), 365)
-    )
-    out["autonomy_reflect_interval_seconds"] = max(
-        300,
-        min(
-            _safe_int(out.get("autonomy_reflect_interval_seconds"), 3600),
-            86400,
-        ),
-    )
     out["base_personality"] = DEFAULT_CONTROL["base_personality"]
     for dead_key in DEAD_CONTROL_KEYS:
         out.pop(dead_key, None)
     for key in [name for name in out if str(name).startswith("vc_")]:
         out.pop(key, None)
+    for retired in [key for key in out if str(key).startswith("autonomy_")]:
+        out.pop(retired, None)
     return out
 
 
@@ -399,20 +356,10 @@ async def _save_context_entries(entries):
     await atomic_json_write(_context_path(), entries[:1000])
 
 
-def _load_autonomy_state():
-    return _safe_object(_load(_autonomy_state_path()))
 
 
-def _load_autonomy_goals():
-    data = _safe_object(_load(_autonomy_goals_path()))
-    goals = data.get("goals", [])
-    return goals if isinstance(goals, list) else []
 
 
-def _load_autonomy_log():
-    data = _safe_object(_load(_autonomy_log_path()))
-    entries = data.get("entries", [])
-    return entries if isinstance(entries, list) else []
 
 
 def _load_inbox():

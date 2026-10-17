@@ -161,6 +161,13 @@
                     >
                   </div>
                 </details>
+                <details><summary>Privacy and saved history</summary>
+                  <p>Current requests and necessary context are sent to the selected AI provider, including fallbacks. Provider retention is separate. Automatic learned facts and embeddings are retired.</p>
+                  <label>Optional conversation history<select name="tracking"><option value="off">Off — do not save conversations</option><option value="on">On — I choose to save conversations</option></select></label>
+                  <p>Off deletes saved conversation content. Tool workspaces, published content, previous provider copies and backups need operator review.</p>
+                  <button type="button" id="privacy-review">Review optional choices</button>
+                  <button type="button" id="privacy-delete">Delete my data</button>
+                </details>
                 <div class="actions">
                   <button class="primary" type="submit">Save my settings</button
                   ><span id="personal-saved" class="muted"></span>
@@ -184,17 +191,12 @@
                 Loading connection…
               </p>
               <p class="muted">
-                Your provider may charge for API usage. A ChatGPT subscription
-                does not include OpenAI API credit.
+                Your API endpoint may charge for usage. Check its billing and privacy terms.
               </p>
               <form id="connection-form">
                 <div class="fields">
+                  <input type="hidden" name="provider" id="provider" value="custom">
                   <label
-                    >Provider<select
-                      name="provider"
-                      id="provider"
-                    ></select></label
-                  ><label
                     >API key<input
                       name="api_key"
                       type="password"
@@ -256,15 +258,6 @@
                         value="4096"
                         required /></label
                     ><label
-                      >Creativity (temperature)<input
-                        name="temperature"
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        max="2"
-                        value="0.4"
-                        required /></label
-                    ><label
                       >Reasoning effort<select name="effort">
                         <option value="">Provider default</option>
                         <option>none</option>
@@ -272,6 +265,7 @@
                         <option>low</option>
                         <option>medium</option>
                         <option>high</option>
+                        <option>xhigh</option>
                         <option>max</option>
                       </select></label
                     ><label
@@ -281,13 +275,8 @@
                         min="1024"
                         max="2000000"
                         placeholder="Provider default" /></label
-                    ><label id="endpoint-override"
-                      >Custom API base URL<input
-                        name="advanced_url"
-                        type="url"
-                        maxlength="300"
-                        placeholder="Use the provider’s default"
-                    /></label>
+                    ><label>LLM timeout (seconds)<input name="request_timeout" type="number" min="10" max="1800" value="300" required /></label>
+                    <label>Whole task timeout (seconds)<input name="turn_timeout" type="number" min="10" max="7200" value="900" required /></label>
                   </div>
                 </details>
                 <div class="actions">
@@ -403,7 +392,7 @@
       </div>
     </main>
     <footer>
-      Built for Discord. <code>/config</code> is always there when you need it.
+      <a href="../terms/">Terms</a> · <a href="../privacy/">Privacy</a> · <a href="../contact/">Contact</a><br>Built for Discord. <code>/config</code> is always there when you need it.
     </footer>
   </body>
 </html>

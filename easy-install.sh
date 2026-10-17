@@ -180,13 +180,10 @@ choose_provider() {
 
   cat > "$TTY" <<'MENU'
   Pick what powers Maxwell:
-    1) Ollama on this computer
-    2) OpenRouter
-    3) OpenAI
-    4) LM Studio
-    5) Custom OpenAI-compatible API
+    1) Local model server (Ollama)
+    2) Custom compatible API endpoint
 MENU
-  choice=$(prompt "Provider" "1")
+  choice=$(prompt "Connection" "1")
   case "$choice" in
     1)
       PROVIDER_KIND="ollama"
@@ -195,28 +192,12 @@ MENU
       AI_API_KEY=""
       ;;
     2)
-      PROVIDER_KIND="openrouter"
-      AI_BASE_URL="https://openrouter.ai/api/v1"
-      AI_MODEL="moonshotai/kimi-k2.6:free"
-      ;;
-    3)
-      PROVIDER_KIND="openai"
-      AI_BASE_URL="https://api.openai.com/v1"
-      AI_MODEL="gpt-4.1-mini"
-      ;;
-    4)
-      PROVIDER_KIND="lmstudio"
-      AI_BASE_URL="http://localhost:1234/v1"
-      AI_MODEL="local-model"
-      AI_API_KEY=""
-      ;;
-    5)
       PROVIDER_KIND="custom"
-      AI_BASE_URL=$(prompt "AI API URL" "http://localhost:8000/v1")
+      AI_BASE_URL=$(prompt "AI API URL" "https://api.example.com/v1")
       AI_MODEL=""
       ;;
     *)
-      warn "Unknown choice; using Ollama defaults."
+      warn "Unknown choice; using local model-server defaults."
       PROVIDER_KIND="ollama"
       AI_BASE_URL="http://localhost:11434"
       AI_MODEL="qwen3:8b"
@@ -226,7 +207,7 @@ MENU
 
   AI_MODEL=$(prompt "Model" "$AI_MODEL")
   case "$PROVIDER_KIND" in
-    openrouter|openai|custom)
+    custom)
       AI_API_KEY=$(prompt_secret "API key (blank only if your API does not need one)" "$AI_API_KEY")
       ;;
   esac

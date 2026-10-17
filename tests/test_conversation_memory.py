@@ -15,6 +15,8 @@ from maxwell_core.memory.scope import MemoryRequester
 def test_opt_out_deletes_one_account_and_blocks_new_rows(tmp_path):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
+        memory.preferences.set_default("100", "tracking", "on")
+        memory.preferences.set_default("200", "tracking", "on")
         try:
             await memory.add_to_channel_memory("c1", {
                 "message_id": "keep", "guild_id": "g", "author_id": "200",
@@ -24,6 +26,7 @@ def test_opt_out_deletes_one_account_and_blocks_new_rows(tmp_path):
                 "message_id": "drop", "guild_id": "g", "author_id": "100",
                 "content": "private words", "timestamp": "2026-10-12T00:00:01+00:00",
             })
+            memory.preferences.set_default("100", "tracking", "off")
             memory.tracks_message_content = lambda uid: uid != "100"
             memory._db.execute(
                 "INSERT INTO vectors (id, kind, channel_id, guild_id, author, author_id, "
@@ -67,6 +70,8 @@ def test_opt_out_deletes_one_account_and_blocks_new_rows(tmp_path):
 def test_opt_out_deletes_replies_quotes_and_tool_rows(tmp_path):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
+        memory.preferences.set_default("100", "tracking", "on")
+        memory.preferences.set_default("200", "tracking", "on")
         try:
             await memory.add_to_channel_memory("c1", {
                 "message_id": "u1", "guild_id": "g", "author_id": "100", "author": "Ada",
@@ -75,7 +80,7 @@ def test_opt_out_deletes_replies_quotes_and_tool_rows(tmp_path):
             })
             await memory.add_to_channel_memory("c1", {
                 "message_id": "tool1", "guild_id": "g", "author": "Tool", "author_id": "",
-                "is_tool": True,
+                "is_tool": True, "requested_by": "100",
                 "content": 'Called web_search with {"query": "treatment for diagnosis X"} -> ...',
                 "timestamp": "2026-10-12T00:00:01+00:00",
             })
@@ -95,7 +100,7 @@ def test_opt_out_deletes_replies_quotes_and_tool_rows(tmp_path):
             })
             await memory.add_to_channel_memory("c1", {
                 "message_id": "tool-other", "guild_id": "g", "author": "Tool",
-                "is_tool": True, "content": "Called weather with {}",
+                "is_tool": True, "requested_by": "200", "content": "Called weather with {}",
                 "timestamp": "2026-10-12T00:00:04+00:00",
             })
             await memory.add_to_channel_memory("c1", {

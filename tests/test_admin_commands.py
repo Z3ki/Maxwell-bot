@@ -101,7 +101,7 @@ def test_sensitive_control_cannot_be_changed_through_discord(tmp_path):
         _control={},
         _load_control=lambda force=False: None,
     )
-    with pytest.raises(ValueError, match="sensitive"):
+    with pytest.raises(ValueError, match="unknown control key"):
         asyncio.run(_set_control(bot, "autonomy_api_key", "do-not-store"))
     assert not (tmp_path / "bot_control.json").exists()
 

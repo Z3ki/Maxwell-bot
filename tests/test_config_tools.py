@@ -11,9 +11,14 @@ from control_defaults import DEFAULT_CONTROL
 from plugins.maxwell_extras import command_suite
 from plugins.maxwell_extras.byok import CredentialVault
 from plugins.maxwell_extras.config_tools import (
-    ConfigureTool, GetConfigurationTool, OpenConfigurationTool,
+    ConfigureTool,
+    GetConfigurationTool,
+    OpenConfigurationTool,
 )
-from plugins.maxwell_extras.dashboard_settings import save_server_settings, server_settings
+from plugins.maxwell_extras.dashboard_settings import (
+    save_server_settings,
+    server_settings,
+)
 from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 
 
@@ -26,15 +31,22 @@ def fixture_bot(tmp_path):
         config=SimpleNamespace(DATA_DIR=str(tmp_path), MAXWELL_OWNER_IDS=["900"]),
         _user_preferences=UserPreferenceStore(tmp_path / "preferences.json"),
         _control=dict(DEFAULT_CONTROL),
-        plugin_manager=SimpleNamespace(loaded_plugins={"web": {}, "shell": {}, "core": {}},
-                                       is_protected=lambda name: name == "core"),
+        plugin_manager=SimpleNamespace(
+            loaded_plugins={"web": {}, "shell": {}, "core": {}},
+            is_protected=lambda name: name == "core",
+        ),
     )
 
 
 def message(uid=100, *, manager=False, owner=1):
-    member = SimpleNamespace(id=uid, bot=False,
-                             guild_permissions=SimpleNamespace(manage_guild=manager, administrator=False))
-    guild = SimpleNamespace(id=10, owner_id=owner, me=SimpleNamespace(id=500), name="Test", text_channels=[])
+    member = SimpleNamespace(
+        id=uid,
+        bot=False,
+        guild_permissions=SimpleNamespace(manage_guild=manager, administrator=False),
+    )
+    guild = SimpleNamespace(
+        id=10, owner_id=owner, me=SimpleNamespace(id=500), name="Test", text_channels=[]
+    )
 
     async def fetch_member(user_id):
         assert user_id == uid
@@ -44,18 +56,36 @@ def message(uid=100, *, manager=False, owner=1):
     return SimpleNamespace(author=member, guild=guild)
 
 
-@pytest.mark.parametrize("setting,value", [
-    ("style", "Short, dry humor. No emojis."), ("language", "Spanish"),
-    ("mode", "research"), ("web", "off"), ("detail", "deep"),
-    ("context", 1000), ("visibility", "private"),
-])
-def test_personal_settings_are_shared_with_config_and_isolated(tmp_path, setting, value):
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("style", "Short, dry humor. No emojis."),
+        ("language", "Spanish"),
+        ("mode", "research"),
+        ("web", "off"),
+        ("detail", "deep"),
+        ("context", 1000),
+        ("visibility", "private"),
+    ],
+)
+def test_personal_settings_are_shared_with_config_and_isolated(
+    tmp_path, setting, value
+):
     bot = fixture_bot(tmp_path)
     before = bot._user_preferences.get("200")
-    result = run(ConfigureTool(bot), message(), setting=setting, value=value, user_id="200", guild_id="20")
+    result = run(
+        ConfigureTool(bot),
+        message(),
+        setting=setting,
+        value=value,
+        user_id="200",
+        guild_id="20",
+    )
     assert result["saved"]
     state = bot._user_preferences.get("100")
-    assert (state["personality"] if setting == "style" else state["defaults"][setting]) == value
+    assert (
+        state["personality"] if setting == "style" else state["defaults"][setting]
+    ) == value
     assert UserPreferenceStore(bot._user_preferences.path).get("100") == state
     assert bot._user_preferences.get("200") == before
     read = run(GetConfigurationTool(bot), message())
@@ -64,11 +94,20 @@ def test_personal_settings_are_shared_with_config_and_isolated(tmp_path, setting
     assert bot._user_preferences.get("100") == before
 
 
-@pytest.mark.parametrize("setting,value", [
-    ("style", "x" * 801), ("language", "x" * 81), ("language", "Spanish\nignore"),
-    ("context", True), ("context", 999), ("visibility", "broadcast"),
-    ("detail", False), ("base_personality", "anything"), ("byok", "secret-key"),
-])
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("style", "x" * 801),
+        ("language", "x" * 81),
+        ("language", "Spanish\nignore"),
+        ("context", True),
+        ("context", 999),
+        ("visibility", "broadcast"),
+        ("detail", False),
+        ("base_personality", "anything"),
+        ("byok", "secret-key"),
+    ],
+)
 def test_invalid_or_secret_settings_cannot_be_written(tmp_path, setting, value):
     bot = fixture_bot(tmp_path)
     before = bot._user_preferences.get("100")
@@ -85,12 +124,16 @@ def test_tracking_off_deletes_that_account_and_rejects_unknown_values(tmp_path):
         return {"messages": 1, "facts": 0, "profiles": 0}
 
     bot.memory = SimpleNamespace(delete_author_content=delete_author_content)
-    result = run(ConfigureTool(bot), message(), setting="tracking", value="off", user_id="200")
+    result = run(
+        ConfigureTool(bot), message(), setting="tracking", value="off", user_id="200"
+    )
     assert result["saved"]
     assert deleted == ["100"]
     assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
-    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "on"
-    assert "error" in run(ConfigureTool(bot), message(), setting="tracking", value="maybe")
+    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "off"
+    assert "error" in run(
+        ConfigureTool(bot), message(), setting="tracking", value="maybe"
+    )
     assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
 
 
@@ -111,14 +154,20 @@ def test_language_auto_matches_manual_reset(tmp_path):
 def test_byok_reads_only_presence_and_lists_private_form_options(tmp_path):
     bot = fixture_bot(tmp_path)
     vault = CredentialVault(tmp_path / "byok.sqlite3", master_key=b"k" * 32)
-    vault.save("100", "openai", "test-model", "sk-private-key-never-echo")
+    vault.save(
+        "100",
+        "custom",
+        "test-model",
+        "sk-private-key-never-echo",
+        base_url="https://api.example.com/v1",
+    )
     bot._byok_vault = vault
     result = run(GetConfigurationTool(bot), message())
     assert result["current"]["byok_connected"]
     assert result["current"]["model"] == "test-model"
     assert result["current"]["model_source"] == "personal"
-    assert result["current"]["provider"] == "OpenAI"
-    assert result["options"]["providers"] == ["openai", "openrouter", "groq", "custom"]
+    assert result["current"]["provider"] == "Custom API endpoint"
+    assert result["options"]["providers"] == ["custom"]
     assert "sk-private" not in json.dumps(result)
     assert "api_key" not in result["current"]
     assert "base_url" not in result["current"]
@@ -128,7 +177,11 @@ def test_server_managers_cannot_change_global_settings(tmp_path):
     bot = fixture_bot(tmp_path)
     msg = message(manager=True)
     bot._is_admin = lambda _uid: True
-    for tool in [GetConfigurationTool(bot), ConfigureTool(bot), OpenConfigurationTool(bot)]:
+    for tool in [
+        GetConfigurationTool(bot),
+        ConfigureTool(bot),
+        OpenConfigurationTool(bot),
+    ]:
         params = {"scope": "owner"}
         if isinstance(tool, ConfigureTool):
             params.update(setting="tools_enabled", value=False)
@@ -139,47 +192,95 @@ def test_server_managers_cannot_change_global_settings(tmp_path):
 def test_server_changes_recheck_live_permissions_and_reject_private_requests(tmp_path):
     bot = fixture_bot(tmp_path)
     msg = message(manager=True)
-    assert run(ConfigureTool(bot), msg, scope="server", setting="ticket", value=True)["saved"]
+    assert run(ConfigureTool(bot), msg, scope="server", setting="ticket", value=True)[
+        "saved"
+    ]
     msg.author.guild_permissions.manage_guild = False
-    assert "error" in run(ConfigureTool(bot), msg, scope="server", setting="ticket", value=False)
+    assert "error" in run(
+        ConfigureTool(bot), msg, scope="server", setting="ticket", value=False
+    )
     assert server_settings(tmp_path, "10")["ticket"] is True
     msg.author.guild_permissions.manage_guild = True
     msg.response_visibility = "private"
-    assert "error" in run(ConfigureTool(bot), msg, scope="server", setting="ticket", value=False)
+    assert "error" in run(
+        ConfigureTool(bot), msg, scope="server", setting="ticket", value=False
+    )
     msg.response_visibility = "public"
 
     async def revoked(_uid):
-        return SimpleNamespace(id=100, guild_permissions=SimpleNamespace(manage_guild=False, administrator=False))
+        return SimpleNamespace(
+            id=100,
+            guild_permissions=SimpleNamespace(manage_guild=False, administrator=False),
+        )
 
     msg.guild.fetch_member = revoked
-    assert "error" in run(ConfigureTool(bot), msg, scope="server", setting="ticket", value=False)
+    assert "error" in run(
+        ConfigureTool(bot), msg, scope="server", setting="ticket", value=False
+    )
 
 
 def test_application_owner_does_not_bypass_guild_permissions(tmp_path):
     bot = fixture_bot(tmp_path)
-    assert "error" in run(ConfigureTool(bot), message(900), scope="server", setting="progress", value="on")
-    result = run(ConfigureTool(bot), message(900), scope="owner", setting="autonomy_enabled", value=False)
+    assert "error" in run(
+        ConfigureTool(bot), message(900), scope="server", setting="progress", value="on"
+    )
+    result = run(
+        ConfigureTool(bot),
+        message(900),
+        scope="owner",
+        setting="tools_enabled",
+        value=False,
+    )
     assert result["saved"]
-    assert json.loads((tmp_path / "bot_control.json").read_text())["autonomy_enabled"] is False
-    assert run(ConfigureTool(bot), message(900), scope="owner", setting="autonomy_enabled", action="reset")["saved"]
+    assert (
+        json.loads((tmp_path / "bot_control.json").read_text())["tools_enabled"]
+        is False
+    )
+    assert run(
+        ConfigureTool(bot),
+        message(900),
+        scope="owner",
+        setting="tools_enabled",
+        action="reset",
+    )["saved"]
 
 
-@pytest.mark.parametrize("setting,value,state_key,expected", [
-    ("ticket", True, "ticket", True), ("progress", "off", "progress", "off"),
-    ("plugins", {"web": True, "shell": False}, "plugins", {"web": True, "shell": False}),
-    ("capabilities", ["moderation"], "capabilities", ["moderation"]),
-    ("moderation", "off", "moderation", "off"),
-])
-def test_server_settings_persist_without_touching_other_guilds(tmp_path, setting, value, state_key, expected):
+@pytest.mark.parametrize(
+    "setting,value,state_key,expected",
+    [
+        ("ticket", True, "ticket", True),
+        ("progress", "off", "progress", "off"),
+        (
+            "plugins",
+            {"web": True, "shell": False},
+            "plugins",
+            {"web": True, "shell": False},
+        ),
+        ("capabilities", ["moderation"], "capabilities", ["moderation"]),
+        ("moderation", "off", "moderation", "off"),
+    ],
+)
+def test_server_settings_persist_without_touching_other_guilds(
+    tmp_path, setting, value, state_key, expected
+):
     bot = fixture_bot(tmp_path)
-    save_server_settings(tmp_path, "20", {"ticket": True, "progress": "on", "plugins": {"web": False}}, fallback=bot._control)
+    save_server_settings(
+        tmp_path,
+        "20",
+        {"ticket": True, "progress": "on", "plugins": {"web": False}},
+        fallback=bot._control,
+    )
     before = server_settings(tmp_path, "20")
     msg = message(manager=True)
-    assert run(ConfigureTool(bot), msg, scope="server", setting=setting, value=value)["saved"]
+    assert run(ConfigureTool(bot), msg, scope="server", setting=setting, value=value)[
+        "saved"
+    ]
     state = run(GetConfigurationTool(bot), msg, scope="server")["current"]
     assert state[state_key] == expected
     assert server_settings(tmp_path, "20") == before
-    assert run(ConfigureTool(bot), msg, scope="server", setting=setting, action="reset")["saved"]
+    assert run(
+        ConfigureTool(bot), msg, scope="server", setting=setting, action="reset"
+    )["saved"]
     if setting == "ticket":
         assert "10" not in bot._ticket_greeting_servers
     if setting == "progress":
@@ -187,14 +288,28 @@ def test_server_settings_persist_without_touching_other_guilds(tmp_path, setting
     assert server_settings(tmp_path, "20") == before
 
 
-@pytest.mark.parametrize("setting,value", [
-    ("capabilities", ["invented"]), ("plugins", {"core": True}), ("plugins", {"web": "yes"}),
-    ("progress", "yes"), ("ticket", "on"), ("channels", "999"), ("moderation", "auto"),
-])
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("capabilities", ["invented"]),
+        ("plugins", {"core": True}),
+        ("plugins", {"web": "yes"}),
+        ("progress", "yes"),
+        ("ticket", "on"),
+        ("channels", "999"),
+        ("moderation", "auto"),
+    ],
+)
 def test_server_rejects_unsupported_values(tmp_path, setting, value):
     bot = fixture_bot(tmp_path)
     before = server_settings(tmp_path, "10")
-    assert "error" in run(ConfigureTool(bot), message(manager=True), scope="server", setting=setting, value=value)
+    assert "error" in run(
+        ConfigureTool(bot),
+        message(manager=True),
+        scope="server",
+        setting=setting,
+        value=value,
+    )
     assert server_settings(tmp_path, "10") == before
 
 
@@ -202,24 +317,34 @@ def test_channel_changes_validate_bot_access_and_restore_autonomy(tmp_path):
     bot = fixture_bot(tmp_path)
     msg = message(manager=True)
     perms = SimpleNamespace(view_channel=True, send_messages=False)
-    msg.guild.text_channels = [SimpleNamespace(id=25, permissions_for=lambda _me: perms)]
-    assert "error" in run(ConfigureTool(bot), msg, scope="server", setting="channels", value="25")
+    msg.guild.text_channels = [
+        SimpleNamespace(id=25, permissions_for=lambda _me: perms)
+    ]
+    assert "error" in run(
+        ConfigureTool(bot), msg, scope="server", setting="channels", value="25"
+    )
     perms.send_messages = True
-    assert run(ConfigureTool(bot), msg, scope="server", setting="channels", value="25")["saved"]
+    assert run(ConfigureTool(bot), msg, scope="server", setting="channels", value="25")[
+        "saved"
+    ]
     assert bot._control["guild_solo_channel"]["10"] == "25"
-    assert "10" in bot._control["autonomy_blocked_servers"]
-    assert run(ConfigureTool(bot), msg, scope="server", setting="channels", action="reset")["saved"]
+    assert run(
+        ConfigureTool(bot), msg, scope="server", setting="channels", action="reset"
+    )["saved"]
     assert "10" not in bot._control["guild_solo_channel"]
-    assert "10" not in bot._control["autonomy_blocked_servers"]
 
 
 def test_reload_is_owner_only_and_failure_is_not_claimed_as_saved(tmp_path):
     bot = fixture_bot(tmp_path)
     calls = []
     bot._load_control = lambda *, force: calls.append(force)
-    assert run(ConfigureTool(bot), message(900), scope="owner", setting="reload")["saved"]
+    assert run(ConfigureTool(bot), message(900), scope="owner", setting="reload")[
+        "saved"
+    ]
     assert calls == [True]
-    bot._user_preferences.set_default = lambda *a: (_ for _ in ()).throw(OSError("private path/secret"))
+    bot._user_preferences.set_default = lambda *a: (_ for _ in ()).throw(
+        OSError("private path/secret")
+    )
     result = run(ConfigureTool(bot), message(), setting="detail", value="deep")
     assert "error" in result and "saved" not in result
     assert "secret" not in result["error"]
@@ -256,8 +381,14 @@ def interaction(uid=100, guild=None):
     async def edit_original_response(**kwargs):
         edits.append(kwargs)
 
-    return SimpleNamespace(user=SimpleNamespace(id=uid, bot=False), guild=guild, response=response,
-                           followup=followup, edits=edits, edit_original_response=edit_original_response)
+    return SimpleNamespace(
+        user=SimpleNamespace(id=uid, bot=False),
+        guild=guild,
+        response=response,
+        followup=followup,
+        edits=edits,
+        edit_original_response=edit_original_response,
+    )
 
 
 def test_normal_message_button_opens_only_requesters_private_byok_panel(tmp_path):
@@ -267,10 +398,16 @@ def test_normal_message_button_opens_only_requesters_private_byok_panel(tmp_path
     async def send(**kwargs):
         sent.append(kwargs)
 
-    msg = SimpleNamespace(author=SimpleNamespace(id=100), guild=None, channel=SimpleNamespace(send=send))
+    msg = SimpleNamespace(
+        author=SimpleNamespace(id=100), guild=None, channel=SimpleNamespace(send=send)
+    )
 
     async def journey():
-        result = json.loads(await OpenConfigurationTool(bot).execute(msg, setting="byok", provider="custom"))
+        result = json.loads(
+            await OpenConfigurationTool(bot).execute(
+                msg, setting="byok", provider="custom"
+            )
+        )
         assert result["button_sent"] and not result["opened"]
         button = sent[0]["view"].children[0]
         other = interaction(200)
@@ -309,7 +446,11 @@ def test_open_server_button_rechecks_permissions_and_context(tmp_path):
     msg.channel = SimpleNamespace(send=send)
 
     async def journey():
-        assert json.loads(await OpenConfigurationTool(bot).execute(msg, scope="server", setting="progress"))["button_sent"]
+        assert json.loads(
+            await OpenConfigurationTool(bot).execute(
+                msg, scope="server", setting="progress"
+            )
+        )["button_sent"]
         button = sent[0]["view"].children[0]
         wrong = interaction(guild=SimpleNamespace(id=20))
         await button.callback(wrong)
@@ -325,9 +466,16 @@ def test_open_server_button_rechecks_permissions_and_context(tmp_path):
 
 def test_schemas_reject_arbitrary_targets_and_credentials(tmp_path):
     bot = fixture_bot(tmp_path)
-    for tool in [GetConfigurationTool(bot), ConfigureTool(bot), OpenConfigurationTool(bot)]:
+    for tool in [
+        GetConfigurationTool(bot),
+        ConfigureTool(bot),
+        OpenConfigurationTool(bot),
+    ]:
         for field in ("user_id", "guild_id", "api_key", "system_prompt"):
-            args = {field: "secret", **({"setting": "style"} if isinstance(tool, ConfigureTool) else {})}
+            args = {
+                field: "secret",
+                **({"setting": "style"} if isinstance(tool, ConfigureTool) else {}),
+            }
             with pytest.raises(ValidationError):
                 validate(args, tool.get_parameters())
     assert ConfigureTool(bot).is_destructive
@@ -336,6 +484,12 @@ def test_schemas_reject_arbitrary_targets_and_credentials(tmp_path):
 
 def test_unknown_users_and_scope_cannot_modify_settings(tmp_path):
     bot = fixture_bot(tmp_path)
-    assert "error" in run(ConfigureTool(bot), SimpleNamespace(), setting="style", value="hi")
-    assert "error" in run(ConfigureTool(bot), message(), scope="global", setting="style", value="hi")
-    assert "error" in run(ConfigureTool(bot), message(), action="invented", setting="style", value="hi")
+    assert "error" in run(
+        ConfigureTool(bot), SimpleNamespace(), setting="style", value="hi"
+    )
+    assert "error" in run(
+        ConfigureTool(bot), message(), scope="global", setting="style", value="hi"
+    )
+    assert "error" in run(
+        ConfigureTool(bot), message(), action="invented", setting="style", value="hi"
+    )

@@ -18,7 +18,7 @@ from typing import Any, Protocol
 
 import discord
 
-from autonomy import _reply_relation_bit
+from maxwell_core.prompts.history import _reply_relation_bit
 from context_budget import BudgetPlan, fit_lines
 from control_defaults import DEFAULT_CONTROL, audio_input_enabled
 from discord_threads import is_discord_thread
@@ -103,6 +103,13 @@ class ConversationPromptBuilder:
             if is_user_install_message(message)
             else None
         )
+        preferences = getattr(host, "_user_preferences", None)
+        storage_allowed = True
+        if preferences is not None:
+            from plugins.maxwell_extras.user_preferences import tracks_message_content
+            storage_allowed = tracks_message_content(preferences, message.author.id)
+            if not storage_allowed:
+                app_history_limit = 0
         base_knowledge = getattr(host, "_base_knowledge", None) or _fill_identity_text(
             host, MAXWELL_BASE_KNOWLEDGE, live_name=True
         )
@@ -190,6 +197,7 @@ class ConversationPromptBuilder:
         room = _guild_room_context(
             getattr(message, "guild", None),
             getattr(message, "channel", None),
+            requester=getattr(message, "author", None),
             recent_users=(getattr(host, "_recent_users", None) or {}).get(
                 str(channel_id)
             ),
@@ -248,9 +256,10 @@ class ConversationPromptBuilder:
         thread_block = self.hooks.thread_prompt_block(host, message)
         if thread_block:
             dynamic_parts.append(thread_block)
-        await self._append_memory_context(
-            message, user_message, system_parts, dynamic_parts
-        )
+        if storage_allowed:
+            await self._append_memory_context(
+                message, user_message, system_parts, dynamic_parts
+            )
 
         if host._control.get("emoji_context_enabled", True):
             from discord_expressions import available_emojis, available_stickers

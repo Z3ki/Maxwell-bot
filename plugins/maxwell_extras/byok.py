@@ -20,27 +20,16 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from maxwell_core.providers.http import normalize_base_url
 
 
+# One protocol connection; no hosted-service presets or vendor model defaults.
 PROVIDERS: dict[str, dict[str, str]] = {
-    "openai": {
-        "label": "OpenAI",
-        "base_url": "https://api.openai.com/v1",
-        "suggested_model": "gpt-4.1-mini",
-    },
-    "openrouter": {
-        "label": "OpenRouter",
-        "base_url": "https://openrouter.ai/api/v1",
-        "suggested_model": "openai/gpt-4.1-mini",
-    },
-    "groq": {
-        "label": "Groq",
-        "base_url": "https://api.groq.com/openai/v1",
-        "suggested_model": "openai/gpt-oss-120b",
-    },
-    "custom": {
-        "label": "Custom OpenAI endpoint",
-        "base_url": "",
-        "suggested_model": "",
-    },
+    "custom": {"label": "Custom API endpoint", "base_url": "", "suggested_model": ""},
+}
+# Read-only upgrade map for encrypted records saved by earlier releases.
+# Never exposed as choices, used for new saves, or used as a fallback route.
+_LEGACY_ENDPOINTS = {
+    "openai": "https://api.openai.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "groq": "https://api.groq.com/openai/v1",
 }
 
 _MODEL_RE = re.compile(r"^[A-Za-z0-9_./:@~+-]{1,120}$")
@@ -49,7 +38,7 @@ _KEY_MAX = 512
 _URL_MAX = 300
 _MAX_OUTPUT_TOKENS = 16384
 _MODALITIES = {"text", "vision", "audio", "tools"}
-_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "max"}
+_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _BOOL_WORDS = {
     "on": True,
     "off": False,
@@ -70,6 +59,8 @@ _LEGACY_SETTINGS: dict[str, Any] = {
     "max_tokens": 4096,
     "effort": "",
     "context": None,
+    "timeout": 300,
+    "turn_timeout": 900,
 }
 _NEW_SETTINGS: dict[str, Any] = {
     "vision": False,
@@ -79,6 +70,8 @@ _NEW_SETTINGS: dict[str, Any] = {
     "max_tokens": 4096,
     "effort": "",
     "context": None,
+    "timeout": 300,
+    "turn_timeout": 900,
 }
 
 
@@ -94,7 +87,7 @@ def _blocked_host(host: str) -> bool:
 
 
 def validate_public_endpoint(url: str, *, required: bool) -> str:
-    """Accept a public HTTPS OpenAI-compatible base URL, or blank for a preset."""
+    """Accept a public HTTPS OpenAI-compatible base URL, when required."""
     text = str(url or "").strip()
     if not text:
         if required:
@@ -153,14 +146,18 @@ def format_generation(settings: dict[str, Any]) -> str:
     context = settings.get("context")
     if context:
         parts.append(f"context={int(context)}")
+    parts.extend(
+        (
+            f"timeout={int(settings.get('timeout', 300))}",
+            f"turn_timeout={int(settings.get('turn_timeout', 900))}",
+        )
+    )
     return " ".join(parts)
 
 
 def parse_modalities(text: str) -> dict[str, bool]:
     tokens = [
-        token
-        for token in re.split(r"[\s,]+", str(text or "").strip().lower())
-        if token
+        token for token in re.split(r"[\s,]+", str(text or "").strip().lower()) if token
     ]
     unknown = [token for token in tokens if token not in _MODALITIES]
     if unknown:
@@ -208,7 +205,9 @@ def parse_generation(text: str) -> dict[str, Any]:
         elif key in {"effort", "reasoning_effort"}:
             effort = value.strip().lower()
             if effort not in _EFFORTS:
-                raise ValueError("effort must be minimal, low, medium, high, or max")
+                raise ValueError(
+                    "effort must be none, minimal, low, medium, high, xhigh, or max"
+                )
             result["effort"] = "" if effort == "none" else effort
         elif key in {"context", "context_window", "window"}:
             try:
@@ -221,10 +220,26 @@ def parse_generation(text: str) -> dict[str, Any]:
                 raise ValueError("context must be from 1024 to 2000000 tokens")
             else:
                 result["context"] = window
+        elif key in {"timeout", "turn_timeout"}:
+            try:
+                seconds = int(value)
+            except ValueError:
+                raise ValueError(f"{key} must be whole seconds") from None
+            ceiling = 1800 if key == "timeout" else 7200
+            if not 10 <= seconds <= ceiling:
+                raise ValueError(f"{key} must be from 10 to {ceiling} seconds")
+            result[key] = seconds
         else:
             raise ValueError(
-                "generation keys are reasoning, max_tokens, effort, and context"
+                "generation keys are reasoning, max_tokens, effort, context, timeout, and turn_timeout"
             )
+    if any(
+        part.lower() in {"effort=none", "reasoning_effort=none"}
+        for part in re.split(r"[\s,]+", raw)
+    ):
+        result["reasoning"] = False
+    if result["turn_timeout"] < result["timeout"]:
+        raise ValueError("turn_timeout must be at least timeout")
     if not result["reasoning"]:
         result["effort"] = ""
     return result
@@ -440,17 +455,45 @@ class CredentialVault:
         if not row:
             return None
         provider, model, base_url, raw_settings, nonce, ciphertext = row
-        if provider not in PROVIDERS:
+        legacy = provider in _LEGACY_ENDPOINTS
+        if provider not in PROVIDERS and not legacy:
             raise ValueError("stored provider is not supported")
         endpoint = validate_public_endpoint(
-            str(base_url or ""), required=not PROVIDERS[provider]["base_url"]
+            str(base_url or _LEGACY_ENDPOINTS.get(provider, "")), required=True
         )
         try:
-            secret = AESGCM(key).decrypt(
-                bytes(nonce), bytes(ciphertext), self._aad(owner, provider)
-            ).decode("utf-8")
+            secret = (
+                AESGCM(key)
+                .decrypt(bytes(nonce), bytes(ciphertext), self._aad(owner, provider))
+                .decode("utf-8")
+            )
         except (InvalidTag, UnicodeError) as exc:
-            raise VaultUnavailable("stored BYOK credential could not be decrypted") from exc
+            raise VaultUnavailable(
+                "stored BYOK credential could not be decrypted"
+            ) from exc
+        if legacy:
+            # Preserve the exact original destination and bind the re-encrypted key
+            # to the generic identifier. A concurrent edit/delete must win this CAS.
+            new_nonce = secrets.token_bytes(12)
+            encrypted = AESGCM(key).encrypt(
+                new_nonce, secret.encode(), self._aad(owner, "custom")
+            )
+            with self._db() as db:
+                changed = db.execute(
+                    "UPDATE credentials SET provider='custom',base_url=?,nonce=?,ciphertext=? WHERE user_id=? AND provider=? AND nonce=? AND ciphertext=?",
+                    (
+                        endpoint,
+                        new_nonce,
+                        encrypted,
+                        owner,
+                        provider,
+                        nonce,
+                        ciphertext,
+                    ),
+                ).rowcount
+            if not changed:
+                return self.get(owner)
+            provider = "custom"
         return {
             "provider": provider,
             "model": str(model),
@@ -497,7 +540,9 @@ class CredentialVault:
         old_key = self._require_key()
         new_key = _master_key(new_master_key)
         if new_key is None:
-            raise ValueError("new encryption key must be exactly 32 bytes (64 hex characters)")
+            raise ValueError(
+                "new encryption key must be exactly 32 bytes (64 hex characters)"
+            )
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -507,13 +552,18 @@ class CredentialVault:
                 rotated = []
                 for owner, provider, nonce, ciphertext in rows:
                     aad = self._aad(owner, provider)
-                    secret = AESGCM(old_key).decrypt(bytes(nonce), bytes(ciphertext), aad)
+                    secret = AESGCM(old_key).decrypt(
+                        bytes(nonce), bytes(ciphertext), aad
+                    )
                     next_nonce = secrets.token_bytes(12)
                     next_ciphertext = AESGCM(new_key).encrypt(next_nonce, secret, aad)
                     rotated.append((next_nonce, next_ciphertext, owner))
                 db.executemany(
                     "UPDATE credentials SET nonce=?, ciphertext=?, updated_at=? WHERE user_id=?",
-                    [(nonce, ciphertext, int(time.time()), owner) for nonce, ciphertext, owner in rotated],
+                    [
+                        (nonce, ciphertext, int(time.time()), owner)
+                        for nonce, ciphertext, owner in rotated
+                    ],
                 )
                 db.commit()
             except Exception:
@@ -556,9 +606,12 @@ def make_request_provider(bot: Any, credential: dict[str, Any]):
         retry_attempts=1,
         empty_response_retries=0,
         policy=ProviderPolicy(
-            sensitive_credentials=True, public_network_only=True,
-            allow_provider_fallback=False, max_request_seconds=300,
-            max_response_bytes=2 * 1024 * 1024, max_output_tokens=max_tokens,
+            sensitive_credentials=True,
+            public_network_only=True,
+            allow_provider_fallback=False,
+            max_request_seconds=int(settings.get("timeout", 300)),
+            max_response_bytes=2 * 1024 * 1024,
+            max_output_tokens=max_tokens,
         ),
     )
     client.capabilities = replace(
@@ -570,6 +623,7 @@ def make_request_provider(bot: Any, credential: dict[str, Any]):
         reasoning=bool(settings["reasoning"]),
         context_window=settings["context"],
     )
+    client.turn_timeout_seconds = int(settings.get("turn_timeout", 900))
     client.enable_audio_input = bool(settings["audio"])
     client.available = True
     return client

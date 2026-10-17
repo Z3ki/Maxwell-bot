@@ -12,9 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from autonomy import AutonomyEngine
 from bot import MaxwellBot
-from control_defaults import DEFAULT_CONTROL
 
 
 def run(coro):
@@ -158,64 +156,3 @@ def test_locking_one_server_leaves_another_lock_alone(bot):
     assert bot._control["guild_solo_channel"] == {"1": "100", "2": "500"}
     run(bot._handle_solo_command(_msg(channel_id="500", guild_id="2"), "off"))
     assert bot._control["guild_solo_channel"] == {"1": "100"}
-
-
-# ── autonomy ──────────────────────────────────────────────────────────────
-def test_locking_a_server_stops_autonomy_there(bot):
-    run(bot._handle_solo_command(_msg(channel_id="100"), None))
-    assert bot._control["autonomy_blocked_servers"] == ["1"]
-
-
-def test_unlocking_gives_autonomy_back(bot):
-    m = _msg(channel_id="100")
-    run(bot._handle_solo_command(m, None))
-    run(bot._handle_solo_command(m, "off"))
-    assert bot._control["autonomy_blocked_servers"] == []
-
-
-def test_unlocking_keeps_a_blacklist_the_admin_set_by_hand(bot):
-    """`,solo off` must not hand autonomy back a server someone else silenced."""
-    bot._control["autonomy_blocked_servers"] = ["2", "3"]
-    m = _msg(channel_id="100", guild_id="2")
-    run(bot._handle_solo_command(m, None))
-    run(bot._handle_solo_command(m, "off"))
-    # Solo did not take server 2's autonomy away, so it does not give it back.
-    assert set(bot._control["autonomy_blocked_servers"]) == {"2", "3"}
-
-
-def test_unlocking_gives_back_only_what_solo_took(bot):
-    bot._control["autonomy_blocked_servers"] = ["3"]
-    m = _msg(channel_id="100", guild_id="1")
-    run(bot._handle_solo_command(m, None))
-    assert set(bot._control["autonomy_blocked_servers"]) == {"3", "1"}
-    run(bot._handle_solo_command(m, "off"))
-    assert bot._control["autonomy_blocked_servers"] == ["3"]
-    assert bot._control["guild_solo_autonomy_added"] == []
-
-
-def _engine(control, channel_guild_id="1"):
-    engine = object.__new__(AutonomyEngine)
-    engine.bot = SimpleNamespace(
-        _control=control,
-        get_channel=lambda cid: SimpleNamespace(
-            guild=SimpleNamespace(id=channel_guild_id)
-        ),
-    )
-    return engine
-
-
-def test_autonomy_obeys_the_lock_even_without_the_blacklist(bot):
-    """Belt and braces: the lock holds if the two settings drift apart."""
-    control = dict(DEFAULT_CONTROL)
-    control["guild_solo_channel"] = {"1": "100"}
-    control["autonomy_blocked_servers"] = []  # someone cleared it by hand
-    engine = _engine(control)
-    assert engine._channel_allowed("101") is False
-    assert engine._channel_allowed("100") is True
-
-
-def test_autonomy_is_unaffected_in_other_servers(bot):
-    control = dict(DEFAULT_CONTROL)
-    control["guild_solo_channel"] = {"1": "100"}
-    engine = _engine(control, channel_guild_id="2")
-    assert engine._channel_allowed("500") is True

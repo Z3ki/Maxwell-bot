@@ -148,16 +148,10 @@ def _control_path() -> Path:
     return _data_dir() / "bot_control.json"
 
 
-def _autonomy_state_path() -> Path:
-    return _data_dir() / "autonomy_state.json"
 
 
-def _autonomy_goals_path() -> Path:
-    return _data_dir() / "autonomy_goals.json"
 
 
-def _autonomy_log_path() -> Path:
-    return _data_dir() / "autonomy_log.json"
 
 
 def _commands_path() -> Path:

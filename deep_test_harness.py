@@ -29,7 +29,6 @@ import sys
 import tempfile
 import time
 import traceback
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, List, Optional
 
@@ -48,8 +47,6 @@ import tool_registry  # noqa: E402
 import bot_tools  # noqa: E402
 import chess_game  # noqa: E402
 import site_backend  # noqa: E402
-import autonomy_social  # noqa: E402
-import watch_policy  # noqa: E402
 import concurrency_safety  # noqa: E402
 from plugins.maxwell_extras.command_suite import command_definitions  # noqa: E402
 from usage_commands import command_help_text  # noqa: E402
@@ -428,63 +425,6 @@ class DeepTestHarness:
     # =========================================================================
     # SUITE 6: Autonomy Engine & Turn-Taking Dynamics
     # =========================================================================
-    def test_suite_autonomy(self):
-        self.current_suite = "Autonomy & Turn-Taking"
-        print(f"\n\033[1;34m=== SUITE 6: {self.current_suite} ===\033[0m")
-
-        def test_turn_taking_social_states():
-            now = datetime.now(timezone.utc)
-            bot_id = "bot_123"
-
-            # 1. ADDRESSED: User pinged bot recently, no reply yet
-            msg1 = autonomy_social.FloorMessage(
-                author_id="user_456",
-                created_at=now,
-                is_self=False,
-                is_bot=False,
-                addresses_self=True,
-            )
-            v_addressed = autonomy_social.read_floor(
-                channel_id="chan_1",
-                messages=[msg1],
-                settings=autonomy_social.FloorSettings(),
-            )
-            assert v_addressed.state == "ADDRESSED"
-            assert v_addressed.may_speak is True
-
-            # 2. HOLDING: Bot spoke last, nobody answered
-            msg2 = autonomy_social.FloorMessage(
-                author_id=bot_id,
-                created_at=now,
-                is_self=True,
-                is_bot=True,
-                addresses_self=False,
-            )
-            v_holding = autonomy_social.read_floor(
-                channel_id="chan_2",
-                messages=[msg2],
-                settings=autonomy_social.FloorSettings(),
-            )
-            assert v_holding.state == "HOLDING"
-            assert v_holding.may_speak is False
-
-            # Render floor section
-            rendered = autonomy_social.render_floor_section([v_addressed, v_holding])
-            assert "ADDRESSED" in rendered
-            assert "HOLDING" in rendered
-            return "Turn-taking social state evaluator handles ADDRESSED, HOLDING & floor rendering"
-
-        def test_watch_policy_scoring():
-            ctx_high = watch_policy.ExtractionContext(text="Remember that my name is Bob and I live in Paris.")
-            ctx_low = watch_policy.ExtractionContext(text="lol ok")
-            score_high = watch_policy.extraction_score(ctx_high)
-            score_low = watch_policy.extraction_score(ctx_low)
-            assert score_high.value > score_low.value
-            assert score_high.value >= 0.25
-            return "Watch policy extraction scoring differentiates rich vs trivial context"
-
-        self.run_sync_test("Autonomy turn-taking conversation states", test_turn_taking_social_states)
-        self.run_sync_test("Watch policy extraction scoring", test_watch_policy_scoring)
 
     # =========================================================================
     # SUITE 7: Chess Engine & Board Mechanics
@@ -638,7 +578,6 @@ class DeepTestHarness:
         self.test_suite_tools()
         await self.test_suite_shell()
         await self.test_suite_rag_memory()
-        self.test_suite_autonomy()
         self.test_suite_chess()
         self.test_suite_sites()
         self.test_suite_security_guards()

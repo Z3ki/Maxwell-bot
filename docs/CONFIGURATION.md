@@ -149,6 +149,24 @@ If tools are still missing, check the master `tools_enabled` switch,
 denials. A missing `python-chess` dependency prevents chess from loading at all;
 installing it in a shell sandbox does not change the bot's Python environment.
 
+### A loaded tool is missing in one server
+
+Plugin loading does not imply that a server's model can use its tools. A saved
+`guild_plugin_overrides["<guild_id>"]["chess"] = false` hides `chess_start`,
+`chess_move`, `chess_state` and `chess_resign` from that server's tool schemas
+and chess instructions even when startup logs say the chess plugin loaded.
+
+To restore chess, open `/config` → **Server settings** → **Extra tools** in
+the affected server and include **Chess** among the enabled plugins. Preserve
+the other selections. An operator can instead update that server's `chess`
+override to `true` through the authenticated control API, preserving other
+guilds and plugin overrides. Controls reload without a restart.
+
+If tools are still missing, check the master `tools_enabled` switch,
+`disabled_tools`, server tool-group restrictions and explicit per-user plugin
+denials. A missing `python-chess` dependency prevents chess from loading at all;
+installing it in a shell sandbox does not change the bot's Python environment.
+
 ## Runtime controls
 
 Defaults live in `control_defaults.py`. `bot_control.json` overrides them at runtime.
@@ -187,7 +205,6 @@ Frequently used controls include:
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
 | `message_quota_enabled` | Forced off for unlimited request admission |
 | `store_memory` | Conversation-memory storage switch |
-| `autonomy_enabled` | Runtime autonomy switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
 
 The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the authenticated operator API or `/maintenance` to editing `bot_control.json` while Maxwell is running. There is no browser admin frontend or Discord browser OAuth login.
@@ -224,7 +241,7 @@ sandbox destinations reachable.
 
 ## Optional/background features
 
-Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Examples include `ENABLE_AUTONOMY` and `ENABLE_SHELL`; `ENABLE_RAG` is permanently disabled.
+Many `ENABLE_*` environment switches accept `auto`, `true`, or `false`. Examples include `ENABLE_SHELL` and `ENABLE_CREATE_SITE`; `ENABLE_RAG` is permanently disabled.
 
 Simple installs keep token-spending background loops off by default. The exact dependency detection is implemented in `config.py` and reported by `doctor.py`.
 

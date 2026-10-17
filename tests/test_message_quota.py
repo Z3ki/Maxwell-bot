@@ -139,7 +139,8 @@ def test_help_browses_topics_and_returns_only_the_selected_section():
         "owner",
     }
     assert "/config" in command_help_text(topic="personal")
-    assert "Bring your own key" in command_help_text(topic="personal")
+    assert "My AI provider" in command_help_text(topic="personal")
+    assert "timeouts, context and reasoning" in command_help_text(topic="personal")
     assert "/personality" not in command_help_text(topic="personal")
     assert "/image" not in command_help_text(topic="personal")
 
@@ -166,7 +167,7 @@ def test_help_interaction_uses_selected_topic():
     )
     assert sent and sent[0][1] is True
     assert "/config" in sent[0][0]
-    assert "Bring your own key" in sent[0][0]
+    assert "My AI provider" in sent[0][0]
     assert "/personality" not in sent[0][0]
     assert "/image" not in sent[0][0]
 

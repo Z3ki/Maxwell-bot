@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 
 from plugins.discord_presence import impl as presence_tools
 
-from autonomy import AutonomyEngine
 from bot import MaxwellBot
 from bot_tools import LookupUserTool, SearchMessagesTool
 
@@ -59,22 +58,6 @@ def test_set_activity_elapsed_serializes_discord_timestamps(monkeypatch):
     asyncio.run(run())
 
 
-def test_autonomy_history_defaults_stay_small():
-    engine = SimpleNamespace(bot=SimpleNamespace(_control={}))
-    engine._activity_channel_limit = AutonomyEngine._activity_channel_limit.__get__(
-        engine
-    )
-    engine._activity_history_limit = AutonomyEngine._activity_history_limit.__get__(
-        engine
-    )
-    assert engine._activity_channel_limit() == 6
-    assert engine._activity_history_limit() == 12
-    engine.bot._control = {
-        "autonomy_activity_channels": 99,
-        "autonomy_activity_messages": 500,
-    }
-    assert engine._activity_channel_limit() == 12
-    assert engine._activity_history_limit() == 25
 
 
 def test_search_messages_only_reads_this_channel():

@@ -69,7 +69,8 @@ def test_notify_owner_dms_configured_creator():
     assert "#general" in body
     assert "Villa" in body
     assert "missing permission" in body
-    assert "kick the spammer" in body
+    assert "kick the spammer" not in body
+    assert "request_chars: 16" in body
 
 
 def test_notify_owner_rate_limits_duplicates():

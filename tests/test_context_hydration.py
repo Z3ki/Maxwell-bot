@@ -197,6 +197,7 @@ def test_pointer_uses_scoped_stored_history_when_discord_history_is_unavailable(
 
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
+        memory.preferences.set_default("8", "tracking", "on")
         try:
             await memory.add_to_channel_memory("42", {
                 "message_id": "3", "guild_id": "30", "author": "Ada", "author_id": "8",

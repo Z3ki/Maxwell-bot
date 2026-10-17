@@ -636,10 +636,10 @@ class OpenAICompatibleProvider(ChatProvider):
             # OR nested `reasoning: {"effort": "none"}`. The literal string
             # "none" is what the docs list as a valid value (alongside "low",
             # "medium", "high", "max") — sending boolean false or
-            # {"exclude": true} (OpenRouter-style) was a no-op against Ollama,
+            # {"exclude": true} was a no-op against this compatible server,
             # which is why reasoning kept streaming even with
             # disable_reasoning=True. Emit both shapes so the same payload
-            # works across Ollama and OpenRouter without branching.
+            # works across compatible servers without destination presets.
             data["reasoning_effort"] = "none"
             data["reasoning"] = {"effort": "none"}
             data["thinking"] = {"type": "disabled", "budget_tokens": 0}
@@ -987,7 +987,7 @@ class OpenAICompatibleProvider(ChatProvider):
             )
         if byok_request:
             try:
-                timeout = max(1, min(int(timeout), 300))
+                timeout = max(1, min(int(timeout), self.policy.max_request_seconds or 300))
             except (TypeError, ValueError):
                 timeout = 120
             ceiling = self.policy.max_output_tokens or 4096
@@ -1315,7 +1315,7 @@ class OpenAICompatibleProvider(ChatProvider):
                             resp.status,
                             headers_ms,
                             len(error_text),
-                            error_text[:200],
+                            "[provider body omitted]",
                         )
                         if (
                             has_media
@@ -1344,7 +1344,7 @@ class OpenAICompatibleProvider(ChatProvider):
                                 if _strip_media_parts(chat_messages):
                                     logger.warning(
                                         "No endpoint accepts this media; retrying text-only: %s",
-                                        error_text[:200],
+                                        "[provider body omitted]",
                                     )
                                     has_media = False
                                     media_broken.clear()
@@ -1422,7 +1422,7 @@ class OpenAICompatibleProvider(ChatProvider):
                                 "Provider endpoint %s blocked the prompt on content policy; "
                                 "failing over: %s",
                                 endpoint.name,
-                                error_text[:200],
+                                "[provider body omitted]",
                             )
                             if await self._retry_after_attempt(
                                 attempt,

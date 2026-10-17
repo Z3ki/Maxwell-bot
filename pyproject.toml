@@ -69,6 +69,11 @@ ignore = [
 "plugins/maxwell_extras/workbench_v2.py" = ["PERF401"]
 # Mechanical split of bot_tools.py binds helper globals by name.
 "plugins/**/impl.py" = ["F401", "F403", "F405", "F821"]
+# Mechanical split of bot.py: mixins bind shared globals via dir() loop and
+# bot.py re-exports bot_common for backwards-compatible `from bot import X`.
+"bot.py" = ["F401", "F403", "F405"]
+"bot_common.py" = ["F401"]
+"bot_parts/**" = ["F401", "F403", "F405", "F811", "F821"]
 "tooling/helpers.py" = ["F401", "F811"]
 "bot_tools.py" = ["F401", "F403"]
 

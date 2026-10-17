@@ -72,9 +72,6 @@ def test_guild_plugin_overrides_keep_only_numeric_guilds_and_boolean_plugin_valu
         # control_defaults documents 0 as meaningful for each of these.
         "conversation_watch_seconds",  # 0 disables the follow-up watch
         "site_ttl_hours",  # 0 = never expire
-        "autonomy_recent_reply_block_seconds",  # 0 = defer to the floor cooldown
-        "autonomy_floor_cooldown_seconds",
-        "autonomy_floor_mid_flow_seconds",
         "max_tool_iterations",
         "tool_history_messages",
         "memory_history_messages",

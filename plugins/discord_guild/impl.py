@@ -140,17 +140,12 @@ class LookupUserTool(Tool):
 
             info_lines.append(f"Avatar: {avatar}")
 
-            # Voice channel presence
-            member, voice_ch = _find_member_voice(
-                self.bot, uid_int, getattr(message, "guild", None)
-            )
-            if voice_ch is not None:
-                gname = getattr(getattr(voice_ch, "guild", None), "name", "?")
-                info_lines.append(
-                    f"Voice: in #{getattr(voice_ch, 'name', voice_ch.id)} ({gname})"
-                )
-            else:
-                info_lines.append("Voice: not in a voice channel (from cached members)")
+            # Voice state is only visible in the current server and channel.
+            guild = getattr(message, "guild", None)
+            member = guild.get_member(uid_int) if guild else None
+            voice_ch = getattr(getattr(member, "voice", None), "channel", None)
+            if voice_ch is not None and _visible_to(voice_ch, message.author):
+                info_lines.append(f"Voice: in #{voice_ch.name} ({guild.name})")
 
             return "\n".join(info_lines)
         except discord.NotFound:
@@ -174,29 +169,10 @@ class ListServersTool(Tool):
         )
 
     async def execute(self, message: Message, **kwargs) -> str:
-        lines = []
+        if not _caller_is_admin(self.bot, message):
+            return "Error: listing bot servers is restricted to application owners."
         guilds = list(getattr(self.bot, "guilds", None) or [])
-        if guilds:
-            lines.append(f"Servers ({len(guilds)}):")
-            lines.extend(f"  • {_guild_server_line(guild)}" for guild in guilds[:20])
-            if len(guilds) > 20:
-                lines.append(f"  ... and {len(guilds) - 20} more")
-
-        group_channels = [
-            ch
-            for ch in (getattr(self.bot, "private_channels", None) or [])
-            if isinstance(ch, discord.GroupChannel)
-        ]
-        if group_channels:
-            lines.append(f"\nGroup chats ({len(group_channels)}):")
-            lines.extend(
-                f"  • {gc.name or 'Unnamed'} (ID: {gc.id})"
-                for gc in group_channels[:10]
-            )
-
-        if not lines:
-            return "You're not in any servers or group chats."
-        return "\n".join(lines)
+        return "\n".join(_guild_server_line(guild) for guild in guilds[:20]) or "No servers."
 
 class ListAdminServersTool(Tool):
     """List servers where Maxwell has useful admin permissions."""
@@ -277,7 +253,7 @@ class ListChannelsTool(Tool):
         category_id: str | None = None,
         **kwargs,
     ) -> str:
-        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        guild, error = await _resolve_listing_guild(self.bot, message, guild_id)
         if error:
             return error
         if guild is None:
@@ -289,6 +265,7 @@ class ListChannelsTool(Tool):
             category_id=category_id,
             limit=80,
             include_topic=True,
+            requester=message.author,
         )
 
 class ListRolesTool(Tool):
@@ -312,7 +289,7 @@ class ListRolesTool(Tool):
         query: str | None = None,
         **kwargs,
     ) -> str:
-        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        guild, error = await _resolve_listing_guild(self.bot, message, guild_id)
         if error:
             return error
         if guild is None:
@@ -345,7 +322,7 @@ class ListMembersTool(Tool):
         limit: str | int | None = None,
         **kwargs,
     ) -> str:
-        guild, error = await _resolve_guild(self.bot, message, guild_id)
+        guild, error = await _resolve_listing_guild(self.bot, message, guild_id)
         if error:
             return error
         if guild is None:
@@ -360,6 +337,7 @@ class ListMembersTool(Tool):
             role_spec=role_id or role,
             status=status,
             limit=cap,
+            requester=message.author,
         )
 
 class CreateCategoryTool(Tool):

@@ -3,8 +3,7 @@
 Maxwell's Discord processing uses `ChatProvider` and request-local
 `ProviderResult` objects. `OpenAICompatibleProvider` implements the
 `/v1/chat/completions` protocol, including streaming, tools, media, reasoning
-options, usage, model overrides, cancellation and bounded recovery. Ollama,
-OpenAI, OpenRouter, Groq and LM Studio remain supported compatible endpoints.
+options, usage, model overrides, cancellation and bounded recovery. Configure a compatible endpoint explicitly; there are no hosted-service presets.
 
 ## Configuration
 
@@ -79,8 +78,8 @@ and [DeepSeek caching guide](https://api-docs.deepseek.com/guides/kv_cache).
 `GenerationDefaults`, `ProviderCapabilities`, `ProviderPolicy` and authentication
 contracts. Credentials are excluded from configuration representations.
 The abstract `ChatProvider` has no API-key requirement or OpenAI wire-format
-requirement. The factory maps protocol kind `openai_compat` and legacy/vendor
-aliases (`ollama`, `openai`, `openrouter`, `groq`, `lmstudio`, `custom`) explicitly
+requirement. The factory maps protocol kind `openai_compat` and the generic
+`custom` alias explicitly
 to the compatible implementation. Unknown kinds fail with a configuration error.
 
 `ProviderRouter` owns independent primary, fallback and vision clients. Clients
@@ -123,8 +122,8 @@ is registered through the factory or plugin service container.
 
 BYOK construction supplies an immutable policy before session creation:
 public HTTPS only, DNS results checked and pinned, private IP literals rejected,
-verified TLS, redirects blocked, provider fallback forbidden, 300-second total
-request deadline, 2 MiB response limit, and 4096 output-token limit. Each user
+verified TLS, redirects blocked, provider fallback forbidden, configurable 10–1800 second total
+request deadline, 2 MiB response limit, and configurable 16–16384 output-token limit. Each user
 request owns a separate client and encrypted API-key record. Sensitive requests
 remain non-streaming so credential echoes are scrubbed before progress UI or
 the final result receives content. Upstream errors and authentication failures
@@ -142,3 +141,24 @@ response recovery also remain supported.
 Remaining `OLLAMA_*` references are deprecated environment/import migration
 paths, compatibility tests, historical release/audit notes, or genuine Ollama
 service controls (`OLLAMA_ORIGINS` and the old embedding URL alias).
+
+## Slow models, context and reasoning
+
+Set `AI_REQUEST_TIMEOUT_SECONDS` (10–7200) for each operator-provider call and
+`AI_TURN_TIMEOUT_SECONDS` (10–7200) for the whole request, including tools.
+A zero whole-task value preserves `live_turn_timeout_seconds` (180 by default).
+For example, use 600 and 1800 for a slow website-building model. A shorter
+whole-task deadline still cancels the call. `AI_CONTEXT_WINDOW` sets the model's
+context size in tokens (0 retains the normal prompt budget); output tokens and
+context size are separate. Prompt budgeting is a conservative character estimate,
+not a provider tokenizer guarantee. Fallback routes inherit this context setting;
+configure a limit that fits every enabled route.
+
+`AI_DISABLE_REASONING=false` and `AI_REASONING_EFFORT=minimal|low|medium|high|xhigh|max`
+configure operator models; fallback has `AI_FALLBACK_DISABLE_REASONING` and
+`AI_FALLBACK_REASONING_EFFORT`. Personal connections expose reasoning, effort,
+context and both deadlines in `/config → My AI provider → Advanced → Reply limits`
+and the dashboard. Unsupported levels remain provider errors; no model is
+chosen merely to satisfy a level. No hidden reasoning text is displayed or saved.
+
+See [PREMIUM_TASKS.md](PREMIUM_TASKS.md) for bounded task workers and manual grants.
