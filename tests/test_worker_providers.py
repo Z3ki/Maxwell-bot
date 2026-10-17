@@ -84,7 +84,7 @@ def test_empty_locked_vault_allows_operator_but_existing_locked_key_fails_closed
     worker._key = bytes.fromhex("ab" * 32)
     save(worker)
     worker._key = None
-    result = asyncio.run(tool.execute(msg, tasks=TASKS))
+    result = asyncio.run(tool.run(msg, tasks=TASKS))
     assert "no task started" in result
     bot._generate_response.assert_not_awaited()
     shell.execute.assert_not_awaited()
@@ -132,7 +132,7 @@ def test_operator_route_credentials_never_leak_to_new_destination(
 def test_partial_operator_config_refuses_workers_without_breaking_chat(tmp_path):
     bot, msg, _, tool = setup(tmp_path)
     bot.config.AI_WORKER_BASE_URL = "http://localhost:1234/v1"
-    assert "no task started" in asyncio.run(tool.execute(msg, tasks=TASKS))
+    assert "no task started" in asyncio.run(tool.run(msg, tasks=TASKS))
     bot._generate_response.assert_not_awaited()
     assert tool._active == 0
 
@@ -179,13 +179,13 @@ def test_owned_worker_client_is_closed_and_parent_context_restored(
         budget_token = _current_byok_tool_budget.set(budget)
         try:
             if outcome == "cancel":
-                task = asyncio.create_task(tool.execute(msg, tasks=TASKS * 2))
+                task = asyncio.create_task(tool.run(msg, tasks=TASKS * 2))
                 await asyncio.wait_for(entered.wait(), 1)
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
             else:
-                report = await tool.execute(msg, tasks=TASKS)
+                report = await tool.run(msg, tasks=TASKS)
                 assert "secret error" not in report
                 assert ("deadline" in report) == (outcome == "timeout")
             assert _current_request_provider.get() is parent
@@ -212,7 +212,7 @@ def test_coordinator_delegates_general_task_and_worker_retains_actual_authorizat
         )
         result = json.loads(
             asyncio.run(
-                tool.execute(
+                tool.run(
                     msg,
                     tasks=[
                         {
@@ -234,7 +234,7 @@ def test_coordinator_delegates_general_task_and_worker_retains_actual_authorizat
 def test_worker_without_tool_support_does_not_start_llm(tmp_path):
     bot, msg, _, tool = setup(tmp_path)
     bot.ai_provider.capabilities.native_tools = False
-    result = json.loads(asyncio.run(tool.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(tool.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "unavailable"
     bot._generate_response.assert_not_awaited()
 
@@ -243,7 +243,7 @@ def test_worker_deadline_fits_parent_only_for_eligible_premium_requests(tmp_path
     bot, _, _, _ = setup(tmp_path)
     bot.config.AI_WORKER_TURN_TIMEOUT_SECONDS = 2400
     assert worker_timeout_seconds(bot) == 2400
-    assert request_turn_timeout_seconds(bot, premium=True) == 2430
+    assert request_turn_timeout_seconds(bot, premium=True) == 180
     assert request_turn_timeout_seconds(bot, premium=False) == 180
     bot._control["premium_task_workers_enabled"] = False
     assert request_turn_timeout_seconds(bot, premium=True) == 180
@@ -294,7 +294,7 @@ def test_worker_byok_shares_parent_tool_budget_across_siblings(tmp_path, monkeyp
     budget = {"calls": 7}
     token = _current_byok_tool_budget.set(budget)
     try:
-        reports = json.loads(asyncio.run(tool.execute(msg, tasks=TASKS * 2)))
+        reports = json.loads(asyncio.run(tool.run(msg, tasks=TASKS * 2)))
     finally:
         _current_byok_tool_budget.reset(token)
     assert budget["calls"] == 8
@@ -339,7 +339,7 @@ def test_worker_carries_only_applicable_feature_instructions(tmp_path):
         get_available_tools=lambda **k: {},
     )
     bot._generate_response.side_effect = [ProviderResult("done")]
-    asyncio.run(tool.execute(msg, tasks=TASKS))
+    asyncio.run(tool.run(msg, tasks=TASKS))
     prompt = json.dumps(bot._generate_response.await_args.args[0])
     assert "Required scoped shell verification" in prompt
     assert "UNRELATED" not in prompt
@@ -375,7 +375,7 @@ def test_worker_media_is_processed_as_transient_input_and_never_as_text(tmp_path
 
     bot._generate_response.side_effect = generate
     reports = asyncio.run(
-        tool.execute(
+        tool.run(
             msg,
             tasks=[
                 {
@@ -413,7 +413,7 @@ def test_worker_cannot_widen_github_policy_or_write_credentials(tmp_path):
     ]
     report = json.loads(
         asyncio.run(
-            tool.execute(
+            tool.run(
                 msg,
                 tasks=[
                     {

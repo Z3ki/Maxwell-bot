@@ -181,9 +181,9 @@ off, blank effort, request timeout 600 seconds (10–7200). Configure independen
 `AI_WORKER_REQUEST_TIMEOUT_SECONDS`, and `AI_WORKER_TURN_TIMEOUT_SECONDS` (0–7200).
 A zero worker turn value uses `task_workers_timeout_seconds` (default 600) from
 `bot_control.json`; a nonzero env value overrides that operator ceiling. Personal
-worker turn settings are capped by this ceiling. Premium parent turns allow at
-least the worker ceiling plus 30 seconds to deliver a report. Cancellation and
-step, context and tool-call limits remain effective.
+worker turn settings are capped by this ceiling. Detached jobs own their deadline;
+chat retains its normal deadline and can continue while a job runs. Cancellation
+and step, context and tool-call limits remain effective.
 
 A dedicated user worker connection takes precedence, then the user's chat BYOK,
 then this env route, then the primary provider. Dedicated worker BYOK has its own
@@ -191,7 +191,8 @@ model, endpoint, modalities, reasoning/effort, output/context and request/turn
 limits in `/config → More options → Subagent AI provider` and the dashboard.
 No extra consent/model calls are used for routing. Failed selected keys never
 fall back to an operator account. A new client is closed after its children stop;
-an inherited parent client is borrowed and remains open. These routes support the
+a detached job opens its own personal client rather than borrowing the chat
+turn's client, so a finished chat cannot close a running worker connection. These routes support the
 existing OpenAI-compatible Chat Completions protocol; effort support depends on
 that provider/model. No claims about provider retention or training follow from
 choosing a model or disabling local history.

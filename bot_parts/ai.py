@@ -100,7 +100,9 @@ class AIMixin:
         # This step is working again: any typing that a previous send
         # suspended in this channel comes back only now, so the indicator
         # never trails the last delivered message.
-        await typing_resume(self, getattr(message, "channel", None))
+        from plugins.maxwell_extras.task_job_store import active_job
+        if active_job.get() is None:
+            await typing_resume(self, getattr(message, "channel", None))
         started = time.monotonic()
         try:
             return await selected_provider.generate_response(messages, **kwargs)

@@ -92,7 +92,7 @@ def test_premium_worker_executes_via_real_authorization_and_does_not_save_messag
     tmp_path,
 ):
     bot, msg, shell, worker = setup(tmp_path)
-    result = json.loads(asyncio.run(worker.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "reported"
     assert result["completed"] == [{"tool": "shell", "status": "returned"}]
     shell.execute.assert_awaited_once_with(msg, command="pwd")
@@ -111,11 +111,11 @@ def test_premium_worker_executes_via_real_authorization_and_does_not_save_messag
 
 def test_free_plan_and_unverified_entitlement_fail_closed(tmp_path):
     bot, msg, shell, worker = setup(tmp_path, premium=False)
-    assert "requires" in asyncio.run(worker.execute(msg, tasks=TASKS))
+    assert "requires" in asyncio.run(worker.run(msg, tasks=TASKS))
     bot._message_quota.plan_for = lambda uid: (_ for _ in ()).throw(
         OSError("private-error")
     )
-    result = asyncio.run(worker.execute(msg, tasks=TASKS))
+    result = asyncio.run(worker.run(msg, tasks=TASKS))
     assert "could not be verified" in result and "private-error" not in result
     shell.execute.assert_not_awaited()
 
@@ -129,7 +129,7 @@ def test_plan_is_durable_and_revocation_stops_before_next_tool(tmp_path):
         return call()
 
     bot._generate_response.side_effect = generate
-    result = json.loads(asyncio.run(worker.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "failed"
     shell.execute.assert_not_awaited()
 
@@ -143,7 +143,7 @@ def test_deleted_request_cannot_continue_worker(tmp_path):
         return call()
 
     bot._generate_response.side_effect = generate
-    result = json.loads(asyncio.run(worker.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "failed"
     shell.execute.assert_not_awaited()
 
@@ -157,7 +157,7 @@ def test_worker_cannot_bypass_new_tool_disable(tmp_path):
         return next(responses)
 
     bot._generate_response.side_effect = generate
-    result = json.loads(asyncio.run(worker.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["completed"] == [{"tool": "shell", "status": "error"}]
     shell.execute.assert_not_awaited()
 
@@ -174,7 +174,7 @@ def test_worker_cannot_bypass_new_tool_disable(tmp_path):
 def test_worker_rejects_escalation_recursion_and_exports(tmp_path, name, args):
     bot, msg, shell, worker = setup(tmp_path)
     bot._generate_response.side_effect = [call(name, **args)]
-    result = json.loads(asyncio.run(worker.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "failed"
     shell.execute.assert_not_awaited()
 
@@ -182,7 +182,7 @@ def test_worker_rejects_escalation_recursion_and_exports(tmp_path, name, args):
 def test_exception_report_never_leaks_provider_exception_content(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
     bot._generate_response.side_effect = RuntimeError("secret-key-123")
-    result = asyncio.run(worker.execute(msg, tasks=TASKS))
+    result = asyncio.run(worker.run(msg, tasks=TASKS))
     assert "failed" in result and "secret-key" not in result
 
 
@@ -203,7 +203,7 @@ def test_timeout_and_parent_cancel_join_all_children(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "plugins.maxwell_extras.task_workers.worker_timeout_seconds", lambda *a: 0.01
     )
-    result = asyncio.run(worker.execute(msg, tasks=TASKS * 2))
+    result = asyncio.run(worker.run(msg, tasks=TASKS * 2))
     assert "deadline" in result and len(stopped) == 2
     assert worker._active == 0 and not worker._users
     monkeypatch.setattr(
@@ -211,7 +211,7 @@ def test_timeout_and_parent_cancel_join_all_children(tmp_path, monkeypatch):
     )
 
     async def cancel():
-        running = asyncio.create_task(worker.execute(msg, tasks=TASKS * 2))
+        running = asyncio.create_task(worker.run(msg, tasks=TASKS * 2))
         await entered.wait()
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -235,9 +235,9 @@ def test_same_user_capacity_is_atomic_and_sibling_model_calls_overlap(tmp_path):
     bot._generate_response.side_effect = generate
 
     async def run():
-        first = asyncio.create_task(worker.execute(msg, tasks=TASKS * 2))
+        first = asyncio.create_task(worker.run(msg, tasks=TASKS * 2))
         await arrived.wait()
-        assert "busy" in await worker.execute(msg, tasks=TASKS)
+        assert "busy" in await worker.run(msg, tasks=TASKS)
         assert worker._active == 2
         release.set()
         assert len(json.loads(await first)) == 2
@@ -248,12 +248,12 @@ def test_same_user_capacity_is_atomic_and_sibling_model_calls_overlap(tmp_path):
 def test_step_and_context_limits_stop_without_forgetting_writes(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
     bot._control["task_workers_max_steps"] = 1
-    result = json.loads(asyncio.run(worker.execute(msg, tasks=TASKS)))[0]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "step_limit" and shell.execute.await_count == 1
     bot.ai_provider.capabilities.context_window = 1024
     bot._generate_response.reset_mock()
     result = json.loads(
-        asyncio.run(worker.execute(msg, tasks=[{"kind": "shell", "task": "x" * 6000}]))
+        asyncio.run(worker.run(msg, tasks=[{"kind": "shell", "task": "x" * 6000}]))
     )[0]
     assert result["status"] == "context_limit"
     bot._generate_response.assert_not_awaited()
@@ -270,7 +270,7 @@ def test_worker_uses_request_local_provider_and_limits(tmp_path):
     bot._generate_response.side_effect = [ProviderResult("done")]
     token = _current_request_provider.set(provider)
     try:
-        asyncio.run(worker.execute(msg, tasks=TASKS))
+        asyncio.run(worker.run(msg, tasks=TASKS))
     finally:
         _current_request_provider.reset(token)
     args = bot._generate_response.await_args.kwargs
@@ -286,5 +286,5 @@ def test_worker_uses_request_local_provider_and_limits(tmp_path):
 )
 def test_invalid_tasks_do_not_start_anything(tmp_path, tasks):
     bot, msg, shell, worker = setup(tmp_path)
-    assert "Error" in asyncio.run(worker.execute(msg, tasks=tasks))
+    assert "Error" in asyncio.run(worker.run(msg, tasks=tasks))
     bot._generate_response.assert_not_awaited()

@@ -1,4 +1,4 @@
-"""Bounded request-scoped Premium workers; no scheduler or saved transcripts."""
+"""Bounded worker engine; detached job lifetime is owned by task_jobs."""
 
 from __future__ import annotations
 
@@ -137,9 +137,10 @@ class DelegateTaskTool(Tool):
         return (
             "Premium: delegate all substantial work: websites, code, shell, research, media analysis, repository tasks and multi-step investigations. Use general for tasks spanning tools. Delegate one or two focused tasks. Use a saved profile by name, or set kind and optionally choose its tools. Maxwell may select permissions within available caller tools. "
             "Workers use a dedicated personal worker connection, your chat BYOK, the operator worker model, or the default AI, in that order, with caller permissions and bounded "
-            "steps and time. Wait for their reports before changing the same files. "
-            "They cannot send chat messages, export files, delegate again or run after "
-            "this request ends. Reports can describe partial work; do not claim success "
+            "steps and time. Returns a background job ID immediately; keep chatting while it runs. "
+            "Do not poll or wait in this turn. Completion returns to the originating context. "
+            "Use manage_tasks for status or requested cancellation. Do not launch duplicate work or change the same files while a job runs. "
+            "Workers cannot send chat messages, export files or delegate recursively. Reports can describe partial work; do not claim success "
             "without checking results. Include all necessary task context explicitly."
         )
 
@@ -158,6 +159,14 @@ class DelegateTaskTool(Tool):
         return True
 
     async def execute(self, message, tasks=None, **kwargs):
+        if _inside_worker.get():
+            return "refused: workers cannot delegate recursively"
+        manager = getattr(self.bot, "_task_jobs", None)
+        if manager is None:
+            return "Error: background task manager unavailable; no job started"
+        return await manager.submit(self, message, tasks)
+
+    async def run(self, message, tasks=None, **kwargs):
         import jsonschema
         from bot import _current_request_provider
 
@@ -346,6 +355,13 @@ class DelegateTaskTool(Tool):
             chunks = []
             media = []
             for _ in range(steps):
+                from .task_job_store import active_job
+                context = active_job.get()
+                if context:
+                    manager, job = context
+                    if not await manager.allowed(job):
+                        raise asyncio.CancelledError
+                    job.steps += 1
                 if not await self._eligible(message):
                     return {
                         "kind": task["kind"],
@@ -422,6 +438,9 @@ class DelegateTaskTool(Tool):
                                 or name not in current_profile["tools"]
                             ):
                                 raise PermissionError("agent permissions withdrawn")
+                        if context:
+                            job.last_tool = name
+                            job.tool_calls += 1
                         output = await self.bot._execute_tool_by_name(
                             message,
                             name,
