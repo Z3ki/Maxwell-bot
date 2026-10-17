@@ -307,6 +307,38 @@ def test_adapter_send_caps_at_six():
     assert "chunk 7" in last.content
 
 
+def test_policy_notice_is_sent_after_the_answer(tmp_path):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    interaction = _interaction(user_id=2, prompt="explain this")
+    store = UserPreferenceStore(tmp_path / "user_preferences.json")
+    bot = SimpleNamespace(
+        _user_preferences=store,
+        config=SimpleNamespace(MAXWELL_PUBLIC_BASE_URL="https://operator.example.test"),
+        _is_admin=lambda uid: False,
+        on_message=None,
+    )
+    sent = []
+
+    async def on_message(message):
+        await message.channel.send("Here is the explanation.")
+
+    def spawn(coro):
+        sent.append(coro)
+
+    bot.on_message = on_message
+    bot._spawn_detached = spawn
+    assert asyncio.run(handle_user_install_interaction(bot, interaction)) is True
+    assert interaction.followup.payloads == []
+
+    asyncio.run(sent[0])
+    contents = [row["content"] for row in interaction.followup.payloads]
+    assert contents[0] == "Here is the explanation."
+    assert "Terms" in contents[1]
+    assert interaction.followup.payloads[1]["ephemeral"] is True
+    assert store.consents.review("2") == []
+
+
 def test_handle_spawns_for_non_admin():
     interaction = _interaction(user_id=2, prompt="ping me")
     spawned = []
@@ -525,7 +557,8 @@ def test_saved_visibility_is_used_for_slash_and_message_actions(tmp_path, monkey
                     }})
                 assert await ui.handle_user_install_interaction(bot, interaction)
                 assert interaction.response.deferred_ephemeral is (visibility == "private")
-                assert interaction.followup.payloads[-1]["ephemeral"] is (visibility == "private")
+                answer = next(row for row in interaction.followup.payloads if row["content"] == "answer")
+                assert answer["ephemeral"] is (visibility == "private")
                 if name != "maxwell":
                     message = received[-1]
                     assert message.user_install_message_action
@@ -540,7 +573,8 @@ def test_saved_visibility_is_used_for_slash_and_message_actions(tmp_path, monkey
             })
             assert await ui.handle_user_install_interaction(bot, user_action)
             assert user_action.response.deferred_ephemeral is (visibility == "private")
-            assert user_action.followup.payloads[-1]["ephemeral"] is (visibility == "private")
+            answer = next(row for row in user_action.followup.payloads if row["content"] == "answer")
+            assert answer["ephemeral"] is (visibility == "private")
             explicit = _interaction()
             explicit.data["options"].append({"name": "visibility", "value": "private" if visibility == "public" else "public"})
             assert await ui.handle_user_install_interaction(bot, explicit)

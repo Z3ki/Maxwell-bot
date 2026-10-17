@@ -350,8 +350,8 @@ def test_rewrite_modal_preserves_request_options_and_prevents_duplicate_submissi
     assert "Respond in Spanish" in message.user_install_request_instructions
     assert message.response_visibility == "private"
     assert submission.response.deferred_ephemeral
-    assert submission.followup.payloads[-1]["content"] == "plain answer"
-    assert "embed" not in submission.followup.payloads[-1]
+    answer = next(row for row in submission.followup.payloads if row["content"] == "plain answer")
+    assert "embed" not in answer
     asyncio.run(modal.on_submit(submission))
     assert len(received) == 1
 
