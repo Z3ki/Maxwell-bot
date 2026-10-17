@@ -1073,8 +1073,6 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
     except Exception:
         logger.exception("user-install defer failed")
         return True
-    from privacy import maybe_notice
-    await maybe_notice(bot, interaction)
     source_context = interaction_source_context(interaction, getattr(turn.get("reference"), "resolved", None))
     history = (
         await snapshot_channel_history(bot, interaction, limit=history_limit)
@@ -1112,8 +1110,22 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
         await bind_user_install_author(message)
     spawn = getattr(bot, "_spawn_detached", None)
     on_message = getattr(bot, "on_message", None)
+
+    async def run_turn(message=message):
+        try:
+            if callable(on_message):
+                await on_message(message)
+        finally:
+            # The notice is an ephemeral follow-up. Sending it before the
+            # answer lets the final edit of the deferred response dismiss it.
+            from privacy import maybe_notice
+
+            await maybe_notice(bot, interaction)
+
     if callable(spawn) and callable(on_message):
-        spawn(on_message(message))
+        spawn(run_turn())
     elif callable(on_message):
-        await on_message(message)
+        await run_turn()
+    else:
+        await run_turn()
     return True
