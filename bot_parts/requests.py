@@ -102,6 +102,11 @@ class RequestPipelineMixin:
 
     async def _mark_request_effect(self, message) -> None:
         """Commit the checkpoint before HTTP without blocking the Discord loop."""
+        from plugins.maxwell_extras.task_job_store import active_job
+        worker = active_job.get()
+        if worker is not None:
+            await worker[0].checkpoint(worker[1])
+            return
         journal = getattr(self, "_request_journal", None)
         mid = str(getattr(message, "id", "") or "")
         if journal is None or not mid:
@@ -474,6 +479,9 @@ class RequestPipelineMixin:
                 return
             uid = str(getattr(message.author, "id", ""))
             current_plan.set((uid, await load_plan(self, uid)))
+            jobs = getattr(self, "_task_jobs", None)
+            if jobs is not None:
+                await jobs.refresh_user(uid)
             request_provider = await self._personal_provider(message)
             if request_provider is not None:
                 _current_request_provider.set(request_provider)

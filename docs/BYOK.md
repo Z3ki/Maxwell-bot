@@ -94,3 +94,5 @@ rotation script, the same old key and the same new key. Update the secret and
 restart only after every database succeeds; if one fails, keep services stopped
 and recover it before switching keys. Keep recovery backups protected. Do not
 restart with databases encrypted under different master keys.
+
+Background jobs open a separate connection using the saved worker/chat credential snapshot; they never borrow a chat turn's client. Workers in one job share their eight-tool personal-provider budget. Future chat turns have their own budget and client. Job status/cancel is available through `/tasks` and conversational `manage_tasks`. Reports stay transient even with history off; full deletion removes job metadata and stops old job writes.

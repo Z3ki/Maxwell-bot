@@ -390,3 +390,5 @@ provider, encryption, retention and legal-review evidence in
 `release-readiness.json`; `python scripts/check_release_readiness.py` blocks public
 release while review is incomplete. Deploying source does not configure the Portal
 or certify legal compliance. Do not enable Premium sales before billing review.
+
+Premium worker jobs are detached from chat turns. Register/sync the new `/tasks` command on deployment; it privately reviews and cancels user-owned jobs, including results whose original interaction token expired. `/cancel` also stops that user's jobs in the current conversation. Each bot instance must use its own data directory/job manager. Restart/unload stops and joins live jobs and records interruption instead of replaying them. See [PREMIUM_TASKS.md](PREMIUM_TASKS.md) for delivery, metadata retention and manual artifact deletion.

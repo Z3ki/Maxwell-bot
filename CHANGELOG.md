@@ -2,8 +2,9 @@
 
 ## 0.1.15 — 2026-10-17 (release candidate; operator review required)
 
+- Detach Premium workers from chat turns: launch returns a job ID immediately, Maxwell can keep chatting in the same channel, and jobs own their provider/deadline, lifecycle and completion delivery. Add conversational status/cancel and private `/tasks`; preserve visibility after token expiry, avoid duplicate notifications, include jobs in deletion/drain/shutdown and never replay interrupted jobs. Persist metadata only; reports remain in bounded RAM.
 - Make Premium substantial work coordinator-led: delegate sites, code, shell, research, repository work and scoped analysis to bounded workers, with independent `AI_WORKER_*` defaults and separate encrypted user worker BYOK/settings in Discord and the dashboard. Preserve live permissions, shared tool budgets, cancellation and honest deletion across both credential stores.
-- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium request-scoped task workers, custom profiles and model-selected tool permissions within caller authorization.
+- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium background task workers, custom profiles and model-selected tool permissions within caller authorization.
 
 - Remove hosted-provider presets and vendor-specific key links; use explicit endpoint/model/key connections, migrating encrypted historical records safely.
 - Optional conversation storage now requires an affirmative choice. Historical defaults do not imply consent; resets preserve privacy opt-outs.

@@ -8,10 +8,10 @@ from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 from bot import MaxwellBot
 
 
-def test_command_suite_keeps_only_config_and_cancellation_as_standalone_commands():
+def test_command_suite_keeps_config_cancellation_and_private_tasks_commands():
     definitions = command_suite.command_definitions()
     names = {row["name"] for row in definitions}
-    assert names == {"config", "cancel"}
+    assert names == {"config", "cancel", "tasks"}
     assert not names.intersection({"personality", "image", "chess", "checkers", "moderation", "memory", "reminder", "diagnostics", "maintenance"})
 
 
