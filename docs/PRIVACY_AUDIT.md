@@ -235,9 +235,9 @@ are available only to configured owners in `/config → Bot controls`. Paid chec
 remains disabled. Full deletion revokes manual plan/limit grants; short-lived quota
 metadata remains under the documented retention policy.
 
-[PREMIUM_TASKS.md](PREMIUM_TASKS.md) documents request-scoped workers: same caller,
+[PREMIUM_TASKS.md](PREMIUM_TASKS.md) documents detached worker jobs: same caller,
 provider and permission checks, no saved transcripts/background scheduler, bounded
-steps/time/concurrency, cancellation joined with the parent, and explicit partial
+steps/time/concurrency, cancellation managed independently of the chat turn, and explicit partial
 failure reports. New tests cover grants/revocation/restarts, failed plan writes,
 worker cancellation, privacy suppression, rejected tools/exports/recursion,
 capacity and context budgets. These workers do not restore the deleted autonomous
@@ -246,7 +246,7 @@ engine or its legacy controls.
 
 ### Independent worker providers and coordinator routing
 
-Premium substantial tasks now use request-scoped workers with separate operator
+Premium substantial tasks now use detached worker jobs with separate operator
 `AI_WORKER_*` settings or an independent personal worker BYOK slot. Dedicated
 worker BYOK wins over chat BYOK, then operator workers, then the primary provider.
 Task text, selected tool results and supported transient media go to that route;
@@ -257,3 +257,20 @@ Full deletion reports worker-vault failures separately and invalidates stale
 credential saves. Rotate both databases before switching the master key.
 Worker transcripts remain transient; no separate worker history or consent gate.
 Broader reviewed task tools retain central caller, plugin and scope checks.
+
+
+### Detached job lifecycle correction
+
+Worker launch now returns immediately, freeing the same channel's chat turn.
+Jobs keep independent contexts/clients/deadlines and share budgets only among
+their own siblings. Worker tools checkpoint side effects against the job ledger,
+not a completed/superseded chat request. Completion uses the original visibility;
+failed/expired private app tokens never cause public or unsolicited DM delivery.
+`/tasks` supplies a fresh private interaction for status/report retrieval/cancel.
+Only minimal job metadata is durable (one-day default retention, configurable
+`MAXWELL_TASK_METADATA_RETENTION_DAYS`). Task/transcript content stays transient;
+final reports have a bounded one-hour RAM cache, cleared by deletion and restart.
+The job DB participates in full deletion; live cancellation, same-context cache
+refresh and per-step checks observe deletion suppression across API processes.
+Restart records interruption/ambiguous delivery rather than replaying side effects.
+Shutdown/plugin unload joins workers and owned clients; maintenance drain counts them.

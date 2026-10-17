@@ -141,6 +141,8 @@ def _inflight_tasks(bot: Any) -> list[asyncio.Task]:
             for task in (group or ())
             if _task_running(task)
         )
+    jobs = getattr(getattr(bot, "_task_jobs", None), "jobs", {}) or {}
+    found.extend(job.task for job in jobs.values() if _task_running(job.task))
     return found
 
 
@@ -148,6 +150,9 @@ def inflight_busy(bot: Any) -> bool:
     """True while a turn, tool call, or counted background callback is running."""
     if bot is None:
         return False
+    jobs = getattr(getattr(bot, "_task_jobs", None), "jobs", {}) or {}
+    if any(_task_running(job.task) for job in jobs.values()):
+        return True
     active = getattr(bot, "_active_requests", None) or {}
     for task in active.values():
         if isinstance(task, asyncio.Task) and not task.done():

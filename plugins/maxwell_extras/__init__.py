@@ -23,6 +23,7 @@ def setup(bot, ctx):
     from .user_preferences import UserPreferenceStore, bind_message_tracking
     from .task_agents import TaskAgentStore, ManageTaskAgentTool
     from .task_workers import DelegateTaskTool
+    from .task_jobs import TaskJobs, ManageTasksTool
     from .byok import CredentialVault
 
     store = ReminderStore(ctx.store_path("reminders.json"))
@@ -40,6 +41,8 @@ def setup(bot, ctx):
     bot._byok_vault = CredentialVault(ctx.store_path("byok.sqlite3"))
     bot._worker_byok_vault = CredentialVault(ctx.store_path("worker_byok.sqlite3"))
     bot._task_agents = TaskAgentStore(ctx.store_path("task_agents.sqlite3"))
+    bot._task_jobs = TaskJobs(bot, ctx.store_path("task_jobs.sqlite3"))
+    ctx.every(30.0, bot._task_jobs.tick)
     install_user_install_features(bot)
     install_command_suite(bot, preferences)
 
@@ -66,6 +69,7 @@ def setup(bot, ctx):
 
     return [
         DelegateTaskTool(bot),
+        ManageTasksTool(bot),
         ManageTaskAgentTool(bot),
         MaxwellUpdatesTool(bot),
         GetConfigurationTool(bot),
@@ -77,7 +81,10 @@ def setup(bot, ctx):
     ]
 
 
-def teardown(bot):
+async def teardown(bot):
+    manager = getattr(bot, "_task_jobs", None)
+    if manager is not None:
+        await manager.close()
     import user_install as ui
 
     ui.unwrap_session_send("maxwell_embed")

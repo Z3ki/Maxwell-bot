@@ -62,6 +62,12 @@
       "returns_result": true,
       "ends_turn": false,
       "requires_admin": false
+    },
+    {
+      "name": "manage_tasks",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false
     }
   ]
 }

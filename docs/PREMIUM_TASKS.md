@@ -26,7 +26,7 @@ coordinator; workers cannot recursively delegate, send Discord messages or expor
 shell files. The effective tool set intersects task/profile permissions and live
 caller authorization. Premium never bypasses the sandbox, site ownership,
 plugin/server restrictions, private visibility, web-off, deletion suppression or
-the shared personal-provider tool-call budget.
+the personal-provider tool-call budget shared by siblings within each job.
 
 Worker provider precedence is: **dedicated worker BYOK → personal chat BYOK →
 operator `AI_WORKER_*` route → primary chat provider**. A saved but unavailable key
@@ -37,29 +37,63 @@ and worker keys/settings are independent, encrypted with the same operator maste
 key and both removed by full deletion. A user can review/delete saved keys after
 Premium revocation, but worker execution still requires Premium.
 
-Workers keep transcripts in memory only. No jobs survive cancellation or restart;
-there is no autonomous scheduling, cross-user context or saved worker memory.
-Generated site/files and shell workspace data follow those tools' existing
-retention and manual deletion rules. The selected AI provider receives task text
-and tool results; disabling history does not stop that processing.
+`delegate_task` returns a job ID immediately. Maxwell can answer more messages
+in the same channel while workers continue; an unrelated chat turn, its deadline
+or its cancellation does not own the job. `manage_tasks` lets Maxwell check status
+or cancel a task when asked, scoped to that user and the current channel/visibility.
+The prompt includes a small status summary, not the task transcript. Do not poll
+or repeat progress unasked. One completed job produces one factual completion
+notification in its original context, with mentions disabled.
 
-Defaults: one delegation per user at a time, at most two siblings, four active
-workers globally, twelve LLM steps per worker, a 128,000-character text context budget
-and a 600-second worker deadline. Premium whole requests allow at least that
-ceiling plus 30 seconds for the coordinator report. Sibling tool calls serialize to reduce write races;
-model calls may overlap. The operator may change `premium_task_workers_enabled`,
-`task_workers_max_active` (1–8), `task_workers_max_steps` (1–32) and
-`task_workers_timeout_seconds` (10–7200), and `task_workers_context_chars` (up to 2,000,000) in `bot_control.json`. Old removed
-`subagent_*` controls cannot resurrect the retired runtime. Workers recheck plans
-and privacy state before each model/tool step. Revocation stops further steps;
-an already-running external request may finish before that check.
+`/tasks` privately lists your own jobs across contexts, with refresh/cancel controls
+and an optional job ID. `/cancel` cancels your current chat request and your worker
+jobs in that conversation. Ask Maxwell to cancel a job conversationally to keep
+chatting without it. Cancellation joins children and closes their owned clients;
+already completed writes can remain. Main chat never borrows a worker-owned key
+or waits for that client's shutdown. Workers open their own personal connection
+instead of borrowing the chat turn's short-lived BYOK client.
 
-Reports distinguish unavailable tools, capacity, context/step/time limits and
-failures. A model report is not independent verification. Completed actions can
-remain after failure/cancel; inspect them before retrying. Workers stop when the
-context budget is full rather than forgetting earlier writes and repeating them.
-The normal `/cancel` cancels the parent and its children. Shell cancellation uses
-the existing sandbox teardown; this feature adds no host shell access.
+For application commands, completion keeps the original Public/Private visibility
+and uses that interaction's follow-up token while valid. Discord tokens expire
+after 15 minutes and user-only installations have a follow-up cap; see the
+[official interaction reference](https://github.com/discord/discord-api-docs/blob/main/developers/interactions/receiving-and-responding.mdx).
+An expired/failed follow-up is recorded, without sending a private result publicly,
+starting a DM or retrying an ambiguous send. Use a fresh `/tasks job_id:...` to
+retrieve the report privately. Ordinary message/DM tasks reply to the original
+channel; this never starts an unsolicited DM. Completion delivery is bounded to
+10 seconds and claimed durably before HTTP to avoid duplicate notifications.
+
+Worker transcripts and task text exist only in memory while the job runs. Final
+reports remain in a bounded in-memory cache for up to one hour (at most 256 jobs,
+earlier eviction is possible under load), so the user can retrieve results even
+if delivery fails. Source-message/attachment references are released on completion.
+No task text, transcript, report, webhook token or API key is saved in the job DB.
+`plugins/maxwell_extras/task_jobs.sqlite3` stores job/user/source/channel/guild IDs,
+visibility, task kinds, lifecycle timestamps, state, side-effect/delivery markers
+and tool counts. Metadata defaults to one day of retention, configurable with
+`MAXWELL_TASK_METADATA_RETENTION_DAYS`; periodic cleanup and full deletion remove it.
+
+A restart marks previously live jobs interrupted and ambiguous deliveries unknown;
+it never resumes or replays their side effects. Detailed reports do not survive
+restart. Plugin unload/shutdown cancels and joins jobs before provider teardown;
+maintenance drain includes them. Full deletion cancels live jobs where possible,
+removes metadata and cached results, and prevents old writes from recreating rows.
+The bot observes dashboard deletion through shared metadata/epoch checks. Essential
+processing can already have reached a provider; published websites and sandbox
+files retain their separate tool/operator deletion lifecycle.
+
+Defaults: one job per user, at most two siblings, four active worker slots globally,
+twelve LLM steps each, a 128,000-character text budget and a 600-second job engine
+deadline. Workers have independent request/job deadlines; chat keeps its own
+normal deadline. Sibling tool calls serialize; model calls may overlap. Controls:
+`premium_task_workers_enabled`, `task_workers_max_active` (1–8),
+`task_workers_max_steps` (1–32), `task_workers_timeout_seconds` (10–7200) and
+`task_workers_context_chars` (up to 2,000,000). Permission, Premium, privacy and
+source-access checks run before model/tool steps; a two-second watchdog also
+stops long in-flight work when access is revoked. A request already sent externally
+may finish before cancellation takes effect. Reports distinguish incomplete,
+failed, stopped, cancelled and interrupted jobs; a model report is not independent
+verification. Inspect partial changes before retrying.
 
 For slow models, configure the independent worker LLM and whole-task deadlines in
 [PROVIDERS.md](PROVIDERS.md). A personal worker deadline is capped by the operator

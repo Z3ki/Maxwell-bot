@@ -59,10 +59,5 @@ def worker_timeout_seconds(bot):
 
 
 def request_turn_timeout_seconds(bot, provider=None, *, premium=False):
-    timeout = turn_timeout_seconds(bot, provider)
-    if premium and (getattr(bot, "_control", {}) or {}).get(
-        "premium_task_workers_enabled", True
-    ):
-        # Leave room for the coordinator to report after a worker deadline.
-        timeout = max(timeout, worker_timeout_seconds(bot) + 30)
-    return timeout
+    # Detached workers own their deadline; slow jobs never extend a chat turn.
+    return turn_timeout_seconds(bot, provider)

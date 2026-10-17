@@ -119,7 +119,11 @@ CANCEL_COMMAND = {
 
 
 def command_definitions() -> list[dict[str, Any]]:
-    return [CONFIG_COMMAND, CANCEL_COMMAND]
+    return [CONFIG_COMMAND, CANCEL_COMMAND, {
+        "name": "tasks", "description": "Privately review or cancel your background worker tasks.", **_APP_META,
+        "options": [{"name":"action","description":"Review or cancel a task","type":3,"choices":[{"name":"Status","value":"status"},{"name":"Cancel","value":"cancel"}]},
+                    {"name":"job_id","description":"Optional task ID; required for cancellation","type":3,"max_length":12}],
+    }]
 
 
 def _options(interaction: Any) -> dict[str, Any]:
@@ -1227,6 +1231,19 @@ async def _handle_cancel(bot: Any, interaction: Any) -> bool:
         if candidate is not None and not candidate.done() and str(owners.get(key) or "") == uid:
             task = candidate
             break
+    manager = getattr(bot, "_task_jobs", None)
+    stopped = 0
+    if manager is not None:
+        from .task_jobs_ui import context_ids
+        cid, gid = context_ids(interaction)
+        rows = await manager.inspect(uid)
+        for row in rows:
+            job = manager.jobs.get(row["id"])
+            if job and (job.row["channel_id"], job.row["guild_id"]) == (cid, gid):
+                stopped += await manager.cancel(uid, row["id"])
+    if task is None and stopped:
+        await _send(interaction, f"Stopped {stopped} worker job(s). Partial changes may remain; inspect before retrying.")
+        return True
     if task is None:
         await _send(interaction, "You have no running Maxwell request in this interaction context.")
         return True
@@ -1249,6 +1266,8 @@ def install_command_suite(bot: Any, store: Any) -> None:
         ui.register_command(command)
     ui.register_interaction_handler(_handle_config, priority=5, name="command_config")
     ui.register_interaction_handler(_handle_cancel, priority=5, name="command_cancel")
+    from .task_jobs_ui import handle_tasks
+    ui.register_interaction_handler(handle_tasks, priority=5, name="command_tasks")
     for stale_name in ("personality", "diagnostics", "maintenance"):
         ui.unregister_command(stale_name)
     bot._maxwell_command_suite_installed = True
@@ -1258,7 +1277,7 @@ def uninstall_command_suite(bot: Any) -> None:
     global _ACTIVE_STORE
     for command in command_definitions():
         ui.unregister_command(str(command.get("name") or ""))
-    for name in ("command_config", "command_cancel"):
+    for name in ("command_config", "command_cancel", "command_tasks"):
         ui.unregister_interaction_handler(name)
     if getattr(bot, "_maxwell_command_suite_installed", False):
         del bot._maxwell_command_suite_installed

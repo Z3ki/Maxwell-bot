@@ -81,6 +81,10 @@ def delete_data(root, user_id, preferences, *, sessions=None):
         from plugins.maxwell_extras.task_agents import TaskAgentStore
 
         run("custom_agents", lambda: TaskAgentStore(agent_path).delete(uid))
+    job_path = extra / "task_jobs.sqlite3"
+    if job_path.is_file():
+        from plugins.maxwell_extras.task_job_store import TaskJobStore
+        run("worker_jobs", lambda: TaskJobStore(job_path).delete(uid))
     quota_path = root / "message_quota.sqlite3"
     if quota_path.is_file():
 
@@ -155,6 +159,12 @@ async def delete_live_data(bot, user_id):
         raise RuntimeError("Privacy settings unavailable")
     # This must finish before cancelling writers. Off applies across API processes.
     await asyncio.to_thread(preferences.set_default, uid, "tracking", "off")
+    manager = getattr(bot, "_task_jobs", None)
+    if manager is not None:
+        await manager.cancel(uid, reason="stopped")
+        for jid, job in list(manager.jobs.items()):
+            if job.row["user_id"] == uid:
+                manager.jobs.pop(jid, None)
     owners = getattr(bot, "_active_request_user", {}) or {}
     tasks = getattr(bot, "_active_requests", {}) or {}
     current = asyncio.current_task()
@@ -209,6 +219,10 @@ def cleanup_data(root, preferences):
     """Run at startup and every ten minutes. No raw diagnostic content is needed."""
     root = Path(root)
     now = time.time()
+    job_path = root / "plugins/maxwell_extras/task_jobs.sqlite3"
+    if job_path.is_file():
+        from plugins.maxwell_extras.task_job_store import TaskJobStore
+        TaskJobStore(job_path).prune()
     agent_path = root / "plugins/maxwell_extras/task_agents.sqlite3"
     if agent_path.is_file():
         from plugins.maxwell_extras.task_agents import TaskAgentStore

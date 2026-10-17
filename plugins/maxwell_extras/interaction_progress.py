@@ -563,6 +563,9 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
     )
 
     async def before_tool(payload) -> None:
+        from .task_job_store import active_job
+        if active_job.get() is not None:
+            return
         data = getattr(payload, "data", payload) or {}
         message = data.get("message")
         if message is not None and is_user_install_message(message):
@@ -571,6 +574,9 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
                 await _note_interaction_tool(state, str(data.get("name") or ""))
 
     async def after_tool(payload) -> None:
+        from .task_job_store import active_job
+        if active_job.get() is not None:
+            return
         data = getattr(payload, "data", payload) or {}
         message = data.get("message")
         name = str(data.get("name") or "")
