@@ -67,7 +67,7 @@ class PrivacySupport(discord.ui.Modal, title="Send private privacy request"):
         label="Request to the bot operator (no secrets)",
         style=discord.TextStyle.paragraph,
         max_length=1000,
-        placeholder="Access, export, correction, backup or workspace deletion. This will be sent privately to the configured operator.",
+        placeholder="Access, export, correction or deletion. Sent privately to this bot’s configured operator.",
     )
 
     def __init__(self, panel):
@@ -83,14 +83,15 @@ class PrivacySupport(discord.ui.Modal, title="Send private privacy request"):
         result = await notify_owner(
             self.panel.bot,
             kind="privacy",
-            title="User-requested private privacy support",
+            title=f"Private privacy request from user {self.panel.user_id}",
             details=f"Discord user {self.panel.user_id} explicitly requested operator support: {str(self.request_text)}",
         )
-        await _send(
-            interaction,
-            result
-            + " Your request is sent only to the configured operator. Any delivered Discord support copy needs operator deletion.",
+        suffix = (
+            " Sent privately to the configured operator. Any delivered Discord support copy needs operator deletion."
+            if result.startswith("Reported to ")
+            else " Delivery was not confirmed. Please retry later; do not post personal information in public issues."
         )
+        await _send(interaction, result + suffix)
 
 
 class PrivacyButton(discord.ui.Button):

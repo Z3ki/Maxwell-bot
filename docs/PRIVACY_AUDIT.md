@@ -200,3 +200,17 @@ renewal, cancellation, tax and refund terms before Premium sales.
 Automated verification results and final Git references are recorded in the PR and
 final delivery report. No deployment/restart or Portal modification is implied by
 merging source.
+
+## Local verification before promotion
+
+- Python 3.12: 3,149 tests passed, two explicitly skipped (no local Chromium and
+  no real provider API key), nine existing Discord UI deprecation warnings.
+- Shared-core branch coverage: 83.01%, above the configured 80% gate.
+- Ruff, compileall, pip dependency check, 11 tracked shell syntax checks and
+  dashboard JavaScript syntax check passed.
+- Scoped-history and inbound-queue benchmarks ran at 100, 500 and 1,000 servers.
+  These are local storage/admission measurements, not Discord/provider capacity.
+- Docker is unavailable locally; pinned audio/runtime image checks are delegated
+  to the repository's GitHub Actions workflows, not claimed as local passes.
+- The release-readiness check intentionally blocks publication pending operator
+  evidence. No live Discord/Portal/provider or backup-restore validation is claimed.

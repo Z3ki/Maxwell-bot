@@ -429,6 +429,8 @@ class CoreMixin:
             data_dir=self.config.DATA_DIR, max_messages=self.config.MEMORY_MESSAGE_LIMIT
         )
 
+        # Privacy remains available even if the optional UI plugin fails to load.
+        self._user_preferences = self.memory.preferences
         self.inbox = InboxStore(self.config.DATA_DIR)
         self.thread_store = ThreadStore(self.config.DATA_DIR)
         self.thread_store.load()
@@ -616,7 +618,10 @@ class CoreMixin:
         await self.ai_provider.initialize()
         self.memory.load_from_disk()
         from privacy_data import cleanup_data
-        await asyncio.to_thread(cleanup_data, self.config.DATA_DIR, self._user_preferences)
+        try:
+            await asyncio.to_thread(cleanup_data, self.config.DATA_DIR, self._user_preferences)
+        except Exception as exc:
+            logger.warning("Startup privacy cleanup failed (%s); periodic cleanup will retry", type(exc).__name__)
         self._load_sites()
         self._load_admins()
         self._load_auto_channels()
