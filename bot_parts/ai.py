@@ -80,7 +80,7 @@ class AIMixin:
             quotas = getattr(self, "_message_quota", None)
             if quotas is not None:
                 guild = getattr(message, "guild", None)
-                quotas.charge(
+                await asyncio.to_thread(quotas.charge,
                     str(quota_user_id),
                     enforced_message_limit(self._control),
                     enforced_window_seconds(self._control),
@@ -90,8 +90,13 @@ class AIMixin:
             premium_model = str(
                 getattr(getattr(self, "config", None), "AI_PREMIUM_MODEL", "") or ""
             ).strip()
-            if premium_model and self._wants_premium_model(str(quota_user_id or ""), message):
-                kwargs["model"] = premium_model
+            if premium_model:
+                from premium_access import current_plan, load_plan
+                uid = str(quota_user_id or "")
+                snapshot = current_plan.get()
+                premium = snapshot == (uid, "premium") if snapshot and snapshot[0] == uid else await load_plan(self, uid) == "premium"
+                if premium or self._wants_premium_model(uid, message):
+                    kwargs["model"] = premium_model
         # This step is working again: any typing that a previous send
         # suspended in this channel comes back only now, so the indicator
         # never trails the last delivered message.

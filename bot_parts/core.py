@@ -410,13 +410,9 @@ class CoreMixin:
 
     def _wants_premium_model(self, quota_user_id: str, message) -> bool:
         """Premium-plan grant, or the experimental agentic routing switch."""
-        plan_for = getattr(getattr(self, "_message_quota", None), "plan_for", None)
-        if quota_user_id and callable(plan_for):
-            try:
-                if plan_for(quota_user_id) == "premium":
-                    return True
-            except Exception:
-                logger.debug("premium model lookup failed", exc_info=True)
+        from premium_access import premium_for_current_request
+        if premium_for_current_request(quota_user_id):
+            return True
         # Experimental: requests that want something DONE (build, run, deploy,
         # debug …) get the stronger model even on the free plan, because the
         # small model is what usually fails them.
