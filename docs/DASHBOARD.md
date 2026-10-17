@@ -51,3 +51,5 @@ Settings writers lock read-modify-write operations and merge only the selected g
 ## Verify after deployment
 
 Open the dashboard, sign in, save a personal language preference, and confirm it in `/config`. Use an administrator account to save a server setting and confirm it in Discord. Check that a normal member cannot access that server's settings, that logging out requires a new sign-in, and that `/api/control` on the dashboard origin returns 404 from Caddy. Actual OAuth sign-in requires your configured application credentials and registered redirect URI; automated tests use mocked Discord responses.
+
+AI connections have independent **Chat** and **Subagents (Premium)** slots. The selector clears unsaved key input when switching. Both use the same encrypted vault format and Discord settings; worker execution remains Premium gated. See [BYOK.md](BYOK.md) for routing, limits, deletion and rotating both credential databases.

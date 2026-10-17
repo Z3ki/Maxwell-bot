@@ -265,11 +265,13 @@ def test_server_permissions_are_fresh_and_cross_server_channels_are_rejected(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("path,vault_name", [("/api/dashboard/connection", "vault"), ("/api/dashboard/worker-connection", "worker_vault")])
 def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, path, vault_name
 ):
     async def run():
         async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
+            vault = getattr(dashboard, vault_name)
             payload = {
                 "provider": "custom",
                 "model": "test-model",
@@ -277,14 +279,14 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
                 "base_url": "https://api.example.com/v1",
             }
             response = await client.put(
-                "/api/dashboard/connection", json=payload, headers=headers
+                path, json=payload, headers=headers
             )
             assert response.status == 200
             assert SECRET not in await response.text()
-            assert dashboard.vault.get("100")["api_key"] == SECRET
-            assert not dashboard.vault.has_credential("200")
+            assert vault.get("100")["api_key"] == SECRET
+            assert not vault.has_credential("200")
             response = await client.put(
-                "/api/dashboard/connection",
+                path,
                 json={
                     "provider": "custom",
                     "model": "new-model",
@@ -294,10 +296,10 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
                 headers=headers,
             )
             assert response.status == 200
-            assert dashboard.vault.get("100")["api_key"] == SECRET
+            assert vault.get("100")["api_key"] == SECRET
             assert (
                 await client.put(
-                    "/api/dashboard/connection",
+                    path,
                     json={
                         "provider": "custom",
                         "model": "model",
@@ -307,17 +309,17 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
                     headers=headers,
                 )
             ).status == 400
-            assert dashboard.vault.get("100")["provider"] == "custom"
+            assert vault.get("100")["provider"] == "custom"
             assert (
                 await client.put(
-                    "/api/dashboard/connection",
+                    path,
                     json={**payload, "user_id": "200"},
                     headers=headers,
                 )
             ).status == 400
             assert (
                 await client.put(
-                    "/api/dashboard/connection",
+                    path,
                     json={
                         **payload,
                         "provider": "custom",
@@ -327,9 +329,9 @@ def test_connection_never_exposes_key_preserves_edits_and_blocks_wrong_owner(
                 )
             ).status == 400
             assert (
-                await client.delete("/api/dashboard/connection", headers=headers)
+                await client.delete(path, headers=headers)
             ).status == 200
-            assert not dashboard.vault.has_credential("100")
+            assert not vault.has_credential("100")
 
     asyncio.run(run())
 
@@ -485,4 +487,44 @@ def test_dashboard_roundtrips_slow_model_settings_used_by_discord(tmp_path, monk
             from plugins.maxwell_extras.byok import CredentialVault
             stored = CredentialVault(dashboard.vault.path, dashboard.vault._key).get("100")["settings"]
             assert (stored["timeout"], stored["turn_timeout"], stored["context"], stored["effort"]) == (1200, 2400, 128000, "high")
+    asyncio.run(run())
+
+
+def test_worker_connections_are_isolated_authenticated_and_included_in_deletion(tmp_path, monkeypatch):
+    async def run():
+        async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
+            path = "/api/dashboard/worker-connection"
+            payload = {"provider": "custom", "model": "worker", "api_key": SECRET, "base_url": "https://example.com/v1"}
+            assert (await client.get(path)).status == 401
+            assert (await client.put(path, json=payload, headers={"Cookie": headers["Cookie"]})).status == 403
+            assert (await client.put(path, json=payload, headers=headers)).status == 200
+            assert not dashboard.vault.has_credential("100")
+            dashboard.vault.save("100", "custom", "chat", SECRET, base_url="https://example.com/v1")
+            assert (await client.delete(path, headers=headers)).status == 200
+            assert dashboard.vault.has_credential("100")
+            assert (await client.put(path, json=payload, headers=headers)).status == 200
+            response = await client.delete("/api/dashboard/privacy", headers=headers)
+            assert response.status == 200
+            assert not dashboard.worker_vault.has_credential("100") and not dashboard.vault.has_credential("100")
+
+    asyncio.run(run())
+
+
+def test_worker_connection_test_uses_only_worker_key_and_closes_client(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    captured = []
+    provider = SimpleNamespace(generate_response=AsyncMock(return_value="OK"), close=AsyncMock())
+    def make(bot, credential):
+        captured.append(credential)
+        return provider
+    monkeypatch.setattr("api.dashboard.make_request_provider", make)
+    async def run():
+        async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
+            dashboard.vault.save("100", "custom", "chat", "sk-chat-test-secret", base_url="https://example.com/v1")
+            dashboard.worker_vault.save("100", "custom", "worker", SECRET, base_url="https://example.com/v1")
+            response = await client.post("/api/dashboard/worker-connection/test", json={}, headers=headers)
+            assert response.status == 200 and SECRET not in await response.text()
+            assert captured[0]["model"] == "worker" and captured[0]["api_key"] == SECRET
+            provider.close.assert_awaited_once()
     asyncio.run(run())

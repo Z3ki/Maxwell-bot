@@ -52,7 +52,7 @@ continues using the old key:
 1. Back up the encrypted database and current key using the deployment's secret
    manager.
 2. Stop Maxwell and run `python scripts/rotate_byok_key.py --database
-   "$DATA_DIR/byok.sqlite3"` with the current key in the environment.
+   "$DATA_DIR/plugins/maxwell_extras/byok.sqlite3"` with the current key in the environment.
 3. Enter and confirm the new 64-character key at the prompts.
 4. Replace `MAXWELL_BYOK_ENCRYPTION_KEY` in the secret manager, then restart
    Maxwell and verify a credential status can be read.
@@ -74,3 +74,23 @@ HTTPS validation, DNS pinning, TLS verification, redirect blocking, total time
 and response-size limits, and credential redaction are enforced by the client.
 See [PROVIDERS.md](PROVIDERS.md). ChatGPT login and OAuth are not implemented;
 future OAuth credentials must be stored separately from the BYOK API-key table.
+
+
+## Separate subagent credentials
+
+Use `/config → More options → Subagent AI provider` or select **Subagents
+(Premium)** in the dashboard connection section. Save/test/edit/remove works like
+the chat connection, but uses `plugins/maxwell_extras/worker_byok.sqlite3` and never
+changes the chat slot. Full deletion removes both slots and blocks credential
+saves from requests/forms opened before deletion. Workers without their own key
+inherit chat BYOK before the operator worker route. Saved unreadable keys stop
+execution until repaired or removed. Premium is required to execute workers;
+keys can still be reviewed and removed after revocation.
+
+During master-key rotation, with both bot and API stopped, rotate **both**
+`$DATA_DIR/plugins/maxwell_extras/byok.sqlite3` and
+`$DATA_DIR/plugins/maxwell_extras/worker_byok.sqlite3` (when present) using the
+rotation script, the same old key and the same new key. Update the secret and
+restart only after every database succeeds; if one fails, keep services stopped
+and recover it before switching keys. Keep recovery backups protected. Do not
+restart with databases encrypted under different master keys.

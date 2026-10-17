@@ -39,6 +39,7 @@ _PERSONAL_SETTINGS = {
     "language": ("Language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("AI connection", "Connect your own AI account with an API key."),
+    "worker_byok": ("Subagent AI provider", "Choose an independent API endpoint, model and generation settings for Premium workers."),
     "agents": ("Custom agents", "Save and manage your own task-worker instructions and tool permissions."),
     "tracking": ("Privacy", "Choose whether Maxwell stores your message content."),
 }
@@ -301,6 +302,8 @@ class _ConfigNavButton(discord.ui.Button):
             return
         self.panel.scope = scope
         self.panel.selected_key = self.key
+        if self.key.startswith(("byok", "worker_byok")):
+            await self.panel._refresh_connection()
         self.panel.notice = ""
         self.panel._build()
         await _edit_panel(interaction, content=None, embed=self.panel.embed(), view=self.panel,
@@ -652,6 +655,8 @@ class _ConfigTextModal(discord.ui.Modal):
             await _send(interaction, str(exc))
             return
         self.panel.selected_key = self.key
+        if self.key.startswith(("byok", "worker_byok")):
+            await self.panel._refresh_connection()
         self.panel.notice = "**Saved.** Your next reply will use this setting."
         await _send(interaction, "Saved. This applies to your replies across channels, servers and DMs.")
         self.panel._build()
@@ -703,7 +708,7 @@ class _ConfigPanel(discord.ui.View):
         self.agent_profiles = await asyncio.to_thread(agents.list, self.user_id) if agents else []
 
     async def _refresh_connection(self) -> None:
-        vault = getattr(self.bot, "_byok_vault", None)
+        vault = connections.vault_for(self)
         self.connection_status = None
         self.connection_error = ""
         if vault is None:
@@ -768,8 +773,8 @@ class _ConfigPanel(discord.ui.View):
                 self.add_item(button)
         self.add_item(_ConfigCloseButton(self))
         if self.selected_key != "overview":
-            parent = "byok" if self.selected_key in {"byok_advanced", "byok_remove"} else (
-                "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context", "agents"} else "overview")
+            parent = "worker_byok" if self.selected_key in {"worker_byok_advanced", "worker_byok_remove"} else "byok" if self.selected_key in {"byok_advanced", "byok_remove"} else (
+                "replies" if self.scope == "personal" and self.selected_key in {"mode", "web", "context", "agents", "worker_byok"} else "overview")
             self.add_item(_ConfigNavButton(self, parent, label="Back", row=4))
         if self.selected_key == "overview":
             if self.scope == "personal":
@@ -792,7 +797,7 @@ class _ConfigPanel(discord.ui.View):
             for i, key in enumerate(keys):
                 self.add_item(_ConfigNavButton(self, key, label="Replies & context" if key == "replies" else None, row=1 + i // 2))
             return
-        if self.scope == "personal" and self.selected_key.startswith("byok"):
+        if self.scope == "personal" and self.selected_key.startswith(("byok", "worker_byok")):
             connections.build(self, _ConfigNavButton)
             return
         if self.scope == "personal":
@@ -803,7 +808,7 @@ class _ConfigPanel(discord.ui.View):
             if self.selected_key == "replies":
                 for row, key in ((1, "visibility"), (2, "detail")):
                     self.add_item(_ConfigValueSelect(self, _PERSONAL_VALUE_CHOICES[key], key=key, row=row))
-                for key in ("mode", "web", "context", "agents"):
+                for key in ("mode", "web", "context", "agents", "worker_byok"):
                     self.add_item(_ConfigNavButton(self, key, row=3))
                 return
             choices = _PERSONAL_VALUE_CHOICES.get(self.selected_key)
@@ -839,7 +844,7 @@ class _ConfigPanel(discord.ui.View):
 
     def _current_value(self) -> str:
         if self.scope == "personal":
-            if self.selected_key.startswith("byok"):
+            if self.selected_key.startswith(("byok", "worker_byok")):
                 return connections.summary(self)
             row = self.personal
             if self.selected_key == "style":
@@ -908,11 +913,11 @@ class _ConfigPanel(discord.ui.View):
     def render(self) -> str:
         if self.selected_key == "overview":
             return self.overview()
-        if self.scope == "personal" and self.selected_key.startswith("byok"):
+        if self.scope == "personal" and self.selected_key.startswith(("byok", "worker_byok")):
             return connections.render(self)
         if self.scope == "personal" and self.selected_key == "agents":
             lines = [f"`{row['name']}` · {row['kind']} · {', '.join(row['tools'])}" for row in self.agent_profiles]
-            return ("## Your custom task agents\nPremium can save up to ten profiles. Maxwell can choose tool permissions within your available tools. Profiles use your selected AI connection.\n\n" + ("\n".join(lines) or "No saved agents.") + "\n\nUse Manage agent to save/edit or delete an ID. Instructions are optional saved settings, expire 90 days after editing by default and are included in Delete my data. Do not include credentials. You can also ask Maxwell to manage your agents.\n\n" + self.notice)[:1900]
+            return ("## Your custom task agents\nPremium can save up to ten profiles. Maxwell can choose tool permissions within your available tools. Profiles use your selected subagent AI connection.\n\n" + ("\n".join(lines) or "No saved agents.") + "\n\nUse Manage agent to save/edit or delete an ID. Instructions are optional saved settings, expire 90 days after editing by default and are included in Delete my data. Do not include credentials. You can also ask Maxwell to manage your agents.\n\n" + self.notice)[:1900]
         if self.scope == "personal" and self.selected_key == "tracking":
             return self._privacy_screen()
         if self.scope == "personal" and self.selected_key == "replies":
@@ -921,7 +926,7 @@ class _ConfigPanel(discord.ui.View):
                      for key in ("visibility", "detail", "mode", "web", "context")]
             return ("## Replies & context\nDefaults for `/maxwell` and message app actions. "
                     "Choose who sees your replies and how much detail you want.\n\n" + "\n".join(lines) +
-                    "\n\nUse the buttons for response mode, web search and recent messages. "
+                    "\n\nUse the buttons for response mode, web search, recent messages, custom agents and a separate subagent AI provider. "
                     "Private app replies do not read public channel history.\n\n" + self.notice)
         settings = {"personal": _PERSONAL_SETTINGS, "server": _SERVER_SETTINGS, "owner": _OWNER_SETTINGS}[self.scope]
         selected = settings.get(self.selected_key, ("Setting", ""))[0]
@@ -1111,7 +1116,7 @@ class _ConfigPanel(discord.ui.View):
         if self.scope == "personal":
             if self.selected_key == "style":
                 await asyncio.to_thread(self.store.set_personality, self.user_id, "")
-            elif self.selected_key == "byok":
+            elif self.selected_key in {"byok", "worker_byok"}:
                 await _send(interaction, "Use **Delete key** to remove BYOK credentials.")
                 return
             else:

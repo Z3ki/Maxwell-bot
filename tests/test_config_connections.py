@@ -594,3 +594,38 @@ def test_custom_agent_private_modal_saves_permissions_and_deletes_without_premiu
     delete.action._value = "delete"
     asyncio.run(delete.on_submit(Interaction()))
     assert bot._task_agents.list("100") == []
+
+
+def test_worker_connection_form_is_independent_and_stale_forms_cannot_cross_slots(setup, tmp_path):
+    panel, bot, chat, _ = setup
+    worker = bot._worker_byok_vault = CredentialVault(tmp_path / "worker_byok.sqlite3", "11" * 32)
+    seed(panel, chat)
+
+    async def run():
+        panel.selected_key = "worker_byok"
+        await panel._refresh_connection()
+        panel._build()
+        assert panel.connection_status is None and connections.vault_for(panel) is worker
+        modal = connections.ConnectModal(panel)
+        modal.api_key._value = "sk-worker-private-key-123456"
+        modal.model._value = "independent-coder"
+        modal.endpoint._value = "https://worker.example.com/v1"
+        await modal.on_submit(Interaction())
+        assert worker.get("100")["model"] == "independent-coder"
+        assert chat.get("100")["api_key"] == SECRET
+        stale = connections.ConnectModal(panel)
+        stale.api_key._value = "sk-should-never-be-saved-12345"
+        stale.model._value = "stale-model"
+        stale.endpoint._value = "https://different.example.com/v1"
+        panel.selected_key = "byok"
+        await stale.on_submit(Interaction())
+        assert chat.get("100")["model"] == "example-model"
+        assert worker.get("100")["model"] == "independent-coder"
+        panel.selected_key = "worker_byok_remove"
+        await panel._refresh_connection()
+        panel._build()
+        await component(panel, connections.DisconnectButton).callback(Interaction())
+        assert not worker.has_credential("100") and chat.has_credential("100")
+        assert panel.selected_key == "worker_byok"
+
+    asyncio.run(run())

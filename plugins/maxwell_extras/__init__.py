@@ -38,6 +38,7 @@ def setup(bot, ctx):
     bot._user_preferences = preferences
     bind_message_tracking(bot, preferences)
     bot._byok_vault = CredentialVault(ctx.store_path("byok.sqlite3"))
+    bot._worker_byok_vault = CredentialVault(ctx.store_path("worker_byok.sqlite3"))
     bot._task_agents = TaskAgentStore(ctx.store_path("task_agents.sqlite3"))
     install_user_install_features(bot)
     install_command_suite(bot, preferences)
