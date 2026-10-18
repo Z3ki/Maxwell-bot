@@ -83,23 +83,76 @@ extend-immutable-calls = ["discord.app_commands.describe"]
 
 [tool.mypy]
 python_version = "3.11"
-# The tree is large and largely unannotated; a strict gate would produce
-# thousands of errors and get ignored. This checks what is annotated and stays
-# quiet about what is not, so new annotations are actually worth adding.
+# The tree is large and largely unannotated; a strict gate over everything
+# would produce thousands of errors and get ignored. CI checks the shared core
+# and the leaf modules listed in `files`, with check_untyped_defs on, and
+# follows imports silently so a gated module is not failed by an ungated one.
+files = [
+    "maxwell_core",
+    "message_pipeline.py",
+    "concurrency_safety.py",
+    "control_defaults.py",
+    "config.py",
+    "tool_registry.py",
+    "response_guard.py",
+    "watch_policy.py",
+    "message_quota.py",
+    "context_budget.py",
+    "provider_limits.py",
+    "premium_access.py",
+    "privacy.py",
+    "identity.py",
+    "plugins/maxwell_extras/style_freedom.py",
+]
+follow_imports = "silent"
 ignore_missing_imports = true
 warn_redundant_casts = true
 warn_unused_ignores = false
-check_untyped_defs = false
+check_untyped_defs = true
 exclude = "(bot\\.py\\.bak|shelldocker|\\.pi-lens|\\.pi-subagents|temp)"
+
+# Known baseline: these gated modules still carry pre-existing type errors
+# (mostly Optional narrowing). They stay in the gate's import graph but their
+# own errors are not reported yet. Remove a module from this list once it is
+# clean; never add a module here to silence a new error.
+[[tool.mypy.overrides]]
+module = [
+    "maxwell_core.hooks",
+    "maxwell_core.memory.scope",
+    "maxwell_core.plugins.lifecycle",
+    "maxwell_core.plugins.manifest",
+    "maxwell_core.prompts.conversation",
+    "maxwell_core.providers.factory",
+    "maxwell_core.providers.routing",
+    "maxwell_core.tools.publication",
+    "maxwell_core.tools.spec",
+    "maxwell_core.transport.output_safety",
+]
+ignore_errors = true
+
+# Clean at the default level but not yet with untyped bodies checked.
+[[tool.mypy.overrides]]
+module = ["maxwell_core.providers.models", "maxwell_core.providers.streaming"]
+check_untyped_defs = false
 
 [tool.coverage.run]
 branch = true
-source = ["maxwell_core", "message_pipeline", "concurrency_safety"]
+# Measure the whole runtime tree so the report shows what the suite actually
+# exercises. CI gates two numbers from the same data: the repository total
+# (fail_under below) and the shared-core scope (maxwell_core, message_pipeline,
+# concurrency_safety), which keeps its own, higher bar in `make coverage` and
+# .github/workflows/tests.yml.
+source = ["."]
+omit = [
+    "tests/*",
+    ".venv/*",
+    "venv/*",
+    # Manual live-API harness, never imported by the runtime.
+    "deep_test_harness.py",
+]
 
 [tool.coverage.report]
-# Shared services and request admission have a measured regression gate.
-# This scope does not claim coverage of every Discord/plugin integration.
-fail_under = 80
+fail_under = 68
 precision = 2
 show_missing = true
 skip_covered = true

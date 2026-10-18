@@ -1,0 +1,674 @@
+{
+ "errors": [],
+ "results": [
+  {
+   "code": "286     )\n287     return hashlib.sha1(stable.encode(\"utf-8\")).hexdigest()[:8]\n288 \n",
+   "col_offset": 11,
+   "end_col_offset": 47,
+   "filename": "./api/state.py",
+   "issue_confidence": "HIGH",
+   "issue_cwe": {
+    "id": 327,
+    "link": "https://cwe.mitre.org/data/definitions/327.html"
+   },
+   "issue_severity": "HIGH",
+   "issue_text": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
+   "line_number": 287,
+   "line_range": [
+    287
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b324_hashlib.html",
+   "test_id": "B324",
+   "test_name": "hashlib"
+  },
+  {
+   "code": "116             removed = db.execute(\n117                 f\"DELETE FROM vectors WHERE id IN ({marks})\",\n118                 chunk,\n",
+   "col_offset": 18,
+   "end_col_offset": 51,
+   "filename": "./conversation_memory.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 117,
+   "line_range": [
+    117
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "349         rows = self._db.execute(\n350             \"SELECT v.id,v.author,v.author_id,v.content,v.timestamp,v.metadata \"\n351             \"FROM conversation_search JOIN vectors v ON v.rowid=conversation_search.rowid \"\n352             \"WHERE conversation_search MATCH ? AND v.channel_id=? AND v.guild_id=? \"\n353             \"AND v.kind IN ('message','bot_output')\" + exclusion +\n354             \" ORDER BY bm25(conversation_search,0.0,1.0),v.timestamp DESC,v.created_at DESC LIMIT ?\",\n",
+   "col_offset": 12,
+   "end_col_offset": 52,
+   "filename": "./conversation_memory.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 350,
+   "line_range": [
+    350,
+    351,
+    352,
+    353
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "637             rows = self._db.execute(\n638                 f\"\"\"\n639                 SELECT e.src, e.rel, e.dst, ns.name AS src_name, nd.name AS dst_name\n640                 FROM graph_edges e\n641                 JOIN graph_nodes ns ON ns.id = e.src\n642                 JOIN graph_nodes nd ON nd.id = e.dst\n643                 WHERE (e.src IN ({placeholders}) OR e.dst IN ({placeholders}))\n644                   AND (e.scope='public' OR e.scope=?)\n645                 \"\"\",\n646                 (*frontier, *frontier, scope),\n",
+   "col_offset": 20,
+   "end_col_offset": 33,
+   "filename": "./knowledge_graph.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 638,
+   "line_range": [
+    638,
+    639,
+    640,
+    641,
+    642,
+    643,
+    644,
+    645
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "81         and not db.execute(\n82             \"SELECT 1 FROM vectors WHERE \" + missing_where + \" LIMIT 1\"\n83         ).fetchone()\n",
+   "col_offset": 12,
+   "end_col_offset": 42,
+   "filename": "./maxwell_core/memory/identity.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 82,
+   "line_range": [
+    82
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "106         rows = db.execute(\n107             \"SELECT id, kind, channel_id, guild_id, author_id, content, scope, \"\n108             \"metadata, content_hash FROM vectors WHERE \"\n109             + where\n110             + \" ORDER BY created_at, id\"\n",
+   "col_offset": 12,
+   "end_col_offset": 56,
+   "filename": "./maxwell_core/memory/identity.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 107,
+   "line_range": [
+    107,
+    108,
+    109
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "380             root=str(self.user_root(uid))\n381             args=[\"docker\",\"run\",\"-d\",\"--init\",\"--name\",name,\"--network\",\"bridge\",\"--memory\",\"4g\",\"--memory-swap\",\"4g\",\"--cpus\",\"2\",\"--pids-limit\",\"768\",\"--security-opt\",\"no-new-privileges\",\"--cap-drop\",\"ALL\",\"--cap-add\",\"CHOWN\",\"--cap-add\",\"DAC_OVERRIDE\",\"--cap-add\",\"FOWNER\",\"--cap-add\",\"SETGID\",\"--cap-add\",\"SETUID\",\"--tmpfs\",\"/tmp:rw,exec,nosuid,size=256m\",\"-v\",f\"{root}:/workspace:rw\",_IMAGE]\n382             res=await self._proc(*args,timeout=60)\n",
+   "col_offset": 329,
+   "end_col_offset": 360,
+   "filename": "./plugins/github_projects/impl.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 381,
+   "line_range": [
+    381
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "435             \"--pids-limit\", \"64\", \"--security-opt\", \"no-new-privileges\",\n436             \"--cap-drop\", \"ALL\", \"--tmpfs\", \"/tmp:rw,noexec,nosuid,nodev,size=256m\",\n437             \"-v\", f\"{root}:/repository:ro\", \"--workdir\", \"/tmp\", _IMAGE,\n438             \"python3\", \"-I\", \"-c\", INSPECTION_SCRIPT, operation, \"/repository\", ref,\n439         ]\n440         return await self._proc(*args, timeout=max(1, min(int(timeout), 180)))\n441 \n442     async def git(self,uid:str,repo:str,policy:dict[str,Any],commands:list[list[str]],*,timeout:int=300)->ExecResult:\n443         repo=_repo(repo)\n444         await self._require_command_permission(uid, repo)\n",
+   "col_offset": 44,
+   "end_col_offset": 83,
+   "filename": "./plugins/github_projects/impl.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 436,
+   "line_range": [
+    432,
+    433,
+    434,
+    435,
+    436,
+    437,
+    438,
+    439
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "436             \"--cap-drop\", \"ALL\", \"--tmpfs\", \"/tmp:rw,noexec,nosuid,nodev,size=256m\",\n437             \"-v\", f\"{root}:/repository:ro\", \"--workdir\", \"/tmp\", _IMAGE,\n438             \"python3\", \"-I\", \"-c\", INSPECTION_SCRIPT, operation, \"/repository\", ref,\n439         ]\n440         return await self._proc(*args, timeout=max(1, min(int(timeout), 180)))\n441 \n442     async def git(self,uid:str,repo:str,policy:dict[str,Any],commands:list[list[str]],*,timeout:int=300)->ExecResult:\n443         repo=_repo(repo)\n444         await self._require_command_permission(uid, repo)\n445         validate_git_commands(commands)\n",
+   "col_offset": 57,
+   "end_col_offset": 63,
+   "filename": "./plugins/github_projects/impl.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 437,
+   "line_range": [
+    432,
+    433,
+    434,
+    435,
+    436,
+    437,
+    438,
+    439
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "468             \"--security-opt\", \"no-new-privileges\", \"--cap-drop\", \"ALL\",\n469             \"--tmpfs\", \"/tmp:rw,noexec,nosuid,nodev,size=256m\",\n470             \"--mount\", f\"type=volume,source={cache_volume},destination=/git-scratch\",\n471             \"-v\", f\"{target}:/repository:rw\", \"--workdir\", \"/tmp\", _IMAGE,\n472             \"python3\", \"-I\", \"-c\", GIT_SCRIPT, \"/repository\", \"/git-scratch\",\n473         ]\n474         payload = json.dumps({\n475             \"repo\": repo, \"commands\": commands, \"checkout\": checkout, \"token\": token,\n476         }).encode()\n477         result = await self._proc(*args, input=payload, timeout=max(1, min(int(timeout), 1800)))\n478         return ExecResult(result.code, result.stdout.replace(token, \"[redacted]\"), result.stderr.replace(token, \"[redacted]\"))\n479 \n",
+   "col_offset": 23,
+   "end_col_offset": 62,
+   "filename": "./plugins/github_projects/impl.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 469,
+   "line_range": [
+    464,
+    465,
+    466,
+    467,
+    468,
+    469,
+    470,
+    471,
+    472,
+    473
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "470             \"--mount\", f\"type=volume,source={cache_volume},destination=/git-scratch\",\n471             \"-v\", f\"{target}:/repository:rw\", \"--workdir\", \"/tmp\", _IMAGE,\n472             \"python3\", \"-I\", \"-c\", GIT_SCRIPT, \"/repository\", \"/git-scratch\",\n473         ]\n474         payload = json.dumps({\n475             \"repo\": repo, \"commands\": commands, \"checkout\": checkout, \"token\": token,\n476         }).encode()\n477         result = await self._proc(*args, input=payload, timeout=max(1, min(int(timeout), 1800)))\n478         return ExecResult(result.code, result.stdout.replace(token, \"[redacted]\"), result.stderr.replace(token, \"[redacted]\"))\n479 \n480     async def checkout(self,uid:str,repo:str,policy:dict[str,Any],ref:str=\"\")->str:\n481         repo=_repo(repo)\n",
+   "col_offset": 59,
+   "end_col_offset": 65,
+   "filename": "./plugins/github_projects/impl.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 471,
+   "line_range": [
+    464,
+    465,
+    466,
+    467,
+    468,
+    469,
+    470,
+    471,
+    472,
+    473
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "34                       if key not in {'api_sig', 'format', 'callback'}) + secret\n35     return hashlib.md5(payload.encode('utf-8')).hexdigest()\n36 \n",
+   "col_offset": 11,
+   "end_col_offset": 47,
+   "filename": "./plugins/lastfm/client.py",
+   "issue_confidence": "HIGH",
+   "issue_cwe": {
+    "id": 327,
+    "link": "https://cwe.mitre.org/data/definitions/327.html"
+   },
+   "issue_severity": "HIGH",
+   "issue_text": "Use of weak MD5 hash for security. Consider usedforsecurity=False",
+   "line_number": 35,
+   "line_range": [
+    35
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b324_hashlib.html",
+   "test_id": "B324",
+   "test_name": "hashlib"
+  },
+  {
+   "code": "130              (older.timestamp=o.timestamp AND older.sequence<o.sequence)))'''\n131         rows = self.connection.execute(f'''SELECT o.* FROM outbox o\n132             WHERE {head} AND o.next_attempt<=?\n133             ORDER BY o.timestamp,o.sequence LIMIT ?''', (now, _BATCH)).fetchall()\n134         next_at = self.connection.execute(f'''SELECT MIN(o.next_attempt) FROM outbox o\n",
+   "col_offset": 43,
+   "end_col_offset": 18,
+   "filename": "./plugins/lastfm/scrobble.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 131,
+   "line_range": [
+    131,
+    132,
+    133
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "133             ORDER BY o.timestamp,o.sequence LIMIT ?''', (now, _BATCH)).fetchall()\n134         next_at = self.connection.execute(f'''SELECT MIN(o.next_attempt) FROM outbox o\n135             WHERE {head} AND o.next_attempt>?''', (now,)).fetchone()[0]\n136         jobs = []\n",
+   "col_offset": 46,
+   "end_col_offset": 18,
+   "filename": "./plugins/lastfm/scrobble.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 134,
+   "line_range": [
+    134,
+    135
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "126             return db.execute(\n127                 \"DELETE FROM agents WHERE user_id=?\" + (\" AND name=?\" if name else \"\"),\n128                 (uid, name) if name else (uid,),\n",
+   "col_offset": 16,
+   "end_col_offset": 52,
+   "filename": "./plugins/maxwell_extras/task_agents.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 127,
+   "line_range": [
+    127
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "102                 db.execute(\n103                     \"UPDATE jobs SET \"\n104                     + \",\".join(k + \"=?\" for k in values)\n105                     + \",updated_at=? WHERE id=?\",\n",
+   "col_offset": 20,
+   "end_col_offset": 38,
+   "filename": "./plugins/maxwell_extras/task_job_store.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 103,
+   "line_range": [
+    103,
+    104
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "573                     exec_token = f\"maxwell-exec-{uuid.uuid4().hex}\"\n574                     pid_file = f\"/tmp/{exec_token}.pid\"\n575                     # Run the user's shell in its own session/process group and leave\n",
+   "col_offset": 33,
+   "end_col_offset": 38,
+   "filename": "./plugins/shell/impl.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 574,
+   "line_range": [
+    574
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "187         \"--tmpfs\", \"/workspace:rw,exec,nosuid,nodev,size=512m\",\n188         \"--tmpfs\", \"/tmp:rw,exec,nosuid,nodev,size=256m\",\n189         image,\n190         \"sh\", \"-c\", _guest_start_command(),\n191     ]\n192 \n193 \n194 __all__ = [\n195     \"GUEST_CAPABILITIES\", \"ShellTenant\", \"docker_run_args\", \"egress_policy_ready\", \"resource_pool_ready\",\n196     \"validate_runsc_runtime\",\n197     \"shell_tenant\",\n198 ]\n",
+   "col_offset": 19,
+   "end_col_offset": 56,
+   "filename": "./plugins/shell/isolation.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 188,
+   "line_range": [
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178,
+    179,
+    180,
+    181,
+    182,
+    183,
+    184,
+    185,
+    186,
+    187,
+    188,
+    189,
+    190,
+    191
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  },
+  {
+   "code": "97     try:\n98         with urllib.request.urlopen(request, timeout=45) as response:\n99             body = response.read()\n",
+   "col_offset": 13,
+   "end_col_offset": 56,
+   "filename": "./plugins/tts_voice/impl.py",
+   "issue_confidence": "HIGH",
+   "issue_cwe": {
+    "id": 22,
+    "link": "https://cwe.mitre.org/data/definitions/22.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Audit url open for permitted schemes. Allowing use of file:/ or custom schemes is often unexpected.",
+   "line_number": 98,
+   "line_range": [
+    98
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b310-urllib-urlopen",
+   "test_id": "B310",
+   "test_name": "blacklist"
+  },
+  {
+   "code": "305                     db.execute(\n306                         f\"DELETE FROM {table} WHERE {column}<?\",\n307                         (\n",
+   "col_offset": 26,
+   "end_col_offset": 38,
+   "filename": "./privacy_data.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 306,
+   "line_range": [
+    306
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "1508         rows = self._db.execute(\n1509             \"SELECT id, kind, channel_id, guild_id, scope, author, author_id, \"\n1510             \"content, timestamp, metadata FROM vectors WHERE kind IN \"\n1511             \"('message', 'bot_output') AND channel_id=? AND \" + guild_sql +\n1512             \" ORDER BY timestamp DESC, created_at DESC LIMIT ?\",\n",
+   "col_offset": 12,
+   "end_col_offset": 61,
+   "filename": "./rag_memory.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 1509,
+   "line_range": [
+    1509,
+    1510,
+    1511
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "2479             cursor = self._db.execute(\n2480                 f\"UPDATE vectors SET {assignments} WHERE id=? AND kind='shared_context'\",\n2481                 (*values.values(), str(context_id)),\n",
+   "col_offset": 18,
+   "end_col_offset": 37,
+   "filename": "./rag_memory.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 2480,
+   "line_range": [
+    2480
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "2538         rows = self._db.execute(\n2539             \"SELECT id, kind, channel_id, guild_id, author_id, content, scope, \"\n2540             \"importance, timestamp, metadata FROM vectors WHERE kind='shared_context' \"\n2541             f\"AND (scope IN ({placeholders}) OR (scope='global' AND \"\n2542             \"metadata LIKE '%\\\"public_approved\\\": true%' AND \"\n2543             \"metadata LIKE '%\\\"source_kind\\\": \\\"operator_public\\\"%')) \"\n2544             \"ORDER BY importance DESC, created_at DESC LIMIT ?\",\n2545             (*scopes, max(1, min(int(max_items) * 10, 500))),\n",
+   "col_offset": 12,
+   "end_col_offset": 29,
+   "filename": "./rag_memory.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 2539,
+   "line_range": [
+    2539,
+    2540,
+    2541,
+    2542,
+    2543,
+    2544
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "3033         rows = self._db.execute(\n3034             \"SELECT id, kind, channel_id, guild_id, author, author_id, source, \"\n3035             \"content, embedding, metadata, scope, importance, downvotes, timestamp \"\n3036             \"FROM vectors WHERE \" + \" AND \".join(where_parts),\n3037             params,\n",
+   "col_offset": 12,
+   "end_col_offset": 33,
+   "filename": "./rag_memory.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 89,
+    "link": "https://cwe.mitre.org/data/definitions/89.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Possible SQL injection vector through string-based query construction.",
+   "line_number": 3034,
+   "line_range": [
+    3034,
+    3035,
+    3036
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+   "test_id": "B608",
+   "test_name": "hardcoded_sql_expressions"
+  },
+  {
+   "code": "167                     # cap_drop=ALL does not block its next lifecycle operation.\n168                     os.fchmod(directory_fd, 0o1777)\n169                 for name in dirs + files:\n",
+   "col_offset": 20,
+   "end_col_offset": 51,
+   "filename": "./site_server.py",
+   "issue_confidence": "HIGH",
+   "issue_cwe": {
+    "id": 732,
+    "link": "https://cwe.mitre.org/data/definitions/732.html"
+   },
+   "issue_severity": "HIGH",
+   "issue_text": "Chmod setting a permissive mask 0o1777 on file (directory_fd).",
+   "line_number": 168,
+   "line_range": [
+    168
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b103_set_bad_file_permissions.html",
+   "test_id": "B103",
+   "test_name": "set_bad_file_permissions"
+  },
+  {
+   "code": "184                         # Set mode while the controller still owns the file.\n185                         os.fchmod(fd, 0o660)\n186                         try:\n",
+   "col_offset": 24,
+   "end_col_offset": 44,
+   "filename": "./site_server.py",
+   "issue_confidence": "HIGH",
+   "issue_cwe": {
+    "id": 732,
+    "link": "https://cwe.mitre.org/data/definitions/732.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Chmod setting a permissive mask 0o660 on file (fd).",
+   "line_number": 185,
+   "line_range": [
+    185
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b103_set_bad_file_permissions.html",
+   "test_id": "B103",
+   "test_name": "set_bad_file_permissions"
+  },
+  {
+   "code": "190                             # databases and WAL/journal files, not just /data.\n191                             os.fchmod(fd, 0o666)\n192                     finally:\n",
+   "col_offset": 28,
+   "end_col_offset": 48,
+   "filename": "./site_server.py",
+   "issue_confidence": "HIGH",
+   "issue_cwe": {
+    "id": 732,
+    "link": "https://cwe.mitre.org/data/definitions/732.html"
+   },
+   "issue_severity": "HIGH",
+   "issue_text": "Chmod setting a permissive mask 0o666 on file (fd).",
+   "line_number": 191,
+   "line_range": [
+    191
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b103_set_bad_file_permissions.html",
+   "test_id": "B103",
+   "test_name": "set_bad_file_permissions"
+  },
+  {
+   "code": "1022         \"--read-only\",\n1023         \"--tmpfs\", \"/tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777\",\n1024         \"-p\", f\"127.0.0.1:{port}:{CONTAINER_PORT}\",\n1025         \"-v\", f\"{docker_bind_path(source.resolve())}:/app:ro\",\n1026         \"-v\", f\"{docker_bind_path(persistent.resolve())}:/data:rw\",\n1027         \"-e\", f\"PORT={CONTAINER_PORT}\",\n1028         \"-e\", f\"SITE_SLUG={slug}\",\n1029         \"-e\", f\"SITE_BASE_PATH={server_path(slug)}\",\n1030     ]\n1031     for key, value in (env or {}).items():\n1032         args.extend([\"-e\", f\"{key}={value}\"])\n1033     args.append(image)\n1034 \n1035     code, _out, err = await _docker(*args, timeout=60)\n1036     if code != 0:\n1037         if previous:\n1038             failed = dict(previous)\n1039             failed.update(\n1040                 {\n1041                     \"port\": port,\n1042                     \"env\": env,\n1043                     \"packages\": packages,\n1044                     \"running\": False,\n1045                     \"health\": f\"start failed: {err.strip()[:300]}\",\n1046                     \"container\": container_name(slug),\n1047                     \"image\": image,\n1048                 }\n1049             )\n1050             _write_entry(data_dir, slug, failed)\n1051         raise SiteServerError(f\"could not start the backend: {err.strip()[:300]}\")\n",
+   "col_offset": 19,
+   "end_col_offset": 67,
+   "filename": "./site_server.py",
+   "issue_confidence": "MEDIUM",
+   "issue_cwe": {
+    "id": 377,
+    "link": "https://cwe.mitre.org/data/definitions/377.html"
+   },
+   "issue_severity": "MEDIUM",
+   "issue_text": "Probable insecure usage of temp file/directory.",
+   "line_number": 1023,
+   "line_range": [
+    1003,
+    1004,
+    1005,
+    1006,
+    1007,
+    1008,
+    1009,
+    1010,
+    1011,
+    1012,
+    1013,
+    1014,
+    1015,
+    1016,
+    1017,
+    1018,
+    1019,
+    1020,
+    1021,
+    1022,
+    1023,
+    1024,
+    1025,
+    1026,
+    1027,
+    1028,
+    1029,
+    1030
+   ],
+   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
+   "test_id": "B108",
+   "test_name": "hardcoded_tmp_directory"
+  }
+ ]
+}
