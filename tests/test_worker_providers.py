@@ -542,9 +542,12 @@ def test_coordinator_github_schema_keeps_account_actions_only(tmp_path):
             "auth" in params["properties"]["action"]["enum"]
             and "run" not in params["properties"]["action"]["enum"]
         )
-        assert MaxwellBot._authorize_tool_execution(
-            bot, msg, "github_repo", github, {"action": "run"}
-        ).startswith("refused: delegate")
+        assert (
+            MaxwellBot._authorize_tool_execution(
+                bot, msg, "github_repo", github, {"action": "run"}
+            )
+            is None
+        )
         assert "run" in GitHubRepoTool.parameters["properties"]["action"]["enum"]
     finally:
         current_plan.reset(token)
