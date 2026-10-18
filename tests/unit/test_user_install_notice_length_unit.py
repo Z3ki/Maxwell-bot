@@ -118,3 +118,37 @@ def test_split_for_note_hard_cuts_unbroken_text():
     head, rest = _split_for_note("n" * 100, body)
     assert len("n" * 100) + 2 + len(head) <= DISCORD_MESSAGE_LIMIT
     assert head + rest == body
+
+
+def test_note_survives_plugin_send_wrappers(tmp_path):
+    import user_install as ui
+
+    seen = []
+
+    def factory(inner):
+        async def send(self, content=None, file=None, **kwargs):
+            seen.append(content)
+            return await inner(self, content, file, **kwargs)
+
+        return send
+
+    ui.wrap_session_send(factory, name="test_passthrough", priority=10)
+    try:
+        assert getattr(ui.UserInstallSession.send, "_maxwell_policy_notice", False)
+        session, interaction = _session(tmp_path)
+        asyncio.run(session.send("wrapped answer"))
+        assert "Terms" in seen[0]
+        (only,) = _contents(interaction)
+        assert "Terms" in only and only.endswith("wrapped answer")
+    finally:
+        ui.unwrap_session_send("test_passthrough")
+    assert getattr(ui.UserInstallSession.send, "_maxwell_policy_notice", False)
+
+
+def test_note_survives_an_empty_wrapper_rebuild(tmp_path):
+    import user_install as ui
+
+    ui.unwrap_session_send("not_registered")  # rebuilds the chain
+    session, interaction = _session(tmp_path)
+    asyncio.run(session.send("plain"))
+    assert "Terms" in _contents(interaction)[0]
