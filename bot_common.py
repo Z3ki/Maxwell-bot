@@ -358,6 +358,14 @@ _current_request_provider: ContextVar[Any] = ContextVar(
 _current_byok_tool_budget: ContextVar[Any] = ContextVar(
     "current_byok_tool_budget", default=None
 )
+# Personal-key turns get the same step budget as subagents. Eight was cute
+# until a site edit burned all eight and then couldn't even say so.
+BYOK_TOOL_CALL_LIMIT = 24
+# Replying is the point of the turn, so it never spends the budget. Without
+# this, a turn that ran out got its own send_message refused and went silent.
+BYOK_BUDGET_EXEMPT_TOOLS = frozenset(
+    {"send_message", "send_rich_message", "react", "no_response"}
+)
 _current_inbound_effects: ContextVar[Any] = ContextVar(
     "current_inbound_effects", default=None
 )

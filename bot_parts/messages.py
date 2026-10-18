@@ -1667,7 +1667,7 @@ class MessagesMixin:
                 0,
                 min(
                     _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0),
-                    8 if byok_active else 100,
+                    BYOK_TOOL_CALL_LIMIT if byok_active else 100,
                 ),
             )
             tool_timeout = float(

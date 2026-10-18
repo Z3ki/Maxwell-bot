@@ -290,13 +290,13 @@ def test_worker_byok_shares_parent_tool_budget_across_siblings(tmp_path, monkeyp
         return call() if len(messages) == 2 else ProviderResult("finished")
 
     bot._generate_response.side_effect = generate
-    budget = {"calls": 7}
+    budget = {"calls": 23}
     token = _current_byok_tool_budget.set(budget)
     try:
         reports = json.loads(asyncio.run(tool.run(msg, tasks=TASKS * 2)))
     finally:
         _current_byok_tool_budget.reset(token)
-    assert budget["calls"] == 8
+    assert budget["calls"] == 24
     assert shell.execute.await_count == 1
     assert sorted(r["completed"][0]["status"] for r in reports) == ["error", "returned"]
 

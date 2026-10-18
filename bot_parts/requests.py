@@ -193,12 +193,14 @@ class RequestPipelineMixin:
             )
             if denied:
                 raise PermissionError(denied)
-            if _current_request_provider.get() is not None:
+            if _current_request_provider.get() is not None and not MaxwellBot._byok_budget_exempt(
+                tool_identifier, handler
+            ):
                 budget = _current_byok_tool_budget.get()
                 # All parallel calls in a native tool batch share this mutable
                 # request budget. Increment synchronously before execute() so
-                # sibling tasks cannot race past the provider's eight-call cap.
-                if not isinstance(budget, dict) or budget.get("calls", 0) >= 8:
+                # sibling tasks cannot race past the provider's call cap.
+                if not isinstance(budget, dict) or budget.get("calls", 0) >= BYOK_TOOL_CALL_LIMIT:
                     raise PermissionError("refused: personal provider tool-call limit reached")
                 budget["calls"] += 1
             result = await handler.execute(inbound_message, **tool_args)
@@ -217,6 +219,16 @@ class RequestPipelineMixin:
         finally:
             if state is not None:
                 state["tools_running"] -= 1
+
+    @staticmethod
+    def _byok_budget_exempt(identifier: str, handler) -> bool:
+        """True for the reply tools a personal-key turn may always call."""
+        canonical = str(
+            getattr(handler, "tool_name", None)
+            or getattr(handler, "name", None)
+            or identifier
+        ).strip()
+        return canonical in BYOK_BUDGET_EXEMPT_TOOLS or identifier in BYOK_BUDGET_EXEMPT_TOOLS
 
     def _authorize_tool_execution(
         self, message, identifier: str, handler, arguments: dict | None = None
@@ -245,9 +257,11 @@ class RequestPipelineMixin:
         from plugins.maxwell_extras.task_workers import GITHUB_ACCOUNT_ACTIONS, _inside_worker
         if _inside_worker.get() and canonical == "github_repo" and ((arguments or {}).get("action") in GITHUB_ACCOUNT_ACTIONS or "token" in (arguments or {})):
             return "refused: workers cannot change accounts or repository permissions"
-        if _current_request_provider.get() is not None:
+        if _current_request_provider.get() is not None and not MaxwellBot._byok_budget_exempt(
+            identifier, handler
+        ):
             budget = _current_byok_tool_budget.get()
-            if not isinstance(budget, dict) or budget.get("calls", 0) >= 8:
+            if not isinstance(budget, dict) or budget.get("calls", 0) >= BYOK_TOOL_CALL_LIMIT:
                 return "refused: personal provider tool-call limit reached"
         disabled = set(control.get("disabled_tools", []) or [])
         if canonical in disabled or identifier in disabled:

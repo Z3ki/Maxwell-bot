@@ -111,7 +111,7 @@ def test_request_allowed_by_preferences_passes():
 
 
 @pytest.mark.parametrize(
-    "budget, refused", [(None, True), ({"calls": 8}, True), ({"calls": 7}, False)]
+    "budget, refused", [(None, True), ({"calls": 24}, True), ({"calls": 23}, False)]
 )
 def test_personal_provider_tool_budget(budget, refused):
     p_token = _current_request_provider.set(object())
@@ -387,3 +387,15 @@ def test_worker_cannot_change_github_accounts():
     assert allowed is None
     # Outside a worker the same call is not blocked by this rule.
     assert _auth(_bot(), _message(), "github_repo", tool, {"action": action}) is None
+
+
+@pytest.mark.parametrize("name", ["send_message", "send_rich_message", "react", "no_response"])
+def test_spent_personal_budget_still_lets_the_turn_reply(name):
+    p_token = _current_request_provider.set(object())
+    b_token = _current_byok_tool_budget.set({"calls": 24})
+    try:
+        out = _auth(_bot(), _message(), name=name)
+    finally:
+        _current_byok_tool_budget.reset(b_token)
+        _current_request_provider.reset(p_token)
+    assert out is None

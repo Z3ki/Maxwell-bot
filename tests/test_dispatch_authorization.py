@@ -90,13 +90,13 @@ def test_byok_budget_counts_parallel_model_tool_calls_as_one_shared_budget():
                     MaxwellBot._invoke_request_tool(
                         bot, message, "read_data", handler
                     )
-                    for _ in range(12)
+                    for _ in range(30)
                 ),
                 return_exceptions=True,
             )
-            assert sum(isinstance(item, PermissionError) for item in outcomes) == 4
-            assert len(calls) == 8
-            assert _current_byok_tool_budget.get()["calls"] == 8
+            assert sum(isinstance(item, PermissionError) for item in outcomes) == 6
+            assert len(calls) == 24
+            assert _current_byok_tool_budget.get()["calls"] == 24
         finally:
             _current_byok_tool_budget.reset(budget_token)
             _current_request_provider.reset(provider_token)
