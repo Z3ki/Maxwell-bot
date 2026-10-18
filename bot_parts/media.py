@@ -150,6 +150,8 @@ class MediaMixin:
                 )
                 if not mime.startswith(("image/", "video/", "audio/", "text/")):
                     mime = MIME_MAP.get(ext, mime)
+                if mime in {"audio/mpeg3", "audio/x-mpeg3", "audio/x-mp3", "audio/mp3"}:
+                    mime = "audio/mpeg"
                 filename = attachment.filename
                 # Respect process_audio (the audio-input toggle) — skip pure audio attachments
                 # if disabled. Video may still yield image frames even if audio track skipped later.
