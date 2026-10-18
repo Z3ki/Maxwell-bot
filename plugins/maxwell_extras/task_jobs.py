@@ -91,16 +91,19 @@ class TaskJobs:
         self._active = 0
         self.closed = False
 
-    async def submit(self, engine, message, tasks):
+    async def submit(self, engine, message, tasks, timeout_minutes=None):
         import jsonschema
         from .task_workers import _inside_worker, _limit
 
         if _inside_worker.get():
             return "refused: workers cannot delegate recursively"
         try:
-            jsonschema.validate({"tasks": tasks}, engine.parameters)
+            args = {"tasks": tasks}
+            if timeout_minutes is not None:
+                args["timeout_minutes"] = timeout_minutes
+            jsonschema.validate(args, engine.parameters)
         except jsonschema.ValidationError:
-            return "Error: supply one or two scoped tasks"
+            return "Error: supply one or two scoped tasks (timeout_minutes is 1-30)"
         tasks = json.loads(json.dumps(tasks))
         if self.closed:
             return "refused: worker manager is stopping"
@@ -176,7 +179,7 @@ class TaskJobs:
         # Empty context prevents inheriting chat deadlines, credentials, progress,
         # effects, generated-file collectors and notices. The job binds its own.
         job.task = asyncio.create_task(
-            self._run(job, tasks), name="maxwell-worker-" + row["id"], context=Context()
+            self._run(job, tasks, timeout_minutes), name="maxwell-worker-" + row["id"], context=Context()
         )
 
         def finished(done):
@@ -297,7 +300,7 @@ class TaskJobs:
                     job.task.cancel()
                 return
 
-    async def _run(self, job, tasks):
+    async def _run(self, job, tasks, timeout_minutes=None):
         from bot import _current_inbound, _current_byok_tool_budget
         from premium_access import current_plan
 
@@ -315,7 +318,9 @@ class TaskJobs:
             ):
                 raise asyncio.CancelledError
             watcher = asyncio.create_task(self._watch(job))
-            raw = await job.engine.run(job.message, tasks=tasks)
+            raw = await job.engine.run(
+                job.message, tasks=tasks, timeout_minutes=timeout_minutes
+            )
             try:
                 reports = json.loads(raw)
             except (ValueError, TypeError):

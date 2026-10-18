@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import math
 
+# Default whole-job budget for subagents, and the most a model may request.
+WORKER_TIMEOUT_DEFAULT_SECONDS = 1200
+WORKER_TIMEOUT_MAX_SECONDS = 1800
+
 
 def _bounded(value, default, ceiling=7200):
     try:
@@ -52,10 +56,23 @@ def worker_timeout_seconds(bot):
     return _bounded(
         configured
         or (getattr(bot, "_control", {}) or {}).get(
-            "task_workers_timeout_seconds", 600
+            "task_workers_timeout_seconds", WORKER_TIMEOUT_DEFAULT_SECONDS
         ),
-        600,
+        WORKER_TIMEOUT_DEFAULT_SECONDS,
     )
+
+
+def requested_worker_timeout_seconds(default, timeout_minutes=None):
+    """Job budget: the operator default, or a model-chosen value up to 30 min."""
+    if timeout_minutes is None:
+        return default
+    try:
+        minutes = float(timeout_minutes)
+    except (ValueError, TypeError):
+        return default
+    if not math.isfinite(minutes) or minutes <= 0:
+        return default
+    return max(60, min(minutes * 60, max(default, WORKER_TIMEOUT_MAX_SECONDS)))
 
 
 def request_turn_timeout_seconds(bot, provider=None, *, premium=False):
