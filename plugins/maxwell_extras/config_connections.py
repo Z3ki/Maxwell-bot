@@ -133,7 +133,7 @@ class ConnectModal(discord.ui.Modal):
             settings = (
                 effective_settings((same or {}).get("settings"))
                 if same
-                else parse_model_support("text, tools", "")
+                else parse_model_support("text, vision, tools", "")
             )
             endpoint = (
                 str(self.endpoint.value or "")

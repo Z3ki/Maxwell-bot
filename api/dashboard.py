@@ -533,7 +533,7 @@ class Dashboard:
                 if "modalities" in body and "generation" in body
                 else effective_settings(same.get("settings"))
                 if same
-                else parse_model_support("text, tools", "")
+                else parse_model_support("text, vision, tools", "")
             )
             await asyncio.to_thread(
                 vault.save,
