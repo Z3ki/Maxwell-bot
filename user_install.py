@@ -807,7 +807,32 @@ class UserInstallSession:
             await defer(ephemeral=self.ephemeral)
 
     async def send(self, content: str | None = None, file=None, **kwargs):
+        content = await self._stick_policy_notice(content)
         return await type(self)._send_impl(self, content, file, **kwargs)
+
+    async def _stick_policy_notice(self, content: str | None) -> str | None:
+        """Keep the one-time terms note on the private reply itself.
+
+        A separate ephemeral follow-up shows for a moment and Discord then
+        removes it when this reply is posted.
+        """
+        if getattr(self, "_policy_notice_done", False) or not self.ephemeral:
+            return content
+        self._policy_notice_done = True
+        bot = getattr(self.interaction, "client", None)
+        if bot is None:
+            return content
+        from privacy import _ephemeral_notice, maybe_notice
+
+        token = _ephemeral_notice.set(True)
+        try:
+            note = await maybe_notice(bot, self.interaction)
+        finally:
+            _ephemeral_notice.reset(token)
+        if not note:
+            return content
+        body = "" if content is None else str(content)
+        return f"{note}\n\n{body}".strip()
 
     async def _send_impl(self, content: str | None = None, file=None, **kwargs):
         """Webhook send that preserves embeds, views, polls, and files."""
@@ -1112,15 +1137,14 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
     on_message = getattr(bot, "on_message", None)
 
     async def run_turn(message=message):
-        try:
-            if callable(on_message):
-                await on_message(message)
-        finally:
-            # The notice is an ephemeral follow-up. Sending it before the
-            # answer lets the final edit of the deferred response dismiss it.
-            from privacy import maybe_notice
+        from privacy import maybe_notice
 
+        # Public replies cannot keep an ephemeral follow-up: Discord deletes
+        # it as soon as the answer lands. DM that one notice instead.
+        if visibility != "private":
             await maybe_notice(bot, interaction)
+        if callable(on_message):
+            await on_message(message)
 
     if callable(spawn) and callable(on_message):
         spawn(run_turn())
