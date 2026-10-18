@@ -333,7 +333,7 @@ class DelegateTaskTool(Tool):
                     "report": "No permitted tools for this task",
                 }
             control = getattr(self.bot, "_control", {}) or {}
-            steps = _limit(control, "task_workers_max_steps", 24, 64)
+            steps = _limit(control, "task_workers_max_steps", 100, 100)
             selected = provider or getattr(self.bot, "ai_provider", None)
             if not getattr(
                 getattr(selected, "capabilities", None), "native_tools", True
