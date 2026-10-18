@@ -350,7 +350,13 @@ class DelegateTaskTool(Tool):
                         "report": str(result)[:8000],
                     }
                 if not isinstance(calls, list) or len(calls) > 4:
-                    raise ValueError("invalid worker tool batch")
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "That tool batch was invalid. Continue with one to four tool calls, or finish the task.",
+                        }
+                    )
+                    continue
                 chunk = [
                     {
                         "role": "assistant",
@@ -359,41 +365,58 @@ class DelegateTaskTool(Tool):
                     }
                 ]
                 for call in calls:
-                    function = call.get("function", {})
-                    name = function.get("name", "")
-                    args = function.get("arguments", "{}")
-                    args = json.loads(args) if isinstance(args, str) else args
+                    function = call.get("function") or {}
+                    name = str(function.get("name") or "")
+                    raw_args = function.get("arguments", "{}")
+                    try:
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except json.JSONDecodeError:
+                        args = None
+                    refusal = ""
                     if (
-                        name not in names
-                        or not isinstance(args, dict)
-                        or any(str(k).startswith("_") for k in args)
+                        not isinstance(args, dict)
+                        or name not in names
+                        or any(str(key).startswith("_") for key in args)
                     ):
-                        raise ValueError("worker attempted an unavailable tool")
-                    if name == "github_repo" and (
+                        refusal = "Error: that tool call could not be run. Fix it and continue the task."
+                    elif name == "github_repo" and (
                         args.get("action") in GITHUB_ACCOUNT_ACTIONS or "token" in args
                     ):
-                        raise ValueError(
-                            "account and permission changes require the coordinator"
+                        refusal = "Error: account and permission changes stay with the coordinator. Continue without that."
+                    elif name == "shell" and args.get("files"):
+                        refusal = "Error: this subagent cannot export files. Continue without that."
+                    if refusal:
+                        completed.append({"tool": name or "unknown", "status": "error"})
+                        chunk.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call.get("id", ""),
+                                "content": refusal,
+                            }
                         )
-                    if name == "shell" and args.get("files"):
-                        raise ValueError("worker cannot export files")
-                    async with execution_lock:
-                        if not await self._eligible(message):
-                            raise PermissionError("request invalidated")
-                        if context:
-                            job.last_tool = name
-                            job.tool_calls += 1
-                        output = await self.bot._execute_tool_by_name(
-                            message,
-                            name,
-                            args,
-                            disabled=set(
-                                (getattr(self.bot, "_control", {}) or {}).get(
-                                    "disabled_tools", []
-                                )
-                            ),
-                            compatible=names,
-                        )
+                        continue
+                    try:
+                        async with execution_lock:
+                            if not await self._eligible(message):
+                                raise PermissionError("request invalidated")
+                            if context:
+                                job.last_tool = name
+                                job.tool_calls += 1
+                            output = await self.bot._execute_tool_by_name(
+                                message,
+                                name,
+                                args,
+                                disabled=set(
+                                    (getattr(self.bot, "_control", {}) or {}).get(
+                                        "disabled_tools", []
+                                    )
+                                ),
+                                compatible=names,
+                            )
+                    except PermissionError:
+                        raise
+                    except Exception:
+                        output = "Error: that tool failed. Continue the task with what you already have."
                     from media_payloads import strip_media_payloads
 
                     # Binary payloads are transient model inputs, never pasted into text,
@@ -454,13 +477,13 @@ class DelegateTaskTool(Tool):
                 "completed": completed,
                 "report": "Step budget reached; inspect completed changes before retrying",
             }
-        except Exception as exc:
+        except Exception:
             # Never expose exception text, task content, credentials or tool arguments.
             return {
                 "kind": task["kind"],
                 "status": "failed",
                 "completed": completed,
-                "report": f"Worker stopped ({type(exc).__name__}); partial changes may remain",
+                "report": "The subagent stopped before it finished. Anything it already changed may still be there.",
             }
         finally:
             _current_request_provider.reset(provider_token)

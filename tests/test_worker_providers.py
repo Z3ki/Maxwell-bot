@@ -401,7 +401,8 @@ def test_worker_cannot_widen_github_policy_or_write_credentials(tmp_path):
     )
     bot.tools["github_repo"] = github
     bot._generate_response.side_effect = [
-        call("github_repo", action="policy_set", repo="owner/repo", mode="admin")
+        call("github_repo", action="policy_set", repo="owner/repo", mode="admin"),
+        ProviderResult("continued"),
     ]
     report = json.loads(
         asyncio.run(
@@ -413,7 +414,8 @@ def test_worker_cannot_widen_github_policy_or_write_credentials(tmp_path):
             )
         )
     )[0]
-    assert report["status"] == "failed"
+    assert report["status"] == "reported"
+    assert report["report"] == "continued"
     github.execute.assert_not_awaited()
     schema = bot._generate_response.await_args.kwargs["tools"][0]["function"][
         "parameters"

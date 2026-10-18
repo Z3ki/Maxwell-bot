@@ -173,9 +173,10 @@ def test_worker_cannot_bypass_new_tool_disable(tmp_path):
 )
 def test_worker_rejects_escalation_recursion_and_exports(tmp_path, name, args):
     bot, msg, shell, worker = setup(tmp_path)
-    bot._generate_response.side_effect = [call(name, **args)]
+    bot._generate_response.side_effect = [call(name, **args), ProviderResult("continued")]
     result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
-    assert result["status"] == "failed"
+    assert result["status"] == "reported"
+    assert result["report"] == "continued"
     shell.execute.assert_not_awaited()
 
 
