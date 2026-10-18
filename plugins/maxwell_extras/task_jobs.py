@@ -137,7 +137,7 @@ class TaskJobs:
             "channel_id": cid,
             "guild_id": gid,
             "private": int(private),
-            "kinds": ",".join(t.get("kind") or "profile" for t in tasks),
+            "kinds": ",".join(t.get("kind") or "task" for t in tasks),
             "created_at": now,
             "updated_at": now,
             "state": "queued",
@@ -562,14 +562,20 @@ class TaskJobs:
 
 
 def format_job(row, *, limit=1850):
-    text = f"Task `{row['id']}` · {row['state']} · {row.get('kinds', '')}\n"
+    state = {
+        "queued": "waiting",
+        "running": "working",
+        "completed": "finished",
+        "incomplete": "didn't finish",
+    }.get(str(row.get("state") or ""), str(row.get("state") or "unknown"))
+    text = f"Subagent `{row['id']}` · {state}\n"
     if row.get("last_tool"):
-        text += f"Latest tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"
+        text += f"Last tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"
     for report in row.get("reports", []):
-        text += f"{report.get('kind', 'worker')}: {report.get('status', 'unknown')} — {report.get('report', '')}\n"
+        text += f"{report.get('status', 'unknown')} — {report.get('report', '')}\n"
     text += row.get("note", "")
     if row.get("effects") and row["state"] != "completed":
-        text += "\nPartial changes may remain. Inspect before retrying."
+        text += "\nIt may have already changed files. Check those before trying again."
     return text[:limit]
 
 
