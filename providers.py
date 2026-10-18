@@ -476,10 +476,10 @@ class OpenAICompatibleProvider(ChatProvider):
         that are known to ship text that way; for everything else we let the
         empty-response retry/fallback take over.
         """
-        model = (endpoint.model if endpoint is not None else self.model) or ""
-        m = model.lower()
-        # DeepSeek-family convention: answer may ride in reasoning_content.
-        return any(tok in m for tok in ("deepseek", "deep_seek", "deepseek-r1"))
+        # Reasoning stays inside the model call. DeepSeek often puts the
+        # scratchpad in reasoning_content; posting that is the leak.
+        _ = (endpoint, message)
+        return False
 
     def _media_endpoint_order(self) -> list[ProviderEndpoint]:
         """Vision first, then the rest. Text-only primaries 400 on image_url."""

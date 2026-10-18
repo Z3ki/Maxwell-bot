@@ -975,17 +975,18 @@ def test_image_unsupported_skips_text_only_primary():
     assert session.payloads[1]["model"] == "fallback-model"
 
 
-def test_reasoning_only_response_is_not_treated_as_empty():
-    provider = OpenAICompatibleProvider("http://example.test", "deepseek-v4-flash", 10, 0.5)
+def test_deepseek_reasoning_is_not_posted_as_the_answer():
+    provider = OpenAICompatibleProvider(
+        "http://example.test", "deepseek-v4-flash", 10, 0.5, empty_response_retries=0
+    )
     provider.available = True
+    provider.retry_attempts = 1
     session = FakeSession(FakeReasoningOnlyResponse())
     provider._session = session
 
     async def run():
-        message = await provider.generate_chat_completion(
-            [{"role": "user", "content": "hi"}]
-        )
-        assert message["content"] == "pong"
+        with pytest.raises(RuntimeError):
+            await provider.generate_chat_completion([{"role": "user", "content": "hi"}])
 
     asyncio.run(run())
     assert len(session.payloads) == 1
