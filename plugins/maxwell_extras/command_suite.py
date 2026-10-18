@@ -805,14 +805,10 @@ class _ConfigPanel(discord.ui.View):
             connections.build(self, _ConfigNavButton)
             return
         if self.scope == "personal":
-            if self.selected_key == "agents":
-                from .task_agents_ui import AgentProfileButton
-                self.add_item(AgentProfileButton(self))
-                return
             if self.selected_key == "replies":
                 for row, key in ((1, "visibility"), (2, "detail")):
                     self.add_item(_ConfigValueSelect(self, _PERSONAL_VALUE_CHOICES[key], key=key, row=row))
-                for key in ("mode", "web", "context", "agents", "worker_byok"):
+                for key in ("mode", "web", "context", "worker_byok"):
                     self.add_item(_ConfigNavButton(self, key, row=3))
                 return
             choices = _PERSONAL_VALUE_CHOICES.get(self.selected_key)
@@ -919,9 +915,6 @@ class _ConfigPanel(discord.ui.View):
             return self.overview()
         if self.scope == "personal" and self.selected_key.startswith(("byok", "worker_byok")):
             return connections.render(self)
-        if self.scope == "personal" and self.selected_key == "agents":
-            lines = [f"`{row['name']}` · {row['kind']} · {', '.join(row['tools'])}" for row in self.agent_profiles]
-            return ("## Your custom task agents\nPremium can save up to ten profiles. Maxwell can choose tool permissions within your available tools. Profiles use your selected subagent AI connection.\n\n" + ("\n".join(lines) or "No saved agents.") + "\n\nUse Manage agent to save/edit or delete an ID. Instructions are optional saved settings, expire 90 days after editing by default and are included in Delete my data. Do not include credentials. You can also ask Maxwell to manage your agents.\n\n" + self.notice)[:1900]
         if self.scope == "personal" and self.selected_key == "tracking":
             return self._privacy_screen()
         if self.scope == "personal" and self.selected_key == "replies":
@@ -930,7 +923,7 @@ class _ConfigPanel(discord.ui.View):
                      for key in ("visibility", "detail", "mode", "web", "context")]
             return ("## Replies & context\nDefaults for `/maxwell` and message app actions. "
                     "Choose who sees your replies and how much detail you want.\n\n" + "\n".join(lines) +
-                    "\n\nUse the buttons for response mode, web search, recent messages, custom agents and a separate subagent AI provider. "
+                    "\n\nUse the buttons for response mode, web search, recent messages and a separate subagent AI provider. "
                     "Private app replies do not read public channel history.\n\n" + self.notice)
         settings = {"personal": _PERSONAL_SETTINGS, "server": _SERVER_SETTINGS, "owner": _OWNER_SETTINGS}[self.scope]
         selected = settings.get(self.selected_key, ("Setting", ""))[0]

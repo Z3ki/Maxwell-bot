@@ -142,7 +142,7 @@ async def change_setting(bot, context, scope, setting, value, *, reset=False):
         if setting == "tracking" and value == "on" and not reset:
             raise ValueError("Enable optional history yourself in /config → Privacy or the dashboard; a model cannot grant consent.")
         if setting in {"byok", "worker_byok", "agents"}:
-            raise ValueError("Use the private configuration form for this setting; custom agents also support manage_task_agent.")
+            raise ValueError("Use the private configuration form for this setting.")
         if reset:
             if setting == "style":
                 await asyncio.to_thread(store.set_personality, uid, "")

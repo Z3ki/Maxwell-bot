@@ -21,7 +21,7 @@ def setup(bot, ctx):
         deliver_due_reminders,
     )
     from .user_preferences import UserPreferenceStore, bind_message_tracking
-    from .task_agents import TaskAgentStore, ManageTaskAgentTool
+    from .task_agents import TaskAgentStore
     from .task_workers import DelegateTaskTool
     from .task_jobs import TaskJobs, ManageTasksTool
     from .byok import CredentialVault
@@ -70,7 +70,6 @@ def setup(bot, ctx):
     return [
         DelegateTaskTool(bot),
         ManageTasksTool(bot),
-        ManageTaskAgentTool(bot),
         MaxwellUpdatesTool(bot),
         GetConfigurationTool(bot),
         ConfigureTool(bot),

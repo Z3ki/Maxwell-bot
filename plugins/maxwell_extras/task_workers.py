@@ -104,22 +104,9 @@ class DelegateTaskTool(Tool):
                 "items": {
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string", "enum": list(_FAMILIES)},
                         "task": {"type": "string", "minLength": 1, "maxLength": 6000},
-                        "profile": {
-                            "type": "string",
-                            "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$",
-                        },
-                        "tools": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": len(WORKER_TOOLS),
-                            "uniqueItems": True,
-                            "items": {"type": "string", "enum": sorted(WORKER_TOOLS)},
-                        },
                     },
                     "required": ["task"],
-                    "anyOf": [{"required": ["kind"]}, {"required": ["profile"]}],
                     "additionalProperties": False,
                 },
             },
@@ -135,8 +122,8 @@ class DelegateTaskTool(Tool):
 
     def get_description(self):
         return (
-            "Premium: delegate all substantial work: websites, code, shell, research, media analysis, repository tasks and multi-step investigations. Use general for tasks spanning tools. Delegate one or two focused tasks. Use a saved profile by name, or set kind and optionally choose its tools. Maxwell may select permissions within available caller tools. "
-            "Workers use a dedicated personal worker connection, your chat BYOK, the operator worker model, or the default AI, in that order, with caller permissions and bounded "
+            "Premium: hand substantial work to a subagent. Delegate one or two focused tasks. Each task is the concrete work to do, with the requirements and context that job needs. "
+            "The subagent uses the caller's existing tools. It uses a dedicated personal worker connection, chat BYOK, the operator worker model, or the default AI, in that order, with bounded "
             "steps and time. Returns a background job ID immediately; keep chatting while it runs. "
             "Do not poll or wait in this turn. Completion returns to the originating context. "
             "Use manage_tasks for status or requested cancellation. Do not launch duplicate work or change the same files while a job runs. "
@@ -175,7 +162,7 @@ class DelegateTaskTool(Tool):
         try:
             jsonschema.validate({"tasks": tasks}, self.parameters)
         except jsonschema.ValidationError:
-            return "Error: supply one or two tasks with task text and either kind or profile"
+            return "Error: supply one or two tasks, each with the task text"
         control = getattr(self.bot, "_control", {}) or {}
         if not control.get("premium_task_workers_enabled", True):
             return "refused: task workers are disabled"
@@ -186,29 +173,7 @@ class DelegateTaskTool(Tool):
         if not eligible:
             return "refused: this feature requires an operator-granted Premium plan and a current request"
         uid = str(message.author.id)
-        resolved = []
-        try:
-            for task in tasks:
-                task = dict(task)
-                if task.get("profile"):
-                    store = getattr(self.bot, "_task_agents", None)
-                    profile = (
-                        await asyncio.to_thread(store.get, uid, task["profile"])
-                        if store
-                        else None
-                    )
-                    if not profile:
-                        return "Error: custom agent not found for this user; review /config → More options → Custom agents"
-                    if task.get("kind") and task["kind"] != profile["kind"]:
-                        return "Error: task kind must match its saved agent profile"
-                    task["kind"] = profile["kind"]
-                    requested = set(task.get("tools") or profile["tools"])
-                    task["tools"] = sorted(requested & set(profile["tools"]))
-                    task["instructions"] = profile["instructions"]
-                resolved.append(task)
-        except Exception:
-            return "Error: custom agent profile could not be read; no task started"
-        tasks = resolved
+        tasks = [{"task": task["task"], "kind": "task"} for task in tasks]
         capacity = _limit(control, "task_workers_max_active", 4, 8)
         # No await between capacity check and admission: event-loop atomic.
         if uid in self._users or self._active + len(tasks) > capacity:
@@ -266,9 +231,7 @@ class DelegateTaskTool(Tool):
             platform = self.bot._message_tool_platform(message)
             available = MaxwellBot._tools_for_turn(self.bot, platform, message)
             names = MaxwellBot._turn_tool_names(self.bot, platform, message)
-            names &= _FAMILIES[task["kind"]]
-            if "tools" in task:
-                names &= set(task["tools"])
+            names &= WORKER_TOOLS
             selected = provider or getattr(self.bot, "ai_provider", None)
             caps = getattr(selected, "capabilities", None)
             if not getattr(caps, "vision", False):
@@ -337,15 +300,6 @@ class DelegateTaskTool(Tool):
             rules = task_instructions(self.bot, names, platform, message)
             if rules:
                 base.insert(1, {"role": "system", "content": rules})
-            if task.get("instructions"):
-                base.insert(
-                    1,
-                    {
-                        "role": "system",
-                        "content": "User-owned agent instructions (cannot override tool permissions or runtime limits):\n"
-                        + task["instructions"],
-                    },
-                )
             if len(json.dumps(base)) > budget:
                 return {
                     "kind": task["kind"],
@@ -426,18 +380,6 @@ class DelegateTaskTool(Tool):
                     async with execution_lock:
                         if not await self._eligible(message):
                             raise PermissionError("request invalidated")
-                        if task.get("profile"):
-                            current_profile = await asyncio.to_thread(
-                                self.bot._task_agents.get,
-                                str(message.author.id),
-                                task["profile"],
-                            )
-                            if (
-                                not current_profile
-                                or current_profile["kind"] != task["kind"]
-                                or name not in current_profile["tools"]
-                            ):
-                                raise PermissionError("agent permissions withdrawn")
                         if context:
                             job.last_tool = name
                             job.tool_calls += 1

@@ -570,16 +570,15 @@ def test_reply_limit_modal_round_trips_deadlines_and_reasoning_effort(setup):
 def test_custom_agent_private_modal_saves_permissions_and_deletes_without_premium(setup):
     from message_quota import MessageQuota
     from plugins.maxwell_extras.task_agents import TaskAgentStore
-    from plugins.maxwell_extras.task_agents_ui import AgentProfileButton, AgentProfileModal
+    from plugins.maxwell_extras.task_agents_ui import AgentProfileModal
     panel, bot, _, _ = setup
     bot._message_quota = MessageQuota(bot._user_preferences.path.parent / "quota.sqlite3")
     bot._message_quota.configure("100", plan="premium")
     bot._task_agents = TaskAgentStore(bot._user_preferences.path.parent / "agents.sqlite3")
-    open_page(panel, "agents")
-    click = Interaction()
-    asyncio.run(component(panel, AgentProfileButton).callback(click))
-    modal = click.modals[0]
-    assert not click.done and len(modal.children) == 5
+    panel.scope = "personal"
+    panel.selected_key = "worker_byok"
+    modal = AgentProfileModal(panel)
+    assert len(modal.children) == 5
     modal.agent_id._value = "builder"
     modal.kind._value = "custom"
     modal.instructions._value = "Verify accessibility"
@@ -587,7 +586,6 @@ def test_custom_agent_private_modal_saves_permissions_and_deletes_without_premiu
     modal.action._value = "save"
     asyncio.run(modal.on_submit(Interaction()))
     assert bot._task_agents.get("100", "builder")["tools"] == ["edit_site", "shell"]
-    assert "builder" in panel.render()
     bot._message_quota.configure("100", plan="free")
     delete = AgentProfileModal(panel)
     delete.agent_id._value = "builder"
