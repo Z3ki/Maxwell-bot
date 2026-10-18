@@ -5,7 +5,12 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from bot import MaxwellBot
-from premium_access import current_plan, load_plan, premium_for_current_request
+from premium_access import (
+    current_plan,
+    load_plan,
+    premium_for_current_request,
+    premium_withheld_note,
+)
 
 
 def test_plan_read_runs_in_worker_thread_and_fails_closed():
@@ -41,3 +46,16 @@ def test_request_snapshot_isolated_by_user_and_reused_by_provider():
     assert not premium_for_current_request("123")
     reader.assert_not_called()
     assert bot.ai_provider.generate_response.await_args.kwargs["model"] == "slow-reasoning-model"
+
+
+def test_free_turn_is_told_why_the_subagent_is_missing():
+    bot = SimpleNamespace(tools={"delegate_task": object()}, _control={})
+    note = premium_withheld_note(bot, {"shell"}, "123")
+    assert "Premium" in note and "not in this turn" in note
+    assert "restart" in note
+    token = current_plan.set(("123", "premium"))
+    try:
+        assert premium_withheld_note(bot, set(), "123") == ""
+    finally:
+        current_plan.reset(token)
+    assert premium_withheld_note(bot, {"delegate_task"}, "123") == ""
