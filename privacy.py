@@ -179,7 +179,7 @@ def notice_text(bot, user_id) -> str | None:
     uid = str(user_id or "")
     if store is None or not uid.isdigit() or not {"terms", "privacy"} <= urls.keys():
         return None
-    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-2").strip()
+    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-3").strip()
     if not store.consents.claim_notice(uid, version):
         return None
     return (
@@ -195,7 +195,7 @@ def release_notice(bot, user_id) -> None:
     uid = str(user_id or "")
     if store is None or not uid.isdigit():
         return
-    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-2").strip()
+    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-3").strip()
     store.consents.retry_notice(uid, version)
 
 
