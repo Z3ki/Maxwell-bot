@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
+import re
 import secrets
 import time
 from typing import ClassVar
@@ -414,6 +415,20 @@ class TaskJobs:
         except Exception:
             logger.warning("Could not store subagent result for the main model")
 
+    async def _send_reported_files(self, job) -> None:
+        raw = "\n".join(str(item.get("report") or "") for item in (job.reports or []))
+        tool = (getattr(self.bot, "tools", None) or {}).get("send_file")
+        if not raw or tool is None or job.message is None:
+            return
+        for path in reported_files(raw):
+            try:
+                result = await tool.execute(job.message, path=path)
+            except Exception:
+                logger.warning("Could not attach %s from a finished subagent", path, exc_info=True)
+                continue
+            if not str(result).startswith("__FILE_SENT__"):
+                logger.info("Subagent file stayed unsent: %s", str(result)[:180])
+
     async def deliver(self, job):
         if not await self.allowed(job):
             job.row["delivery"] = "suppressed"
@@ -426,6 +441,7 @@ class TaskJobs:
             return
         job.row["delivery"] = "attempting"
         text = format_job(job.view(), limit=1850)
+        await self._send_reported_files(job)
         interaction = getattr(job.message, "interaction", None)
         try:
             if interaction is not None:
@@ -589,6 +605,26 @@ class TaskJobs:
                     self.store.update, job.row["id"], state=job.stop_reason
                 )
         self.jobs.clear()
+
+
+_SENDABLE_SUFFIXES = (
+    ".mp3", ".wav", ".ogg", ".flac", ".m4a",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp",
+    ".mp4", ".webm", ".pdf", ".zip", ".mid", ".midi",
+)
+
+
+def reported_files(text: str) -> list[str]:
+    """Workspace media paths a finished job should attach, not just name."""
+    found: list[str] = []
+    for match in re.findall(r"/workspace/[A-Za-z0-9_./+-]+", str(text or "")):
+        path = match.rstrip(".,);]'\"")
+        if not path.lower().endswith(_SENDABLE_SUFFIXES) or path in found:
+            continue
+        found.append(path)
+        if len(found) == 4:
+            break
+    return found
 
 
 def _public_report(text: str) -> str:
