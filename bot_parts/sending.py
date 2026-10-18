@@ -171,7 +171,7 @@ class SendingMixin:
         # Discord's reply-author notification is independent of mentions in
         # the response text. Notify the reply author without parsing @mentions.
         kwargs["allowed_mentions"] = discord.AllowedMentions(
-            everyone=False, roles=False, users=False,
+            everyone=False, roles=False, users=True,
             replied_user=reply_to is not None and kwargs.get("mention_author", True),
         )
         # Drain typing BEFORE the message goes out. A typing event that

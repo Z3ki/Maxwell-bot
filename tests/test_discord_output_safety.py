@@ -27,10 +27,10 @@ def test_reply_notifies_author_and_suppresses_untrusted_text_mentions():
             assert call.kwargs["content"] == text
             mentions = call.kwargs["allowed_mentions"]
             assert mentions.everyone is False
-            assert mentions.users is False
+            assert mentions.users is True
             assert mentions.roles is False
             assert mentions.replied_user is is_reply
-            assert mentions.to_dict()["parse"] == []
+            assert mentions.to_dict()["parse"] == ["users"]
             assert mentions.to_dict().get("replied_user", False) is is_reply
 
     asyncio.run(run())

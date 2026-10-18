@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import Context
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import logging
 import secrets
@@ -389,6 +390,30 @@ class TaskJobs:
                 return
             await asyncio.sleep(0.1)
 
+    async def _remember_delivery(self, job, text: str) -> None:
+        """The channel post is not a new user turn, so store it for the main model."""
+        remember = getattr(self.bot, "add_message_to_memory", None)
+        message = job.message
+        channel = getattr(message, "channel", None)
+        if not callable(remember) or channel is None:
+            return
+        user = getattr(self.bot, "user", None)
+        try:
+            await remember(
+                str(getattr(channel, "id", "") or ""),
+                {
+                    "author": getattr(user, "display_name", None) or "Maxwell",
+                    "author_id": str(getattr(user, "id", "") or ""),
+                    "author_is_bot": True,
+                    "content": "Subagent result already sent in this channel. Do not rewrite it.\n" + text,
+                    "message_id": f"subagent:{job.row['id']}",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                message,
+            )
+        except Exception:
+            logger.warning("Could not store subagent result for the main model")
+
     async def deliver(self, job):
         if not await self.allowed(job):
             job.row["delivery"] = "suppressed"
@@ -417,13 +442,18 @@ class TaskJobs:
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
-                kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
+                kwargs = {
+                    "allowed_mentions": discord.AllowedMentions(
+                        everyone=False, roles=False, users=True
+                    )
+                }
                 ref = getattr(job.message, "to_reference", None)
                 if callable(ref):
                     kwargs["reference"] = ref(fail_if_not_exists=False)
                     kwargs["mention_author"] = False
                 await job.message.channel.send(text, **kwargs)
             job.row["delivery"] = "sent"
+            await self._remember_delivery(job, text)
         except Exception as exc:
             job.row["delivery"] = "failed"
             logger.warning("Worker delivery failed (%s)", type(exc).__name__)
@@ -568,8 +598,8 @@ def _public_report(text: str) -> str:
     cleaned = " ".join(cleaned.split())
     if not cleaned:
         return "The subagent finished. The working notes stayed in the job."
-    if len(cleaned) > 500:
-        cleaned = cleaned[:500].rsplit(" ", 1)[0] + "…"
+    if len(cleaned) > 280:
+        cleaned = cleaned[:280].rsplit(" ", 1)[0] + "…"
     return cleaned
 
 
