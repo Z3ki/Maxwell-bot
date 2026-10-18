@@ -1062,7 +1062,7 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
             interaction, defaults=defaults, fallback=turn.get("visibility") or "public"
         )
         history_limit = resolve_context_limit(interaction, defaults=defaults)
-        if defaults is not None and defaults.get("tracking", "off") != "on":
+        if defaults is not None and defaults.get("tracking", "on") != "on":
             history_limit = 0
         response = getattr(interaction, "response", None)
         is_done = getattr(response, "is_done", None)
