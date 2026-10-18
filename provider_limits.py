@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import math
 
+from control_defaults import DEFAULT_CONTROL
+
+LIVE_TURN_TIMEOUT_DEFAULT_SECONDS = DEFAULT_CONTROL["live_turn_timeout_seconds"]
+
 # Default whole-job budget for subagents, and the most a model may request.
 WORKER_TIMEOUT_DEFAULT_SECONDS = 1200
 WORKER_TIMEOUT_MAX_SECONDS = 1800
@@ -40,11 +44,15 @@ def turn_timeout_seconds(bot, provider=None):
     configured = getattr(getattr(bot, "config", None), "AI_TURN_TIMEOUT_SECONDS", 0)
     getter = getattr(bot, "_inbound_setting", None)
     if not configured and callable(getter):
-        return getter("live_turn_timeout_seconds", 180, 1, 7200)
+        return getter(
+            "live_turn_timeout_seconds", LIVE_TURN_TIMEOUT_DEFAULT_SECONDS, 1, 7200
+        )
     return _bounded(
         configured
-        or (getattr(bot, "_control", {}) or {}).get("live_turn_timeout_seconds", 180),
-        180,
+        or (getattr(bot, "_control", {}) or {}).get(
+            "live_turn_timeout_seconds", LIVE_TURN_TIMEOUT_DEFAULT_SECONDS
+        ),
+        LIVE_TURN_TIMEOUT_DEFAULT_SECONDS,
     )
 
 

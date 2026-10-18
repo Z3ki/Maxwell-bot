@@ -236,16 +236,14 @@ def _sanitize_control(control):
             30,
         ),
     )
+    default_budget = DEFAULT_CONTROL.get("prompt_context_budget", 96000)
     out["prompt_context_budget"] = max(
         10000,
         min(
             _parse_int(
-                control.get(
-                    "prompt_context_budget",
-                    DEFAULT_CONTROL.get("prompt_context_budget", 200000),
-                )
-                or 200000,
-                200000,
+                control.get("prompt_context_budget", default_budget)
+                or default_budget,
+                default_budget,
             ),
             2000000,
         ),

@@ -248,11 +248,14 @@ class SettingsMixin:
             control["tool_history_messages"] = max(
                 0, min(parse_int(control.get("tool_history_messages", 10) or 0, 0), 30)
             )
+            default_budget = DEFAULT_CONTROL["prompt_context_budget"]
             control["prompt_context_budget"] = max(
                 10000,
                 min(
                     parse_int(
-                        control.get("prompt_context_budget", 200000) or 200000, 200000
+                        control.get("prompt_context_budget", default_budget)
+                        or default_budget,
+                        default_budget,
                     ),
                     2000000,
                 ),

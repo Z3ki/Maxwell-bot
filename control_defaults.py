@@ -99,7 +99,9 @@ DEFAULT_CONTROL = {
     # Direct requests must end in a visible answer, not discretionary silence.
     "require_direct_response": True,
     "respond_to_edited_mentions": True,
-    "live_turn_timeout_seconds": 180,
+    # Bounds the whole live turn, tool loop included. 180s cut off ordinary
+    # multi-step tool work (site builds, shell + verify) mid-turn.
+    "live_turn_timeout_seconds": 900,
     "premium_task_workers_enabled": True,
     "task_workers_max_active": 4,
     "task_workers_max_steps": 100,
@@ -151,12 +153,17 @@ DEFAULT_CONTROL = {
     "night_fallback_start_hour": 22,
     "night_fallback_end_hour": 9,
     "ai_timeout_seconds": 3600,
-    "memory_history_messages": 20,
-    "memory_context_budget": 24000,
-    "tool_history_messages": 4,
-    "prompt_context_budget": 48000,
+    # Context sizing. These match what the production deployment runs. The
+    # static system prompt alone is ~20k chars, so a 48k prompt budget left
+    # history ~3k chars (a handful of messages) on fresh installs.
+    # memory_context_budget is half of prompt_context_budget; keep that ratio
+    # when changing either.
+    "memory_history_messages": 40,
+    "memory_context_budget": 48000,
+    "tool_history_messages": 8,
+    "prompt_context_budget": 96000,
     "live_max_output_tokens": 4096,
-    "max_tool_iterations": 12,
+    "max_tool_iterations": 50,
     "tool_iteration_timeout_seconds": 3600,
     "max_response_chars": 4000,
     # Prefer OpenAI-style native tool_calls when the provider supports them.

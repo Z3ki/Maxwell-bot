@@ -74,8 +74,8 @@ def test_parse_int_accepts_only_integral_values(value, expected):
         ("prompt_context_budget", 1_500_000, 1_500_000),
         ("prompt_context_budget", 2_000_000, 2_000_000),
         ("prompt_context_budget", 2_000_001, 2_000_000),
-        ("prompt_context_budget", 0, 200_000),
-        ("prompt_context_budget", "junk", 200_000),
+        ("prompt_context_budget", 0, DEFAULT_CONTROL["prompt_context_budget"]),
+        ("prompt_context_budget", "junk", DEFAULT_CONTROL["prompt_context_budget"]),
     ],
 )
 def test_dashboard_uses_bot_limits_and_defaults(key, raw, expected):
@@ -139,7 +139,11 @@ def test_bot_accepts_integral_strings_and_floats(tmp_path, key, raw, expected):
         ("max_response_chars", 3000.5, 4000),
         ("max_response_chars", "3000.5", 4000),
         ("tool_history_messages", 12.5, 0),
-        ("prompt_context_budget", "300000.25", 200000),
+        (
+            "prompt_context_budget",
+            "300000.25",
+            DEFAULT_CONTROL["prompt_context_budget"],
+        ),
         ("live_max_output_tokens", 8192.5, 4096),
         ("live_max_output_tokens", "inf", 4096),
     ],

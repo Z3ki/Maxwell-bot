@@ -109,7 +109,11 @@ class MessagesMixin:
             self._dispatch_plugin_event("on_message", message)
             async with asyncio.timeout(
                 MaxwellBot._inbound_setting(
-                    self, "live_turn_timeout_seconds", 180, 1, 7200
+                    self,
+                    "live_turn_timeout_seconds",
+                    DEFAULT_CONTROL["live_turn_timeout_seconds"],
+                    1,
+                    7200,
                 )
             ):
                 reason = await self._on_message_impl(message)
@@ -1666,7 +1670,13 @@ class MessagesMixin:
             max_iters = max(
                 0,
                 min(
-                    _safe_int(self._control.get("max_tool_iterations", 30) or 0, 0),
+                    _safe_int(
+                        self._control.get(
+                            "max_tool_iterations", DEFAULT_CONTROL["max_tool_iterations"]
+                        )
+                        or 0,
+                        0,
+                    ),
                     BYOK_TOOL_CALL_LIMIT if byok_active else 100,
                 ),
             )

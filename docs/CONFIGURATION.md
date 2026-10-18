@@ -196,13 +196,14 @@ Frequently used controls include:
 | `disabled_tools` | Per-tool deny list |
 | `require_direct_response` | Require an answer/acknowledgement for eligible direct requests |
 | `respond_to_edited_mentions` | Allow a newly added direct mention to start one request |
-| `max_tool_iterations` | Tool-loop iteration cap |
+| `max_tool_iterations` | Tool-loop iteration cap (default 50) |
 | `tool_iteration_timeout_seconds` | Tool-loop timeout |
-| `prompt_context_budget` | Approximate prompt/context budget |
-| `memory_context_budget` | Approximate memory contribution budget |
+| `prompt_context_budget` | Approximate prompt/context budget in chars (default 96000) |
+| `memory_context_budget` | Most chars of channel history per turn (default 48000) |
+| `memory_history_messages` | Most recent channel messages per turn (default 40) |
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
-| `message_quota_limit` | Free messages per rolling window (default 200) |
-| `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
+| `message_quota_limit` | Free messages per rolling window (default 150) |
+| `message_quota_window_seconds` | Rolling window length (default 3600, one hour) |
 | `message_quota_enabled` | Forced off for unlimited request admission |
 | `store_memory` | Conversation-memory storage switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
@@ -211,7 +212,7 @@ The authoritative set and valid ranges are in `control_defaults.py` and `api.sta
 
 ## Prompt size and provider caching
 
-`prompt_context_budget` and `memory_context_budget` are character budgets, not exact model-token counts. The final prompt limit is soft: complete historical transcript blocks may be removed, but authorization/system instructions, live input, and native tool-call/result records are preserved rather than clipped mid-rule.
+`prompt_context_budget` and `memory_context_budget` are character budgets, not exact model-token counts. History gets what is left of `prompt_context_budget` after the output reserve (a quarter of the budget), the ~20k-char system prompt and a per-turn tail reserve (an eighth of the budget, at least 8000), capped by `memory_context_budget`. Below roughly 96000 the system prompt crowds history out and the bot logs `History squeezed`; keep `memory_context_budget` near half of `prompt_context_budget`. The final prompt limit is soft: complete historical transcript blocks may be removed, but authorization/system instructions, live input, and native tool-call/result records are preserved rather than clipped mid-rule.
 
 Tool guidance is conditional on enabled plugins, available tools, and request scope. Component `token_budget` values are advisory; they never truncate an instruction.
 
@@ -227,11 +228,10 @@ Directed inbound work is journaled in `DATA_DIR/inbound_requests.sqlite3` with l
 Relevant controls include `live_turn_timeout_seconds`, `inbound_retry_attempts`, and `inbound_retry_delay_seconds`. Maxwell deliberately avoids blind replay after a tool or Discord send may already have taken effect.
 
 `live_turn_timeout_seconds` bounds the entire turn, not each provider/tool call.
-Its default is 180 seconds even when `ai_timeout_seconds` and
-`tool_iteration_timeout_seconds` are larger. Multi-step site creation and
-verification may need an operator-set budget such as 900 seconds. Keep network
-calls independently bounded; raising the turn budget does not make blocked
-sandbox destinations reachable.
+Its default is 900 seconds, enough for multi-step site creation and
+verification; `ai_timeout_seconds` and `tool_iteration_timeout_seconds` are
+larger but cannot outlast it. Keep network calls independently bounded; raising
+the turn budget does not make blocked sandbox destinations reachable.
 
 ## Conversation history
 
