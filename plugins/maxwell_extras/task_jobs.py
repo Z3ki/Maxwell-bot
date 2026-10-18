@@ -597,9 +597,13 @@ def _public_report(text: str) -> str:
     cleaned = re.sub(r"```.*?```", " ", str(text or ""), flags=re.S)
     cleaned = " ".join(cleaned.split())
     if not cleaned:
-        return "The subagent finished. The working notes stayed in the job."
-    if len(cleaned) > 280:
-        cleaned = cleaned[:280].rsplit(" ", 1)[0] + "…"
+        return "The subagent finished."
+    for sep in (" (", " — ", " – ", ". "):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0].strip()
+            break
+    if len(cleaned) > 160:
+        cleaned = cleaned[:160].rsplit(" ", 1)[0].rstrip(".,;") + "…"
     return cleaned
 
 
@@ -610,6 +614,10 @@ def format_job(row, *, limit=1850):
         "completed": "finished",
         "incomplete": "didn't finish",
     }.get(str(row.get("state") or ""), str(row.get("state") or "unknown"))
+    if str(row.get("state") or "") == "completed":
+        reports = row.get("reports") or []
+        latest = reports[-1].get("report", "") if reports else ""
+        return (_public_report(latest) or "The subagent finished.")[:limit]
     text = f"Subagent `{row['id']}` · {state}\n"
     if row.get("last_tool"):
         text += f"Last tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"
