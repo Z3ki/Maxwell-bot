@@ -10,7 +10,7 @@ import pytest
 from plugins.maxwell_extras.task_agents import ManageTaskAgentTool, TaskAgentStore
 from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 from privacy_data import cleanup_data, delete_data
-from test_premium_task_workers import setup, call
+from test_premium_task_workers import setup
 
 
 def store(root):
