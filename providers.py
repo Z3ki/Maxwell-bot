@@ -397,6 +397,23 @@ class OpenAICompatibleProvider(ChatProvider):
                 ) from None
         return headers
 
+    # Request headers that carry identifiers, not credentials. Their values
+    # must not be redacted: x-opencode-session defaults to "maxwell", and
+    # treating it as a secret blanked that word out of errors and BYOK replies.
+    _NON_SECRET_HEADERS = frozenset({"x-opencode-session"})
+
+    @classmethod
+    def _credential_secrets(cls, headers: dict[str, str]) -> tuple[str, ...]:
+        """Header values to redact: every header except known identifiers."""
+        secrets: list[str] = []
+        for name, value in (headers or {}).items():
+            if not value or str(name).strip().lower() in cls._NON_SECRET_HEADERS:
+                continue
+            secret = str(value).removeprefix("Bearer ")
+            if secret and secret not in secrets:
+                secrets.append(secret)
+        return tuple(secrets)
+
     def _display_error(self, detail: Any, secrets: tuple[str, ...] = ()) -> str:
         """Never copy BYOK upstream bodies into logs or surfaced exceptions."""
         if self.policy.sensitive_credentials:
@@ -1229,9 +1246,7 @@ class OpenAICompatibleProvider(ChatProvider):
             credential_secrets: tuple[str, ...] = ()
             try:
                 headers = await self._auth_headers(endpoint)
-                credential_secrets = tuple(
-                    value.removeprefix("Bearer ") for value in headers.values() if value
-                )
+                credential_secrets = self._credential_secrets(headers)
                 async with session.post(
                     f"{endpoint.base_url}/chat/completions",
                     json=data,
