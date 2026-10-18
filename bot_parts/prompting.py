@@ -104,12 +104,14 @@ class PromptingMixin:
         the whole window. The output reserve scales with the budget so a
         full context window can't leave the model with no room to answer.
         """
+        default_budget = DEFAULT_CONTROL["prompt_context_budget"]
         raw_budget = max(
             10000,
             min(
                 _safe_int(
-                    self._control.get("prompt_context_budget", 96000) or 96000,
-                    240000,
+                    self._control.get("prompt_context_budget", default_budget)
+                    or default_budget,
+                    default_budget,
                 ),
                 2000000,
             ),

@@ -45,6 +45,20 @@ from .history import canonical_history, compact_media_annotations, history_text,
 logger = logging.getLogger(__name__)
 
 
+def transcript_tail_reserve(prompt_budget: int, dynamic_chars: int, live_chars: int) -> int:
+    """Prompt chars held back from history for the per-turn tail.
+
+    The tail is the volatile system block, the live request and the reaction
+    snapshot. A floor that scales with the budget keeps the history window
+    stable across turns (prefix caching) while ordinary tails vary; an
+    unusually large tail still takes precedence over history. The scaled
+    share is 1/8: at 1/4 it held back ~18k chars on a 96k budget for a tail
+    that is usually 1-3k, starving history behind a ~20k system prompt.
+    """
+    actual = dynamic_chars + max(4000, live_chars + 1000) + 1500
+    return max(8000, prompt_budget // 8, actual)
+
+
 class ConversationHost(Protocol):
     """State and transport callbacks consumed by one conversation turn."""
 
@@ -422,7 +436,10 @@ class ConversationPromptBuilder:
         self, message, query, messages, selected_ids, remaining_budget,
     ):
         host = self.host
-        history_count = _safe_int(host._control.get("memory_history_messages", 500), 500)
+        default_count = DEFAULT_CONTROL["memory_history_messages"]
+        history_count = _safe_int(
+            host._control.get("memory_history_messages", default_count), default_count
+        )
         recall = getattr(getattr(host, "memory", None), "get_relevant_channel_memory", None)
         budget = min(2000, remaining_budget)
         if (history_count <= 0 or budget < 200 or not callable(recall)
@@ -472,12 +489,14 @@ class ConversationPromptBuilder:
             # Operators can still raise memory_context_budget; this clamp
             # stops a fat control file from walking the request past the
             # model's useful window.
-            budget = max(
+            default_budget = DEFAULT_CONTROL["memory_context_budget"]
+            configured = max(
                 1000,
                 min(
                     _safe_int(
-                        host._control.get("memory_context_budget", 48000) or 48000,
-                        48000,
+                        host._control.get("memory_context_budget", default_budget)
+                        or default_budget,
+                        default_budget,
                     ),
                     96000,
                 ),
@@ -486,25 +505,28 @@ class ConversationPromptBuilder:
             # transcript space. The final budget pass can discard the whole
             # flattened transcript, but never clips instructions or live input.
             prompt_budget = self.hooks.prompt_budget_chars(host)
-            # Reserve a consistent tail allowance so ordinary changes to
-            # assets/RAG/live input do not also resize the history window.
-            # Exceptionally large tails still take precedence over history.
-            reserved = sum(self.hooks.message_content_chars(m) for m in messages) + max(
-                8000,
-                prompt_budget // 4,
-                sum(len(p) for p in dynamic_parts)
-                + max(4000, len(user_message) + len(media_summary) + 1000)
-                + 1500,  # bounded reaction snapshot added below
+            reserved = sum(self.hooks.message_content_chars(m) for m in messages) + (
+                transcript_tail_reserve(
+                    prompt_budget,
+                    sum(len(p) for p in dynamic_parts),
+                    len(user_message) + len(media_summary),
+                )
             )
-            budget = max(
-                1000, min(budget, prompt_budget - reserved)
-            )
+            budget = max(1000, min(configured, prompt_budget - reserved))
+            if budget < min(configured, 8000):
+                logger.warning(
+                    "History squeezed to %s chars (memory_context_budget=%s): "
+                    "system prompt and live tail use %s of %s prompt chars; "
+                    "raise prompt_context_budget",
+                    budget, configured, reserved, prompt_budget,
+                )
+            default_count = DEFAULT_CONTROL["memory_history_messages"]
             count = max(
                 0,
                 min(
                     _safe_int(
-                        host._control.get("memory_history_messages", 500),
-                        500,
+                        host._control.get("memory_history_messages", default_count),
+                        default_count,
                     ),
                     2000,
                 ),
@@ -526,9 +548,16 @@ class ConversationPromptBuilder:
             chat_rows = [row for row in memory if not row.get("is_tool")]
             start = max(0, len(chat_rows) - count)
             recent_memory = chat_rows[start - (start % block) :] if count else []
+            default_tools = DEFAULT_CONTROL["tool_history_messages"]
             tool_limit = max(
                 0,
-                min(_safe_int(host._control.get("tool_history_messages", 20), 20), 50),
+                min(
+                    _safe_int(
+                        host._control.get("tool_history_messages", default_tools),
+                        default_tools,
+                    ),
+                    50,
+                ),
             )
             tool_rows = [row for row in memory if row.get("is_tool")]
             tool_history = tool_rows[-tool_limit:] if tool_limit else []

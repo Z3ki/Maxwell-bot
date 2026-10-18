@@ -16,7 +16,11 @@ from plugins.maxwell_extras.worker_providers import select_worker_provider
 from premium_access import current_plan
 from privacy_data import delete_data
 from plugins.maxwell_extras.user_preferences import UserPreferenceStore
-from provider_limits import request_turn_timeout_seconds, worker_timeout_seconds
+from provider_limits import (
+    LIVE_TURN_TIMEOUT_DEFAULT_SECONDS,
+    request_turn_timeout_seconds,
+    worker_timeout_seconds,
+)
 from test_premium_task_workers import TASKS, setup
 
 
@@ -242,10 +246,10 @@ def test_worker_deadline_fits_parent_only_for_eligible_premium_requests(tmp_path
     bot, _, _, _ = setup(tmp_path)
     bot.config.AI_WORKER_TURN_TIMEOUT_SECONDS = 2400
     assert worker_timeout_seconds(bot) == 2400
-    assert request_turn_timeout_seconds(bot, premium=True) == 180
-    assert request_turn_timeout_seconds(bot, premium=False) == 180
+    assert request_turn_timeout_seconds(bot, premium=True) == LIVE_TURN_TIMEOUT_DEFAULT_SECONDS
+    assert request_turn_timeout_seconds(bot, premium=False) == LIVE_TURN_TIMEOUT_DEFAULT_SECONDS
     bot._control["premium_task_workers_enabled"] = False
-    assert request_turn_timeout_seconds(bot, premium=True) == 180
+    assert request_turn_timeout_seconds(bot, premium=True) == LIVE_TURN_TIMEOUT_DEFAULT_SECONDS
 
 
 def test_delete_removes_both_vaults_and_old_save_cannot_resurrect_key(tmp_path):

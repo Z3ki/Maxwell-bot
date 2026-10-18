@@ -146,7 +146,7 @@ service controls (`OLLAMA_ORIGINS` and the old embedding URL alias).
 
 Set `AI_REQUEST_TIMEOUT_SECONDS` (10–7200) for each operator-provider call and
 `AI_TURN_TIMEOUT_SECONDS` (10–7200) for the whole request, including tools.
-A zero whole-task value preserves `live_turn_timeout_seconds` (180 by default).
+A zero whole-task value preserves `live_turn_timeout_seconds` (900 by default).
 For example, use 600 and 1800 for a slow website-building model. A shorter
 whole-task deadline still cancels the call. `AI_CONTEXT_WINDOW` sets the model's
 context size in tokens (0 retains the normal prompt budget); output tokens and
