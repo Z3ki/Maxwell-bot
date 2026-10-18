@@ -134,81 +134,23 @@ def test_free_users_can_review_and_delete_profiles_but_cannot_save(tmp_path):
     asyncio.run(run())
 
 
-def test_worker_loads_only_owners_profile_and_enforces_model_chosen_permissions(
-    tmp_path,
-):
+def test_worker_runs_the_task_without_a_saved_profile(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
     bot._task_agents = store(tmp_path)
     bot._task_agents.save(
         "123", "builder", "custom", "Inspect accessible assets", tools=["shell"]
     )
-    tasks = [{"profile": "builder", "task": "Verify local files"}]
-    result = json.loads(asyncio.run(worker.run(msg, tasks=tasks)))[0]
+    result = json.loads(
+        asyncio.run(worker.run(msg, tasks=[{"task": "Verify local files"}]))
+    )[0]
     assert result["status"] == "reported"
-    prompt = bot._generate_response.await_args_list[0].args[0]
-    assert "Inspect accessible assets" in str(prompt)
+    prompt = str(bot._generate_response.await_args_list[0].args[0])
+    assert "Inspect accessible assets" not in prompt
+    assert "Verify local files" in prompt
     assert [
         s["function"]["name"]
         for s in bot._generate_response.await_args_list[0].kwargs["tools"]
     ] == ["shell"]
-    bot._task_agents.delete("123", "builder")
-    bot._task_agents.save(
-        "456",
-        "builder",
-        "custom",
-        "Another user's secret instructions",
-        tools=["shell"],
+    assert "Error" in asyncio.run(
+        worker.run(msg, tasks=[{"profile": "builder", "task": "Inspect"}])
     )
-    bot._generate_response.reset_mock()
-    assert "not found for this user" in asyncio.run(worker.run(msg, tasks=tasks))
-    bot._generate_response.assert_not_awaited()
-
-
-def test_per_task_permissions_only_narrow_profile_and_never_add_tools(tmp_path):
-    bot, msg, shell, worker = setup(tmp_path)
-    bot._task_agents = store(tmp_path)
-    bot._task_agents.save("123", "builder", "custom", "Inspect", tools=["list_sites"])
-    result = json.loads(
-        asyncio.run(
-            worker.run(
-                msg,
-                tasks=[{"profile": "builder", "task": "Inspect", "tools": ["shell"]}],
-            )
-        )
-    )[0]
-    assert result["status"] == "unavailable"
-    shell.execute.assert_not_awaited()
-
-
-def test_permissions_removed_during_model_call_stop_before_execution(tmp_path):
-    bot, msg, shell, worker = setup(tmp_path)
-    bot._task_agents = store(tmp_path)
-    bot._task_agents.save("123", "builder", "custom", "Inspect", tools=["shell"])
-
-    async def generate(*args, **kwargs):
-        bot._task_agents.save(
-            "123", "builder", "custom", "Review", tools=["list_sites"]
-        )
-        return call()
-
-    bot._generate_response.side_effect = generate
-    result = json.loads(
-        asyncio.run(
-            worker.run(msg, tasks=[{"profile": "builder", "task": "Inspect"}])
-        )
-    )[0]
-    assert result["status"] == "failed"
-    shell.execute.assert_not_awaited()
-
-
-def test_custom_transient_permissions_work_without_saving_profile(tmp_path):
-    bot, msg, shell, worker = setup(tmp_path)
-    result = json.loads(
-        asyncio.run(
-            worker.run(
-                msg, tasks=[{"kind": "custom", "tools": ["shell"], "task": "Inspect"}]
-            )
-        )
-    )[0]
-    assert result["status"] == "reported"
-    assert not (tmp_path / "plugins").exists()

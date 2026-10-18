@@ -85,7 +85,7 @@ def setup(tmp_path, *, premium=True):
     return bot, message, shell, DelegateTaskTool(bot)
 
 
-TASKS = [{"kind": "shell", "task": "Inspect workspace and report"}]
+TASKS = [{"task": "Inspect workspace and report"}]
 
 
 def test_premium_worker_executes_via_real_authorization_and_does_not_save_messages(
@@ -253,7 +253,7 @@ def test_step_and_context_limits_stop_without_forgetting_writes(tmp_path):
     bot.ai_provider.capabilities.context_window = 1024
     bot._generate_response.reset_mock()
     result = json.loads(
-        asyncio.run(worker.run(msg, tasks=[{"kind": "shell", "task": "x" * 6000}]))
+        asyncio.run(worker.run(msg, tasks=[{"task": "x" * 6000}]))
     )[0]
     assert result["status"] == "context_limit"
     bot._generate_response.assert_not_awaited()

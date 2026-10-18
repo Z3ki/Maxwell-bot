@@ -215,11 +215,7 @@ def test_coordinator_delegates_general_task_and_worker_retains_actual_authorizat
                 tool.run(
                     msg,
                     tasks=[
-                        {
-                            "kind": "general",
-                            "tools": ["shell"],
-                            "task": "Check workspace",
-                        }
+                        {"task": "Check workspace"}
                     ],
                 )
             )
@@ -378,11 +374,7 @@ def test_worker_media_is_processed_as_transient_input_and_never_as_text(tmp_path
         tool.run(
             msg,
             tasks=[
-                {
-                    "kind": "general",
-                    "task": "Analyze the supplied image",
-                    "tools": ["see_image"],
-                }
+                {"task": "Analyze the supplied image"}
             ],
         )
     )
@@ -416,11 +408,7 @@ def test_worker_cannot_widen_github_policy_or_write_credentials(tmp_path):
             tool.run(
                 msg,
                 tasks=[
-                    {
-                        "kind": "general",
-                        "tools": ["github_repo"],
-                        "task": "Inspect repo",
-                    }
+                    {"task": "Inspect repo"}
                 ],
             )
         )
