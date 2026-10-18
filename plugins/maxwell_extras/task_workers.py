@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import traceback
 from contextvars import ContextVar
 from typing import ClassVar
 
@@ -14,6 +16,11 @@ from provider_limits import (
     turn_timeout_seconds,
     worker_timeout_seconds,
 )
+
+logger = logging.getLogger(__name__)
+
+# One dropped or reset provider stream must not end the whole job.
+WORKER_RETRY_ATTEMPTS = 3
 
 _inside_worker = ContextVar("maxwell_inside_task_worker", default=False)
 _FAMILIES = {
@@ -102,6 +109,59 @@ def _site_result_url(name: str, result: str) -> str | None:
     return match[1] if match else None
 
 
+_URL_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)(?:[^\s/@'\"<>]*@)?([^\s/?#'\"<>]+)[^\s'\"<>]*")
+
+
+def _provider_secrets(provider) -> tuple[str, ...]:
+    """Credentials held by a worker client, which may be a non-env BYOK key."""
+    secrets = []
+    for client in (provider, *(getattr(provider, "providers", None) or ())):
+        for attribute in ("api_key", "fallback_api_key", "vision_api_key"):
+            value = getattr(client, attribute, None)
+            if isinstance(value, str) and len(value) >= 4 and value not in secrets:
+                secrets.append(value)
+    return tuple(secrets)
+
+
+def _sanitize(text: str, secrets=()) -> str:
+    """Strip credentials, URL paths/queries and userinfo from diagnostic text."""
+    from diagnostics_safety import redact_diagnostics
+
+    for secret in secrets:
+        text = text.replace(secret, "[redacted]")
+    text = _URL_RE.sub(r"\1\2/[…]", text)
+    return redact_diagnostics(text)
+
+
+def _error_summary(
+    exc: BaseException, secrets=(), limit: int = 160, *, message: bool = True
+) -> str:
+    """Short, redacted "Type: message"; message=False keeps only the type."""
+    detail = _sanitize(" ".join(str(exc).split()), secrets) if message else ""
+    if len(detail) > limit:
+        detail = detail[: limit - 1].rstrip() + "…"
+    name = type(exc).__name__
+    return f"{name}: {detail}" if detail else name
+
+
+def _report_error(exc: BaseException, secrets=()) -> str:
+    """Provider errors carry designed, user-safe text; other text stays in logs."""
+    from maxwell_core.providers.errors import ProviderError
+
+    return _error_summary(exc, secrets, message=isinstance(exc, ProviderError))
+
+
+def _log_failure(stage: str, exc: BaseException, secrets=()) -> None:
+    """Log type, message and traceback with credentials and URL details removed."""
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    logger.error(
+        "Task worker %s failed: %s\n%s",
+        stage,
+        _error_summary(exc, secrets, limit=500),
+        _sanitize(trace, secrets).rstrip(),
+    )
+
+
 class DelegateTaskTool(Tool):
     tool_name = "delegate_task"
     returns_result = True
@@ -180,7 +240,8 @@ class DelegateTaskTool(Tool):
             return "refused: task workers are disabled"
         try:
             eligible = await self._eligible(message)
-        except Exception:
+        except Exception as exc:
+            _log_failure("entitlement check", exc)
             return "refused: Premium entitlement or privacy state could not be verified"
         if not eligible:
             return "refused: this feature requires an operator-granted Premium plan and a current request"
@@ -202,7 +263,8 @@ class DelegateTaskTool(Tool):
                 provider, owned = await select_worker_provider(
                     self.bot, uid, _current_request_provider.get()
                 )
-            except Exception:
+            except Exception as exc:
+                _log_failure("provider selection", exc)
                 return "Error: worker AI connection is unavailable; no task started. Review /config → More options → Subagent AI provider or ask the operator."
             timeout = min(
                 turn_timeout_seconds(self.bot, provider)
@@ -226,8 +288,8 @@ class DelegateTaskTool(Tool):
             if owned and provider is not None:
                 try:
                     await provider.close()
-                except Exception:
-                    pass  # No secret-bearing exception strings in logs or reports.
+                except Exception as exc:
+                    _log_failure("provider cleanup", exc, _provider_secrets(provider))
 
     async def _worker(self, message, task, provider, execution_lock):
         from bot import MaxwellBot, _current_request_provider
@@ -370,6 +432,7 @@ class DelegateTaskTool(Tool):
                     max_tokens=output_tokens,
                     charge_message=False,
                     media=media,
+                    retry_attempts=WORKER_RETRY_ATTEMPTS,
                 )
                 calls = getattr(result, "tool_calls", None) or []
                 if not calls:
@@ -469,7 +532,8 @@ class DelegateTaskTool(Tool):
                             )
                     except PermissionError:
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        _log_failure(f"tool {name}", exc, _provider_secrets(selected))
                         output = "Error: that tool failed. Continue the task with what you already have."
                     from media_payloads import strip_media_payloads
 
@@ -546,13 +610,20 @@ class DelegateTaskTool(Tool):
                 "completed": completed,
                 "report": "Step budget reached; inspect completed changes before retrying",
             }
-        except Exception:
-            # Never expose exception text, task content, credentials or tool arguments.
+        except Exception as exc:
+            # Task content and tool arguments stay out of logs and reports;
+            # the error text is redacted and bounded.
+            secrets = _provider_secrets(provider or getattr(self.bot, "ai_provider", None))
+            _log_failure("job", exc, secrets)
             return {
                 "kind": task["kind"],
                 "status": "failed",
                 "completed": completed,
-                "report": "The subagent stopped before it finished. Anything it already changed may still be there.",
+                "report": (
+                    "The subagent stopped before it finished "
+                    f"({_report_error(exc, secrets)}). "
+                    "Anything it already changed may still be there."
+                ),
             }
         finally:
             _current_request_provider.reset(provider_token)
