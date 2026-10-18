@@ -154,14 +154,20 @@ class AIMixin:
         policy_links = "\n".join(f"{name.title()}: {url}" for name, url in urls.items()) if urls else (
             "This operator has not configured policy URLs. Ask the operator for them; never substitute another deployment's policies."
         )
-        return fill_identity(base, values) + (
+        # The style-freedom addendum is appended at this final boundary. The
+        # plugin-era refactor (ed46283) dropped the old install_style_freedom()
+        # call without moving it into the host; append_style_freedom is
+        # idempotent, so a wrapped instance still carries it exactly once.
+        from plugins.maxwell_extras.style_freedom import append_style_freedom
+
+        return append_style_freedom(fill_identity(base, values) + (
             "\n\n## This deployment's policies\n"
             + policy_links
             + "\nProvide these links when someone asks about terms or privacy. "
             "Do not proactively announce policies or send first-use legal DMs. "
             "Refer to the current pages for policy details; do not invent their contents "
             "or claim a user has received or accepted a notice."
-        )
+        ))
 
     async def _personal_provider(self, message):
         """Saved personal model for this sender, including normal chat.
