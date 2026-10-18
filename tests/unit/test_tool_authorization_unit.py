@@ -389,7 +389,9 @@ def test_worker_cannot_change_github_accounts():
     assert _auth(_bot(), _message(), "github_repo", tool, {"action": action}) is None
 
 
-@pytest.mark.parametrize("name", ["send_message", "send_rich_message", "react", "no_response"])
+@pytest.mark.parametrize(
+    "name", ["send_message", "send_rich_message", "react", "no_response"]
+)
 def test_spent_personal_budget_still_lets_the_turn_reply(name):
     p_token = _current_request_provider.set(object())
     b_token = _current_byok_tool_budget.set({"calls": 24})
