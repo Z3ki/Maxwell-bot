@@ -99,7 +99,8 @@ def test_plan_and_billing_controls_are_discarded():
     assert "message_quota_personal_plus_limit" not in sanitized
     assert "message_quota_server_plus_limit" not in sanitized
     assert enforced_message_limit(sanitized) == 40
-    assert FREE_MESSAGE_LIMIT == 200
+    assert FREE_MESSAGE_LIMIT == 150
+    assert PREMIUM_MESSAGE_LIMIT == 500
     assert DEFAULT_CONTROL["message_quota_limit"] == FREE_MESSAGE_LIMIT
     assert _sanitize_control({})["message_quota_limit"] == FREE_MESSAGE_LIMIT
 
@@ -293,7 +294,7 @@ def test_premium_grant_uses_the_higher_allowance_and_stronger_model(tmp_path):
     ledger.configure("42", plan="premium")
     state = ledger.status("42", FREE_MESSAGE_LIMIT, 18000)
     assert state["plan"] == "premium"
-    assert state["limit"] == PREMIUM_MESSAGE_LIMIT == 2000
+    assert state["limit"] == PREMIUM_MESSAGE_LIMIT == 500
     assert state["used"] == 0
     calls = []
 

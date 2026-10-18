@@ -222,7 +222,14 @@ def _sanitize_control(control):
         ),
     )
     out["message_quota_window_seconds"] = max(
-        60, min(_safe_int(out.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600)
+        60,
+        min(
+            _safe_int(
+                out.get("message_quota_window_seconds"),
+                DEFAULT_CONTROL["message_quota_window_seconds"],
+            ),
+            7 * 24 * 3600,
+        ),
     )
     out["live_max_output_tokens"] = max(
         256, min(_safe_int(out.get("live_max_output_tokens"), 4096), 32768)
