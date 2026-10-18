@@ -974,7 +974,7 @@ class _ConfigPanel(discord.ui.View):
         )
         return (
             "## Privacy\n"
-            "Optional saved history is off until you choose On.\n\n"
+            "Saved messages are on unless you turn them off.\n\n"
             f"**Message storage:** {current}\n"
             "**Persistent learned memory:** unavailable; automatic facts/embeddings are retired.\n"
             "**AI processing:** current requests and necessary context still go to the selected provider, including fallbacks/BYOK. Provider retention is separate.\n\n"
@@ -1163,11 +1163,14 @@ class _ConfigPanel(discord.ui.View):
             await self._save_server_flag(self.selected_key, "default" if self.selected_key == "progress" else False)
         if self.scope == "personal":
             await self._refresh_personal()
-        self.notice = (
-            "**Reset.** Message storage stays off. Use the clearly labeled On choice to enable optional saved history."
-            if tracking_was_off else
-            "**Reset.** The default is restored."
-        )
+        if self.scope == "personal" and self.selected_key == "tracking":
+            self.notice = (
+                "**Reset.** Message storage stays off. Use On to save messages again."
+                if tracking_was_off else
+                "**Reset.** Message storage is now off. Use On to save messages again."
+            )
+        else:
+            self.notice = "**Reset.** The default is restored."
         self._build()
         await _edit_panel(interaction,
             content=None, embed=self.embed(), view=self,

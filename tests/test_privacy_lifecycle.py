@@ -42,9 +42,9 @@ def test_new_and_legacy_users_do_not_create_fake_storage_consent(tmp_path):
         )
     )
     store = UserPreferenceStore(path)
-    assert all(
-        store.get(uid)["defaults"]["tracking"] == "off" for uid in ("1", "2", "3")
-    )
+    assert store.get("1")["defaults"]["tracking"] == "on"
+    assert store.get("2")["defaults"]["tracking"] == "off"
+    assert store.get("3")["defaults"]["tracking"] == "on"
     assert store.consents.review("1") == []
     assert tracks_message_content(None, "1") is False
     store.reset_default("2", "tracking")
@@ -89,6 +89,7 @@ def test_consent_is_scoped_versioned_idempotent_and_durable(tmp_path):
 def test_off_prevents_content_persistence_across_ingestion_rows(tmp_path, variant):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
+        memory.preferences.set_default("1", "tracking", "off")
         row = {"author_id": "1", "content": "MUST_NOT_PERSIST", "message_id": "100"}
         if variant == "tool":
             row.update(
@@ -181,8 +182,8 @@ def test_failed_write_does_not_activate_history(tmp_path, monkeypatch):
         lambda *args: (_ for _ in ()).throw(OSError("disk full")),
     )
     with pytest.raises(OSError):
-        store.set_default("1", "tracking", "on")
-    assert not tracks_message_content(store, "1")
+        store.set_default("1", "tracking", "off")
+    assert tracks_message_content(store, "1")
 
 
 def test_dashboard_sync_keeps_opt_out_on_unrelated_update(tmp_path):
@@ -239,7 +240,7 @@ def test_notice_is_private_once_per_version_without_acceptance(tmp_path, monkeyp
         assert store.consents.review("1") == []
         await maybe_notice(bot, interaction)
         assert interaction.followup.send.await_count == 1
-        monkeypatch.setenv("MAXWELL_NOTICE_VERSION", "material-disclosure-2")
+        monkeypatch.setenv("MAXWELL_NOTICE_VERSION", "material-disclosure-3")
         await maybe_notice(bot, interaction)
         assert interaction.followup.send.await_count == 2
 
@@ -269,6 +270,7 @@ def test_cleanup_migrates_legacy_default_on_and_preserves_current_choice(tmp_pat
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
         store = memory.preferences
+        store.set_default("1", "tracking", "off")
         store.set_default("2", "tracking", "on")
         await memory.add_to_channel_memory(
             "20", {"author_id": "2", "content": "keep", "message_id": "2"}

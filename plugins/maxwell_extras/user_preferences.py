@@ -22,7 +22,7 @@ _DEFAULTS: dict[str, Any] = {
     "language": "",
     "visibility": "public",
     # on: store this person's message content. off: do not store it.
-    "tracking": "off",
+    "tracking": "on",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800
@@ -94,13 +94,6 @@ class UserPreferenceStore:
                         if key in _ALLOWED_DEFAULTS
                     }
                 )
-            # Historical default-on is not proof of an affirmative storage choice.
-            # Preserve every opt-out; require new evidence before retaining content.
-            if (
-                defaults.get("tracking") == "on"
-                and row.get("storage_choice_version") != STORAGE_VERSION
-            ):
-                defaults["tracking"] = "off"
             personality = str(row.get("personality") or "")[:_PERSONALITY_LIMIT]
             return {"defaults": defaults, "personality": personality}
 

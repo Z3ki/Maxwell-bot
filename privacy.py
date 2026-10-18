@@ -175,14 +175,14 @@ async def maybe_notice(bot, interaction):
     urls = policy_urls(getattr(bot, "config", None))
     if not uid.isdigit() or not {"terms", "privacy"} <= urls.keys():
         return
-    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-1").strip()
+    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-2").strip()
     try:
         if not await asyncio.to_thread(store.consents.claim_notice, uid, version):
             return
         await interaction.followup.send(
             "Maxwell sends your request and necessary context to the selected AI provider. "
-            "Optional saved history is off until you enable it in `/config → Privacy`. "
-            "Turning it off does not stop provider processing. "
+            "Saved messages are on until you turn them off in `/config → Privacy`. "
+            "Turning storage off does not stop provider processing. "
             f"[Terms]({urls['terms']}) · [Privacy]({urls['privacy']})",
             ephemeral=True,
         )
