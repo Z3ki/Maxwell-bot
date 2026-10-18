@@ -146,9 +146,11 @@ SQLite belongs at `/data/app.db`. Source, registry env secrets and `_data` are
 outside the public static web root. Restart and code replacement do not delete
 `_data`. Permission preparation supports old root-owned databases, including
 SQLite journal/WAL files: it grants uid 10001 access without copying/truncating
-files. With a cap-dropped controller, files it owns may require mode 0666 and
-its private directory mode 1777 because chown is unavailable; these are private
-per-site mounts, not shared between backends. Symlinks/special files are rejected,
+files. With a cap-dropped controller, chown is unavailable, so files it owns get
+mode 0606 and its private directories 1707 (owner plus "other", which is how
+uid 10001 is checked). If an operator has already set a path's group to gid
+10001, the group bits are used instead (0660 / 1770) and "other" gets nothing.
+These are private per-site mounts, not shared between backends. Symlinks/special files are rejected,
 and inaccessible state yields an explicit repair error rather than pretending
 persistence is writable. Unexpected permissions require host operator repair.
 
