@@ -81,6 +81,9 @@ def normalize_capabilities(values: Iterable[str] | None) -> list[str]:
     """Return unique, known capability names. Unknown names are kept (forward-compat)."""
     out: list[str] = []
     seen: set[str] = set()
+    if isinstance(values, str):
+        # A bare "shell" in plugin.json is one capability, not five letters.
+        values = (values,)
     for raw in values or ():
         name = str(raw or "").strip()
         if not name or name in seen:
