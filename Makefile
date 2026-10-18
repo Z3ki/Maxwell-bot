@@ -2,7 +2,7 @@ PYTHON ?= python3
 
 .PHONY: check dependencies lint format-check typecheck audit shell-check test coverage
 
-CORE_COVERAGE_FAIL_UNDER ?= 83
+CORE_COVERAGE_FAIL_UNDER ?= 86
 
 check: dependencies lint format-check typecheck shell-check coverage audit
 
