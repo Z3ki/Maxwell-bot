@@ -170,9 +170,13 @@ class SendingMixin:
             reply_to = None
         # Discord's reply-author notification is independent of mentions in
         # the response text. Notify the reply author without parsing @mentions.
+        if reply_to is not None:
+            kwargs.setdefault("mention_author", True)
+        else:
+            kwargs.pop("mention_author", None)
         kwargs["allowed_mentions"] = discord.AllowedMentions(
             everyone=False, roles=False, users=True,
-            replied_user=reply_to is not None and kwargs.get("mention_author", True),
+            replied_user=reply_to is not None and kwargs["mention_author"],
         )
         # Drain typing BEFORE the message goes out. A typing event that
         # lands after the send re-lights "Maxwell is typing..." for a full
@@ -189,6 +193,7 @@ class SendingMixin:
                 else:
                     sent = await reply_to.reply(content=content, file=file, **kwargs)
             except discord.Forbidden:
+                kwargs.pop("mention_author", None)
                 kwargs["allowed_mentions"] = discord.AllowedMentions.none()
                 logger.warning(
                     "reply failed (forbidden) in channel %s; falling back to send",
@@ -221,6 +226,7 @@ class SendingMixin:
                 if not _is_unknown_reference_error(exc):
                     raise
                 kwargs["allowed_mentions"] = discord.AllowedMentions.none()
+                kwargs.pop("mention_author", None)
                 logger.warning(
                     "reply parent is gone (%s), falling back to channel.send in channel %s",
                     getattr(exc, "code", None) or exc.__class__.__name__,

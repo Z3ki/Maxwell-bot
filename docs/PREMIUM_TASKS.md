@@ -37,13 +37,23 @@ and worker keys/settings are independent, encrypted with the same operator maste
 key and both removed by full deletion. A user can review/delete saved keys after
 Premium revocation, but worker execution still requires Premium.
 
+`AI_WORKER_MODEL` selects the operator worker model, with `AI_WORKER_BASE_URL`
+and `AI_WORKER_API_KEY` selecting its endpoint and credential. These settings do
+not change the coordinator's chat model. A saved personal worker/chat connection
+takes precedence; review **Subagent AI provider** if a user sees a different worker
+model. Keep endpoint/key diagnostics private; never paste env-file values into chat.
+
 `delegate_task` returns a job ID immediately. Maxwell can answer more messages
 in the same channel while workers continue; an unrelated chat turn, its deadline
 or its cancellation does not own the job. `manage_tasks` lets Maxwell check status
 or cancel a task when asked, scoped to that user and the current channel/visibility.
 The prompt includes a small status summary, not the task transcript. Do not poll
 or repeat progress unasked. One completed job produces one factual completion
-notification in its original context, with mentions disabled.
+notification in its original context. Ordinary message replies notify the source
+author; everyone and role mentions stay disabled. Interaction follow-ups keep
+mentions disabled. Published-site completions use the successful site's tool-provided
+URL, for example `here you go: https://example.com/bot/my-site/`, rather than a
+long model-written description.
 
 `/tasks` privately lists your own jobs across contexts, with refresh/cancel controls
 and an optional job ID. `/cancel` cancels your current chat request and your worker

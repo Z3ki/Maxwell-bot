@@ -18,6 +18,8 @@
 
 ## Unreleased
 
+- Notify the original message author on ordinary and detached worker replies while keeping everyone and role mentions disabled; interaction follow-ups remain mention-suppressed.
+- Return short, tool-provided publication links from completed website workers instead of truncating model-written descriptions that can omit the URL.
 - Do not post a "Maxwell is using" line for reactions, silence, typing, waits, or message edits, deletes, and pins. Those actions are the response, and the status line only appears and disappears.
 - Remove generic working acknowledgements during streaming and app commands, and the persistent shell status that repeated once per command. Keep concrete tool progress and final answers.
 

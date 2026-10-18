@@ -90,6 +90,18 @@ def _limit(control, key, default, maximum):
         return default
 
 
+def _site_result_url(name: str, result: str) -> str | None:
+    """Keep publication links from tool results, not the worker's prose."""
+    if name == "create_site":
+        pattern = r"^Site created: (https?://[^\s<>]+)"
+    elif name == "edit_site":
+        pattern = r"^(?:Wrote|Patched) [^\n]+ → (https?://[^\s<>]+)"
+    else:
+        return None
+    match = re.match(pattern, result)
+    return match[1] if match else None
+
+
 class DelegateTaskTool(Tool):
     tool_name = "delegate_task"
     returns_result = True
@@ -498,13 +510,16 @@ class DelegateTaskTool(Tool):
                                 }
                             )
                     output = strip_media_payloads(str(output))
-                    body = str(output).removeprefix(f"Tool {name}:").strip().lower()
-                    failed = body.startswith(
+                    body = str(output).removeprefix(f"Tool {name}:").strip()
+                    failed = body.lower().startswith(
                         ("error", "refused", "failed", "could not")
                     )
-                    completed.append(
-                        {"tool": name, "status": "error" if failed else "returned"}
-                    )
+                    completion = {
+                        "tool": name, "status": "error" if failed else "returned"
+                    }
+                    if not failed and (site_url := _site_result_url(name, body)):
+                        completion["site_url"] = site_url
+                    completed.append(completion)
                     # Keep the tool result up to the context budget. A fixed
                     # 8000-character cut hid command output and made the model retry.
                     # Share the room with the rest of this batch and keep half for

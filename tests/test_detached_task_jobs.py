@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -244,6 +244,42 @@ def test_status_cancel_are_owned_scoped_and_leave_no_orphan_workers(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("is_reply", [True, False])
+def test_chat_completion_notifies_source_author_only_when_referenced(tmp_path, is_reply):
+    async def run():
+        bot, msg, _, engine, manager = environment(tmp_path)
+        reference = SimpleNamespace(message_id=msg.id)
+        if is_reply:
+            msg.to_reference = Mock(return_value=reference)
+        report = "Verified worker result @everyone @here <@&456>"
+        bot._generate_response.side_effect = [call(), ProviderResult(report)]
+        job = await launch(engine, manager, msg)
+        try:
+            await join(job)
+            assert job.row["delivery"] == "sent"
+            msg.channel.send.assert_awaited_once()
+            args, kwargs = msg.channel.send.await_args
+            assert report in args[0]
+            assert f"<@{msg.author.id}>" not in args[0]
+            mentions = kwargs["allowed_mentions"]
+            assert mentions.everyone is False
+            assert mentions.roles is False
+            assert mentions.users is True
+            assert mentions.replied_user is is_reply
+            assert mentions.to_dict().get("replied_user", False) is is_reply
+            if is_reply:
+                msg.to_reference.assert_called_once_with(fail_if_not_exists=False)
+                assert kwargs["reference"] is reference
+                assert kwargs["mention_author"] is True
+            else:
+                assert "reference" not in kwargs
+                assert "mention_author" not in kwargs
+        finally:
+            await manager.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "private,expired", [(True, False), (True, True), (False, False), (False, True)]
 )
@@ -275,6 +311,10 @@ def test_app_completion_keeps_visibility_and_never_falls_back_to_public_or_dm(
                     msg.interaction.followup.send.await_args.kwargs["ephemeral"]
                     is private
                 )
+                kwargs = msg.interaction.followup.send.await_args.kwargs
+                assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
+                assert "reference" not in kwargs
+                assert "mention_author" not in kwargs
             public = SimpleNamespace(**vars(msg))
             public.response_visibility = "public"
             if private:

@@ -12,6 +12,7 @@ from bot import MaxwellBot, ToolCircuitBreaker, _current_request_provider
 from maxwell_core.providers.models import ProviderResult
 from message_quota import MessageQuota
 from plugins.maxwell_extras.task_workers import DelegateTaskTool, _inside_worker
+from plugins.maxwell_extras.task_jobs import format_job
 from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 from tools import Tool
 
@@ -33,7 +34,7 @@ class FakeTool(Tool):
         return "verified"
 
 
-def call(name="shell", **args):
+def call(name="shell", /, **args):
     return ProviderResult(
         "",
         tool_calls=[
@@ -259,6 +260,117 @@ def test_text_only_reply_is_not_a_finished_website(tmp_path):
     shell.execute.assert_awaited_once()
     nudge = bot._generate_response.await_args_list[1].args[0][-1]["content"]
     assert "have not called any tools" in nudge
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://maxwell.z3ki.dev", "https://maxwell.z3ki.dev/dev"],
+)
+def test_published_worker_completion_links_real_site_tool_result(tmp_path, base_url):
+    from bot_tools import CreateSiteTool
+
+    bot, msg, _, worker = setup(tmp_path)
+    bot.config.MAXWELL_SITE_DIR = str(tmp_path / "public" / "bot")
+    bot.config.MAXWELL_PUBLIC_BASE_URL = base_url
+    bot.config.DATA_DIR = str(tmp_path)
+    bot._sites = {}
+    msg.author.display_name = "Requester"
+    bot.tools["create_site"] = CreateSiteTool(bot)
+    page = "<!DOCTYPE html><html><head><title>Garden</title></head><body><h1>Garden</h1></body></html>"
+    bot._generate_response.side_effect = [
+        call("create_site", name="real-garden", title="A different title", body=page),
+        ProviderResult("Published an amazing garden with a rich visual design and custom controls."),
+    ]
+
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+
+    url = f"{base_url}/bot/real-garden/"
+    assert result["status"] == "reported"
+    assert result["completed"] == [
+        {"tool": "create_site", "status": "returned", "site_url": url}
+    ]
+    assert (tmp_path / "public" / "bot" / "real-garden" / "index.html").is_file()
+    assert format_job({"state": "completed", "reports": [result]}) == f"here you go: {url}"
+
+
+@pytest.mark.parametrize(
+    "name, output, expected_url",
+    [
+        ("create_site", "Site created: https://maxwell.z3ki.dev/bot/demo/\nLifetime: 24h.", "https://maxwell.z3ki.dev/bot/demo/"),
+        ("edit_site", "Wrote index.html, style.css → https://maxwell.z3ki.dev/bot/demo/", "https://maxwell.z3ki.dev/bot/demo/"),
+        ("edit_site", "Patched index.html (2 occurrence(s)) → https://maxwell.z3ki.dev/bot/demo/", "https://maxwell.z3ki.dev/bot/demo/"),
+        ("create_site", "Error: could not publish https://maxwell.z3ki.dev/bot/demo/", None),
+        ("create_site", "Site created: missing URL", None),
+        ("edit_site", "https://maxwell.z3ki.dev/bot/demo/\n  • index.html (100 bytes)", None),
+        ("edit_site", "<p>Site created: https://maxwell.z3ki.dev/bot/invented/</p>", None),
+        ("shell", "Site created: https://maxwell.z3ki.dev/bot/demo/", None),
+    ],
+)
+def test_worker_only_keeps_links_from_successful_site_writes(
+    tmp_path, name, output, expected_url
+):
+    bot, msg, tool, worker = setup(tmp_path)
+    tool.tool_name = name
+    tool.execute.return_value = output
+    bot.tools = {name: tool}
+    bot._generate_response.side_effect = [
+        call(name, command="pwd"),
+        ProviderResult("The worker's final report."),
+    ]
+
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+
+    completion = result["completed"][0]
+    assert completion.get("site_url") == expected_url
+    assert completion["status"] == ("error" if output.startswith("Error") else "returned")
+    text = format_job({"state": "completed", "reports": [result]})
+    assert text == (
+        f"here you go: {expected_url}" if expected_url else "The worker's final report."
+    )
+
+
+def test_publication_completion_keeps_multiple_sites_and_other_results():
+    urls = [
+        "https://maxwell.z3ki.dev/bot/first/",
+        "https://maxwell.z3ki.dev/bot/second/",
+    ]
+    publication = {
+        "status": "reported",
+        "completed": [
+            {"tool": "create_site", "status": "returned", "site_url": urls[0]},
+            {"tool": "edit_site", "status": "returned", "site_url": urls[0]},
+            {"tool": "create_site", "status": "returned", "site_url": urls[1]},
+        ],
+        "report": "Published two impressive sites without mentioning their links.",
+    }
+    other = {"status": "reported", "report": "Saved the notes in /workspace/notes.txt."}
+    row = {"state": "completed", "reports": [publication, other]}
+    assert format_job(row) == (
+        f"here you go: {urls[0]}\nhere you go: {urls[1]}\n"
+        "Saved the notes in /workspace/notes.txt."
+    )
+
+
+def test_failed_publication_job_preserves_failure_output():
+    row = {
+        "id": "abc123",
+        "state": "incomplete",
+        "effects": True,
+        "reports": [{
+            "status": "failed",
+            "completed": [{
+                "tool": "create_site",
+                "status": "returned",
+                "site_url": "https://maxwell.z3ki.dev/bot/partial/",
+            }],
+            "report": "Site edits failed.",
+        }],
+    }
+    text = format_job(row)
+    assert "didn't finish" in text
+    assert "failed — Site edits failed." in text
+    assert "may have already changed files" in text
+    assert "here you go:" not in text
 
 
 def test_text_only_reply_stops_after_two_nudges(tmp_path):

@@ -458,15 +458,17 @@ class TaskJobs:
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
+                ref = getattr(job.message, "to_reference", None)
+                is_reply = callable(ref)
                 kwargs = {
                     "allowed_mentions": discord.AllowedMentions(
-                        everyone=False, roles=False, users=True
+                        everyone=False, roles=False, users=True,
+                        replied_user=is_reply,
                     )
                 }
-                ref = getattr(job.message, "to_reference", None)
-                if callable(ref):
+                if is_reply:
                     kwargs["reference"] = ref(fail_if_not_exists=False)
-                    kwargs["mention_author"] = False
+                    kwargs["mention_author"] = True
                 await job.message.channel.send(text, **kwargs)
             job.row["delivery"] = "sent"
             await self._remember_delivery(job, text)
@@ -652,6 +654,24 @@ def format_job(row, *, limit=1850):
     }.get(str(row.get("state") or ""), str(row.get("state") or "unknown"))
     if str(row.get("state") or "") == "completed":
         reports = row.get("reports") or []
+        results = []
+        has_site = False
+        for report in reports:
+            urls = list(dict.fromkeys(
+                item["site_url"]
+                for item in report.get("completed", [])
+                if report.get("status") == "reported"
+                and item.get("tool") in {"create_site", "edit_site"}
+                and item.get("status") == "returned"
+                and item.get("site_url")
+            ))
+            if urls:
+                has_site = True
+                results.extend(f"here you go: {url}" for url in urls)
+            else:
+                results.append(_public_report(report.get("report", "")))
+        if has_site:
+            return "\n".join(results)[:limit]
         latest = reports[-1].get("report", "") if reports else ""
         return (_public_report(latest) or "The subagent finished.")[:limit]
     text = f"Subagent `{row['id']}` · {state}\n"
