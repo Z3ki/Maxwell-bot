@@ -206,9 +206,12 @@ def test_coordinator_delegates_general_task_and_worker_retains_actual_authorizat
     token = current_plan.set(("123", "premium"))
     try:
         names = MaxwellBot._turn_tool_names(bot, "discord", msg)
-        assert "delegate_task" in names and "shell" not in names
-        assert "delegate" in MaxwellBot._authorize_tool_execution(
-            bot, msg, "shell", shell
+        assert "delegate_task" in names and "shell" in names
+        assert (
+            MaxwellBot._authorize_tool_execution(
+                bot, msg, "shell", shell, {"command": "pwd"}
+            )
+            is None
         )
         result = json.loads(
             asyncio.run(

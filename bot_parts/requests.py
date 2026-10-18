@@ -242,17 +242,7 @@ class RequestPipelineMixin:
         control = getattr(self, "_control", None) or {}
         if not control.get("tools_enabled", True):
             return "refused: tools are disabled"
-        from premium_access import premium_for_current_request
-        from plugins.maxwell_extras.task_workers import GITHUB_ACCOUNT_ACTIONS, WORKER_TOOLS, _inside_worker
-        if (
-            canonical in WORKER_TOOLS and not _inside_worker.get()
-            and not (canonical == "github_repo" and (arguments or {}).get("action") in GITHUB_ACCOUNT_ACTIONS)
-            and premium_for_current_request(getattr(author, "id", ""))
-            and control.get("premium_task_workers_enabled", True)
-            and "delegate_task" in (getattr(self, "tools", {}) or {})
-            and "delegate_task" not in set(control.get("disabled_tools", []) or [])
-        ):
-            return "refused: delegate this task through delegate_task; task tools run inside workers"
+        from plugins.maxwell_extras.task_workers import GITHUB_ACCOUNT_ACTIONS, _inside_worker
         if _inside_worker.get() and canonical == "github_repo" and ((arguments or {}).get("action") in GITHUB_ACCOUNT_ACTIONS or "token" in (arguments or {})):
             return "refused: workers cannot change accounts or repository permissions"
         if _current_request_provider.get() is not None:
