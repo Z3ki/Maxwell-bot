@@ -173,7 +173,9 @@ def _rebuild_session_send() -> None:
     send = UserInstallSession._send_impl
     for _prio, _name, factory in sorted(_SEND_WRAPPERS, key=lambda item: -item[0]):
         send = factory(send)
-    UserInstallSession.send = send
+    # The private terms note is always the outermost layer. Rebuilding from
+    # _send_impl alone dropped it whenever a plugin (un)registered a wrapper.
+    UserInstallSession.send = _with_policy_notice(send)
 
 _USER_INSTALL_META = {
     "integration_types": [1],
@@ -782,6 +784,17 @@ class UserInstallChannelAdapter:
         raise LookupError("user-install has no channel history")
 
 
+def _with_policy_notice(inner):
+    """Wrap a session send so a private reply carries the one-time terms note."""
+
+    async def send(self, content: str | None = None, file=None, **kwargs):
+        content = await self._stick_policy_notice(content)
+        return await inner(self, content, file, **kwargs)
+
+    send._maxwell_policy_notice = True  # type: ignore[attr-defined]
+    return send
+
+
 class UserInstallSession:
     """Send via the interaction token: 1 original + 5 follow-ups, 15 minutes."""
 
@@ -805,10 +818,6 @@ class UserInstallSession:
         defer = getattr(response, "defer", None)
         if callable(defer):
             await defer(ephemeral=self.ephemeral)
-
-    async def send(self, content: str | None = None, file=None, **kwargs):
-        content = await self._stick_policy_notice(content)
-        return await type(self)._send_impl(self, content, file, **kwargs)
 
     async def _stick_policy_notice(self, content: str | None) -> str | None:
         """Keep the one-time terms note on the private reply itself.
@@ -913,6 +922,9 @@ class UserInstallSession:
                 except Exception:
                     logger.exception("user-install edit after cap failed")
         return last
+
+
+UserInstallSession.send = _with_policy_notice(UserInstallSession._send_impl)  # type: ignore[method-assign]
 
 
 class UserInstallMessageAdapter:
