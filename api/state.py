@@ -289,7 +289,9 @@ def _context_entry_id(raw: dict) -> str:
         sort_keys=True,
         ensure_ascii=False,
     )
-    return hashlib.sha1(stable.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha1(
+        stable.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
 
 
 def _sanitize_context_entries(data):

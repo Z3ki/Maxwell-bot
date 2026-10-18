@@ -32,7 +32,8 @@ def _valid_opaque_token(value):
 def signature(parameters: dict, secret: str) -> str:
     payload = ''.join(f'{key}{parameters[key]}' for key in sorted(parameters)
                       if key not in {'api_sig', 'format', 'callback'}) + secret
-    return hashlib.md5(payload.encode('utf-8')).hexdigest()
+    # Last.fm's api_sig scheme mandates MD5; the hash choice is not ours.
+    return hashlib.md5(payload.encode('utf-8'), usedforsecurity=False).hexdigest()
 
 
 # 8 is Last.fm's "operation failed, try again". 11/16 are service outages.

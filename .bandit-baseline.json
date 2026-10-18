@@ -2,26 +2,6 @@
  "errors": [],
  "results": [
   {
-   "code": "286     )\n287     return hashlib.sha1(stable.encode(\"utf-8\")).hexdigest()[:8]\n288 \n",
-   "col_offset": 11,
-   "end_col_offset": 47,
-   "filename": "./api/state.py",
-   "issue_confidence": "HIGH",
-   "issue_cwe": {
-    "id": 327,
-    "link": "https://cwe.mitre.org/data/definitions/327.html"
-   },
-   "issue_severity": "HIGH",
-   "issue_text": "Use of weak SHA1 hash for security. Consider usedforsecurity=False",
-   "line_number": 287,
-   "line_range": [
-    287
-   ],
-   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b324_hashlib.html",
-   "test_id": "B324",
-   "test_name": "hashlib"
-  },
-  {
    "code": "116             removed = db.execute(\n117                 f\"DELETE FROM vectors WHERE id IN ({marks})\",\n118                 chunk,\n",
    "col_offset": 18,
    "end_col_offset": 51,
@@ -264,26 +244,6 @@
    "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b108_hardcoded_tmp_directory.html",
    "test_id": "B108",
    "test_name": "hardcoded_tmp_directory"
-  },
-  {
-   "code": "34                       if key not in {'api_sig', 'format', 'callback'}) + secret\n35     return hashlib.md5(payload.encode('utf-8')).hexdigest()\n36 \n",
-   "col_offset": 11,
-   "end_col_offset": 47,
-   "filename": "./plugins/lastfm/client.py",
-   "issue_confidence": "HIGH",
-   "issue_cwe": {
-    "id": 327,
-    "link": "https://cwe.mitre.org/data/definitions/327.html"
-   },
-   "issue_severity": "HIGH",
-   "issue_text": "Use of weak MD5 hash for security. Consider usedforsecurity=False",
-   "line_number": 35,
-   "line_range": [
-    35
-   ],
-   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b324_hashlib.html",
-   "test_id": "B324",
-   "test_name": "hashlib"
   },
   {
    "code": "130              (older.timestamp=o.timestamp AND older.sequence<o.sequence)))'''\n131         rows = self.connection.execute(f'''SELECT o.* FROM outbox o\n132             WHERE {head} AND o.next_attempt<=?\n133             ORDER BY o.timestamp,o.sequence LIMIT ?''', (now, _BATCH)).fetchall()\n134         next_at = self.connection.execute(f'''SELECT MIN(o.next_attempt) FROM outbox o\n",
