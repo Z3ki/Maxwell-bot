@@ -77,7 +77,7 @@ DEFAULT_CONTROL = {
     "live_turn_timeout_seconds": 180,
     "premium_task_workers_enabled": True,
     "task_workers_max_active": 4,
-    "task_workers_max_steps": 6,
+    "task_workers_max_steps": 24,
     "task_workers_timeout_seconds": 600,
     "inbound_retry_attempts": 2,
     "inbound_retry_delay_seconds": 5,
