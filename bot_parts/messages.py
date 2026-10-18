@@ -1765,6 +1765,14 @@ class MessagesMixin:
                 # promised work runs. Without this guard a model that keeps
                 # acknowledging would ping-pong until max_iters.
                 if _only_promise_results(tool_results):
+                    # The subagent is already queued. Another model turn just
+                    # sends the same "on it" line again.
+                    if any(
+                        "Tool delegate_task:" in (r or "") and '"queued"' in (r or "")
+                        for r in all_tool_results
+                    ):
+                        logger.info("ack after a queued subagent; not sending it again")
+                        break
                     if promise_followups >= 1:
                         logger.info("ack-only send_message repeated; not looping again")
                         break
