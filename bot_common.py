@@ -51,6 +51,7 @@ from discord_media import (
 )
 from message_quota import (
     FREE_MESSAGE_LIMIT as FREE_MESSAGE_LIMIT,
+    FREE_WINDOW_SECONDS as FREE_WINDOW_SECONDS,
     MessageQuota,
     MessageQuotaExceeded,
     enforced_message_limit,

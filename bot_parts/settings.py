@@ -265,7 +265,7 @@ class SettingsMixin:
             )
             control["message_quota_window_seconds"] = max(
                 60,
-                min(_safe_int(control.get("message_quota_window_seconds"), 5 * 60 * 60), 7 * 24 * 3600),
+                min(_safe_int(control.get("message_quota_window_seconds"), FREE_WINDOW_SECONDS), 7 * 24 * 3600),
             )
             control["live_max_output_tokens"] = max(
                 256, min(_safe_int(control.get("live_max_output_tokens"), 4096), 32768)

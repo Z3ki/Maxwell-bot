@@ -13,7 +13,7 @@ import discord
 import user_install as ui
 from api.state import _sanitize_control
 from control_defaults import DEFAULT_CONTROL
-from message_quota import FREE_MESSAGE_LIMIT, PREMIUM_MESSAGE_LIMIT
+from message_quota import FREE_MESSAGE_LIMIT, FREE_WINDOW_SECONDS, PREMIUM_MESSAGE_LIMIT
 from identity import configured_admin_ids
 
 DIAGNOSTICS_COMMAND_NAME = "diagnostics"
@@ -550,7 +550,7 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
             state = ledger.status(
                 key,
                 int(control.get("message_quota_limit") or FREE_MESSAGE_LIMIT),
-                int(control.get("message_quota_window_seconds") or 18000),
+                int(control.get("message_quota_window_seconds") or FREE_WINDOW_SECONDS),
             )
         except (TypeError, ValueError) as exc:
             await _send(interaction, content=f"Could not update quota: {exc}")
