@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from provider_limits import worker_timeout_seconds
+from provider_limits import WORKER_TIMEOUT_MAX_SECONDS, worker_timeout_seconds
 from .byok import make_request_provider
 
 
@@ -55,6 +55,9 @@ async def select_worker_provider(bot, user_id, inherited=None):
             max_output_tokens=output,
         ),
     )
-    provider.turn_timeout_seconds = worker_timeout_seconds(bot)
+    # Ceiling only; the job budget (default or model-requested) applies below it.
+    provider.turn_timeout_seconds = max(
+        worker_timeout_seconds(bot), WORKER_TIMEOUT_MAX_SECONDS
+    )
     provider.available = True
     return provider, True

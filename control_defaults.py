@@ -103,7 +103,7 @@ DEFAULT_CONTROL = {
     "premium_task_workers_enabled": True,
     "task_workers_max_active": 4,
     "task_workers_max_steps": 100,
-    "task_workers_timeout_seconds": 600,
+    "task_workers_timeout_seconds": 1200,
     "inbound_retry_attempts": 2,
     "inbound_retry_delay_seconds": 5,
     # Unused for answering: startup skips the offline backlog instead of

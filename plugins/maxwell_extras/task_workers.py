@@ -13,6 +13,7 @@ from typing import ClassVar
 from tools import Tool
 from provider_limits import (
     request_timeout_seconds,
+    requested_worker_timeout_seconds,
     turn_timeout_seconds,
     worker_timeout_seconds,
 )
@@ -182,6 +183,12 @@ class DelegateTaskTool(Tool):
                     "additionalProperties": False,
                 },
             },
+            "timeout_minutes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30,
+                "description": "Optional whole-job time budget in minutes. Default 20; use up to 30 for big builds.",
+            },
         },
         "required": ["tasks"],
         "additionalProperties": False,
@@ -196,7 +203,7 @@ class DelegateTaskTool(Tool):
         return (
             "Premium: hand substantial work to a subagent. Delegate one or two focused tasks. Each task is the concrete work to do, with the requirements and context that job needs. "
             "The subagent uses the caller's existing tools. It uses a dedicated personal worker connection, chat BYOK, the operator worker model, or the default AI, in that order, with bounded "
-            "steps and time. Returns a background job ID immediately; keep chatting while it runs. "
+            "steps and time (20 minutes by default; set timeout_minutes up to 30 for large builds). Returns a background job ID immediately; keep chatting while it runs. "
             "Do not poll or wait in this turn. Completion returns to the originating context. "
             "Use manage_tasks for status or requested cancellation. Do not launch duplicate work or change the same files while a job runs. "
             "Workers cannot send chat messages, export files or delegate recursively. Reports can describe partial work; do not claim success "
@@ -217,15 +224,17 @@ class DelegateTaskTool(Tool):
             )
         return True
 
-    async def execute(self, message, tasks=None, **kwargs):
+    async def execute(self, message, tasks=None, timeout_minutes=None, **kwargs):
         if _inside_worker.get():
             return "refused: workers cannot delegate recursively"
         manager = getattr(self.bot, "_task_jobs", None)
         if manager is None:
             return "Error: background task manager unavailable; no job started"
-        return await manager.submit(self, message, tasks)
+        return await manager.submit(
+            self, message, tasks, timeout_minutes=timeout_minutes
+        )
 
-    async def run(self, message, tasks=None, **kwargs):
+    async def run(self, message, tasks=None, timeout_minutes=None, **kwargs):
         import jsonschema
         from bot import _current_request_provider
 
@@ -266,11 +275,13 @@ class DelegateTaskTool(Tool):
             except Exception as exc:
                 _log_failure("provider selection", exc)
                 return "Error: worker AI connection is unavailable; no task started. Review /config → More options → Subagent AI provider or ask the operator."
-            timeout = min(
-                turn_timeout_seconds(self.bot, provider)
+            budget = requested_worker_timeout_seconds(
+                worker_timeout_seconds(self.bot), timeout_minutes
+            )
+            timeout = (
+                min(turn_timeout_seconds(self.bot, provider), budget)
                 if getattr(provider, "turn_timeout_seconds", None)
-                else worker_timeout_seconds(self.bot),
-                worker_timeout_seconds(self.bot),
+                else budget
             )
             async with asyncio.timeout(timeout):
                 reports = await asyncio.gather(
