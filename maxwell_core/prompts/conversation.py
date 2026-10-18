@@ -879,7 +879,7 @@ class ConversationPromptBuilder:
         ).strip()
         if hydrated:
             user_parts.append(hydrated)
-        elif is_pointer_only(message_text_without_mentions(message)):
+        elif is_pointer_only(message_text_without_mentions(message, host)):
             user_parts.append(
                 "The pointer's reference could not be loaded. "
                 "Do not invent the missing message."

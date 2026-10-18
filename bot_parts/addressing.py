@@ -4,6 +4,7 @@ Split out of bot.py; methods keep their original bodies.
 """
 
 import bot_common as _common
+from context_hydration import strip_addressing_mentions
 
 # Mechanical split: the methods below were written against bot.py's
 # module globals. Bind every shared name so the bodies run unchanged.
@@ -93,8 +94,10 @@ class AddressingMixin:
         uid = getattr(getattr(self, "user", None), "id", None)
         if uid is not None:
             ids.add(uid)
+        text = strip_addressing_mentions(text, ids)
+        name = process_name(self)
         for sid in ids:
-            text = re.sub(rf"<@!?{sid}>", "", text)
+            text = re.sub(rf"<@!?{sid}>", lambda _match: f"@{name} (you)", text)
         if message is not None:
             hits_role = getattr(self, "_role_mention_hits_self", None)
             if callable(hits_role) and hits_role(message):

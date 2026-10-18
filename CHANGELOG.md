@@ -18,6 +18,7 @@
 
 ## Unreleased
 
+- Preserve Maxwell mentions used as sentence subjects or command targets in model input as `@Maxwell (you)`; remove addressing edge pings without dropping other users' named mentions or misclassifying them as pointer-only turns.
 - Notify the original message author on ordinary and detached worker replies while keeping everyone and role mentions disabled; interaction follow-ups remain mention-suppressed.
 - Return short, tool-provided publication links from completed website workers instead of truncating model-written descriptions that can omit the URL.
 - Do not post a "Maxwell is using" line for reactions, silence, typing, waits, or message edits, deletes, and pins. Those actions are the response, and the status line only appears and disappears.

@@ -9,6 +9,7 @@ also on the bot keyed by message id because ``discord.Message`` is slotted.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from utils import message_reference_is_forward
@@ -19,17 +20,62 @@ logger = logging.getLogger("maxwell")
 _MISSING = object()
 
 
-def message_text_without_mentions(message: Any) -> str:
-    """Message text with user, role, channel, and everyone mentions removed."""
-    import re
+def strip_addressing_mentions(content: str, self_ids: set) -> str:
+    """Remove edge vocatives, not command targets or sentence subjects.
 
+    A trailing mention without a vocative separator is ambiguous: retain it
+    unless the whole prefix is a greeting or pointer. Prefer extra context
+    over silently deleting an object.
+    """
+    text = str(content or "").strip()
+    if not self_ids:
+        return text
+    ids = "|".join(re.escape(str(sid)) for sid in self_ids)
+    mention = rf"<@!?(?:{ids})>"
+    while match := re.match(rf"^{mention}([\s,:;]*)(.*)$", text, re.DOTALL):
+        separator, rest = match.groups()
+        # Without a vocative separator, "Maxwell is/likes/slapped ..." is
+        # about Maxwell, not an instruction addressed to him.
+        subject = re.match(
+            r"(?:is|are|was|were|has|have|had|do|does|did|can|could|will|would|"
+            r"should|must|may|might|got|went|won|lost|said|['’]s|\w+(?:ed|ing|s))\b",
+            rest,
+            re.IGNORECASE,
+        )
+        addressing = (
+            is_pointer_only(rest)
+            or re.match(
+                r"(?:can|could|will|would|should|may|might|do|did|have|are|were)"
+                r"\s+you\b", rest, re.IGNORECASE,
+            )
+            or re.fullmatch(r"hi|hello|hey|yo|thanks|thank you", rest, re.IGNORECASE)
+            or any(char in separator for char in ",:;")
+        )
+        if subject and not addressing:
+            break
+        text = rest.strip()
+    while match := re.search(rf"\s*{mention}[,.!?]*$", text):
+        prefix = text[:match.start()].rstrip()
+        if not (
+            not prefix
+            or prefix.endswith((",", ":", ";", ".", "!", "?"))
+            or is_pointer_only(prefix)
+            or re.fullmatch(r"hi|hello|hey|yo|thanks|thank you", prefix, re.IGNORECASE)
+        ):
+            break
+        text = prefix.rstrip(",:;").strip()
+    return text
+
+
+def message_text_without_mentions(message: Any, bot: Any = None) -> str:
+    """Pointer-detection text without addressing pings; semantic mentions stay."""
     text = str(getattr(message, "content", "") or "")
-    text = re.sub(
-        r"<@!?\d+>|<@&\d+>|<#\d+>|@everyone|@here",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
+    cleaner = getattr(bot, "_content_without_self_mention", None)
+    if callable(cleaner):
+        text = cleaner(text, message)
+    else:
+        uid = getattr(getattr(bot, "user", None), "id", None)
+        text = strip_addressing_mentions(text, {uid} if uid is not None else set())
     return " ".join(text.split())
 
 
@@ -275,7 +321,7 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
     if message_reference_is_forward(message):
         hydration_set(bot, message, hydration_failed=False)
         return
-    text = message_text_without_mentions(message)
+    text = message_text_without_mentions(message, bot)
     pointer = is_pointer_only(text)
     reference = getattr(message, "reference", None)
     has_reference = bool(

@@ -335,7 +335,7 @@ class MessagesMixin:
             # sees it as context.
             return "self_message"
 
-        pointer_only = is_pointer_only(message_text_without_mentions(message))
+        pointer_only = is_pointer_only(message_text_without_mentions(message, self))
         reference = getattr(message, "reference", None)
         has_reference = bool(
             reference

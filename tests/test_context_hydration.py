@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from bot import MaxwellBot
 from context_hydration import (
     hydrate_turn_context,
@@ -25,13 +27,90 @@ def test_pointer_tokens_are_only_the_whole_message():
     assert not is_pointer_only("this is cool")
     assert not is_pointer_only("hello")
     assert not is_pointer_only("")
-    message = SimpleNamespace(content="<@123> ^^ <@&9>")
-    assert is_pointer_only(message_text_without_mentions(message))
+    message = SimpleNamespace(content="<@123> ^^")
+    bot = SimpleNamespace(user=SimpleNamespace(id=123))
+    assert is_pointer_only(message_text_without_mentions(message, bot))
 
 
 def _author(name, user_id, *, bot=False):
     return SimpleNamespace(id=user_id, display_name=name, name=name, bot=bot)
 
+
+def _mention_host():
+    host = SimpleNamespace(
+        bot_name="Maxwell",
+        user=_author("Maxwell", 1, bot=True),
+        _self_ids=lambda: {1, 2},
+        _recent_users={},
+        _control={"music_context_enabled": False},
+        _reply_parent_context_lines=lambda _message: [],
+        _get_music_context=lambda _message: "",
+    )
+    host._content_without_self_mention = (
+        MaxwellBot._content_without_self_mention.__get__(host)
+    )
+    return host
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("!matr slap <@1> el furro", "!matr slap @Maxwell (you) el furro"),
+    ("!matr slap <@!1>", "!matr slap @Maxwell (you)"),
+    ("slap <@1>", "slap @Maxwell (you)"),
+    ("I blame <@2>", "I blame @Maxwell (you)"),
+    ("why did <@1> do that?", "why did @Maxwell (you) do that?"),
+    ("<@1> is the target", "@Maxwell (you) is the target"),
+    ("<@1> slapped <@8>", "@Maxwell (you) slapped <@8>"),
+    ("<@1> slapped you", "@Maxwell (you) slapped you"),
+    ("<@1> got slapped", "@Maxwell (you) got slapped"),
+    ("<@1> likes this", "@Maxwell (you) likes this"),
+    ("<@1> slap <@1>", "slap @Maxwell (you)"),
+    ("<@1> hello", "hello"),
+    ("<@1> can you help?", "can you help?"),
+    ("<@1> thanks", "thanks"),
+    ("<@!1>, help <@8>", "help <@8>"),
+    ("hello <@1>", "hello"),
+    ("what happened? <@1>", "what happened?"),
+    ("explain this, <@1>", "explain this"),
+    ("<@1> ^^", "^^"),
+    ("this <@1>", "this"),
+    ("<@1> <@2>", ""),
+])
+def test_self_mentions_preserve_targets_but_strip_addressing(text, expected):
+    host = _mention_host()
+    assert host._content_without_self_mention(text) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("!matr slap <@1> el furro", "!matr slap @Maxwell (you) el furro"),
+    ("<@1> ask <@8> to slap <@!1>", "ask @Ada(8) to slap @Maxwell (you)"),
+    ("<@8> this", "@Ada(8) this"),
+    ("this <@1> <@8>", "this @Maxwell (you) @Ada(8)"),
+])
+def test_live_prompt_keeps_mentions_in_the_sentence(text, expected):
+    host = _mention_host()
+    message = SimpleNamespace(
+        content=text, author=_author("Sam", 4), channel=SimpleNamespace(id="room"),
+        mentions=[host.user, _author("Ada", 8)],
+    )
+    clean = host._content_without_self_mention(text, message)
+    hooks = SimpleNamespace(apply_prompt_budget=lambda _host, messages: messages)
+    built = ConversationPromptBuilder(host, hooks)._append_live_request(
+        message, clean, False, "", []
+    )
+    content = built[-1]["content"]
+    assert f"[RESPOND TO THIS] Sam(4): {expected}" in content
+    assert "The pointer's reference could not be loaded" not in content
+    assert message.content == text
+
+
+@pytest.mark.parametrize("text", ["<@8> this", "this <@8>", "this <@1> <@8>"])
+def test_semantic_mentions_do_not_trigger_pointer_hydration(text):
+    message = SimpleNamespace(content=text, reference=None)
+    host = _mention_host()
+    asyncio.run(hydrate_turn_context(host, message))
+    assert not hydration_value(host, message, "hydration_failed", False)
+    assert hydration_value(host, message, "hydrated_context") is None
+    assert not is_pointer_only(message_text_without_mentions(message, host))
 
 def test_pointer_hydrates_the_preceding_non_bot_message():
     human = SimpleNamespace(
