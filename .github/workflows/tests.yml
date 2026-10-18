@@ -15,7 +15,7 @@ concurrency:
 env:
   # Shared-core gate (maxwell_core, message_pipeline, concurrency_safety). The
   # repository-wide gate is fail_under in pyproject.toml.
-  CORE_COVERAGE_FAIL_UNDER: "83"
+  CORE_COVERAGE_FAIL_UNDER: "86"
 
 jobs:
   lint:

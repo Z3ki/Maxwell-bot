@@ -161,9 +161,14 @@ def _sanitize_control(control):
             3600,
         ),
     )
+    # Read the submitted value, not out[...]: the default is the int 1, so the
+    # generic int coercion above would turn 0.5 into 0 (then clamp to 0.05).
     try:
         _watch_debounce = float(
-            out.get("conversation_watch_debounce_seconds")
+            control.get(
+                "conversation_watch_debounce_seconds",
+                out.get("conversation_watch_debounce_seconds"),
+            )
         )
     except (TypeError, ValueError):
         _watch_debounce = 1.0
