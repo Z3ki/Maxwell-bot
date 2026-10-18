@@ -138,6 +138,24 @@ SITE_UID = 10001
 SITE_GID = 10001
 
 
+def _site_access_mode(info: os.stat_result, *, directory: bool) -> int:
+    """Least-permissive mode giving the site uid access to a controller-owned path.
+
+    The backend runs as SITE_UID:SITE_GID and is neither the owner nor (usually)
+    in the path's group, so it gets the "other" bits. Group bits are only
+    granted when the group already IS the site's group; in that case POSIX
+    checks the group bits instead of "other", so "other" gets nothing. The
+    owner (the controller) keeps full access for later lifecycle operations.
+    Directories keep the sticky bit so the site cannot delete controller files.
+    """
+    access = 0o7 if directory else 0o6
+    if info.st_gid == SITE_GID:
+        mode = (access << 6) | (access << 3)
+    else:
+        mode = (access << 6) | access
+    return (stat.S_ISVTX | mode) if directory else mode
+
+
 def prepare_state_dir(data_dir, slug: str) -> Path:
     """Preserve existing databases while allowing uid 10001 to write them.
 
@@ -165,7 +183,7 @@ def prepare_state_dir(data_dir, slug: str) -> Path:
                 if info.st_uid != SITE_UID or info.st_mode & 0o700 != 0o700:
                     # Keep controller-owned directories controller-owned, so
                     # cap_drop=ALL does not block its next lifecycle operation.
-                    os.fchmod(directory_fd, 0o1777)
+                    os.fchmod(directory_fd, _site_access_mode(info, directory=True))
                 for name in dirs + files:
                     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
@@ -188,7 +206,7 @@ def prepare_state_dir(data_dir, slug: str) -> Path:
                         except PermissionError:
                             # SQLite must be able to update old root-owned
                             # databases and WAL/journal files, not just /data.
-                            os.fchmod(fd, 0o666)
+                            os.fchmod(fd, _site_access_mode(os.fstat(fd), directory=False))
                     finally:
                         os.close(fd)
         finally:

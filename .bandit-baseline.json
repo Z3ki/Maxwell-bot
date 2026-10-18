@@ -524,26 +524,6 @@
    "test_name": "hardcoded_sql_expressions"
   },
   {
-   "code": "167                     # cap_drop=ALL does not block its next lifecycle operation.\n168                     os.fchmod(directory_fd, 0o1777)\n169                 for name in dirs + files:\n",
-   "col_offset": 20,
-   "end_col_offset": 51,
-   "filename": "./site_server.py",
-   "issue_confidence": "HIGH",
-   "issue_cwe": {
-    "id": 732,
-    "link": "https://cwe.mitre.org/data/definitions/732.html"
-   },
-   "issue_severity": "HIGH",
-   "issue_text": "Chmod setting a permissive mask 0o1777 on file (directory_fd).",
-   "line_number": 168,
-   "line_range": [
-    168
-   ],
-   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b103_set_bad_file_permissions.html",
-   "test_id": "B103",
-   "test_name": "set_bad_file_permissions"
-  },
-  {
    "code": "184                         # Set mode while the controller still owns the file.\n185                         os.fchmod(fd, 0o660)\n186                         try:\n",
    "col_offset": 24,
    "end_col_offset": 44,
@@ -558,26 +538,6 @@
    "line_number": 185,
    "line_range": [
     185
-   ],
-   "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b103_set_bad_file_permissions.html",
-   "test_id": "B103",
-   "test_name": "set_bad_file_permissions"
-  },
-  {
-   "code": "190                             # databases and WAL/journal files, not just /data.\n191                             os.fchmod(fd, 0o666)\n192                     finally:\n",
-   "col_offset": 28,
-   "end_col_offset": 48,
-   "filename": "./site_server.py",
-   "issue_confidence": "HIGH",
-   "issue_cwe": {
-    "id": 732,
-    "link": "https://cwe.mitre.org/data/definitions/732.html"
-   },
-   "issue_severity": "HIGH",
-   "issue_text": "Chmod setting a permissive mask 0o666 on file (fd).",
-   "line_number": 191,
-   "line_range": [
-    191
    ],
    "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b103_set_bad_file_permissions.html",
    "test_id": "B103",
