@@ -134,12 +134,7 @@ def test_plan_moves_early_supporter_above_q_members():
         fx.guild, fx.me, fx.early, above="Q-Members"
     )
     assert err == ""
-    assert _positions(changes) == {
-        "Early Supporter": 3,
-        "Members": 1,
-        "Q-Members": 2,
-        "Mods": 4,
-    }
+    assert _positions(changes) == {"Early Supporter": 3}
     assert "immediately above Q-Members" in summary
     assert "now pos 3" in summary
 
@@ -155,9 +150,9 @@ def test_plan_moves_early_supporter_below_q_members():
         fx.guild, fx.me, fx.early, below="Q-Members"
     )
     assert err == ""
-    assert _positions(changes)["Early Supporter"] == 3
-    assert _positions(changes)["Q-Members"] == 4
+    assert _positions(changes) == {"Early Supporter": 3}
     assert "immediately below Q-Members" in summary
+    assert "now pos 3" in summary
 
 
 def test_plan_absolute_position():
@@ -166,8 +161,9 @@ def test_plan_absolute_position():
         fx.guild, fx.me, fx.early, position="4"
     )
     assert err == ""
-    assert _positions(changes)["Early Supporter"] == 4
+    assert _positions(changes) == {"Early Supporter": 4}
     assert "to position 4" in summary
+    assert "now pos 4" in summary
 
 
 def test_plan_already_above_is_noop():
@@ -222,13 +218,8 @@ def test_execute_move_above_calls_edit_role_positions():
     fx.guild.edit_role_positions.assert_awaited()
     payload = fx.guild.edit_role_positions.await_args.args[0]
     by_id = {int(key.id): pos for key, pos in payload.items()}
-    assert by_id[11] == 3
-    assert by_id[13] == 2
-    assert by_id[12] == 1
-    assert by_id[14] == 4
-    assert 15 not in by_id  # bot's own role stays put
-    assert 16 not in by_id  # admin stays put
-    assert 10 not in by_id  # @everyone stays put
+    # Only the moved role; Discord shifts Members/Q-Members itself.
+    assert by_id == {11: 3}
 
 
 def test_execute_edit_with_above_reorders_without_role_edit():
@@ -282,7 +273,8 @@ def test_execute_reorder_alias_and_below_bot_role():
     assert "immediately below Maxwell" in result
     payload = fx.guild.edit_role_positions.await_args.args[0]
     by_id = {int(key.id): pos for key, pos in payload.items()}
-    assert by_id[11] == 4
+    assert by_id == {11: 4}
+    assert "now pos 4" in result
 
 
 def test_execute_create_refuses_permissions_the_asker_lacks():
@@ -311,3 +303,93 @@ def test_execute_refuses_without_manage_roles():
     assert result.startswith("Error:")
     assert "manage_roles" in result
     fx.guild.edit_role_positions.assert_not_awaited()
+
+
+def _add_managed_and_booster(fx):
+    """Insert a bot-managed role and the Server Booster role into the band."""
+    bot_managed = _role(rid=20, name="OtherBot", position=2)
+    bot_managed.managed = True
+    booster = _role(rid=21, name="Server Booster", position=3)
+    booster.managed = True
+    booster.is_premium_subscriber = lambda: True
+    # Band (low to high): Early 1, OtherBot 2, Booster 3, Members 4,
+    # Q-Members 5, Mods 6; Maxwell 7, Admin 8.
+    fx.members.position = 4
+    fx.qmem.position = 5
+    fx.mods.position = 6
+    fx.bot_role.position = 7
+    fx.admin.position = 8
+    fx.guild.roles.extend([bot_managed, booster])
+    return bot_managed, booster
+
+
+def _run_move(fx, **placement):
+    result = asyncio.run(
+        ManageRoleTool(SimpleNamespace()).execute(
+            fx.msg, action="move", name="Early Supporter", **placement
+        )
+    )
+    payload = fx.guild.edit_role_positions.await_args.args[0]
+    return result, {int(key.id): pos for key, pos in payload.items()}
+
+
+def test_move_payload_is_single_entry_and_skips_managed_and_booster():
+    cases = [
+        ({"position": "5"}, 5),
+        ({"above": "Q-Members"}, 5),
+        ({"below": "Q-Members"}, 4),
+        ({"below": "Maxwell"}, 6),
+    ]
+    for placement, expected in cases:
+        fx = _guild()
+        _add_managed_and_booster(fx)
+        result, by_id = _run_move(fx, **placement)
+        assert result.startswith("Moved Early Supporter"), (placement, result)
+        assert by_id == {11: expected}, placement
+        assert 20 not in by_id and 21 not in by_id
+        assert f"now pos {expected};" in result, (placement, result)
+        fx.guild.edit_role_positions.assert_awaited_once()
+
+
+def test_move_down_to_above_everyone_is_single_entry():
+    fx = _guild()
+    _add_managed_and_booster(fx)
+    fx.early.position = 6
+    fx.members.position = 1
+    fx.qmem.position = 4
+    fx.mods.position = 5
+    result, by_id = _run_move(fx, above="10")  # @everyone by id
+    assert result.startswith("Moved Early Supporter")
+    assert "immediately above @everyone" in result
+    assert by_id == {11: 1}
+    assert "now pos 1;" in result
+
+
+def test_move_above_lower_role_when_moving_down():
+    fx = _guild()
+    fx.early.position = 4
+    fx.mods.position = 1
+    # Band: Mods 1, Members 2, Q-Members 3, Early 4.
+    changes, summary, err = _plan_role_move(
+        fx.guild, fx.me, fx.early, above="Members"
+    )
+    assert err == ""
+    assert _positions(changes) == {"Early Supporter": 3}
+    assert "now pos 3" in summary
+
+
+def test_move_respects_actor_ceiling_with_single_entry():
+    fx = _guild()
+    fx.asker.top_role = fx.qmem
+    fx.asker.roles = [fx.everyone, fx.qmem]
+    changes, summary, err = _plan_role_move(
+        fx.guild, fx.me, fx.early, below="Q-Members", actor=fx.asker
+    )
+    # Band capped at the asker's Q-Members (3): Early 1, Members 2.
+    assert err == ""
+    assert _positions(changes) == {"Early Supporter": 2}
+    assert "now pos 2" in summary
+    _, _, err = _plan_role_move(
+        fx.guild, fx.me, fx.early, position="3", actor=fx.asker
+    )
+    assert "equal/higher than your top role" in err

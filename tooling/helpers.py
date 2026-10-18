@@ -2511,12 +2511,15 @@ def _plan_role_move(
     below=None,
     actor=None,
 ):
-    """Compute new positions for roles below the bot's top role.
+    """Compute the new position of ``moving`` below the bot's top role.
 
-    Returns (changes, summary, error). ``changes`` is a list of
-    ``(role, new_position)`` covering every role in the movable band so the
-    Discord payload stays collision-free. Higher position = higher in
-    Server Settings > Roles.
+    Returns (changes, summary, error). ``changes`` is ``[]`` on error or
+    no-op, otherwise a single ``(moving, new_position)`` entry. Discord
+    shifts the other roles itself; sending them too would include managed
+    and Server Booster roles, which Discord refuses to reposition (403).
+    Positions are ranks with @everyone at 0, so ``new_position`` is the
+    moved role's 1-based slot in the movable band. Higher position = higher
+    in Server Settings > Roles.
     """
     kind, value, err = _parse_role_placement(position, above, below)
     if err:
@@ -2646,16 +2649,12 @@ def _plan_role_move(
                 )
             insert_at = idx
             relation = f"immediately below {_role_ref(target)}"
-    new_order = rest[:insert_at] + [moving] + rest[insert_at:]
-    changes = [(item, pos) for pos, item in enumerate(new_order, start=1)]
-    changed = [
-        (role, pos)
-        for role, pos in changes
-        if int(getattr(role, "position", 0) or 0) != pos
-    ]
     new_pos = insert_at + 1
+    current_pos = next(
+        i for i, item in enumerate(movable, start=1) if _same_role(item, moving)
+    )
     guild_name = getattr(guild, "name", None) or "this server"
-    if not changed:
+    if current_pos == new_pos:
         summary = (
             f"{_role_ref(moving)} is already {relation} in {guild_name}"
         )
@@ -2665,7 +2664,7 @@ def _plan_role_move(
         f"(now pos {new_pos}; higher number is higher in "
         "Server Settings > Roles)"
     )
-    return changes, summary, ""
+    return [(moving, new_pos)], summary, ""
 
 
 async def _move_role_hierarchy(
@@ -2695,10 +2694,10 @@ async def _move_role_hierarchy(
     mover = getattr(guild, "edit_role_positions", None)
     if not callable(mover):
         return "Error: this Discord library cannot reorder role positions"
-    payload = {
-        discord.Object(id=int(item.id)): int(pos)
-        for item, pos in changes
-    }
+    # Only the moved role: Discord shifts the rest, and a full-band payload
+    # that includes managed/booster roles is rejected with 403 (50013).
+    moved, new_pos = changes[0]
+    payload = {discord.Object(id=int(moved.id)): int(new_pos)}
     try:
         await mover(payload, reason=reason)
     except discord.Forbidden:
