@@ -1078,6 +1078,30 @@ class MessagesMixin:
         await MaxwellBot._record_request_outcome(self, message, "suppressed", "channel_send_unavailable")
         return True
 
+    async def _keep_work_draft_inside_subagent(self, message, content, response: str) -> str:
+        """Long working notes stay with the subagent. The channel gets a short line."""
+        text = str(response or "")
+        lowered = text.lower()
+        draft = len(text) >= 1200 and (
+            text.count("```") >= 2
+            or ("```" in text and any(cue in lowered for cue in ("let me write", "i'll use", "now write")))
+        )
+        if not draft:
+            return text
+        names = MaxwellBot._turn_tool_names(
+            self, self._message_tool_platform(message), message
+        )
+        tool = (getattr(self, "tools", None) or {}).get("delegate_task")
+        if tool is not None and "delegate_task" in names:
+            task = str(content or getattr(message, "content", "") or "").strip()[:4000]
+            if task:
+                try:
+                    await tool.execute(message, tasks=[{"task": task}])
+                except Exception:
+                    logger.warning("Could not hand a work draft to the subagent", exc_info=True)
+            return "Handed that to a subagent. The working notes stay there."
+        return "That working draft stays off this chat. Building it needs a subagent, which needs Premium."
+
     async def _deliver_normal_reply(self, message, response, active_progresses):
         """Deliver final text and native stickers with a single first-chunk owner."""
         response = _auto_format_discord(response)
@@ -1930,6 +1954,9 @@ class MessagesMixin:
             response = _sanitize_visible_reply(
                 response,
                 scrub_repeats=bool(self._control.get("scrub_repetitions", True)),
+            )
+            response = await self._keep_work_draft_inside_subagent(
+                message, content, response
             )
             # Safety net: if the user asked for a site/page/website and the
             # model replied with raw HTML/JS in chat instead of calling

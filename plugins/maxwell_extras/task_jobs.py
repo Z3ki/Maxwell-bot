@@ -561,6 +561,18 @@ class TaskJobs:
         self.jobs.clear()
 
 
+def _public_report(text: str) -> str:
+    """Working notes and code stay in the job. The chat gets a short result."""
+    import re
+    cleaned = re.sub(r"```.*?```", " ", str(text or ""), flags=re.S)
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return "The subagent finished. The working notes stayed in the job."
+    if len(cleaned) > 500:
+        cleaned = cleaned[:500].rsplit(" ", 1)[0] + "…"
+    return cleaned
+
+
 def format_job(row, *, limit=1850):
     state = {
         "queued": "waiting",
@@ -572,7 +584,7 @@ def format_job(row, *, limit=1850):
     if row.get("last_tool"):
         text += f"Last tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"
     for report in row.get("reports", []):
-        text += f"{report.get('status', 'unknown')} — {report.get('report', '')}\n"
+        text += f"{report.get('status', 'unknown')} — {_public_report(report.get('report', ''))}\n"
     text += row.get("note", "")
     if row.get("effects") and row["state"] != "completed":
         text += "\nIt may have already changed files. Check those before trying again."
