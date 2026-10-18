@@ -35,6 +35,7 @@ try:
         GUILD_CAPABILITIES,
         KNOWN_TOOLS,
         parse_bool as _parse_bool,
+        parse_int as _parse_int,
     )
 except ImportError:
     DEAD_CONTROL_KEYS = set()
@@ -53,6 +54,15 @@ except ImportError:
         if s in {"0", "false", "no", "off"}:
             return False
         return default
+
+    def _parse_int(value, default):
+        if isinstance(value, int):
+            return int(value)
+        try:
+            number = float(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return int(number) if number.is_integer() else default
 
 
 def _load_control():
@@ -209,12 +219,36 @@ def _sanitize_control(control):
     # (0 everywhere) or wedge autonomy silent for a day.
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 2000))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
+    # The bot's _load_control is the source of truth for these two; parse
+    # the submitted value the same way it does so the dashboard never shows
+    # a number the bot would run differently.
     out["tool_history_messages"] = max(
-        0, min(_safe_int(out.get("tool_history_messages"), 20), 20)
+        0,
+        min(
+            _parse_int(
+                control.get(
+                    "tool_history_messages",
+                    DEFAULT_CONTROL.get("tool_history_messages", 10),
+                )
+                or 0,
+                0,
+            ),
+            30,
+        ),
     )
     out["prompt_context_budget"] = max(
         10000,
-        min(_safe_int(out.get("prompt_context_budget"), 240000), 500000),
+        min(
+            _parse_int(
+                control.get(
+                    "prompt_context_budget",
+                    DEFAULT_CONTROL.get("prompt_context_budget", 200000),
+                )
+                or 200000,
+                200000,
+            ),
+            2000000,
+        ),
     )
     out["message_quota_limit"] = max(
         1,
@@ -289,7 +323,9 @@ def _context_entry_id(raw: dict) -> str:
         sort_keys=True,
         ensure_ascii=False,
     )
-    return hashlib.sha1(stable.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha1(
+        stable.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
 
 
 def _sanitize_context_entries(data):

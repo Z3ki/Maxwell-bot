@@ -201,6 +201,7 @@ from control_defaults import (  # noqa: E402
     audio_input_enabled,
     guild_capability_for_tool,
     parse_bool,
+    parse_int,
 )
 from inbox import (  # noqa: E402
     InboxStore,

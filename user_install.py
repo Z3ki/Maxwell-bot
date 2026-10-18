@@ -173,7 +173,9 @@ def _rebuild_session_send() -> None:
     send = UserInstallSession._send_impl
     for _prio, _name, factory in sorted(_SEND_WRAPPERS, key=lambda item: -item[0]):
         send = factory(send)
-    UserInstallSession.send = send
+    # The private terms note is always the outermost layer. Rebuilding from
+    # _send_impl alone dropped it whenever a plugin (un)registered a wrapper.
+    UserInstallSession.send = _with_policy_notice(send)
 
 _USER_INSTALL_META = {
     "integration_types": [1],
@@ -782,6 +784,72 @@ class UserInstallChannelAdapter:
         raise LookupError("user-install has no channel history")
 
 
+DISCORD_MESSAGE_LIMIT = 2000
+
+
+def _split_for_note(note: str, body: str) -> tuple[str, str]:
+    """Split ``body`` so ``note + blank line + head`` fits one Discord message."""
+    room = DISCORD_MESSAGE_LIMIT - len(note) - 2
+    if room <= 0:
+        return "", body
+    if len(body) <= room:
+        return body, ""
+    cut = body.rfind("\n", 0, room + 1)
+    if cut < room // 2:
+        cut = body.rfind(" ", 0, room + 1)
+    if cut <= 0:
+        cut = room
+    return body[:cut].rstrip(), body[cut:].lstrip()
+
+
+def _with_policy_notice(inner):
+    """Outermost send layer: the one-time private terms note.
+
+    Applied after every registered wrapper (see _rebuild_session_send), so a
+    plugin that replaces the send chain or edits the deferred response
+    directly cannot drop the note, and it never pushes a reply past
+    Discord's 2000-character limit.
+    """
+
+    async def send(self, content: str | None = None, file=None, **kwargs):
+        self._policy_note = None
+        noted = await self._stick_policy_notice(content)
+        note = self._policy_note
+        if not note:
+            return await inner(self, noted, file, **kwargs)
+        delivered_note = False
+        try:
+            if len(noted or "") <= DISCORD_MESSAGE_LIMIT:
+                sent = await inner(self, noted, file, **kwargs)
+                delivered_note = True
+                return sent
+            # The reply was already split to Discord's limit before the note
+            # was added. Keep the note on the reply, but move the overflow
+            # into a further message instead of sending >2000 characters.
+            body = "" if content is None else str(content)
+            head, rest = _split_for_note(note, body)
+            await inner(self, f"{note}\n\n{head}".strip(), None)
+            delivered_note = True
+            return await inner(self, rest or None, file, **kwargs)
+        except Exception:
+            if not delivered_note:
+                # Never mark the one-time note as shown when it was not.
+                self._policy_notice_done = False
+                with contextlib.suppress(Exception):
+                    from privacy import release_notice
+
+                    user = getattr(self.interaction, "user", None)
+                    await asyncio.to_thread(
+                        release_notice,
+                        getattr(self.interaction, "client", None),
+                        getattr(user, "id", ""),
+                    )
+            raise
+
+    send._maxwell_policy_notice = True  # type: ignore[attr-defined]
+    return send
+
+
 class UserInstallSession:
     """Send via the interaction token: 1 original + 5 follow-ups, 15 minutes."""
 
@@ -806,10 +874,6 @@ class UserInstallSession:
         if callable(defer):
             await defer(ephemeral=self.ephemeral)
 
-    async def send(self, content: str | None = None, file=None, **kwargs):
-        content = await self._stick_policy_notice(content)
-        return await type(self)._send_impl(self, content, file, **kwargs)
-
     async def _stick_policy_notice(self, content: str | None) -> str | None:
         """Keep the one-time terms note on the private reply itself.
 
@@ -831,6 +895,7 @@ class UserInstallSession:
             _ephemeral_notice.reset(token)
         if not note:
             return content
+        self._policy_note = note
         body = "" if content is None else str(content)
         return f"{note}\n\n{body}".strip()
 
@@ -913,6 +978,11 @@ class UserInstallSession:
                 except Exception:
                     logger.exception("user-install edit after cap failed")
         return last
+
+
+# Base send (no plugin wrappers yet). _rebuild_session_send re-applies the
+# note layer whenever the wrapper chain changes.
+UserInstallSession.send = _with_policy_notice(UserInstallSession._send_impl)  # type: ignore[method-assign]
 
 
 class UserInstallMessageAdapter:
