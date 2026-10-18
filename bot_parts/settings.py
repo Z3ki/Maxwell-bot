@@ -241,17 +241,17 @@ class SettingsMixin:
             control["max_response_chars"] = max(
                 80,
                 min(
-                    _safe_int(control.get("max_response_chars", 4000) or 4000, 4000),
+                    parse_int(control.get("max_response_chars", 4000) or 4000, 4000),
                     8000,
                 ),
             )
             control["tool_history_messages"] = max(
-                0, min(_safe_int(control.get("tool_history_messages", 10) or 0, 0), 30)
+                0, min(parse_int(control.get("tool_history_messages", 10) or 0, 0), 30)
             )
             control["prompt_context_budget"] = max(
                 10000,
                 min(
-                    _safe_int(
+                    parse_int(
                         control.get("prompt_context_budget", 200000) or 200000, 200000
                     ),
                     2000000,
@@ -269,7 +269,7 @@ class SettingsMixin:
                 min(_safe_int(control.get("message_quota_window_seconds"), FREE_WINDOW_SECONDS), 7 * 24 * 3600),
             )
             control["live_max_output_tokens"] = max(
-                256, min(_safe_int(control.get("live_max_output_tokens"), 4096), 32768)
+                256, min(parse_int(control.get("live_max_output_tokens"), 4096), 32768)
             )
             for retired in [key for key in control if str(key).startswith("autonomy_")]:
                 control.pop(retired, None)

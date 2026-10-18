@@ -18,6 +18,31 @@ def parse_bool(value, default: bool = False) -> bool:
     return default
 
 
+def parse_int(value, default):
+    """Parse a persisted integer setting; integral values only.
+
+    Accepts ints, integral floats (30.0) and strings holding either ("30",
+    " 30.0 "), so a number typed into the dashboard survives a reload. A
+    non-integral value (30.5, "30.5"), inf/nan, or anything unparseable
+    returns ``default`` instead of being truncated.
+    """
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        try:
+            value = float(text)
+        except ValueError:
+            return default
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else default
+    return default
+
+
 def audio_input_enabled(owner) -> bool:
     """Whether audio bytes should reach the model.
 
