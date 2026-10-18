@@ -1024,6 +1024,10 @@ class SendFileTool(Tool):
         if len(blob) > self.MAX_SIZE:
             return f"Error: file is too large (max {self.MAX_SIZE // 1024 // 1024} MB)"
 
+        import mimetypes
+        mimetypes.add_type("audio/mpeg", ".mp3")
+        mimetypes.add_type("audio/wav", ".wav")
+        mimetypes.add_type("audio/ogg", ".ogg")
         file = File(BytesIO(blob), filename=safe_name)
         sent, error = await deliver_attachment(message, file, label="file")
         if error:
