@@ -307,10 +307,9 @@ def test_adapter_send_caps_at_six():
     assert "chunk 7" in last.content
 
 
-def test_policy_notice_is_sent_after_the_answer(tmp_path):
+def _notice_bot(tmp_path):
     from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 
-    interaction = _interaction(user_id=2, prompt="explain this")
     store = UserPreferenceStore(tmp_path / "user_preferences.json")
     bot = SimpleNamespace(
         _user_preferences=store,
@@ -323,19 +322,51 @@ def test_policy_notice_is_sent_after_the_answer(tmp_path):
     async def on_message(message):
         await message.channel.send("Here is the explanation.")
 
-    def spawn(coro):
-        sent.append(coro)
-
     bot.on_message = on_message
-    bot._spawn_detached = spawn
+    bot._spawn_detached = sent.append
+    return bot, store, sent
+
+
+def test_policy_notice_is_sent_after_the_answer(tmp_path):
+    # d500aa9: an ephemeral follow-up is dismissed when the answer lands, so a
+    # private answer carries the one-time note itself, exactly once.
+    bot, store, sent = _notice_bot(tmp_path)
+    interaction = _interaction(user_id=2, prompt="explain this")
+    interaction.data["options"].append(
+        {"name": "visibility", "type": 3, "value": "private"}
+    )
+    interaction.client = bot  # Discord always sets this
     assert asyncio.run(handle_user_install_interaction(bot, interaction)) is True
     assert interaction.followup.payloads == []
 
     asyncio.run(sent[0])
     contents = [row["content"] for row in interaction.followup.payloads]
-    assert contents[0] == "Here is the explanation."
-    assert "Terms" in contents[1]
-    assert interaction.followup.payloads[1]["ephemeral"] is True
+    assert len(contents) == 1
+    assert "Terms" in contents[0]
+    assert contents[0].endswith("Here is the explanation.")
+    assert interaction.followup.payloads[0]["ephemeral"] is True
+    assert store.consents.review("2") == []
+
+    asyncio.run(UserInstallSession(interaction, visibility="private").send("Again."))
+    assert interaction.followup.payloads[-1]["content"] == "Again."
+
+
+def test_public_answer_gets_the_policy_notice_by_dm(tmp_path):
+    # d500aa9: a public answer is not painted with the note; it is DM'd once.
+    bot, store, sent = _notice_bot(tmp_path)
+    interaction = _interaction(user_id=2, prompt="explain this")
+    interaction.client = bot
+    dms = []
+
+    async def dm(text):
+        dms.append(text)
+
+    interaction.user.send = dm
+    assert asyncio.run(handle_user_install_interaction(bot, interaction)) is True
+    asyncio.run(sent[0])
+    contents = [row["content"] for row in interaction.followup.payloads]
+    assert contents == ["Here is the explanation."]
+    assert len(dms) == 1 and "Terms" in dms[0]
     assert store.consents.review("2") == []
 
 
