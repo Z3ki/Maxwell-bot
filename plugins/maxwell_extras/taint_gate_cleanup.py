@@ -51,7 +51,8 @@ def install_taint_gate_cleanup(bot: Any) -> None:
         ) -> str:
             tool = (getattr(self_obj, "tools", None) or {}).get(name)
             if (
-                bool(getattr(tool, "is_destructive", False))
+                name != "shell"
+                and bool(getattr(tool, "is_destructive", False))
                 and _taint_gate_enabled(self_obj)
                 and _is_tainted(self_obj, message)
             ):

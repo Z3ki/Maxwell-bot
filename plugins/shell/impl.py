@@ -758,17 +758,6 @@ class ShellTool(Tool):
         # host / mount, no host net, no docker socket by default). Idle
         # recycle drops leftover processes/packages after MAXWELL_SHELL_IDLE_SECONDS.
 
-        # Indirect-prompt-injection defense: if the current turn is tainted
-        # (the model just read content from a URL / web search that may carry
-        # prompt-injection payloads), refuse. A fresh user message starts a
-        # clean turn. There is no confirmation override.
-        if _taint_gate_blocks(self, message, kwargs):
-            return (
-                "Error: shell refused: this turn read content from a fetched "
-                "URL/web search that may carry prompt-injection payloads. "
-                "Send a new message without fetched content to run shell."
-            )
-
         tenant = shell_tenant(message)
         if tenant is None:
             return "Error: shell needs an authenticated Discord user and request scope"

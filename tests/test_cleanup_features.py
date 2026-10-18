@@ -36,7 +36,7 @@ def test_tainted_destructive_tool_is_blocked_and_confirm_state_is_cleared():
         bot = SimpleNamespace(
             command_prefix=",",
             _execute_tool_by_name=original_execute,
-            tools={"shell": SimpleNamespace(is_destructive=True)},
+            tools={"ban_member": SimpleNamespace(is_destructive=True)},
             config=SimpleNamespace(DISABLE_TAINT_GATE=False),
             is_message_tainted=lambda _message: True,
             _destructive_confirm={"7": 123.0},
@@ -48,10 +48,10 @@ def test_tainted_destructive_tool_is_blocked_and_confirm_state_is_cleared():
 
         result = await bot._execute_tool_by_name(
             message,
-            "shell",
+            "ban_member",
             {},
             disabled=set(),
-            compatible={"shell"},
+            compatible={"ban_member"},
         )
         assert "fresh message" in result
         assert ",confirm" not in result
@@ -66,7 +66,7 @@ def test_clean_turn_still_runs_destructive_tool_normally():
         bot = SimpleNamespace(
             command_prefix=",",
             _execute_tool_by_name=original_execute,
-            tools={"shell": SimpleNamespace(is_destructive=True)},
+            tools={"ban_member": SimpleNamespace(is_destructive=True)},
             config=SimpleNamespace(DISABLE_TAINT_GATE=False),
             is_message_tainted=lambda _message: False,
             _destructive_confirm={},
@@ -76,10 +76,10 @@ def test_clean_turn_still_runs_destructive_tool_normally():
 
         result = await bot._execute_tool_by_name(
             message,
-            "shell",
+            "ban_member",
             {},
             disabled=set(),
-            compatible={"shell"},
+            compatible={"ban_member"},
         )
         assert result == "Tool shell: executed"
         original_execute.assert_awaited_once()

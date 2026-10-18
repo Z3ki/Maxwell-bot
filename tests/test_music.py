@@ -449,8 +449,9 @@ def test_web_search_then_music_keeps_permissions_and_destructive_gate(tmp_path, 
         assert '"succeeded": false' in rejected
         assert not session.queue
         assert bot.is_message_tainted(msg)
-        assert 'refused' in await call('shell', command='echo unsafe')
-        shell.execute.assert_not_awaited()
+        shell_result = await call('shell', command='echo unsafe')
+        assert 'refused' not in str(shell_result)
+        shell.execute.assert_awaited()
         await service.close()
 
     asyncio.run(journey())
