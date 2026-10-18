@@ -313,6 +313,9 @@ class DelegateTaskTool(Tool):
                 }
             chunks = []
             media = []
+            # A promise with no tool call is not a result. DeepSeek often
+            # answers "I'll build it" and stops; keep asking until a tool runs.
+            text_only = 0
             for _ in range(steps):
                 from .task_job_store import active_job
                 context = active_job.get()
@@ -348,6 +351,28 @@ class DelegateTaskTool(Tool):
                 )
                 calls = getattr(result, "tool_calls", None) or []
                 if not calls:
+                    if not completed and text_only < 2:
+                        text_only += 1
+                        chunks.append(
+                            [
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "You have not called any tools, so nothing was done. "
+                                        "Call the tools that do this task now. "
+                                        "Do not describe what you will do."
+                                    ),
+                                }
+                            ]
+                        )
+                        continue
+                    if not completed:
+                        return {
+                            "kind": task["kind"],
+                            "status": "no_tools",
+                            "completed": completed,
+                            "report": "The subagent stopped without using any tools.",
+                        }
                     return {
                         "kind": task["kind"],
                         "status": "reported",
