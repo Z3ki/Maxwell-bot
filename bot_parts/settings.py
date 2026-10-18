@@ -151,8 +151,9 @@ class SettingsMixin:
             if not quiet:
                 logger.info(f"Loaded {len(self._blacklist)} blacklisted users")
         except Exception as e:
+            # Keep the previous in-memory blacklist. Resetting to empty after
+            # one bad read would unblock every blocked user until it is fixed.
             logger.error(f"Failed to load blacklist: {e}")
-            self._blacklist = set()
 
     def _load_shell_whitelist(self, quiet: bool = False):
         try:
