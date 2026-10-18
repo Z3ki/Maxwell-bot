@@ -173,6 +173,8 @@ def _rebuild_session_send() -> None:
     send = UserInstallSession._send_impl
     for _prio, _name, factory in sorted(_SEND_WRAPPERS, key=lambda item: -item[0]):
         send = factory(send)
+    # The private terms note is always the outermost layer. Rebuilding from
+    # _send_impl alone dropped it whenever a plugin (un)registered a wrapper.
     UserInstallSession.send = _with_policy_notice(send)
 
 _USER_INSTALL_META = {
