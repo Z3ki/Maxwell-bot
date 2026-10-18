@@ -405,13 +405,34 @@ class WatchMixin:
             return base
         return max(0.05, min(watch_policy.debounce_seconds(state, base), 5.0))
 
-    def _cancel_watch_debounce(self, channel_id) -> None:
+    def _release_other_directed(self, bucket, replacing) -> None:
+        """Keep another person's pending reply. Same-user bursts still collapse."""
+        previous = (bucket or {}).get("latest_directed")
+        if previous is None or previous is replacing:
+            return
+        prev_uid = str(getattr(getattr(previous, "author", None), "id", "") or "")
+        next_uid = str(getattr(getattr(replacing, "author", None), "id", "") or "")
+        if replacing is not None and prev_uid and prev_uid != next_uid:
+            content = (bucket or {}).get("content") or getattr(previous, "content", "") or ""
+            self._track_task(
+                asyncio.create_task(
+                    self._dispatch_reply(previous, content, directed=True),
+                    name="watch-other-user",
+                )
+            )
+            return
+        MaxwellBot._record_request_outcome(self, previous, "superseded", "watch_coalesced")
+
+    def _cancel_watch_debounce(self, channel_id, *, replacing=None) -> None:
         bucket = (getattr(self, "_watch_debounce", None) or {}).pop(
             str(channel_id or ""), None
         )
         task = (bucket or {}).get("task")
         if bucket:
-            MaxwellBot._record_request_outcome(self, bucket.get("latest_directed"), "superseded", "watch_cancelled")
+            if replacing is not None:
+                self._release_other_directed(bucket, replacing)
+            else:
+                MaxwellBot._record_request_outcome(self, bucket.get("latest_directed"), "superseded", "watch_cancelled")
         if task is not None and not task.done():
             cancel_once(task)
 
@@ -450,9 +471,7 @@ class WatchMixin:
             burst = burst[-24:]
         bucket["burst"] = burst
         if directed:
-            previous = bucket.get("latest_directed")
-            if previous is not message:
-                MaxwellBot._record_request_outcome(self, previous, "superseded", "watch_coalesced")
+            self._release_other_directed(bucket, message)
             bucket["latest_directed"] = message
             bucket["content"] = content
             MaxwellBot._record_request_outcome(self, message, "queued", "watch_debounce")
@@ -539,7 +558,8 @@ class WatchMixin:
                 await self._record_request_outcome(message, "superseded", "same_user_interrupt")
                 return
             self._cancel_watch_debounce(
-                getattr(getattr(message, "channel", None), "id", "")
+                getattr(getattr(message, "channel", None), "id", ""),
+                replacing=message,
             )
             await self._dispatch_reply(message, content, directed=True)
             return

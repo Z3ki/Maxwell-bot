@@ -70,6 +70,7 @@ def _bot(*, watch_seconds=180, debounce_seconds=0.05, watch_enabled=True):
     )
     bot._watch_debounce_seconds = MaxwellBot._watch_debounce_seconds.__get__(bot)
     bot._cancel_watch_debounce = MaxwellBot._cancel_watch_debounce.__get__(bot)
+    bot._release_other_directed = MaxwellBot._release_other_directed.__get__(bot)
     bot._queue_watch_reply = MaxwellBot._queue_watch_reply.__get__(bot)
     bot._touch_watch_debounce = MaxwellBot._touch_watch_debounce.__get__(bot)
     bot._flush_watch_reply = MaxwellBot._flush_watch_reply.__get__(bot)
@@ -708,6 +709,29 @@ def test_a_busy_room_queues_the_ping_instead_of_dropping_it():
         assert handled == ["make an image of a cat", "actually a dog"]
 
     asyncio.run(run())
+
+
+def test_two_people_addressing_in_one_window_both_get_turns():
+    bot = _bot()
+    dispatched = []
+
+    async def dispatch(message, content, *, directed):
+        dispatched.append((message.author.id, content, directed))
+
+    bot._dispatch_reply = dispatch
+    first = _plain_followup(content="git stash", author_id=1, display_name="Kot")
+    first.id = 10
+    second = _plain_followup(content="hello", author_id=2, display_name="spaced")
+    second.id = 11
+    async def run():
+        bot._queue_watch_reply(first, "git stash", directed=True)
+        bot._queue_watch_reply(second, "hello", directed=True)
+        await asyncio.sleep(0)
+        await bot._flush_watch_reply(str(first.channel.id), 0)
+
+    asyncio.run(run())
+    assert (1, "git stash", True) in dispatched
+    assert any(author == 2 and text == "hello" for author, text, _directed in dispatched)
 
 
 def test_bare_mention_is_a_ping_with_no_text():

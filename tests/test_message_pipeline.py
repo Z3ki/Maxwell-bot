@@ -610,6 +610,10 @@ def test_journal_accept_stores_only_metadata_and_preserves_duplicates(tmp_path):
     assert journal.get(101) == delivered
     assert journal.get("unknown") is None
     assert journal.pending() == []
+    journal.note_response(101, 404)
+    journal.note_response(101, 505)
+    assert journal.find_response(404)["message_id"] == "101"
+    assert journal.find_response(505)["message_id"] == "101"
 
 
 def test_journal_pending_order_limit_and_effects_exclusion(tmp_path, monkeypatch):

@@ -586,6 +586,14 @@ class RequestJournal:
                 "AND effects_started = 0"
             )
             connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS response_owners (
+                    response_id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
                 "CREATE INDEX IF NOT EXISTS requests_terminal_age "
                 "ON requests(updated_at DESC, message_id DESC) "
                 "WHERE status IN ('delivered', 'suppressed', 'failed', 'superseded')"
@@ -719,6 +727,16 @@ class RequestJournal:
         if not target:
             return None
         with self._transaction() as connection:
+            owned = connection.execute(
+                "SELECT message_id FROM response_owners WHERE response_id = ?",
+                (target,),
+            ).fetchone()
+            if owned is not None:
+                row = connection.execute(
+                    "SELECT * FROM requests WHERE message_id = ?",
+                    (owned["message_id"],),
+                ).fetchone()
+                return self._record(row) if row is not None else None
             rows = connection.execute(
                 "SELECT * FROM requests WHERE response_id = ? "
                 "ORDER BY updated_at DESC LIMIT 2",
@@ -727,6 +745,26 @@ class RequestJournal:
             if len(rows) != 1:
                 return None
             return self._record(rows[0])
+
+    def note_response(self, message_id: Any, response_id: Any) -> None:
+        """Remember a bot message that belongs to this request, including files."""
+        mid = "" if message_id is None else str(message_id).strip()
+        target = "" if response_id is None else str(response_id).strip()
+        if not mid or not target:
+            return
+        with self._transaction(write=True) as connection:
+            try:
+                self._require(connection, mid)
+            except KeyError:
+                return
+            connection.execute(
+                """
+                INSERT INTO response_owners (response_id, message_id)
+                VALUES (?, ?)
+                ON CONFLICT(response_id) DO UPDATE SET message_id = excluded.message_id
+                """,
+                (target, mid),
+            )
 
     def _change(
         self,

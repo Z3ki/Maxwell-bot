@@ -133,11 +133,11 @@ class RequestPipelineMixin:
             return
 
         def delivered():
+            journal.note_response(mid, sent.id)
             row = journal.get(mid)
             if row and row["status"] not in _REQUEST_TERMINAL:
                 journal.update(mid, "delivered", effects_started=True, response_id=str(sent.id))
-                return row
-            return None
+            return row
 
         row = await journal.submit(delivered)
         if row:
