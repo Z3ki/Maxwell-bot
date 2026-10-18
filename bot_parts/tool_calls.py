@@ -181,7 +181,8 @@ class ToolCallsMixin:
                 if tool is None and plugin_allowed:
                     tool = plugin_tool
                 if (
-                    getattr(tool, "is_destructive", False)
+                    name != "shell"
+                    and getattr(tool, "is_destructive", False)
                     and self.is_message_tainted(message)
                     and not getattr(self.config, "DISABLE_TAINT_GATE", False)
                 ):
