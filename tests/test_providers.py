@@ -1656,7 +1656,7 @@ def test_audio_attaches_as_input_audio_when_enabled():
     async def run():
         await provider.generate_chat_completion(
             [{"role": "user", "content": "[User attached media]"}],
-            media=[{"b64": "AAA", "mime_type": "audio/mpeg"}],
+            media=[{"b64": "AAA", "mime_type": "audio/mpeg3"}],
         )
 
     asyncio.run(run())

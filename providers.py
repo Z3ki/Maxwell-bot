@@ -122,6 +122,9 @@ AUDIO_FORMATS = {
     "audio/wave": "wav",
     "audio/mpeg": "mp3",
     "audio/mp3": "mp3",
+    "audio/mpeg3": "mp3",
+    "audio/x-mpeg3": "mp3",
+    "audio/x-mp3": "mp3",
     "audio/mp4": "m4a",
     "audio/x-m4a": "m4a",
     "audio/ogg": "ogg",
@@ -1073,9 +1076,10 @@ class OpenAICompatibleProvider(ChatProvider):
                     elif mime.startswith("audio/") and getattr(
                         self, "enable_audio_input", False
                     ):
-                        audio_format = AUDIO_FORMATS.get(
-                            mime.split(";", 1)[0].lower(), "wav"
-                        )
+                        audio_format = AUDIO_FORMATS.get(mime.split(";", 1)[0].lower())
+                        if not audio_format:
+                            logger.info("Skipping audio part with unsupported type %s", mime)
+                            continue
                         parts.append(
                             {
                                 "type": "input_audio",
