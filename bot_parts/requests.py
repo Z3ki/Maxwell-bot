@@ -308,11 +308,16 @@ class RequestPipelineMixin:
             if not callable(checker) or not checker(user_id):
                 return "refused: this tool is restricted to Maxwell operators"
 
-        required_perms = tuple(
-            str(value).strip()
-            for value in (getattr(handler, "required_discord_permissions", ()) or ())
-            if str(value).strip()
-        )
+        from maxwell_core.tools.spec import normalize_permission_names
+
+        try:
+            required_perms = normalize_permission_names(
+                getattr(handler, "required_discord_permissions", ()),
+                field_name="required_discord_permissions",
+            )
+        except TypeError:
+            # Unreadable requirement: refuse rather than run unchecked.
+            return "refused: this tool declares invalid permission requirements"
         if required_perms:
             guild = getattr(message, "guild", None)
             if guild is None:

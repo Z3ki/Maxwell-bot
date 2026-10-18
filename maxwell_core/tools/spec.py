@@ -34,6 +34,39 @@ def platform_allowed(transports: Any, platform: str) -> bool:
         return True
     return name in _DISCORD_FAMILY and bool(allowed & _DISCORD_FAMILY)
 
+def normalize_permission_names(value: Any, *, field_name: str = "permissions") -> tuple[str, ...]:
+    """Normalize a declared permission/capability requirement to a tuple.
+
+    A bare string is ONE requirement ("manage_messages", not fifteen
+    letters). Lists, tuples and sets of strings are accepted. Anything else
+    (numbers, dicts, booleans, non-string items) raises TypeError so the
+    caller fails closed instead of guessing at a narrower requirement.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        items: tuple[Any, ...] = (value,)
+    elif isinstance(value, (set, frozenset)):
+        items = tuple(sorted(value, key=str))
+    elif isinstance(value, (list, tuple)):
+        items = tuple(value)
+    else:
+        raise TypeError(
+            f"{field_name} must be a string or a list of strings, "
+            f"not {type(value).__name__}"
+        )
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise TypeError(
+                f"{field_name} entries must be strings, not {type(item).__name__}"
+            )
+        name = item.strip()
+        if name and name not in out:
+            out.append(name)
+    return tuple(out)
+
+
 _CONTRACT_LABELS = {
     CONTRACT_RESULT: " [returns output]",
     CONTRACT_ENDING: " [ends the turn]",
@@ -148,8 +181,16 @@ def spec_from_tool(tool: Any, *, name: str, plugin: str) -> ToolSpec:
     transports = getattr(tool, "transports", None) or getattr(tool, "platform", "any")
     if isinstance(transports, str):
         transports = (transports,)
-    caps = getattr(tool, "required_capabilities", ()) or ()
-    discord_perms = getattr(tool, "required_discord_permissions", ()) or ()
+    # Invalid declarations raise here, so the tool is never registered with
+    # a requirement narrower than its author meant.
+    caps = normalize_permission_names(
+        getattr(tool, "required_capabilities", ()),
+        field_name="required_capabilities",
+    )
+    discord_perms = normalize_permission_names(
+        getattr(tool, "required_discord_permissions", ()),
+        field_name="required_discord_permissions",
+    )
     timeout = getattr(tool, "timeout_seconds", None)
     try:
         timeout_val = float(timeout) if timeout is not None else None
@@ -165,8 +206,8 @@ def spec_from_tool(tool: Any, *, name: str, plugin: str) -> ToolSpec:
         ends_turn=bool(getattr(tool, "ends_turn", False)),
         is_destructive=bool(getattr(tool, "is_destructive", False)),
         requires_admin=bool(getattr(tool, "requires_admin", False)),
-        required_capabilities=tuple(str(x) for x in caps),
-        required_discord_permissions=tuple(str(x) for x in discord_perms),
+        required_capabilities=caps,
+        required_discord_permissions=discord_perms,
         transports=tuple(str(x) for x in transports),
         timeout_seconds=timeout_val,
         side_effects=bool(getattr(tool, "side_effects", True)),
