@@ -63,7 +63,7 @@ _LEGACY_SETTINGS: dict[str, Any] = {
     "turn_timeout": 900,
 }
 _NEW_SETTINGS: dict[str, Any] = {
-    "vision": False,
+    "vision": True,
     "audio": False,
     "tools": True,
     "reasoning": False,
