@@ -83,8 +83,10 @@ processing can already have reached a provider; published websites and sandbox
 files retain their separate tool/operator deletion lifecycle.
 
 Defaults: one job per user, at most two siblings, four active worker slots globally,
-twelve LLM steps each, a 128,000-character text budget and a 600-second job engine
-deadline. Workers have independent request/job deadlines; chat keeps its own
+24 LLM steps each, and a 600-second job deadline. The text budget follows
+`AI_WORKER_CONTEXT_WINDOW` (output tokens reserved, about four characters per
+token). With no window configured it is 2,000,000 characters. Set
+`task_workers_context_chars` only to tighten that. Workers have independent request/job deadlines; chat keeps its own
 normal deadline. Sibling tool calls serialize; model calls may overlap. Controls:
 `premium_task_workers_enabled`, `task_workers_max_active` (1–8),
 `task_workers_max_steps` (1–32), `task_workers_timeout_seconds` (10–7200) and

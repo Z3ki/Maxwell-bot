@@ -278,10 +278,20 @@ class DelegateTaskTool(Tool):
                 or getattr(selected, "max_tokens", 4096)
                 or 4096,
             )
-            budget = _limit(control, "task_workers_context_chars", 128000, 2000000)
+            # Character budget follows the worker context window (about 4
+            # chars per token, output reserved). The old 128k default stopped
+            # a job while the model still had room. An explicit control value
+            # can only tighten this.
             if isinstance(window, int) and window > 0:
-                output_tokens = min(output_tokens, max(16, window // 4))
-                budget = min(budget, (window - output_tokens) * 4)
+                output_tokens = min(output_tokens, max(16, window // 2))
+                budget = max(1024, (window - output_tokens) * 4)
+            else:
+                budget = 2_000_000
+            if control.get("task_workers_context_chars") is not None:
+                budget = min(
+                    budget,
+                    _limit(control, "task_workers_context_chars", budget, 2_000_000),
+                )
             budget -= len(json.dumps(schemas)) + 2048
             base = [
                 {
@@ -379,18 +389,20 @@ class DelegateTaskTool(Tool):
                         "completed": completed,
                         "report": str(result)[:8000],
                     }
-                if not isinstance(calls, list) or len(calls) > 4:
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": "That tool batch was invalid. Continue with one to four tool calls, or finish the task.",
-                        }
+                if not isinstance(calls, list):
+                    chunks.append(
+                        [
+                            {
+                                "role": "user",
+                                "content": "That tool batch was invalid. Call the tools, or finish the task.",
+                            }
+                        ]
                     )
                     continue
                 chunk = [
                     {
                         "role": "assistant",
-                        "content": str(result)[:4000],
+                        "content": str(result),
                         "tool_calls": calls,
                     }
                 ]
@@ -493,11 +505,14 @@ class DelegateTaskTool(Tool):
                     completed.append(
                         {"tool": name, "status": "error" if failed else "returned"}
                     )
+                    # Keep the tool result up to the context budget. A fixed
+                    # 8000-character cut hid command output and made the model retry.
+                    room = budget - len(json.dumps(base + [row for done in chunks for row in done] + chunk)) - 64
                     chunk.append(
                         {
                             "role": "tool",
                             "tool_call_id": call.get("id", ""),
-                            "content": str(output)[:8000],
+                            "content": str(output)[: max(1, room)],
                         }
                     )
                 chunks.append(chunk)

@@ -272,6 +272,33 @@ def test_text_only_reply_stops_after_two_nudges(tmp_path):
     assert bot._generate_response.await_count == 3
 
 
+def test_worker_keeps_tool_output_up_to_the_context_window(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    bot.ai_provider.capabilities.context_window = 256000
+    bot.ai_provider.max_tokens = 32768
+    long_output = "x" * 20000
+    shell.execute = AsyncMock(return_value=long_output)
+    seen = []
+
+    async def generate(messages, **kwargs):
+        seen.append(messages)
+        if len(seen) == 1:
+            return call()
+        return ProviderResult("Published the site.")
+
+    bot._generate_response.side_effect = generate
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "reported"
+    tool_text = seen[1][-1]["content"]
+    assert tool_text.endswith(long_output)
+    assert len(tool_text) > 8000
+    assert kwargs_ok(bot, 32768)
+
+
+def kwargs_ok(bot, output):
+    return bot._generate_response.await_args.kwargs["max_tokens"] == output
+
+
 def test_step_and_context_limits_stop_without_forgetting_writes(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
     bot._control["task_workers_max_steps"] = 1
