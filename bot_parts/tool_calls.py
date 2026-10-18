@@ -1316,6 +1316,10 @@ class ToolCallsMixin:
                 "Ordinary conversation and brief answers need no worker. Direct communication, "
                 "account/privacy settings and moderation remain your responsibility."
             )
+        else:
+            from premium_access import premium_withheld_note
+            requester = getattr(getattr(message, "author", None), "id", None)
+            header += premium_withheld_note(self, names, requester)
         jobs = getattr(self, "_task_jobs", None)
         if jobs is not None and message is not None:
             summary = jobs.summary(message)
