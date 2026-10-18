@@ -292,11 +292,27 @@ def test_worker_keeps_tool_output_up_to_the_context_window(tmp_path):
     tool_text = seen[1][-1]["content"]
     assert tool_text.endswith(long_output)
     assert len(tool_text) > 8000
-    assert kwargs_ok(bot, 32768)
+    assert bot._generate_response.await_args.kwargs["max_tokens"] == 32768
 
 
-def kwargs_ok(bot, output):
-    return bot._generate_response.await_args.kwargs["max_tokens"] == output
+def test_large_tool_output_is_shared_and_still_read(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    shell.execute = AsyncMock(return_value='"' * 200000)
+    batch = call()
+    batch.tool_calls.append({**batch.tool_calls[0], "id": "call_2"})
+    seen = []
+
+    async def generate(messages, **kwargs):
+        seen.append(messages)
+        return batch if len(seen) == 1 else ProviderResult("Done.")
+
+    bot._generate_response.side_effect = generate
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "reported"
+    first, second = seen[1][-2:]
+    assert first["content"].endswith("[output truncated]")
+    assert first["content"].count('"') > 1000
+    assert second["content"].count('"') > 1000
 
 
 def test_step_and_context_limits_stop_without_forgetting_writes(tmp_path):
