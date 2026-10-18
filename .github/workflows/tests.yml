@@ -8,7 +8,68 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Shared-core gate (maxwell_core, message_pipeline, concurrency_safety). The
+  # repository-wide gate is fail_under in pyproject.toml.
+  CORE_COVERAGE_FAIL_UNDER: "86"
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+      # The legacy tree is not ruff-formatted yet (300+ files would change).
+      # New test modules live under tests/unit and must stay formatted.
+      - name: Ruff format (new test modules)
+        run: ruff format --check --diff tests/unit
+      - run: python scripts/check_shell_syntax.py
+
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      # Scope and per-module baseline live in [tool.mypy] in pyproject.toml.
+      - name: mypy (gated modules)
+        run: mypy
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Known-vulnerable dependencies (pip-audit)
+        run: pip-audit --progress-spinner off -r requirements.txt -r requirements-dev.txt
+      # Medium+ severity and confidence. Findings that predate this gate are
+      # recorded in .bandit-baseline.json; anything new fails the job.
+      - name: Static security scan (bandit, new findings only)
+        run: >-
+          bandit -q -r . -ll -ii
+          -x ./tests,./.venv,./venv,./data,./temp,./shelldocker
+          -b .bandit-baseline.json
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -28,10 +89,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends git ripgrep ffmpeg
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pip check
-      - run: ruff check .
-      - run: python scripts/check_shell_syntax.py
-      - name: Regression tests and shared-core branch coverage
-        run: python -u -m pytest -v -W error::RuntimeWarning --cov --cov-report=term-missing:skip-covered
+      - name: Regression tests and repository branch coverage
+        run: python -u -m pytest -v -W error::RuntimeWarning --cov --cov-report=term-missing:skip-covered --cov-report=xml
+      - name: Shared-core coverage gate
+        run: >-
+          python -m coverage report --skip-covered
+          --include='maxwell_core/*,message_pipeline.py,concurrency_safety.py'
+          --fail-under="$CORE_COVERAGE_FAIL_UNDER"
+      - name: Upload coverage report
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
       - name: Benchmark scoped conversation history
         if: matrix.python-version == '3.12'
         run: python scripts/benchmark_conversation_history.py --guilds 100 500 1000 --iterations 10
