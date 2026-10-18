@@ -246,6 +246,32 @@ def test_same_user_capacity_is_atomic_and_sibling_model_calls_overlap(tmp_path):
     asyncio.run(run())
 
 
+def test_text_only_reply_is_not_a_finished_website(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    bot._generate_response.side_effect = [
+        ProviderResult("I'll build the complete game and publish it."),
+        call(),
+        ProviderResult("Published the site."),
+    ]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "reported"
+    assert result["report"] == "Published the site."
+    shell.execute.assert_awaited_once()
+    nudge = bot._generate_response.await_args_list[1].args[0][-1]["content"]
+    assert "have not called any tools" in nudge
+
+
+def test_text_only_reply_stops_after_two_nudges(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    bot._generate_response.side_effect = lambda *a, **k: ProviderResult(
+        "I'll build the complete game and publish it."
+    )
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "no_tools"
+    assert shell.execute.await_count == 0
+    assert bot._generate_response.await_count == 3
+
+
 def test_step_and_context_limits_stop_without_forgetting_writes(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
     bot._control["task_workers_max_steps"] = 1
