@@ -32,7 +32,7 @@ mode `0600`; its containing directory is mode `0700`. Keys are not passed to
 prompts, tools, shell containers, or logs. Each request creates a fresh client
 for the selected provider, with TLS verification, no redirects, public-address
 DNS checks, bounded responses, one retry, the configured request deadline, and at
-most eight tool calls. Maxwell-funded fallback providers are not used after a
+most 24 tool calls (replies such as `send_message` do not count). Maxwell-funded fallback providers are not used after a
 BYOK failure. Configured endpoints must be public HTTPS OpenAI-compatible
 URLs with no login, query, or fragment. Loopback, private, link-local, and
 `.local` / `.internal` hosts are rejected. The provider client still checks
@@ -95,4 +95,4 @@ restart only after every database succeeds; if one fails, keep services stopped
 and recover it before switching keys. Keep recovery backups protected. Do not
 restart with databases encrypted under different master keys.
 
-Background jobs open a separate connection using the saved worker/chat credential snapshot; they never borrow a chat turn's client. Workers in one job share their eight-tool personal-provider budget. Future chat turns have their own budget and client. Job status/cancel is available through `/tasks` and conversational `manage_tasks`. Reports stay transient even with history off; full deletion removes job metadata and stops old job writes.
+Background jobs open a separate connection using the saved worker/chat credential snapshot; they never borrow a chat turn's client. Workers in one job share their 24-call personal-provider budget. Future chat turns have their own budget and client. Job status/cancel is available through `/tasks` and conversational `manage_tasks`. Reports stay transient even with history off; full deletion removes job metadata and stops old job writes.
