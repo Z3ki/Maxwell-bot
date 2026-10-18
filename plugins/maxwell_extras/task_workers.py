@@ -406,7 +406,7 @@ class DelegateTaskTool(Tool):
                         "tool_calls": calls,
                     }
                 ]
-                for call in calls:
+                for index, call in enumerate(calls):
                     function = call.get("function") or {}
                     name = str(function.get("name") or "")
                     raw_args = function.get("arguments", "{}")
@@ -507,14 +507,23 @@ class DelegateTaskTool(Tool):
                     )
                     # Keep the tool result up to the context budget. A fixed
                     # 8000-character cut hid command output and made the model retry.
-                    room = budget - len(json.dumps(base + [row for done in chunks for row in done] + chunk)) - 64
-                    chunk.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.get("id", ""),
-                            "content": str(output)[: max(1, room)],
-                        }
-                    )
+                    # Share the room with the rest of this batch and keep half for
+                    # later rounds, so one large output cannot end the job before
+                    # the model has read it. Sizes are JSON-escaped, as the budget is.
+                    row = {"role": "tool", "tool_call_id": call.get("id", ""), "content": ""}
+                    used = len(json.dumps(base + [r for done in chunks for r in done] + chunk + [row]))
+                    room = max(0, budget - used) // (len(calls) - index + 1)
+                    text = str(output)
+                    if len(json.dumps(text)) - 2 > room:
+                        note = "\n[output truncated]"
+                        keep = max(0, room - len(note))
+                        text = text[:keep]
+                        # Shrink in proportion to escaped size; each pass strictly shortens.
+                        while text and (size := len(json.dumps(text)) - 2) > keep:
+                            text = text[: len(text) * keep // size]
+                        text += note
+                    row["content"] = text
+                    chunk.append(row)
                 chunks.append(chunk)
             return {
                 "kind": task["kind"],
