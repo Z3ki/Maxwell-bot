@@ -167,10 +167,13 @@ def test_parent_turn_cancellation_does_not_cancel_accepted_job(tmp_path):
         bot, msg, _, engine, manager = environment(tmp_path)
         entered, release, accepted = (asyncio.Event() for _ in range(3))
 
+        replies = iter([call(), ProviderResult("done")])
+
         async def generate(*a, **k):
             entered.set()
             await release.wait()
-            return ProviderResult("done")
+            # A worker must call a tool before its text counts as a result.
+            return next(replies)
 
         bot._generate_response.side_effect = generate
 
@@ -191,6 +194,7 @@ def test_parent_turn_cancellation_does_not_cancel_accepted_job(tmp_path):
             release.set()
             await join(job)
             assert job.row["state"] == "completed"
+            assert bot._generate_response.await_count == 2
         finally:
             release.set()
             parent.cancel()
@@ -254,7 +258,7 @@ def test_app_completion_keeps_visibility_and_never_falls_back_to_public_or_dm(
             is_expired=lambda: expired,
             followup=SimpleNamespace(send=AsyncMock()),
         )
-        bot._generate_response.side_effect = [ProviderResult("result")]
+        bot._generate_response.side_effect = [call(), ProviderResult("result")]
         job = await launch(engine, manager, msg)
         try:
             await join(job)
@@ -287,7 +291,7 @@ def test_failed_delivery_is_not_retried_and_reports_remain_private_retrievable(
     async def run():
         bot, msg, _, engine, manager = environment(tmp_path)
         msg.channel.send.side_effect = OSError("SECRET NETWORK ERROR")
-        bot._generate_response.side_effect = [ProviderResult("result")]
+        bot._generate_response.side_effect = [call(), ProviderResult("result")]
         job = await launch(engine, manager, msg)
         try:
             await join(job)
@@ -553,7 +557,7 @@ def test_user_installed_app_without_server_membership_can_run_non_server_work(tm
             followup=SimpleNamespace(send=AsyncMock()),
         )
         bot.get_guild = lambda gid: None
-        bot._generate_response.side_effect = [ProviderResult("done")]
+        bot._generate_response.side_effect = [call(), ProviderResult("done")]
         job = await launch(engine, manager, msg)
         try:
             await join(job)
@@ -675,7 +679,7 @@ def test_fast_completion_waits_for_origin_answer_without_stealing_deferred_reply
     async def run():
         bot, msg, _, engine, manager = environment(tmp_path)
         bot._active_request_messages = {"45": msg}
-        bot._generate_response.side_effect = [ProviderResult("fast result")]
+        bot._generate_response.side_effect = [call(), ProviderResult("fast result")]
         waiting = asyncio.Event()
         original = manager.wait_for_origin
 
@@ -724,7 +728,9 @@ def test_conversational_status_does_not_dump_all_completed_transcripts_into_chat
     async def run():
         bot, msg, _, engine, manager = environment(tmp_path)
         bot._generate_response.side_effect = [
-            ProviderResult("result-" + "x" * 7000) for _ in range(6)
+            reply
+            for _ in range(6)
+            for reply in (call(), ProviderResult("result-" + "x" * 7000))
         ]
         try:
             for index in range(6):
@@ -744,6 +750,33 @@ def test_conversational_status_does_not_dump_all_completed_transcripts_into_chat
                 )
             )
             assert selected[0]["reports"][0]["report"].startswith("result-")
+        finally:
+            await manager.close()
+
+    asyncio.run(run())
+
+
+def test_text_only_worker_is_nudged_then_ends_as_no_tools_not_completed(tmp_path):
+    # f014bd6: a reply with no tool call ("I'll build it") is not a result.
+    async def run():
+        bot, msg, shell, engine, manager = environment(tmp_path)
+        bot._generate_response.side_effect = [
+            ProviderResult("I'll build the complete game") for _ in range(3)
+        ]
+        job = await launch(engine, manager, msg)
+        try:
+            await join(job)
+            assert bot._generate_response.await_count == 3
+            shell.execute.assert_not_awaited()
+            nudges = bot._generate_response.await_args.args[0]
+            assert sum("You have not called any tools" in str(m) for m in nudges) == 2
+            assert job.row["state"] == "incomplete" and job.row["delivery"] == "sent"
+            assert job.row["effects"] == 0
+            sent = msg.channel.send.await_args.args[0]
+            assert "didn't finish" in sent and "no_tools" in sent
+            assert "I'll build the complete game" not in sent
+            (report,) = (await manager.inspect("123"))[0]["reports"]
+            assert report["status"] == "no_tools" and report["completed"] == []
         finally:
             await manager.close()
 
