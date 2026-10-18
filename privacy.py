@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+import contextvars
 import hashlib
 import logging
 import os
@@ -166,32 +167,70 @@ def consent_store(root):
     return ConsentStore(Path(root) / "plugins" / "maxwell_extras" / "privacy.sqlite3")
 
 
-async def maybe_notice(bot, interaction):
-    """One private, nonblocking disclosure after an interaction has been deferred."""
+_ephemeral_notice: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "maxwell_ephemeral_notice", default=False
+)
+
+
+def notice_text(bot, user_id) -> str | None:
+    """Disclosure copy when this user has not been shown the current version."""
     store = getattr(bot, "_user_preferences", None)
-    if store is None:
-        return
-    uid = str(getattr(getattr(interaction, "user", None), "id", ""))
     urls = policy_urls(getattr(bot, "config", None))
-    if not uid.isdigit() or not {"terms", "privacy"} <= urls.keys():
+    uid = str(user_id or "")
+    if store is None or not uid.isdigit() or not {"terms", "privacy"} <= urls.keys():
+        return None
+    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-2").strip()
+    if not store.consents.claim_notice(uid, version):
+        return None
+    return (
+        "Maxwell sends your request and necessary context to the selected AI provider. "
+        "Saved messages are on until you turn them off in `/config → Privacy`. "
+        "Turning storage off does not stop provider processing. "
+        f"[Terms]({urls['terms']}) · [Privacy]({urls['privacy']})"
+    )
+
+
+def release_notice(bot, user_id) -> None:
+    store = getattr(bot, "_user_preferences", None)
+    uid = str(user_id or "")
+    if store is None or not uid.isdigit():
         return
     version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-2").strip()
+    store.consents.retry_notice(uid, version)
+
+
+async def maybe_notice(bot, interaction):
+    """One private disclosure that stays put.
+
+    An ephemeral follow-up is dismissed by Discord when the Ask Maxwell reply
+    updates the deferred response. A private answer keeps the notice in that
+    reply. A public answer is sent by DM so it is not painted into someone
+    else's channel and then removed.
+    """
+    user = getattr(interaction, "user", None)
+    uid = getattr(user, "id", "")
     try:
-        if not await asyncio.to_thread(store.consents.claim_notice, uid, version):
-            return
-        await interaction.followup.send(
-            "Maxwell sends your request and necessary context to the selected AI provider. "
-            "Saved messages are on until you turn them off in `/config → Privacy`. "
-            "Turning storage off does not stop provider processing. "
-            f"[Terms]({urls['terms']}) · [Privacy]({urls['privacy']})",
-            ephemeral=True,
-        )
+        text = await asyncio.to_thread(notice_text, bot, uid)
+    except Exception:
+        return None
+    if not text:
+        return None
+    ephemeral = _ephemeral_notice.get()
+    try:
+        if ephemeral:
+            return text
+        send = getattr(user, "send", None)
+        if not callable(send):
+            raise TypeError("no dm")
+        await send(text)
     except Exception as exc:
         logger.warning("Private policy notice unavailable (%s)", type(exc).__name__)
         try:
-            await asyncio.to_thread(store.consents.retry_notice, uid, version)
+            await asyncio.to_thread(release_notice, bot, uid)
         except Exception:
             pass
+        return None
+    return text
 
 
 def request_started_at():

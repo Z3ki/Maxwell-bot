@@ -226,23 +226,59 @@ def test_selfhosted_policy_override_and_subpath():
 
 def test_notice_is_private_once_per_version_without_acceptance(tmp_path, monkeypatch):
     async def scenario():
+        from privacy import _ephemeral_notice
+
         store = preferences(tmp_path)
         bot = SimpleNamespace(
             _user_preferences=store,
             config=SimpleNamespace(MAXWELL_PUBLIC_BASE_URL="https://operator.test"),
         )
         interaction = SimpleNamespace(
-            user=SimpleNamespace(id=1), followup=SimpleNamespace(send=AsyncMock())
+            user=SimpleNamespace(id=1, send=AsyncMock()),
+            channel=SimpleNamespace(send=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
         )
-        await asyncio.gather(*(maybe_notice(bot, interaction) for _ in range(8)))
-        assert interaction.followup.send.await_count == 1
-        assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
+        token = _ephemeral_notice.set(True)
+        try:
+            notes = await asyncio.gather(*(maybe_notice(bot, interaction) for _ in range(8)))
+        finally:
+            _ephemeral_notice.reset(token)
+        assert sum(bool(note) for note in notes) == 1
+        assert "Terms" in next(note for note in notes if note)
+        interaction.followup.send.assert_not_awaited()
+        interaction.user.send.assert_not_awaited()
+        interaction.channel.send.assert_not_awaited()
         assert store.consents.review("1") == []
-        await maybe_notice(bot, interaction)
-        assert interaction.followup.send.await_count == 1
+        assert await maybe_notice(bot, interaction) is None
         monkeypatch.setenv("MAXWELL_NOTICE_VERSION", "material-disclosure-3")
-        await maybe_notice(bot, interaction)
-        assert interaction.followup.send.await_count == 2
+        token = _ephemeral_notice.set(True)
+        try:
+            again = await maybe_notice(bot, interaction)
+        finally:
+            _ephemeral_notice.reset(token)
+        assert again and "Terms" in again
+
+    asyncio.run(scenario())
+
+
+def test_public_notice_is_a_dm_and_never_a_channel_followup(tmp_path):
+    async def scenario():
+        bot = SimpleNamespace(
+            _user_preferences=preferences(tmp_path),
+            config=SimpleNamespace(MAXWELL_PUBLIC_BASE_URL="https://operator.test"),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1, send=AsyncMock()),
+            channel=SimpleNamespace(send=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        assert await maybe_notice(bot, interaction)
+        interaction.user.send.assert_awaited_once()
+        assert "Terms" in interaction.user.send.await_args.args[0]
+        interaction.channel.send.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+        assert await maybe_notice(bot, interaction) is None
+        interaction.user.send.assert_awaited_once()
 
     asyncio.run(scenario())
 
@@ -254,14 +290,17 @@ def test_missing_permission_has_no_public_or_dm_fallback(tmp_path):
             config=SimpleNamespace(MAXWELL_PUBLIC_BASE_URL="https://operator.test"),
         )
         interaction = SimpleNamespace(
-            user=SimpleNamespace(id=1, send=AsyncMock()),
+            user=SimpleNamespace(id=1, send=AsyncMock(side_effect=PermissionError())),
             channel=SimpleNamespace(send=AsyncMock()),
-            followup=SimpleNamespace(send=AsyncMock(side_effect=PermissionError())),
+            followup=SimpleNamespace(send=AsyncMock()),
         )
-        await maybe_notice(bot, interaction)
-        interaction.user.send.assert_not_awaited()
+        assert await maybe_notice(bot, interaction) is None
+        interaction.user.send.assert_awaited_once()
         interaction.channel.send.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
         assert bot._user_preferences.consents.review("1") == []
+        interaction.user.send.side_effect = None
+        assert await maybe_notice(bot, interaction)
 
     asyncio.run(scenario())
 
