@@ -92,6 +92,7 @@ from maxwell_core.providers.error_rules import (
 )
 from maxwell_core.providers.protocol import (
     CompletionResponse,
+    ProviderProtocolError,
     normalize_completion_message,
 )
 
@@ -789,9 +790,10 @@ class OpenAICompatibleProvider(ChatProvider):
             )
         except RuntimeError as e:
             # Some endpoints reject tools/function calling with 400. Fall back to
-            # a plain completion so XML tool tags still work.
+            # a plain completion so XML tool tags still work. A truncated or
+            # malformed stream ("invalid tool arguments") is not a rejection.
             err = str(e).lower()
-            if tools and (
+            if tools and not isinstance(e, ProviderProtocolError) and (
                 "tool" in err
                 or "function" in err
                 or "tools is not supported" in err
@@ -1862,12 +1864,12 @@ class OpenAICompatibleProvider(ChatProvider):
             jitter = _random.uniform(0, 0.7)
             wait = round(base + jitter, 2)
             logger.warning(
-                f"{reason} (attempt {attempt}/{self.retry_attempts}), retrying in {wait}s..."
+                f"{reason} (attempt {attempt}/{max_attempts}), retrying in {wait}s..."
             )
             await asyncio.sleep(wait)
         else:
             logger.warning(
-                f"{reason} (attempt {attempt}/{self.retry_attempts}), retrying with {next_endpoint.name} provider..."
+                f"{reason} (attempt {attempt}/{max_attempts}), retrying with {next_endpoint.name} provider..."
             )
             await asyncio.sleep(_random.uniform(0.05, 0.25))
         return True

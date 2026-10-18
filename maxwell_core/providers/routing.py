@@ -9,6 +9,8 @@ import time
 from collections import deque
 from dataclasses import replace
 
+import aiohttp
+
 from .base import ChatProvider
 from .errors import (
     ProviderEmptyResponseError,
@@ -19,6 +21,15 @@ from .errors import (
 from .models import CompletionMessage, ProviderPolicy
 
 logger = logging.getLogger(__name__)
+
+# Dropped, reset or stalled connections that escape a client unwrapped are
+# transient: the same request can succeed on the next attempt.
+_TRANSIENT_TRANSPORT_ERRORS = (
+    aiohttp.ClientError,
+    ConnectionError,
+    asyncio.TimeoutError,
+    asyncio.IncompleteReadError,
+)
 
 
 class ProviderRouter(ChatProvider):
@@ -119,10 +130,17 @@ class ProviderRouter(ChatProvider):
         messages = copy.deepcopy(messages)
         order = self._order(has_media, prefer_fallback)
         dead: set[str] = set()
+        # A per-request budget (e.g. task workers) replaces the router default.
+        requested = kwargs.pop("retry_attempts", None)
+        retry_budget = (
+            self.retry_attempts
+            if requested is None
+            else max(1, min(int(requested), 10))
+        )
         max_attempts = (
-            min(self.retry_attempts, 2)
+            min(retry_budget, 2)
             if fast_fallback and len(order) > 1
-            else self.retry_attempts
+            else retry_budget
         )
         # A media request can have vision, fallback AND primary routes. Reserve
         # an attempt for each rather than retrying only the first two forever.
@@ -184,7 +202,15 @@ class ProviderRouter(ChatProvider):
             )
             attempt_messages.insert(insert_at, model_context)
             try:
-                result = await selected.generate_response(attempt_messages, **options)
+                try:
+                    result = await selected.generate_response(
+                        attempt_messages, **options
+                    )
+                except _TRANSIENT_TRANSPORT_ERRORS as exc:
+                    # Type only: transport messages can carry request URLs.
+                    raise ProviderUnavailableError(
+                        f"Provider connection failed ({type(exc).__name__})"
+                    ) from None
                 self._cooldowns.pop(selected.name, None)
                 self.available = True
                 if result.timing:
