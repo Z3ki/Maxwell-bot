@@ -99,7 +99,7 @@ token). With no window configured it is 2,000,000 characters. Set
 `task_workers_context_chars` only to tighten that. Workers have independent request/job deadlines; chat keeps its own
 normal deadline. Sibling tool calls serialize; model calls may overlap. Controls:
 `premium_task_workers_enabled`, `task_workers_max_active` (1–8),
-`task_workers_max_steps` (1–64), `task_workers_timeout_seconds` (10–7200) and
+`task_workers_max_steps` (1–100, default 100), `task_workers_timeout_seconds` (10–7200) and
 `task_workers_context_chars` (up to 2,000,000). Permission, Premium, privacy and
 source-access checks run before model/tool steps; a two-second watchdog also
 stops long in-flight work when access is revoked. A request already sent externally
