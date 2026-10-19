@@ -129,7 +129,12 @@ def test_opt_in_preserves_custom_command_text_and_execution(workspace, action):
         assert not result.startswith("Error:")
         executed = [args for args, _ in calls if args[:2] == ("docker", "exec")]
         assert len(executed) == 1
-        assert executed[0][-3:] == ("bash", "-lc", command)
+        # The command text stays verbatim inside the timeout bootstrap that
+        # records the guest pid for cleanup.
+        assert executed[0][-3:-1] == ("bash", "-lc")
+        script = executed[0][-1]
+        assert script.startswith("echo $$ > ")
+        assert script.endswith(command + "\n")
 
     asyncio.run(scenario())
 
