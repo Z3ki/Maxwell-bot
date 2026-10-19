@@ -55,7 +55,8 @@ async def select_worker_provider(bot, user_id, inherited=None):
             max_output_tokens=output,
         ),
     )
-    # Ceiling only; the job budget (default or model-requested) applies below it.
+    # Informational ceiling for this route. The job deadline itself comes from
+    # provider_limits.worker_job_timeout_seconds (default or model-requested).
     provider.turn_timeout_seconds = max(
         worker_timeout_seconds(bot), WORKER_TIMEOUT_MAX_SECONDS
     )

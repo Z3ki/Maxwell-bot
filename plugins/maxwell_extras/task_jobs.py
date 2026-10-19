@@ -103,7 +103,7 @@ class TaskJobs:
                 args["timeout_minutes"] = timeout_minutes
             jsonschema.validate(args, engine.parameters)
         except jsonschema.ValidationError:
-            return "Error: supply one or two scoped tasks (timeout_minutes is 1-30)"
+            return "Error: supply one or two scoped tasks (timeout_minutes is 1-240)"
         tasks = json.loads(json.dumps(tasks))
         if self.closed:
             return "refused: worker manager is stopping"

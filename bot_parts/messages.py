@@ -113,7 +113,7 @@ class MessagesMixin:
                     "live_turn_timeout_seconds",
                     DEFAULT_CONTROL["live_turn_timeout_seconds"],
                     1,
-                    7200,
+                    14400,
                 )
             ):
                 reason = await self._on_message_impl(message)

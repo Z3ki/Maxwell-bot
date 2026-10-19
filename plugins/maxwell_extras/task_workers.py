@@ -12,10 +12,9 @@ from typing import ClassVar
 
 from tools import Tool
 from provider_limits import (
+    WORKER_TIMEOUT_MAX_SECONDS,
     request_timeout_seconds,
-    requested_worker_timeout_seconds,
-    turn_timeout_seconds,
-    worker_timeout_seconds,
+    worker_job_timeout_seconds,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,8 +185,8 @@ class DelegateTaskTool(Tool):
             "timeout_minutes": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 30,
-                "description": "Optional whole-job time budget in minutes. Default 20; use up to 30 for big builds.",
+                "maximum": WORKER_TIMEOUT_MAX_SECONDS // 60,
+                "description": "Optional whole-job time budget in minutes. Default 120; use up to 240 for very big builds.",
             },
         },
         "required": ["tasks"],
@@ -203,7 +202,7 @@ class DelegateTaskTool(Tool):
         return (
             "Premium: hand substantial work to a subagent. Delegate one or two focused tasks. Each task is the concrete work to do, with the requirements and context that job needs. "
             "The subagent uses the caller's existing tools. It uses a dedicated personal worker connection, chat BYOK, the operator worker model, or the default AI, in that order, with bounded "
-            "steps and time (20 minutes by default; set timeout_minutes up to 30 for large builds). Returns a background job ID immediately; keep chatting while it runs. "
+            "steps and time (120 minutes by default; set timeout_minutes up to 240 for very large builds). Returns a background job ID immediately; keep chatting while it runs. "
             "Do not poll or wait in this turn. Completion returns to the originating context. "
             "Use manage_tasks for status or requested cancellation. Do not launch duplicate work or change the same files while a job runs. "
             "Workers cannot send chat messages, export files or delegate recursively. Reports can describe partial work; do not claim success "
@@ -275,14 +274,7 @@ class DelegateTaskTool(Tool):
             except Exception as exc:
                 _log_failure("provider selection", exc)
                 return "Error: worker AI connection is unavailable; no task started. Review /config → More options → Subagent AI provider or ask the operator."
-            budget = requested_worker_timeout_seconds(
-                worker_timeout_seconds(self.bot), timeout_minutes
-            )
-            timeout = (
-                min(turn_timeout_seconds(self.bot, provider), budget)
-                if getattr(provider, "turn_timeout_seconds", None)
-                else budget
-            )
+            timeout = worker_job_timeout_seconds(self.bot, timeout_minutes)
             async with asyncio.timeout(timeout):
                 reports = await asyncio.gather(
                     *(
