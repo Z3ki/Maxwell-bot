@@ -61,7 +61,7 @@ Historical host/PM2 files may remain for compatibility/migration, but Docker is 
 
 Plugins register tools through `maxwell_core`. Schemas are normalized in `tool_schemas.py`, and the host dispatches calls through the live registry. Multi-step work runs within the active user request; delegated background workers have been removed. Plugin timers remain available for ordinary maintenance such as reminder delivery.
 
-Tools marked destructive are fail-closed when the current turn has been tainted by fetched/web content. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action.
+Tools marked destructive are fail-closed when the current turn has been tainted by fetched/web content, with `shell` as the documented exception: it stays available so Maxwell can follow up on a fetched URL, but only inside the per-tenant gVisor sandbox. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action.
 
 ## Memory
 

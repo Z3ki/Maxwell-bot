@@ -21,7 +21,9 @@ Open a private security advisory or contact the maintainer privately before disc
 
 ## Fetched/web content and destructive tools
 
-Fetched pages and web-search results are untrusted input. When the current turn becomes tainted by fetched/web content, tools marked destructive are blocked for that turn. A fresh user message starts a clean turn.
+Fetched pages and web-search results are untrusted input. When the current turn becomes tainted by fetched/web content, tools marked destructive are blocked for that turn. `shell` is the deliberate exception: it stays available so Maxwell can follow up on a URL in the same turn.
+
+Because `shell` is allowed on a tainted turn, a page with planted instructions can cause shell commands to run. The remaining boundary is the per-tenant gVisor sandbox: the guest has no host filesystem, Docker socket, repository, database, or application credentials; the host egress firewall blocks private and internal ranges; and the container has CPU, memory, process, and time limits. Shell can still make outbound requests to public hosts from inside that sandbox. A fresh user message starts a clean turn.
 
 The previous manual-confirmation override flow was removed. There is no confirmation command that converts a tainted destructive action into an allowed one.
 
