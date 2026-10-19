@@ -670,8 +670,16 @@ class CoreMixin:
             shards = None
         if isinstance(shards, dict) and shards:
             for info in shards.values():
-                ws = getattr(info, "ws", None)
                 try:
+                    # discord.ShardInfo has no `ws` attribute; it exposes
+                    # is_closed(). Reading `ws` made this always report
+                    # disconnected on an AutoShardedBot.
+                    is_closed = getattr(info, "is_closed", None)
+                    if callable(is_closed):
+                        if not is_closed():
+                            return True
+                        continue
+                    ws = getattr(info, "ws", None)
                     if ws is not None and bool(getattr(ws, "open", False)):
                         return True
                 except Exception:

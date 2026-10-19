@@ -288,7 +288,7 @@ def should_consider_reply(pressure: float,
 
 
 def describe_signal(signal: AddressSignal, state: WatchState, pressure: float,
-                    now: float) -> str:
+                    now: float, threshold: float = REPLY_PRESSURE_THRESHOLD) -> str:
     """One compact line of facts for the prompt, instead of prose rules.
 
     The model is better at deciding "is this for me" from the actual
@@ -317,10 +317,10 @@ def describe_signal(signal: AddressSignal, state: WatchState, pressure: float,
         bits.append(f"room pace ~{state.interval_ema:.0f}s between lines")
     bits.append(
         f"reply pressure {pressure:.2f} (bar for speaking unprompted: "
-        f"{REPLY_PRESSURE_THRESHOLD:.2f})"
+        f"{threshold:.2f})"
     )
     line = "Watch signals: " + "; ".join(bits) + "."
-    if not signal.direct and pressure < REPLY_PRESSURE_THRESHOLD + 0.2:
+    if not signal.direct and pressure < threshold + 0.2:
         # Say it as a fact about this line, not as another rule. The numbers
         # above already describe the situation; this names what they add up
         # to, which is the part the model kept talking itself out of.

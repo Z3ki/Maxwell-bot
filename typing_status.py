@@ -23,7 +23,6 @@ their own isolated state.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 from typing import Any
 
@@ -109,11 +108,14 @@ class ChannelTyping:
         if cm is None:
             return
         task = getattr(cm, "task", None)
-        with contextlib.suppress(asyncio.CancelledError, Exception):
+        # Suppress ordinary failures only. Swallowing CancelledError here meant
+        # a task cancelled during typing cleanup returned normally and never
+        # propagated its cancellation.
+        with contextlib.suppress(Exception):
             await cm.__aexit__(None, None, None)
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(Exception):
                 await task
 
 

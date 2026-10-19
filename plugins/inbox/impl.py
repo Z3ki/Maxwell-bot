@@ -44,13 +44,18 @@ class InboxListTool(Tool):
         # item — he asked for the list, so give him the whole thing.
         ordered = store.planner_items(items)
         lines = [f"Inbox ({len(items)} actionable):"]
-        lines.extend(
-            store.render_item(item, summary_chars=300) for item in ordered[:20]
-        )
-        if len(items) > len(ordered):
-            lines.append(f"… {len(items) - len(ordered)} more not shown")
+        # planner_items caps each kind, so the combined list can still exceed
+        # 20. Compare against what was actually rendered, not the pre-slice
+        # length, or items past the slice vanish without the overflow line.
         shown = ordered[:20]
-        if any(str(item.get("kind") or "") == "email" for item in shown):
+        lines.extend(store.render_item(item, summary_chars=300) for item in shown)
+        if len(items) > len(shown):
+            lines.append(f"… {len(items) - len(shown)} more not shown")
+        if shown:
+            # Every rendered row carries text chosen by someone else — an email
+            # subject, a friend-request name, a group-DM name — not just the
+            # email kind. Arm the injection taint gate whenever any of it
+            # reaches the model.
             marker = getattr(self.bot, "mark_message_tainted", None)
             if callable(marker):
                 marker(message)

@@ -320,6 +320,12 @@ class GitHubProjectService:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45))
         return self._session
 
+    async def close(self) -> None:
+        """Release the shared HTTP session (called from the plugin teardown)."""
+        session, self._session = self._session, None
+        if session is not None and not session.closed:
+            await session.close()
+
     def token(self, uid: str, identity: str = "user") -> str:
         if identity == "bot": return str(os.getenv("MAXWELL_GITHUB_TOKEN","") or "").strip()
         safe = re.sub(r"[^0-9A-Za-z]", "_", uid)

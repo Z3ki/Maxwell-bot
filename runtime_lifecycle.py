@@ -63,6 +63,11 @@ def shard_launch_kwargs() -> dict[str, Any]:
         count = max(ids) + 1
     if count is None and not ids:
         return {}
+    if count is not None:
+        # discord.py raises ValueError('shard_ids must be within range of
+        # shard_count') at Client construction, aborting startup. Drop ids at
+        # or above the count rather than let a typo take the bot down.
+        ids = [value for value in ids if value < count]
     kwargs: dict[str, Any] = {}
     if count is not None:
         kwargs["shard_count"] = count

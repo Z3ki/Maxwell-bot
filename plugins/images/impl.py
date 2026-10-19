@@ -299,9 +299,9 @@ class HDImageGeneratorTool(Tool):
                 ) as response:
                     body = await response.text()
                     if response.status != 200:
-                        logger.error(
-                            f"HD image API error: {response.status} - {body[:500]}"
-                        )
+                        # Status only: the response body can echo the private
+                        # prompt (or image metadata) back into the logs.
+                        logger.error("HD image API error: %s", response.status)
                         if "quota" in body.lower():
                             return (
                                 f"Error: the image model ({model}) has no quota right now."

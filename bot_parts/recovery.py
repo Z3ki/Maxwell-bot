@@ -43,11 +43,17 @@ class RecoveryMixin:
             floors = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             floors = {}
+        except (OSError, ValueError) as exc:
+            # A damaged sidecar file must not take down startup or every
+            # gateway recovery event; treat it as empty and carry on.
+            logger.warning("inbound recovery floors unreadable (%s); ignoring", exc)
+            floors = {}
         if not isinstance(floors, dict) or any(
             not str(cid).isdigit() or not isinstance(mid, int) or mid < 0
             for cid, mid in floors.items()
         ):
-            raise ValueError("Invalid inbound recovery floors")
+            logger.warning("inbound recovery floors invalid; ignoring")
+            floors = {}
         self._failed_receipt_floors = floors
 
     def _save_failed_receipt_floors(self) -> None:
@@ -88,6 +94,14 @@ class RecoveryMixin:
         journal = getattr(self, "_request_journal", None)
         boot = float(getattr(self, "_process_started_at", 0) or 0)
         if journal is None or boot <= 0:
+            return 0
+        suppress = getattr(journal, "suppress_stale", None)
+        if callable(suppress):
+            # One batched transaction rather than one fsync per stale row; this
+            # runs synchronously inside setup_hook, so it must not block the
+            # event loop for thousands of writes.
+            with contextlib.suppress(Exception):
+                return int(suppress(boot, reason="stale_offline"))
             return 0
         dropped = 0
         for row in journal.pending(limit=10000):

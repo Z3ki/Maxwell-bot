@@ -96,11 +96,25 @@ def _rag_db() -> sqlite3.Connection:
     return conn
 
 
+def _rag_missing_table(exc: sqlite3.Error) -> bool:
+    """True when the read failed only because the bot has not created the schema."""
+    return "no such table" in str(exc)
+
+
 def _rag_query(sql: str, params: tuple = ()) -> list:
-    """Run a SELECT and return all rows, closing the connection after."""
+    """Run a SELECT and return all rows, closing the connection after.
+
+    A missing table means the bot has not run yet (fresh install, recreated DB);
+    report an empty result rather than 500 so the dashboard still loads.
+    """
     conn = _rag_db()
     try:
-        return conn.execute(sql, params).fetchall()
+        try:
+            return conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            if _rag_missing_table(e):
+                return []
+            raise
     finally:
         conn.close()
 
@@ -109,7 +123,12 @@ def _rag_query_one(sql: str, params: tuple = ()):
     """Run a SELECT and return one row (or None), closing after."""
     conn = _rag_db()
     try:
-        return conn.execute(sql, params).fetchone()
+        try:
+            return conn.execute(sql, params).fetchone()
+        except sqlite3.OperationalError as e:
+            if _rag_missing_table(e):
+                return None
+            raise
     finally:
         conn.close()
 
@@ -2279,10 +2298,14 @@ async def plugins_enable(request):
     if request.can_read_body:
         with contextlib.suppress(Exception):
             body = await request.json()
-    is_global = bool((body or {}).get("is_global", True))
+    if not isinstance(body, dict):
+        # A JSON array/string is syntactically valid but has no keys; treat it
+        # as an empty body instead of raising AttributeError into a 500.
+        body = {}
+    is_global = bool(body.get("is_global", True))
     cmd_id, err = await _queue_command(
         "plugin_enable",
-        extra={"plugin": name, "is_global": is_global, "user_id": (body or {}).get("user_id")},
+        extra={"plugin": name, "is_global": is_global, "user_id": body.get("user_id")},
     )
     if err:
         return _json_response({"error": err}, 409)
@@ -2297,10 +2320,12 @@ async def plugins_disable(request):
     if request.can_read_body:
         with contextlib.suppress(Exception):
             body = await request.json()
-    is_global = bool((body or {}).get("is_global", True))
+    if not isinstance(body, dict):
+        body = {}
+    is_global = bool(body.get("is_global", True))
     cmd_id, err = await _queue_command(
         "plugin_disable",
-        extra={"plugin": name, "is_global": is_global, "user_id": (body or {}).get("user_id")},
+        extra={"plugin": name, "is_global": is_global, "user_id": body.get("user_id")},
     )
     if err:
         return _json_response({"error": err}, 409)
@@ -2338,12 +2363,14 @@ async def plugins_install(request):
         body = await request.json()
     except Exception:
         return _json_response({"error": "JSON object required"}, 400)
-    path = str((body or {}).get("path") or "").strip()
+    if not isinstance(body, dict):
+        return _json_response({"error": "JSON object required"}, 400)
+    path = str(body.get("path") or "").strip()
     if not path:
         return _json_response({"error": "path is required"}, 400)
     cmd_id, err = await _queue_command(
         "plugin_install",
-        extra={"path": path, "replace": bool((body or {}).get("replace"))},
+        extra={"path": path, "replace": bool(body.get("replace"))},
     )
     if err:
         return _json_response({"error": err}, 409)

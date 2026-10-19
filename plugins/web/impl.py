@@ -23,6 +23,12 @@ del _name
 
 from plugins.media.impl import SeeImageTool, SeeVideoTool  # noqa: E402
 
+# Hard cap on a fetched body. fetch_url hands the bytes to the media tools and
+# to the text decoder, so an unbounded read let a model-invoked fetch on a URL
+# that streams a multi-GB body (or an endless stream) exhaust RAM. 25 MB matches
+# the media tools' own MAX_SIZE.
+MAX_FETCH_BYTES = 25 * 1024 * 1024
+
 
 def _authorize_nested_media(bot: Any, message: Any, tool_name: str, url: str):
     """Apply the normal dispatcher policy before an internal tool delegation."""
@@ -289,7 +295,7 @@ class FetchUrlTool(Tool):
             fetch_timeout = getattr(getattr(self.bot, "config", None), "WEB_FETCH_TIMEOUT", 12.0)
             deadline = time.monotonic() + fetch_timeout
             url, content_type, raw = await _fetch_public_url(
-                url, max_bytes=None, timeout=fetch_timeout
+                url, max_bytes=MAX_FETCH_BYTES, timeout=fetch_timeout
             )
         except ValueError as e:
             msg = str(e)
@@ -299,7 +305,7 @@ class FetchUrlTool(Tool):
                     if remaining <= 0:
                         return "Error: source page deadline exceeded"
                     url, content_type, raw = await _fetch_via_jina_reader(
-                        url, max_bytes=None, timeout=remaining
+                        url, max_bytes=MAX_FETCH_BYTES, timeout=remaining
                     )
                 except Exception as jina_exc:
                     detail = str(jina_exc).strip() or type(jina_exc).__name__

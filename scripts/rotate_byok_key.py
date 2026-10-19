@@ -19,8 +19,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--database",
-        default=os.path.join(os.environ.get("DATA_DIR", "data"), "byok.sqlite3"),
-        help="BYOK SQLite file (default: DATA_DIR/byok.sqlite3)",
+        # The bot (and the dashboard) keep this under the plugin's own data
+        # directory, not DATA_DIR/byok.sqlite3 — the old default opened (and
+        # "rotated") an empty database nobody reads.
+        default=os.path.join(
+            os.environ.get("DATA_DIR", "data"),
+            "plugins",
+            "maxwell_extras",
+            "byok.sqlite3",
+        ),
+        help="BYOK SQLite file (default: DATA_DIR/plugins/maxwell_extras/byok.sqlite3)",
     )
     args = parser.parse_args()
     vault = CredentialVault(Path(args.database))

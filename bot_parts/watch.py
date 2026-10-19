@@ -219,7 +219,15 @@ class WatchMixin:
                 pressure = watch_policy.reply_pressure(
                     signal, state, now, self._conversation_watch_seconds()
                 )
-                lines.append(watch_policy.describe_signal(signal, state, pressure, now))
+                lines.append(
+                    watch_policy.describe_signal(
+                        signal,
+                        state,
+                        pressure,
+                        now,
+                        threshold=self._watch_pressure_threshold(),
+                    )
+                )
                 # The gate already refused everything well below the bar, so
                 # a line that got here and is still only just over it is the
                 # marginal case — say so rather than leaving him to guess.

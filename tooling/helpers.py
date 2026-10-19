@@ -103,7 +103,12 @@ try:
     _load_dotenv_early(
         _PathEarly(
             os.getenv(
-                "MAXWELL_ENV_FILE", _PathEarly(__file__).resolve().parent / ".env"
+                # This module lives in tooling/, but the .env it documents is at
+                # the repo root (config.py / doctor.py / api.storage all resolve
+                # APP_ROOT/.env). `parent` pointed at tooling/.env, so the
+                # documented early preload never loaded anything.
+                "MAXWELL_ENV_FILE",
+                _PathEarly(__file__).resolve().parents[1] / ".env",
             )
         ),
         override=False,
@@ -341,6 +346,7 @@ def _scan_bash_heredocs(command: str) -> tuple[list[dict[str, Any]], bool]:
     i = 0
     in_single = False
     in_double = False
+    arith_depth = 0
     blocks: list[dict[str, Any]] = []
     saw_unparsed = False
 
@@ -366,6 +372,17 @@ def _scan_bash_heredocs(command: str) -> tuple[list[dict[str, Any]], bool]:
         if c == "\\" and i + 1 < n:
             i += 2
             continue
+        # Arithmetic expansion `$(( ... ))`. A `<<` here is the left-shift
+        # operator, never a heredoc opener; without this the shift was reported
+        # as an unparseable heredoc and the whole command was rejected.
+        if c == "$" and text.startswith("((", i + 1):
+            arith_depth += 1
+            i += 3
+            continue
+        if c == ")" and arith_depth > 0 and text.startswith("))", i):
+            arith_depth -= 1
+            i += 2
+            continue
         if c == "'":
             in_single = True
             i += 1
@@ -377,6 +394,9 @@ def _scan_bash_heredocs(command: str) -> tuple[list[dict[str, Any]], bool]:
         if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|(){}"):
             nl = text.find("\n", i)
             i = n if nl < 0 else nl
+            continue
+        if arith_depth > 0:
+            i += 1
             continue
         if c == "<" and i + 1 < n and text[i + 1] == "<":
             if i + 2 < n and text[i + 2] == "<":
@@ -727,7 +747,10 @@ def _canon_perm(name: str) -> str:
 
 
 def _perms_to_caps(perms) -> tuple[set[str], str]:
-    if not perms:
+    # `not perms` is True for discord.Permissions.none() too, which is a valid
+    # cached Permissions with every bit clear (a plain member, or a bot with no
+    # elevated rights). Only None means "we could not read them".
+    if perms is None:
         return set(), "permissions are not cached"
     caps: set[str] = set()
     if getattr(perms, "administrator", False):

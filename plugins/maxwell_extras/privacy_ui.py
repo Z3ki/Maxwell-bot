@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+
 import discord
+
+logger = logging.getLogger(__name__)
 
 from privacy import VOICE_VERSION, policy_urls, voice_policy
 from privacy_data import delete_live_data, deletion_text
@@ -135,7 +139,18 @@ class PrivacyButton(discord.ui.Button):
             return
         await _acknowledge(interaction, thinking=True)
         if self.action == "confirm_delete":
-            result = await delete_live_data(self.panel.bot, self.panel.user_id)
+            try:
+                result = await delete_live_data(self.panel.bot, self.panel.user_id)
+            except Exception as exc:
+                # Deletion aborts when suppression cannot be persisted, and that
+                # used to surface as no response at all. Tell the user instead.
+                logger.warning("Privacy deletion failed (%s)", type(exc).__name__)
+                await _send(
+                    interaction,
+                    "Could not complete the deletion: your storage setting could "
+                    "not be saved, so nothing was removed. Please try again.",
+                )
+                return
             await _send(interaction, deletion_text(result))
             return
         if self.action == "withdraw":

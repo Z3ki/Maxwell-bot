@@ -209,13 +209,17 @@ class CreateSiteTool(Tool):
             if not title:
                 title = _title_from_html(body) or "hosted page"
         has_index = any(f["path"] == "index.html" for f in extra_files)
-        if not name or not title or (body is None and not has_index):
+        # A blank body is as useless as a missing one: it used to pass the
+        # guard, skip the write, and still report a published site whose URL
+        # serves nothing.
+        blank_body = not str(body or "").strip()
+        if not name or not title or (blank_body and not has_index):
             missing = []
             if not name:
                 missing.append("name")
             if not title:
                 missing.append("title")
-            if body is None and not has_index:
+            if blank_body and not has_index:
                 missing.append("body (or url= of an HTML file, or files with an index.html)")
             return (
                 f"Error: missing required params — {', '.join(missing)}. "
@@ -844,6 +848,13 @@ class DeleteSiteTool(_SiteOwnedTool):
         # Container, server code, database, and secrets go too.
         with contextlib.suppress(Exception):
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
+        # Drop the site's knowledge-graph node and edges; index_site only
+        # rebuilds slugs still in sites.json, so a deleted site's subgraph
+        # would otherwise linger in the prompt block forever.
+        with contextlib.suppress(Exception):
+            from knowledge_graph import drop_site as _drop_site_graph
+
+            await asyncio.to_thread(_drop_site_graph, self.bot, slug)
         if save_error is not None:
             return f"Error deleting site '{slug}': {save_error}"
         return (

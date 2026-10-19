@@ -223,6 +223,7 @@ class ConversationMemoryManager:
         self.db_path = self.data_dir / "maxwell_rag.db"
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maxwell-history")
         self._closed = False
+        self._close_future = None
         self._db = sqlite3.connect(str(self.db_path), isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -492,12 +493,20 @@ class ConversationMemoryManager:
         """History is queried directly; nothing is loaded into a global cache."""
 
     async def flush(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # FIFO executor ordering drains accepted work before closing the connection.
-        future = asyncio.get_running_loop().run_in_executor(self._executor, self._db.close)
+        if self._close_future is None:
+            self._closed = True
+            # FIFO executor ordering drains accepted work before closing the
+            # connection. Every caller shares this one future, so a second
+            # concurrent flush cannot report done while the close is still
+            # queued behind earlier work.
+            self._close_future = asyncio.get_running_loop().run_in_executor(
+                self._executor, self._db.close
+            )
+            owner = True
+        else:
+            owner = False
         try:
-            await asyncio.shield(future)
+            await asyncio.shield(self._close_future)
         finally:
-            self._executor.shutdown(wait=False)
+            if owner:
+                self._executor.shutdown(wait=False)

@@ -148,7 +148,15 @@ async def main():
     )
 
     async def _gateway_watchdog():
-        threshold = float(os.getenv("MAXWELL_GATEWAY_TIMEOUT", "90"))
+        try:
+            threshold = float(os.getenv("MAXWELL_GATEWAY_TIMEOUT", "90"))
+        except (TypeError, ValueError):
+            # A malformed value must not kill the watchdog task before its
+            # loop starts, which would disable gateway-restart recovery.
+            logger.warning(
+                "MAXWELL_GATEWAY_TIMEOUT is not a number; using 90s"
+            )
+            threshold = 90.0
         interval = 15
         while True:
             await asyncio.sleep(interval)
@@ -238,7 +246,11 @@ async def main():
                 await pm.teardown()
         for task in getattr(bot, "_tasks", []):
             cancel_once(task)
-            with contextlib.suppress(asyncio.CancelledError):
+            # A tracked task that already finished with an exception re-raises
+            # it on await; suppressing only CancelledError let one failed
+            # background task (e.g. a shard-resync disk write) abort the rest
+            # of shutdown cleanup.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         # Cancel in-flight reply tasks so a restart does not leak them.
         def _iter_tasks(task_dict):

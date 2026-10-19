@@ -54,6 +54,17 @@ class _CustomToolCallBuffer:
         """Whether a possible JSON opener remains hidden in the working tail."""
         return self._buf.rfind("{") > self._buf.rfind("}")
 
+    @property
+    def truncated_tool_call(self) -> bool:
+        """Whether the stream ended inside a custom tool-call object.
+
+        Distinguishes a cut-off tool call (``{"name": "shell", ...`` with no
+        closing brace) from ordinary prose that merely contains a stray ``{``:
+        only an unmatched opener pattern counts. Callers use this to reject the
+        stream instead of posting the raw JSON as the assistant reply.
+        """
+        return self.has_pending_json and _CUSTOM_TOOL_OPEN_RE.search(self._buf) is not None
+
     def feed(self, delta: str) -> str:
         """Accumulate a text delta, returning the newly revealed visible text."""
         if not delta:

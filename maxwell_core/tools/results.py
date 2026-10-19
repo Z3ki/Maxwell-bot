@@ -38,6 +38,16 @@ _PROMISE_MAX_CHARS = 200
 _SHORT_FOLLOWUP_AFTER_SEND_CHARS = 200
 
 
+# A negated promise verb is a refusal, not a plan: "I'm not going to create
+# that site." must not force another model turn. Checked per clause so
+# "not now — I'll build it" still counts as a promise.
+_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|cannot|can'?t|won'?t|don'?t|doesn'?t|didn'?t|isn'?t|"
+    r"aren'?t|unable|refus(?:e|es|ed|ing)|stop(?:ped|ping|s)?)\b",
+    re.I,
+)
+
+
 def _promises_followup_work(result: str) -> bool:
     """True when a send_message result is a bare "on it…" promise.
 
@@ -50,7 +60,13 @@ def _promises_followup_work(result: str) -> bool:
     sent = result[idx + len("__MESSAGE_SENT__") :].strip()
     if not sent or len(sent) > _PROMISE_MAX_CHARS:
         return False
-    return bool(_PROMISE_RE.search(sent))
+    for clause in re.split(r"[.!?;\n,—–]+", sent):
+        if not _PROMISE_RE.search(clause):
+            continue
+        if _NEGATION_RE.search(clause):
+            continue
+        return True
+    return False
 
 
 def _plugin_result_needs_followup(result: str) -> bool:
