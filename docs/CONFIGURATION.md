@@ -251,7 +251,7 @@ For `/maxwell`, fast answers use the original deferred interaction. A tool-backe
 
 ## Tool safety behavior
 
-Tools marked destructive are blocked when the current turn has been tainted by fetched/web content. A fresh user message starts a clean turn. There is no manual confirmation command that overrides a tainted destructive action.
+Tools marked destructive are blocked when the current turn has been tainted by fetched/web content, except `shell`, which remains available on purpose so Maxwell can follow up on a URL. Shell still runs only inside the per-tenant gVisor sandbox. A fresh user message starts a clean turn. There is no manual confirmation command that overrides a tainted destructive action.
 
 See [../SECURITY.md](../SECURITY.md) for the Docker-daemon trust boundary and deployment warnings.
 
