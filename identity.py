@@ -175,10 +175,6 @@ def identity_values(
         "self_id_paren": f" (ID {self_id})" if self_id else "",
         "primary_id": self_id_primary,
         "primary_id_paren": f" (ID {self_id_primary})" if self_id_primary else "",
-        "partner_name": "",
-        "partner_id": "",
-        "partner_line": "",
-        "partner_id_paren": "",
     }
 
 

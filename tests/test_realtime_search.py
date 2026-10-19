@@ -297,19 +297,18 @@ def test_deadline_includes_queueing_and_close_cancels_shared_work():
     asyncio.run(scenario())
 
 
-def test_searxng_works_without_ddgs_and_memory_writes_do_not_delay_response(
+def test_searxng_works_without_ddgs_and_does_not_persist_web_results(
     monkeypatch,
 ):
     monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", False)
     monkeypatch.setattr("bot_tools._DDGS", None)
 
     async def scenario():
-        storing = asyncio.Event()
+        stored = []
 
         class Memory:
-            async def store_web_results(self, **_kwargs):
-                storing.set()
-                await asyncio.Event().wait()
+            async def store_web_results(self, **kwargs):
+                stored.append(kwargs)
 
         async def handler(_request):
             return web.json_response({"results": [HIT]})
@@ -328,10 +327,9 @@ def test_searxng_works_without_ddgs_and_memory_writes_do_not_delay_response(
                 result = await asyncio.wait_for(
                     tool.execute(None, query="devices"), timeout=1
                 )
-                await storing.wait()
                 assert "https://example.org/devices" in result
                 assert "retrieved_at=" in result
-                assert len(tool._store_tasks) <= 2
+                assert stored == []
             finally:
                 await tool.close()
 
