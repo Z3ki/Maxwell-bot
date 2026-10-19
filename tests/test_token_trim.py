@@ -6,14 +6,12 @@ different generator.
 """
 
 import asyncio
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from bot import MaxwellBot, ToolCircuitBreaker
-from rag_memory import RAGMemoryManager
 
 
 class FakeTool:
@@ -236,14 +234,3 @@ def test_emoji_grid_skipped_unless_asked():
 
     asyncio.run(run())
 
-
-def test_spawn_skips_when_embed_endpoint_is_paused(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
-    mgr._embed_endpoint_down_until = time.monotonic() + 60
-    ran = []
-
-    async def work():
-        ran.append(1)
-
-    assert mgr._spawn(work()) is None
-    assert ran == []

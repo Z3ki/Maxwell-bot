@@ -248,7 +248,6 @@ DEAD_CONTROL_KEYS = frozenset(
         "intel_interval_seconds",
         "intel_feed_urls",
         "intel_run_history",
-        "autonomy_drives_enabled",
         # Removed memory actors and delegated workers must stay retired even
         # when an existing bot_control.json still enables them.
         'aux_api_key',
@@ -297,7 +296,6 @@ DEAD_CONTROL_KEYS = frozenset(
         "x_posts_per_hour",
         "x_cache_seconds",
         "x_mention_poll_seconds",
-        "x_autonomy_post",
         # Retired token spend caps; message counts are the only usage measure.
         "daily_user_token_limit_enabled",
         "daily_user_token_limit",

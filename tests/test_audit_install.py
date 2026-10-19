@@ -101,10 +101,8 @@ def test_first_install_runs_configuration_wizard(tmp_path):
     assert values["OLLAMA_MODEL"] == "test-model"
     assert values["MAXWELL_ADMIN_PASSWORD"] == "test-password"
     assert values["MAXWELL_OWNER_IDS"] == "123"
-    assert values["ENABLE_AUTONOMY"] == "false"
     assert values["ENABLE_SHELL"] == "false"
     assert not values["MAXWELL_PUBLIC_BASE_URL"]
-    assert "MAXWELL_EMBED_MODEL" not in values
     assert not values["GEMINI_IMAGE_MODEL"]
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
 
@@ -124,7 +122,6 @@ def test_bridge_rewrite_changes_only_local_connection_addresses(tmp_path):
         'OLLAMA_BASE_URL="http://user:localhost@localhost:11434/v1?x=127.0.0.1"\n'
         "AUX_BASE_URL=https://localhost.example/v1\n"
         "X_API_BASE_URL=https://remote.example/localhost\n"
-        "MAXWELL_EMBED_BASE_URL=http://127.0.0.1:11434\n"
         "MAXWELL_SMTP_HOST=127.0.0.1\n"
         'MAXWELL_IMAP_HOST="localhost" # mailbox\n'
         "MAXWELL_API_HOST=127.0.0.1\n"
@@ -139,7 +136,6 @@ def test_bridge_rewrite_changes_only_local_connection_addresses(tmp_path):
         values["OLLAMA_BASE_URL"]
         == "http://user:localhost@host.docker.internal:11434/v1?x=127.0.0.1"
     )
-    assert values["MAXWELL_EMBED_BASE_URL"] == "http://host.docker.internal:11434"
     assert values["MAXWELL_SMTP_HOST"] == "host.docker.internal"
     assert values["MAXWELL_IMAP_HOST"] == "host.docker.internal"
     assert values["MAXWELL_API_HOST"] == "0.0.0.0"

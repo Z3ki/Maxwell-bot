@@ -15,7 +15,6 @@ from conftest import clean_env
 
 import config as config_module
 from providers import normalize_base_url
-from rag_memory import _embed_endpoint, _extract_embeddings
 
 
 @pytest.mark.parametrize(
@@ -103,7 +102,7 @@ def test_retired_memory_agent_environment_flags_are_ignored():
     ) == "False"
 
 
-@pytest.mark.parametrize("flag", ["ENABLE_CREATE_SITE", "ENABLE_HD_IMAGE", "ENABLE_RAG", "ENABLE_SHELL", "ENABLE_AUTONOMY", "MAXWELL_RESTRICT_PUBLIC_RUNTIME"])
+@pytest.mark.parametrize("flag", ["ENABLE_CREATE_SITE", "ENABLE_HD_IMAGE", "ENABLE_SHELL", "MAXWELL_RESTRICT_PUBLIC_RUNTIME"])
 def test_unconfigured_integrations_are_off(flag):
     assert _config_value(flag) == "False"
 
@@ -120,7 +119,7 @@ def test_configured_integrations_enable_and_respect_explicit_off(flag, settings)
 @pytest.mark.parametrize("template", [".env.example", ".env.simple.example"])
 def test_shipped_templates_do_not_enable_unconfigured_integrations(template):
     code = "from config import Config; print(any(getattr(Config, name) for name in " \
-           "['ENABLE_CREATE_SITE','ENABLE_HD_IMAGE','ENABLE_RAG','ENABLE_SHELL']))"
+           "['ENABLE_CREATE_SITE','ENABLE_HD_IMAGE','ENABLE_SHELL']))"
     assert _run(code, {"MAXWELL_ENV_FILE": str(Path(__file__).resolve().parents[1] / template)}) == "False"
 
 
@@ -217,29 +216,3 @@ def test_validate_names_the_missing_requirement(missing, expected):
 def test_base_url_normalization(given, expected):
     assert normalize_base_url(given) == expected
 
-
-@pytest.mark.parametrize(
-    "given,expected",
-    [
-        ("http://localhost:11434", "http://localhost:11434/api/embed"),
-        ("https://api.openai.com/v1", "https://api.openai.com/v1/embeddings"),
-        ("https://api.openai.com/v1/embeddings", "https://api.openai.com/v1/embeddings"),
-        ("http://box:11434/api/embed", "http://box:11434/api/embed"),
-        ("", "http://localhost:11434/api/embed"),
-    ],
-)
-def test_embed_endpoint_derivation(given, expected):
-    assert _embed_endpoint(given) == expected
-
-
-def test_embedding_response_shapes():
-    """Ollama and OpenAI disagree on the wrapper; both must parse."""
-    assert _extract_embeddings({"embeddings": [[1.0, 2.0]]}) == [[1.0, 2.0]]
-    assert _extract_embeddings({"embedding": [1.0]}) == [[1.0]]
-    assert _extract_embeddings({"data": [{"embedding": [3.0]}, {"embedding": [4.0]}]}) == [
-        [3.0],
-        [4.0],
-    ]
-    assert _extract_embeddings({"data": []}) == []
-    assert _extract_embeddings({}) == []
-    assert _extract_embeddings(None) == []

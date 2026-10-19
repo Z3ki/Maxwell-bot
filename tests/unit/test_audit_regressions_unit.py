@@ -291,42 +291,6 @@ def test_inbox_arms_the_taint_gate_for_non_email_rows():
 
 
 # --------------------------------------------------------------------------
-# rag_memory: a long negative is embedded under the same text it stores
-# --------------------------------------------------------------------------
-def test_long_negative_gets_an_embedding(tmp_path):
-    import asyncio
-
-    import numpy as np
-
-    import rag_memory
-    from rag_memory import RAGMemoryManager
-
-    async def scenario():
-        memory = RAGMemoryManager(str(tmp_path))
-        vector = np.ones(rag_memory.EMBED_DIM, dtype=float)
-        vector /= float(np.linalg.norm(vector))
-
-        async def fake_embed(_text, background=False):
-            return vector
-
-        memory._embed = fake_embed
-        try:
-            negative_id = await memory.add_negative("x" * 4000, reason="test")
-            for task in list(memory._embed_tasks):
-                await asyncio.gather(task, return_exceptions=True)
-            row = memory._db.execute(
-                "SELECT content, embedding FROM vectors WHERE id=?", (negative_id,)
-            ).fetchone()
-            assert row is not None
-            assert row["embedding"] is not None
-            assert row["content"] == "x" * 1500
-        finally:
-            await memory.flush()
-
-    asyncio.run(scenario())
-
-
-# --------------------------------------------------------------------------
 # providers.streaming: a truncated custom tool call must not post raw JSON
 # --------------------------------------------------------------------------
 def _assembler():

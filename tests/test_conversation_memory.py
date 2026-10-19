@@ -178,12 +178,12 @@ def test_history_edits_and_retention_never_cross_guilds_or_channels(tmp_path):
 def test_production_bot_starts_without_importing_numpy_or_legacy_rag(tmp_path):
     root = Path(__file__).resolve().parents[1]
     env_file = tmp_path / "settings.env"
-    env_file.write_text(f"DISCORD_BOT_TOKEN=offline-test-token\nAI_MODEL=offline-chat-model\nDATA_DIR={tmp_path}/data\nENABLE_RAG=true\nEMBED_MODEL=unused-local-model\n")
+    env_file.write_text(f"DISCORD_BOT_TOKEN=offline-test-token\nAI_MODEL=offline-chat-model\nDATA_DIR={tmp_path}/data\n")
     code = """
 import sys
 class BlockLegacy:
     def find_spec(self, fullname, *args):
-        if fullname == 'rag_memory' or fullname == 'numpy' or fullname.startswith('numpy.'):
+        if fullname == 'numpy' or fullname.startswith('numpy.'):
             raise AssertionError('retired dependency imported: ' + fullname)
 sys.meta_path.insert(0, BlockLegacy())
 from bot import MaxwellBot
@@ -191,8 +191,6 @@ from config import Config
 from conversation_memory import ConversationMemoryManager
 bot = MaxwellBot()
 assert isinstance(bot.memory, ConversationMemoryManager)
-assert Config.ENABLE_RAG is False
-assert Config.RAG_WEB_STORE_ENABLED is False
 assert 'recall_cross_server_memory' not in bot.tools
 print('History-only runtime ready')
 """

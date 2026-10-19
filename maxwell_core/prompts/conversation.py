@@ -679,13 +679,6 @@ class ConversationPromptBuilder:
                 if mention_bits:
                     relation_bits.append("mentions=" + ",".join(mention_bits))
                 relation = f" [{'; '.join(relation_bits)}]" if relation_bits else ""
-                autonomy_tag = ""
-                if msg.get("autonomy"):
-                    reason = str(msg.get("autonomy_reason") or "").strip()
-                    autonomy_tag = " [your earlier autonomous message"
-                    if reason:
-                        autonomy_tag += f"; reason: {reason[:200]}"
-                    autonomy_tag += "]"
                 header = f"[{stamp}] " if stamp else ""
                 mid = str(msg.get("message_id") or "")
                 if mid and mid in referenced_ids:
@@ -698,17 +691,17 @@ class ConversationPromptBuilder:
                 # reply (parrot bug). User turns DO get a 'Name(id):'
                 # prefix so the model knows who is speaking across many
                 # users in a long transcript. We still keep the
-                # reply/mentions/autonomy metadata on assistant turns
+                # reply/mentions metadata on assistant turns
                 # because it's diagnostic, not identity.
                 if is_self:
-                    meta = f"{relation}{autonomy_tag}".strip()
+                    meta = relation.strip()
                     if meta:
                         line = f"{header}{content_str} {meta}"
                     else:
                         line = f"{header}{content_str}"
                 else:
                     line = (
-                        f"{header}{author_label}{relation}{autonomy_tag}: {content_str}"
+                        f"{header}{author_label}{relation}: {content_str}"
                     )
                 annotate = getattr(host, "_reactions_annotation_for", None)
                 reactions = annotate(msg) if callable(annotate) else ""

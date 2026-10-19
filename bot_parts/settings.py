@@ -274,8 +274,6 @@ class SettingsMixin:
             control["live_max_output_tokens"] = max(
                 256, min(parse_int(control.get("live_max_output_tokens"), 4096), 32768)
             )
-            for retired in [key for key in control if str(key).startswith("autonomy_")]:
-                control.pop(retired, None)
             self._control = control
             self._sync_audio_input_flags()
             # 2026-07-22: the old global progress_messages re-apply is gone —

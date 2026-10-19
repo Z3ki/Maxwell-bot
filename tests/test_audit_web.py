@@ -26,7 +26,7 @@ def test_archived_vectors_are_not_reported_as_an_embedding_backlog(monkeypatch):
     assert stats["mode"] == "history_only"
     assert stats["retrieval_enabled"] is False
     assert stats["pending_embeddings"] == 0
-    assert stats["embed_model"] == ""
+    assert "embed_model" not in stats
 
 
 def test_operator_api_rejects_discord_token_without_basic_auth(tmp_path, monkeypatch):
