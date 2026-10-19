@@ -1190,6 +1190,17 @@ class OpenAICompatibleProvider(ChatProvider):
                 ]
                 if usable:
                     endpoint = usable[0]
+                elif has_media and _strip_media_parts(chat_messages):
+                    # Every media route is broken or dead and the selected
+                    # endpoint is one of them. Retrying it repeats the failure;
+                    # drop the attachments and answer the text instead.
+                    logger.warning(
+                        "No usable media endpoint remains; retrying text-only"
+                    )
+                    has_media = False
+                    media_broken.clear()
+                    max_attempts = max(max_attempts, attempt + len(self._endpoints))
+                    continue
             data = self._request_payload(
                 endpoint,
                 chat_messages,
@@ -1357,7 +1368,14 @@ class OpenAICompatibleProvider(ChatProvider):
                             # it so later turns skip this endpoint for media.
                             self._media_incapable.add(endpoint.name)
                             order = self._media_endpoint_order()
-                            usable = [e for e in order if e.name not in media_broken]
+                            # Exclude endpoints already recorded dead this call,
+                            # or the retry target can be an endpoint that just
+                            # returned a deterministic error.
+                            usable = [
+                                e
+                                for e in order
+                                if e.name not in media_broken and e.name not in dead
+                            ]
                             if not usable:
                                 # Every endpoint refused the attachments. Drop
                                 # them and answer the text instead of failing

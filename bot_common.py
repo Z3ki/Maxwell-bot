@@ -397,6 +397,9 @@ _PER_CHANNEL_STATE_CAPS = {
     "_media_context": 500,
     "_message_snapshots": 1000,
     "_message_update_state": 1000,
+    # One 64-char digest per emoji-discussing channel; without a cap it grew
+    # for the process lifetime in every guild the bot had ever seen.
+    "_emoji_grid_shown": 500,
 }
 
 MAX_VISUAL_MEMORY_IMAGES = 5

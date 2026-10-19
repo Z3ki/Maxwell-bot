@@ -109,12 +109,22 @@ class ChannelTyping:
         if cm is None:
             return
         task = getattr(cm, "task", None)
-        with contextlib.suppress(asyncio.CancelledError, Exception):
+        with contextlib.suppress(Exception):
             await cm.__aexit__(None, None, None)
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except asyncio.CancelledError:
+                # Awaiting the typing task we just cancelled always raises
+                # CancelledError. Re-raise only when *this* task is being
+                # cancelled; otherwise every normal release would abort the
+                # caller's reply.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:
+                pass
 
 
 def _registry(owner: Any) -> dict[str, ChannelTyping] | None:

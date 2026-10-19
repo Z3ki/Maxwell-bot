@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+
 import discord
 
 from privacy import VOICE_VERSION, policy_urls, voice_policy
 from privacy_data import delete_live_data, deletion_text
 from .config_ui import _send, _acknowledge
+
+logger = logging.getLogger(__name__)
 
 
 class VoiceAuthorization(discord.ui.Modal, title="Authorize one voice reference"):
@@ -135,7 +139,20 @@ class PrivacyButton(discord.ui.Button):
             return
         await _acknowledge(interaction, thinking=True)
         if self.action == "confirm_delete":
-            result = await delete_live_data(self.panel.bot, self.panel.user_id)
+            try:
+                result = await delete_live_data(self.panel.bot, self.panel.user_id)
+            except Exception as exc:
+                # Any failure here used to surface as no response at all. It
+                # can happen before anything is removed (the storage setting
+                # could not be saved) or part-way through, so do not claim
+                # either; deletion is safe to retry.
+                logger.warning("Privacy deletion failed (%s)", type(exc).__name__)
+                await _send(
+                    interaction,
+                    "Could not complete the deletion, so some of your data may "
+                    "still be stored. Please try again.",
+                )
+                return
             await _send(interaction, deletion_text(result))
             return
         if self.action == "withdraw":

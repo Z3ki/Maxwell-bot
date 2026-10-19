@@ -19,6 +19,14 @@ INBOX_PLANNER_BUDGET = 900
 ACTIONABLE_STATES = frozenset({"unread", "read"})
 
 
+def _has_content(path: Path) -> bool:
+    """True when the file exists and holds bytes (so it is not a fresh store)."""
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def needs_decision(item: dict) -> bool:
     """Whether this row still needs an external decision.
 
@@ -46,7 +54,10 @@ class InboxStore:
 
     async def _load_unlocked(self, *, for_update: bool = False) -> list[dict]:
         data = await asyncio.to_thread(_load_json_safe, self.path, lambda: None)
-        if data is None and not self.path.exists():
+        if data is None and not _has_content(self.path):
+            # Missing or zero-length file: a fresh store for reads AND writes.
+            # Only checking existence made an empty file read as [] but raise
+            # on every write, so the inbox silently refused all updates.
             return []
         items = data.get("items", []) if isinstance(data, dict) else []
         if for_update and (not isinstance(data, dict) or not isinstance(items, list)):

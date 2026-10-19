@@ -153,6 +153,14 @@ class _ChatStreamAssembler:
         ):
             raise ProviderProtocolError("Provider stream produced no choices")
         if self.custom is not None:
+            if self.custom.truncated_tool_call:
+                # The stream was cut mid tool call (finish_reason="length", or
+                # the provider closed with [DONE] inside the object). Releasing
+                # the buffer would post the raw JSON as the assistant message;
+                # fail instead so the caller retries or falls back.
+                raise ProviderProtocolError(
+                    "Provider stream ended inside a custom tool call"
+                )
             self.custom.drain()
             if self.custom.completed:
                 # Sparse native indexes make len(tools) an unsafe insertion key.

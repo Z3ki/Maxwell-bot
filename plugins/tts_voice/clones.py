@@ -94,6 +94,9 @@ def select_audio(message: object, source: object = "") -> tuple[str, str]:
 def _cdn_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
+        # .port raises ValueError for a malformed/out-of-range port; evaluate it
+        # inside the guard so this predicate returns False instead of raising.
+        port = parsed.port
     except ValueError:
         return False
     host = (parsed.hostname or "").lower()
@@ -101,7 +104,7 @@ def _cdn_url(url: str) -> bool:
         parsed.scheme == "https"
         and host in _CDN_HOSTS
         and not parsed.username
-        and parsed.port in (None, 443)
+        and port in (None, 443)
     )
 
 

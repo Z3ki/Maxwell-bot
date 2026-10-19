@@ -610,12 +610,20 @@ def test_fast_tool_no_progress_message_posted():
     With the fire-and-forget start_defer() API this is the path the
     bot's gen_progress takes. We exercise it directly: start_defer
     schedules a background post task, stop() cancels it before it
-    wakes up, the post never lands."""
+    wakes up, the post never lands.
+
+    Both steps must share ONE event loop. Run separately, asyncio.run()
+    tears the loop down after start_defer() and cancels the pending post
+    task itself, so stop() would have nothing left to cancel and the test
+    would pass even if stop() stopped cancelling."""
     msg = FakeMessage()
     prog = _progress_for_known_tool(msg)
-    asyncio.run(prog.start_defer())  # fire-and-forget
-    # Cancel before the deferred window elapses
-    asyncio.run(prog.stop())
+
+    async def run():
+        await prog.start_defer()
+        await prog.stop()
+
+    asyncio.run(run())
     # The background post task was cancelled; no message ever went out.
     assert msg.channel.sent == []
     assert msg.channel.deleted == []
@@ -674,11 +682,12 @@ def test_transition_to_final_no_post_returns_false():
     would skip the reply and the user would see nothing."""
     msg = FakeMessage()
     prog = _progress_for_known_tool(msg)
-    # Fire-and-forget the deferred post; stop() cancels it
-    asyncio.run(prog.start_defer())
-    asyncio.run(prog.stop())
-    # No message was ever posted.
-    assert len(msg.channel.sent) == 0
+    # Never started and never stopped: the guard under test is `not self._posted`,
+    # not `_stopped`. Calling stop() first (as this test used to) short-circuits
+    # on `_stopped` and the unposted branch is never reached.
+    assert prog._stopped is False
+    assert prog._posted is None
+    assert msg.channel.sent == []
     # transition_to_final returns False; caller must post reply itself.
     ok = asyncio.run(prog.transition_to_final("Hello."))
     assert ok is False
@@ -738,27 +747,38 @@ def test_concurrent_stop_during_deferred_post():
     flicker the user complained about."""
     msg = FakeMessage()
     prog = _progress_for_known_tool(msg)
-    # Fire-and-forget the deferred post
-    asyncio.run(prog.start_defer())
-    # stop() immediately — the deferred post is mid-sleep
-    asyncio.run(prog.stop())
+
+    async def run():
+        # Fire-and-forget the deferred post, then stop() immediately while it
+        # is still mid-sleep — in the SAME loop, so stop() is what cancels it.
+        await prog.start_defer()
+        await prog.stop()
+
+    asyncio.run(run())
     # The post task was cancelled; the post never landed
     assert msg.channel.sent == []
     assert msg.channel.deleted == []
 
 
 def test_concurrent_stop_during_tick():
-    """A tick that races with stop() must be dropped silently.
-    A slow tick that wins the lock AFTER stop() has run would
-    otherwise try to edit a deleted message and 404."""
+    """A tick that arrives after stop() must be dropped silently.
+    A tick that wins the lock AFTER stop() has run would otherwise try to edit
+    the deleted placeholder and 404. Drive the real stop() rather than setting
+    the private flag, so this exercises the public path (and would fail if
+    stop() stopped marking the progress as stopped)."""
     msg = FakeMessage()
     prog = _progress_for_known_tool(msg)
-    asyncio.run(prog.start())  # post lands
-    # Manually flip the stopped flag to simulate a stop() that
-    # raced in. The tick must bail early.
-    prog._stopped = True
-    edits_before = len(msg.channel.edited)
-    asyncio.run(prog.tick(reasoning_delta="Late reasoning."))
+
+    async def run() -> int:
+        await prog.start()  # post lands
+        await prog.stop()  # deletes the placeholder and marks it stopped
+        assert prog._stopped is True
+        edits_before = len(msg.channel.edited)
+        await prog.tick(reasoning_delta="Late reasoning.")
+        return edits_before
+
+    edits_before = asyncio.run(run())
+    assert msg.channel.sent[0] in msg.channel.deleted
     assert len(msg.channel.edited) == edits_before
 
 

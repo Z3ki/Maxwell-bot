@@ -111,7 +111,11 @@ def _image_inventory() -> list[dict[str, str]]:
         if len(fields) != 5:
             continue
         repository, tag, image_id, size, created = fields
-        if repository == "maxwell-site-runtime" or repository.startswith("maxwell-siteimg-"):
+        # Per-site images are named "<IMAGE_PREFIX><slug>", and IMAGE_PREFIX is
+        # "maxwell-<controller>-siteimg-" when MAXWELL_CONTROLLER_ID is set, so a
+        # plain startswith("maxwell-siteimg-") missed every controller-scoped
+        # host. Match the marker anywhere in the repository name.
+        if repository == "maxwell-site-runtime" or "siteimg-" in repository:
             rows.append(
                 {
                     "repository": repository,

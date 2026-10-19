@@ -944,7 +944,13 @@ class UserInstallSession:
         # memory, and user-supplied text from pinging anyone by default.
         payload["allowed_mentions"] = discord.AllowedMentions.none()
         payload["ephemeral"] = self.ephemeral
-        if not payload:
+        # allowed_mentions/ephemeral are always set, so `if not payload` was
+        # never true and an empty send went out for Discord to reject. Test for
+        # anything visible instead.
+        if not any(
+            payload.get(key)
+            for key in ("content", "embed", "embeds", "file", "files", "poll", "view")
+        ):
             payload["content"] = "\u200b"
         # A failed channel send reads this buffer, and webhook attempt 0
         # does not seek. Rewind or the follow-up is stored as 0 bytes.

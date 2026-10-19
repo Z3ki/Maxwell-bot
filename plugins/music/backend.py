@@ -111,8 +111,14 @@ class LavalinkBackend:
                                          request_timeout=aiohttp.ClientTimeout(total=15))
             self.client.music_service = self.service
             self.client.add_event_hook(self.event)
+            try:
+                lavalink_port = int(os.getenv('LAVALINK_PORT', '2333'))
+            except (TypeError, ValueError):
+                # A bare ValueError here escapes as an unhandled startup error;
+                # surface it as MusicError so the caller reports it properly.
+                raise MusicError('LAVALINK_PORT must be an integer port.') from None
             self.node = self.client.add_node(os.getenv('LAVALINK_HOST', '127.0.0.1'),
-                                            int(os.getenv('LAVALINK_PORT', '2333')), password, 'us',
+                                            lavalink_port, password, 'us',
                                             name='music', ssl=os.getenv('LAVALINK_TLS', '').lower() == 'true')
             self.bot.add_listener(self.voice_state, 'on_voice_state_update')
             self.bot.add_listener(self.guild_removed, 'on_guild_remove')

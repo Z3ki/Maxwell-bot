@@ -17,13 +17,9 @@ REGISTERED = discover_tool_names()
 
 
 def test_every_registered_tool_can_be_disabled_from_the_dashboard():
-    assert [t for t in REGISTERED if t not in KNOWN_TOOLS] == []
-
-
-def test_known_tools_has_no_ghosts():
-    # Fallback names that plugins no longer ship are allowed to linger so
-    # persisted disabled_tools lists still sanitize. The reverse — a live
-    # plugin tool missing from KNOWN_TOOLS — is the failure.
+    # Retired names (in KNOWN_TOOLS, no longer shipped) are allowed to linger so
+    # a persisted disabled_tools list still sanitizes; the failure direction is
+    # a live plugin tool missing from KNOWN_TOOLS.
     assert [t for t in REGISTERED if t not in KNOWN_TOOLS] == []
 
 

@@ -229,7 +229,15 @@ def start_expression_refresh(bot):
 
     async def refresh_loop():
         while not bot.is_closed():
-            await refresh_global_expressions(bot)
+            try:
+                await refresh_global_expressions(bot)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # refresh_global_expressions only catches a narrow tuple; a
+                # transient OSError escaping here would end the task, and
+                # expressions would never refresh again for the process.
+                logger.warning("expression refresh loop failed", exc_info=True)
             await asyncio.sleep(REFRESH_SECONDS)
 
     bot._expression_refresh_task = bot._track_task(asyncio.create_task(refresh_loop()))

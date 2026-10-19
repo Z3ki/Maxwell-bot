@@ -160,6 +160,11 @@ EMBED_RECOVERY_INTERVAL_SECONDS = 60.0
 # ~6k chars stays inside that window with room for tokenizer overhead.
 EMBED_MAX_CHARS = 6000
 EMBED_CHUNK_OVERLAP = 200
+# HTTP statuses that reject one specific input rather than signal an endpoint
+# outage. A 400/413/422 means this chunk is malformed or too large; tripping
+# the shared breaker for it would pause embedding for every channel and every
+# queued row, so these are skipped without opening the circuit.
+EMBED_INPUT_ERROR_STATUSES = frozenset({400, 413, 422})
 # The pre-2026-08-09 hard cutoff. Rows embedded before that commit were
 # vectorized from text[:8000], so their cached vectors are NOT valid under the
 # current full-text/chunked derivation. Only used to detect legacy rows.
@@ -1103,6 +1108,12 @@ class RAGMemoryManager:
         try:
             chunk_vecs: list[np.ndarray] = []
             async with self._embed_slot(background=background):
+                # Re-check after waiting for the slot: the holder may have just
+                # tripped the breaker, and this request would otherwise still
+                # hit a known-dead endpoint.
+                if self._embed_endpoint_paused():
+                    self._embed_suppressed_failures += 1
+                    return None
                 session = await self._get_embed_session()
                 for ci, chunk_text in enumerate(chunks_to_embed):
                     payload = {"model": EMBED_MODEL, "input": chunk_text}
@@ -1113,15 +1124,23 @@ class RAGMemoryManager:
                         timeout=aiohttp.ClientTimeout(total=EMBED_HTTP_TIMEOUT_SECONDS),
                     ) as resp:
                         if resp.status != 200:
-                            body = await resp.text()
-                            # A non-200 is just as persistent as a refused
-                            # connection — a 404 for a model that isn't pulled
-                            # repeats for every single message. Trip the same
-                            # breaker so it's one line per outage, not one per
-                            # embed.
-                            self._trip_embed_breaker(
-                                f"HTTP {resp.status}: {body[:200]}"
-                            )
+                            # Never log the response body: embed endpoints echo
+                            # the rejected input, which is private channel text.
+                            if resp.status in EMBED_INPUT_ERROR_STATUSES:
+                                # Input-specific rejection — this chunk is bad,
+                                # the endpoint is fine. Do not open the shared
+                                # breaker or every other channel stops embedding.
+                                logger.warning(
+                                    "Embedding request rejected (HTTP %s); "
+                                    "skipping this chunk",
+                                    resp.status,
+                                )
+                                return None
+                            # An endpoint-level failure (404 for an unpulled
+                            # model, 5xx, auth) is just as persistent as a
+                            # refused connection and repeats for every message.
+                            # Trip the breaker so it is one line per outage.
+                            self._trip_embed_breaker(f"HTTP {resp.status}")
                             return None
                         data = await resp.json()
                         embeddings = _extract_embeddings(data)
@@ -1234,6 +1253,11 @@ class RAGMemoryManager:
         if now < self._query_embed_disabled_until:
             return None
         task = asyncio.ensure_future(self._embed(query))
+        # Track it like every other background embed so flush() waits for or
+        # cancels it before closing the shared session out from under it. A
+        # timed-out query embed is deliberately left running to warm the cache.
+        self._embed_tasks.add(task)
+        task.add_done_callback(self._embed_tasks.discard)
         task.add_done_callback(_ignore_task_result)
         try:
             vec = await asyncio.wait_for(
@@ -1412,11 +1436,11 @@ class RAGMemoryManager:
                                 ),
                             ) as resp:
                                 if resp.status != 200:
-                                    body = await resp.text()
+                                    # Status only — the body can echo the
+                                    # private rows being embedded.
                                     logger.warning(
-                                        "Batch embed API returned %s: %s",
+                                        "Batch embed API returned HTTP %s",
                                         resp.status,
-                                        body[:200],
                                     )
                                     fallback_rows = short_rows
                                 else:
@@ -2605,6 +2629,12 @@ class RAGMemoryManager:
         """
         cid = "neg_" + uuid.uuid4().hex[:12]
         meta = {"reason": reason[:500]}
+        # The row keeps only a prefix of a long negative, and `_embed_and_store`
+        # only writes the vector when its `content=?`/`content_hash=?` guard
+        # matches the stored row. Embedding the full text left a >1500-char
+        # negative permanently unembedded (rowcount 0), so it never took part in
+        # retrieval. Embed exactly what was stored.
+        stored = content[:1500]
         self._db.execute(
             "INSERT INTO vectors (id, kind, channel_id, guild_id, author, "
             "author_id, source, content, content_hash, embedding, metadata, "
@@ -2614,14 +2644,14 @@ class RAGMemoryManager:
             "?, ?, NULL, ?, '', 0, '', 0, 0, ?, ?)",
             (
                 cid,
-                content[:1500],
+                stored,
                 "",
                 json.dumps(meta),
                 _utcnow_iso(),
                 time.time(),
             ),
         )
-        self._spawn(self._embed_and_store(cid, content))
+        self._spawn(self._embed_and_store(cid, stored))
         return cid
 
     async def list_negatives(self, limit: int = 50) -> list[dict]:

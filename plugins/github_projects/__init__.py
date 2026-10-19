@@ -10,3 +10,11 @@ def setup(bot, ctx=None):
     tool.name = "github_repo"
     tool.tool_name = "github_repo"
     return [tool]
+
+
+async def teardown(bot, ctx=None):
+    """Close the service's HTTP session so a reload does not leak a connector."""
+    service = ctx.service("github_projects") if ctx is not None else None
+    close = getattr(service, "close", None)
+    if callable(close):
+        await close()

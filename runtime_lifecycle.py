@@ -7,8 +7,11 @@ historical default and tests can change the process environment.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def drain_timeout_seconds() -> float:
@@ -63,6 +66,23 @@ def shard_launch_kwargs() -> dict[str, Any]:
         count = max(ids) + 1
     if count is None and not ids:
         return {}
+    if count is not None and ids:
+        # discord.py raises ValueError('shard_ids must be within range of
+        # shard_count') at Client construction. Drop a stray out-of-range id,
+        # but if none remain, refuse: launching with no shard_ids would run
+        # every shard in this process and duplicate the other processes.
+        kept = [value for value in ids if value < count]
+        if not kept:
+            raise ValueError(
+                f"SHARD_IDS {ids} are all outside SHARD_COUNT={count}"
+            )
+        if len(kept) != len(ids):
+            logger.warning(
+                "Ignoring SHARD_IDS outside SHARD_COUNT=%s: %s",
+                count,
+                sorted(set(ids) - set(kept)),
+            )
+        ids = kept
     kwargs: dict[str, Any] = {}
     if count is not None:
         kwargs["shard_count"] = count

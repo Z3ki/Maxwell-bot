@@ -26,9 +26,10 @@ except ImportError:
         return default
 
 
-CORS_ORIGIN = os.getenv(
-    "MAXWELL_CORS_ORIGIN",
-    os.getenv("MAXWELL_PUBLIC_BASE_URL", "https://maxwell.example.com"),
+CORS_ORIGIN = (
+    os.getenv("MAXWELL_CORS_ORIGIN")
+    or os.getenv("MAXWELL_PUBLIC_BASE_URL")
+    or "https://maxwell.example.com"
 ).rstrip("/")
 API_HOST = os.getenv("MAXWELL_API_HOST", "127.0.0.1")
 API_PORT = max(1, min(_int_env_safe("MAXWELL_API_PORT", 8765), 65535))

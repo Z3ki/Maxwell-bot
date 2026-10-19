@@ -37,9 +37,18 @@ def identifier(query: str) -> str:
         if ':' in query or re.match(r'^[\w.-]+\.[a-z]{2,}/', query, re.I):
             raise MusicError('Use a song name or an HTTPS YouTube link.')
         return 'ytsearch:' + query
-    url = urlsplit(query if '://' in query else 'https://' + query)
-    if (url.scheme != 'https' or url.username or url.password or url.port
-            or url.hostname not in {'youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be'}):
+    try:
+        url = urlsplit(query if '://' in query else 'https://' + query)
+        # urlsplit() tolerates a malformed/out-of-range port; reading .port
+        # raises a bare ValueError that is not a MusicError.
+        has_port = bool(url.port)
+        hostname = url.hostname
+    except ValueError:
+        raise MusicError(
+            'Only HTTPS YouTube and YouTube Music links are supported.'
+        ) from None
+    if (url.scheme != 'https' or url.username or url.password or has_port
+            or hostname not in {'youtube.com', 'www.youtube.com', 'music.youtube.com', 'youtu.be'}):
         raise MusicError('Only HTTPS YouTube and YouTube Music links are supported.')
     params = parse_qs(url.query)
     video = None

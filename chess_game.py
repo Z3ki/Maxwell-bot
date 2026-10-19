@@ -938,7 +938,12 @@ class ChessGame:
 # --------------------------------------------------------------------------- #
 
 def _data_dir() -> str:
-    env = os.environ.get("MAXWELL_DATA_DIR", "")
+    # Prefer the same DATA_DIR the rest of the bot uses (config.DATA_DIR). The
+    # old MAXWELL_DATA_DIR was set by nothing, so an operator pointing DATA_DIR
+    # at a volume still had chess state written under the repo.
+    env = str(
+        os.environ.get("MAXWELL_DATA_DIR") or os.environ.get("DATA_DIR") or ""
+    ).strip()
     if env:
         return env
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")

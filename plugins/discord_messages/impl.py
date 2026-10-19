@@ -1223,6 +1223,12 @@ class _PurgeConfirmationView(discord.ui.View):
             except discord.Forbidden:
                 failures += 1
                 break
+            except discord.HTTPException:
+                # A transient rate-limit/5xx on one fetch must not kill the
+                # callback: the interaction was already deferred, so an
+                # uncaught error would leave it pending forever with no result.
+                failures += 1
+                break
             if self.user_id is not None and str(
                 getattr(getattr(target, "author", None), "id", "")
             ) != str(self.user_id):

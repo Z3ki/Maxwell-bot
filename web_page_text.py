@@ -49,8 +49,15 @@ class _PageText(HTMLParser):
 
     def handle_endtag(self, tag):
         if self.skip:
-            if tag == self.skip[-1]:
-                self.skip.pop()
+            # A skipped element that is never explicitly closed would otherwise
+            # leave the skip stack non-empty for the rest of the document and
+            # discard every remaining character. Close this element and anything
+            # opened inside it; if the document itself ends, stop skipping.
+            if tag in self.skip:
+                while self.skip and self.skip.pop() != tag:
+                    pass
+            elif tag in {"body", "html"}:
+                self.skip.clear()
             return
         if tag in {
             "p",

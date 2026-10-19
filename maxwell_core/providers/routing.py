@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import random
 import time
 from collections import deque
 from dataclasses import replace
@@ -273,7 +274,9 @@ class ProviderRouter(ChatProvider):
                 ):
                     next_selected = (next_healthy or next_candidates)[0]
                 if next_selected is selected and error.retryable:
-                    await asyncio.sleep(min(8, attempt * 1.5))
+                    # Jitter, so parallel turns (e.g. task workers) do not
+                    # retry an overloaded upstream in lockstep and keep it down.
+                    await asyncio.sleep(min(8, attempt * 1.5) + random.uniform(0, 0.7))
         if last_error:
             raise last_error
         raise ProviderUnavailableError(

@@ -42,6 +42,7 @@ class MediaContextMixin:
                         existing["b64"] = item["b64"]
                         existing["mime_type"] = item["mime_type"]
                         existing["url"] = item.get("url", "")
+                        existing["source"] = item.get("source")
                         replaced = True
                         break
             if not replaced:
@@ -52,6 +53,11 @@ class MediaContextMixin:
                         "filename": fname,
                         "message_id": mid,
                         "url": item.get("url", ""),
+                        # Keep the provenance tag: the emoji/sticker grid is
+                        # recognised solely by source == "emoji_grid", and
+                        # dropping it made a cached grid re-attach later as a
+                        # user image.
+                        "source": item.get("source"),
                         # Decremented after each handled message. Do not "clean this up"
                         # back to a big number unless you enjoy haunted image context.
                         "uses_left": MEDIA_CONTEXT_USES,
@@ -79,6 +85,7 @@ class MediaContextMixin:
                     "filename": item.get("filename", "attachment"),
                     "message_id": item.get("message_id"),
                     "url": item.get("url", ""),
+                    "source": item.get("source"),
                 }
             )
         return active

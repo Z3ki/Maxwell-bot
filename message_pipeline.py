@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
@@ -681,6 +682,13 @@ class RequestJournal:
             """,
             (self._TERMINAL_RETENTION,),
         )
+        # response_owners is written once per delivered response and never
+        # otherwise deleted; without this it grows without bound while
+        # `requests` stays capped. Drop owners whose request row is gone.
+        connection.execute(
+            "DELETE FROM response_owners WHERE message_id NOT IN "
+            "(SELECT message_id FROM requests)"
+        )
 
     def accept(
         self,
@@ -873,6 +881,36 @@ class RequestJournal:
             )
         self._log_transition(row["status"], record)
 
+    def suppress_stale(self, cutoff: float, *, reason: str = "stale_offline") -> int:
+        """Suppress every unfinished, effect-free request created before cutoff.
+
+        One transaction and one fsync for the whole sweep, instead of the
+        per-row update that made a large offline backlog block the event loop
+        for thousands of fsyncs at startup.
+        """
+        cutoff = float(cutoff)
+        with self._transaction(write=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM requests WHERE created_at < ? AND effects_started = 0 "
+                "AND status IN ('received', 'queued', 'deferred', 'running')",
+                (cutoff,),
+            ).fetchall()
+            if not rows:
+                return 0
+            now = time.time()
+            connection.execute(
+                "UPDATE requests SET status = 'suppressed', reason = ?, updated_at = ? "
+                "WHERE created_at < ? AND effects_started = 0 "
+                "AND status IN ('received', 'queued', 'deferred', 'running')",
+                (str(reason), now, cutoff),
+            )
+            self._prune(connection)
+        for row in rows:
+            record = self._record(row)
+            record.update(status="suppressed", reason=str(reason), updated_at=now)
+            self._log_transition(row["status"], record)
+        return len(rows)
+
     def recover(self) -> None:
         """Recover interrupted work once at startup, never replaying effects."""
         transitions = []
@@ -921,6 +959,16 @@ class Watermarks:
         self.max_channels = max(16, int(max_channels))
         self._marks: dict[str, int] = {}
         self._dirty = False
+        # save() runs in a worker thread while the event loop mutates _marks
+        # via note(); the lock makes the snapshot atomic and prevents a
+        # "dictionary changed size during iteration" error mid-save.
+        self._lock = threading.RLock()
+        # Serializes whole saves (periodic worker thread vs. the synchronous
+        # shutdown save) so two writers never share the .tmp file.
+        self._save_lock = threading.Lock()
+        # Bumped by every accepted note(); save() clears _dirty only if nothing
+        # changed while it was writing, so a mark noted mid-save is not lost.
+        self._version = 0
 
     def load(self) -> None:
         try:
@@ -934,29 +982,35 @@ class Watermarks:
         marks = raw.get("channels") if isinstance(raw, dict) else None
         if not isinstance(marks, dict):
             return
-        was_dirty = self._dirty
-        for cid, value in marks.items():
-            # Disk data obeys the same validation, size bound and monotonic
-            # high-water rule as new receipts. Reloads cannot move a live
-            # channel backwards or restore an unbounded channel dictionary.
-            self.note(cid, value)
-        self._dirty = was_dirty
+        with self._lock:
+            was_dirty = self._dirty
+            for cid, value in marks.items():
+                # Disk data obeys the same validation, size bound and monotonic
+                # high-water rule as new receipts. Reloads cannot move a live
+                # channel backwards or restore an unbounded channel dictionary.
+                self.note(cid, value)
+            self._dirty = was_dirty
 
     def save(self) -> None:
-        if not self._dirty:
-            return
-        payload = {"channels": {k: str(v) for k, v in self._marks.items()}}
-        tmp = f"{self.path}.tmp"
-        try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-            os.replace(tmp, self.path)
-            self._dirty = False
-        except Exception as exc:
-            logger.warning("watermarks save failed: %s", exc)
-            with contextlib.suppress(Exception):
-                os.unlink(tmp)
+        with self._save_lock:
+            with self._lock:
+                if not self._dirty:
+                    return
+                version = self._version
+                payload = {"channels": {k: str(v) for k, v in self._marks.items()}}
+            tmp = f"{self.path}.tmp"
+            try:
+                os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle)
+                os.replace(tmp, self.path)
+                with self._lock:
+                    if self._version == version:
+                        self._dirty = False
+            except Exception as exc:
+                logger.warning("watermarks save failed: %s", exc)
+                with contextlib.suppress(Exception):
+                    os.unlink(tmp)
 
     def note(self, channel_id: Any, message_id: Any) -> None:
         cid = str(channel_id or "").strip()
@@ -966,24 +1020,29 @@ class Watermarks:
             return
         if not cid or mid <= 0:
             return
-        if self._marks.get(cid, 0) >= mid:
-            return
-        self._marks[cid] = mid
-        self._dirty = True
-        if len(self._marks) > self.max_channels:
-            # Snowflakes are time-ordered, so the smallest ids are the
-            # coldest rooms — exactly the ones whose backlog matters least.
-            keep = sorted(self._marks.items(), key=lambda kv: kv[1])[
-                -(self.max_channels // 2) :
-            ]
-            self._marks = dict(keep)
+        with self._lock:
+            if self._marks.get(cid, 0) >= mid:
+                return
+            self._marks[cid] = mid
+            self._dirty = True
+            self._version += 1
+            if len(self._marks) > self.max_channels:
+                # Snowflakes are time-ordered, so the smallest ids are the
+                # coldest rooms — exactly the ones whose backlog matters least.
+                keep = sorted(self._marks.items(), key=lambda kv: kv[1])[
+                    -(self.max_channels // 2) :
+                ]
+                self._marks = dict(keep)
 
     def get(self, channel_id: Any) -> int | None:
-        return self._marks.get(str(channel_id or ""))
+        with self._lock:
+            return self._marks.get(str(channel_id or ""))
 
     def channels(self) -> list[tuple[str, int]]:
         """Rooms with a watermark, most recently active first."""
-        return sorted(self._marks.items(), key=lambda kv: kv[1], reverse=True)
+        with self._lock:
+            return sorted(self._marks.items(), key=lambda kv: kv[1], reverse=True)
 
     def __len__(self) -> int:
-        return len(self._marks)
+        with self._lock:
+            return len(self._marks)

@@ -23,7 +23,9 @@ def resolved_message_limit(default_limit: int, override_limit, plan: str) -> int
     if override_limit is not None:
         return max(1, int(override_limit))
     if plan == PREMIUM_PLAN:
-        return PREMIUM_MESSAGE_LIMIT
+        # Never grant premium *less* than the operator's configured free
+        # default; a default above 500 used to cap premium users below free.
+        return max(PREMIUM_MESSAGE_LIMIT, max(1, int(default_limit)))
     return max(1, int(default_limit))
 
 

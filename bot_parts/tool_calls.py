@@ -337,7 +337,16 @@ class ToolCallsMixin:
         channel_id = getattr(channel, "id", None)
         if channel_id is None or not hasattr(self, "memory"):
             return
-        if name == "send_message" and str(result).startswith("__MESSAGE_SENT__"):
+        # Production callers pass the dispatcher's line ("Tool <name>: <result>"),
+        # while direct callers pass the raw tool result. Strip the prefix so the
+        # send_message delivery markers below still match; without this the
+        # same-channel early return never fired and every delivered chunk was
+        # also stored as a duplicate is_tool row.
+        result = str(result)
+        prefix = f"Tool {name}: "
+        if result.startswith(prefix):
+            result = result[len(prefix):]
+        if name == "send_message" and result.startswith("__MESSAGE_SENT__"):
             destination = str((params or {}).get("channel_id") or channel_id)
             if destination == str(channel_id):
                 # Each successful chunk is already recorded under its real
