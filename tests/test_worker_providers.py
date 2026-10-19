@@ -130,7 +130,7 @@ def test_operator_route_credentials_never_leak_to_new_destination(
     assert captured["model"] == "slow-coder" and captured["reasoning_effort"] == "max"
     assert captured["context_window"] == 200000 and captured["max_tokens"] == 20000
     assert captured["policy"].max_request_seconds == 1800
-    assert client.turn_timeout_seconds == 3600
+    assert client.turn_timeout_seconds == 14400
 
 
 def test_partial_operator_config_refuses_workers_without_breaking_chat(tmp_path):
@@ -158,8 +158,8 @@ def test_owned_worker_client_is_closed_and_parent_context_restored(
         AsyncMock(return_value=(client, True)),
     )
     monkeypatch.setattr(
-        "plugins.maxwell_extras.task_workers.worker_timeout_seconds",
-        lambda bot: 0.01 if outcome == "timeout" else 30,
+        "plugins.maxwell_extras.task_workers.worker_job_timeout_seconds",
+        lambda bot, *a, **k: 0.01 if outcome == "timeout" else 30,
     )
     entered = asyncio.Event()
 

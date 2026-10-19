@@ -92,14 +92,14 @@ def test_float_shaped_ints_are_accepted():
 
 def test_out_of_range_is_clamped_not_defaulted():
     out = _sanitize_control({"ai_timeout_seconds": 99999, "max_tool_iterations": -5})
-    assert out["ai_timeout_seconds"] == 7200
+    assert out["ai_timeout_seconds"] == 14400
     assert out["max_tool_iterations"] == 0
 
 
 @pytest.mark.parametrize(
     "key,low,high",
     [
-        ("live_turn_timeout_seconds", 1, 7200),
+        ("live_turn_timeout_seconds", 1, 14400),
         ("inbound_retry_attempts", 1, 5),
         ("inbound_retry_delay_seconds", 1, 300),
         ("gap_recovery_max_messages", 0, 100),
@@ -122,3 +122,9 @@ def test_inbound_reliability_limits(key, low, high):
 def test_inbound_policy_booleans(key):
     assert _sanitize_control({key: "false"})[key] is False
     assert _sanitize_control({key: "true"})[key] is True
+
+
+def test_task_worker_timeout_range():
+    assert _sanitize_control({"task_workers_timeout_seconds": -1})["task_workers_timeout_seconds"] == 60
+    assert _sanitize_control({"task_workers_timeout_seconds": 99999})["task_workers_timeout_seconds"] == 14400
+    assert _sanitize_control({"task_workers_timeout_seconds": "inf"})["task_workers_timeout_seconds"] == DEFAULT_CONTROL["task_workers_timeout_seconds"]

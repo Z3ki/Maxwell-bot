@@ -624,8 +624,8 @@ def render(panel: Any) -> str:
             text += "Your saved key is still present. Remove it below to return to Maxwell's AI.\n"
     else:
         if worker_connection(panel):
-            from provider_limits import worker_timeout_seconds
-            text += f"Use a separate provider and model for Premium subagents. Your chat connection stays independent. Worker deadline ceiling: {worker_timeout_seconds(panel.bot):g}s. Tools must be enabled.\n\n"
+            from provider_limits import WORKER_TIMEOUT_MAX_SECONDS, worker_timeout_seconds
+            text += f"Use a separate provider and model for Premium subagents. Your chat connection stays independent. Subagent job deadline: {worker_timeout_seconds(panel.bot) / 60:g} min by default, up to {WORKER_TIMEOUT_MAX_SECONDS / 60:g} min when requested. Tools must be enabled.\n\n"
         else:
             text += "Optional: replace Maxwell's model with your own provider for chat, mentions, and app actions.\n\n"
         text += "**Connect your API endpoint** with its URL, model and API key.\n"

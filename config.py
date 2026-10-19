@@ -252,15 +252,15 @@ class Config:
     AI_WORKER_CONTEXT_WINDOW = _int_env("AI_WORKER_CONTEXT_WINDOW", 0, min_value=0, max_value=2000000)
     AI_WORKER_DISABLE_REASONING = _bool_env("AI_WORKER_DISABLE_REASONING", True)
     AI_WORKER_REASONING_EFFORT = os.getenv("AI_WORKER_REASONING_EFFORT", "").strip()
-    AI_WORKER_REQUEST_TIMEOUT_SECONDS = _int_env("AI_WORKER_REQUEST_TIMEOUT_SECONDS", 600, min_value=10, max_value=7200)
-    AI_WORKER_TURN_TIMEOUT_SECONDS = _int_env("AI_WORKER_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=7200)
+    AI_WORKER_REQUEST_TIMEOUT_SECONDS = _int_env("AI_WORKER_REQUEST_TIMEOUT_SECONDS", 600, min_value=10, max_value=14400)
+    AI_WORKER_TURN_TIMEOUT_SECONDS = _int_env("AI_WORKER_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=14400)
     # max_tokens = max *output* tokens per completion (not context window).
     # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
     AI_MAX_OUTPUT_TOKENS = _int_env(
         "AI_MAX_OUTPUT_TOKENS", 16384, min_value=1, max_value=131072
     )
-    AI_REQUEST_TIMEOUT_SECONDS = _int_env("AI_REQUEST_TIMEOUT_SECONDS", 3600, min_value=10, max_value=7200)
-    AI_TURN_TIMEOUT_SECONDS = _int_env("AI_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=7200)
+    AI_REQUEST_TIMEOUT_SECONDS = _int_env("AI_REQUEST_TIMEOUT_SECONDS", 3600, min_value=10, max_value=14400)
+    AI_TURN_TIMEOUT_SECONDS = _int_env("AI_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=14400)
     AI_CONTEXT_WINDOW = _int_env("AI_CONTEXT_WINDOW", 0, min_value=0, max_value=2000000)
     AI_DISABLE_REASONING = _bool_env("AI_DISABLE_REASONING", True)
     # Optional chat-completions reasoning_effort (e.g. "low"). Ignored when

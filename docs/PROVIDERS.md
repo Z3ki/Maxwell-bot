@@ -144,8 +144,8 @@ service controls (`OLLAMA_ORIGINS` and the old embedding URL alias).
 
 ## Slow models, context and reasoning
 
-Set `AI_REQUEST_TIMEOUT_SECONDS` (10–7200) for each operator-provider call and
-`AI_TURN_TIMEOUT_SECONDS` (10–7200) for the whole request, including tools.
+Set `AI_REQUEST_TIMEOUT_SECONDS` (10–14400) for each operator-provider call and
+`AI_TURN_TIMEOUT_SECONDS` (10–14400) for the whole request, including tools.
 A zero whole-task value preserves `live_turn_timeout_seconds` (900 by default).
 For example, use 600 and 1800 for a slow website-building model. A shorter
 whole-task deadline still cancels the call. `AI_CONTEXT_WINDOW` sets the model's
@@ -175,13 +175,15 @@ only for operator configuration; user BYOK keeps its public HTTPS restrictions.
 A base URL without a model refuses worker execution, leaving ordinary chat usable.
 
 Worker defaults: output 8192 tokens (16–131072), unspecified context (0), reasoning
-off, blank effort, request timeout 600 seconds (10–7200). Configure independently:
+off, blank effort, request timeout 600 seconds (10–14400). Configure independently:
 `AI_WORKER_MAX_OUTPUT_TOKENS`, `AI_WORKER_CONTEXT_WINDOW` (0–2000000),
 `AI_WORKER_DISABLE_REASONING`, `AI_WORKER_REASONING_EFFORT`,
-`AI_WORKER_REQUEST_TIMEOUT_SECONDS`, and `AI_WORKER_TURN_TIMEOUT_SECONDS` (0–7200).
-A zero worker turn value uses `task_workers_timeout_seconds` (default 600) from
-`bot_control.json`; a nonzero env value overrides that operator ceiling. Personal
-worker turn settings are capped by this ceiling. Detached jobs own their deadline;
+`AI_WORKER_REQUEST_TIMEOUT_SECONDS`, and `AI_WORKER_TURN_TIMEOUT_SECONDS` (0–14400).
+A zero worker turn value uses `task_workers_timeout_seconds` (default 7200, two hours) from
+`bot_control.json`; a nonzero env value overrides that operator default. The model may
+request up to 14400 seconds (four hours) per job with `delegate_task` `timeout_minutes`.
+A personal connection's whole-task (chat turn) deadline does not shorten a subagent job;
+its per-request timeout still applies to each model call. Detached jobs own their deadline;
 chat retains its normal deadline and can continue while a job runs. Cancellation
 and step, context and tool-call limits remain effective.
 

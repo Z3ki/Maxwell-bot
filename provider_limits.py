@@ -8,12 +8,16 @@ from control_defaults import DEFAULT_CONTROL
 
 LIVE_TURN_TIMEOUT_DEFAULT_SECONDS = DEFAULT_CONTROL["live_turn_timeout_seconds"]
 
+# Hard ceiling for any configurable timeout. Four hours, because subagents
+# building real things kept getting guillotined at the old 1-2 hour caps.
+MAX_TIMEOUT_SECONDS = 14400
+
 # Default whole-job budget for subagents, and the most a model may request.
-WORKER_TIMEOUT_DEFAULT_SECONDS = 1200
-WORKER_TIMEOUT_MAX_SECONDS = 1800
+WORKER_TIMEOUT_DEFAULT_SECONDS = DEFAULT_CONTROL["task_workers_timeout_seconds"]
+WORKER_TIMEOUT_MAX_SECONDS = MAX_TIMEOUT_SECONDS
 
 
-def _bounded(value, default, ceiling=7200):
+def _bounded(value, default, ceiling=MAX_TIMEOUT_SECONDS):
     try:
         number = float(value)
         return max(10, min(number, ceiling)) if math.isfinite(number) else default
@@ -45,7 +49,7 @@ def turn_timeout_seconds(bot, provider=None):
     getter = getattr(bot, "_inbound_setting", None)
     if not configured and callable(getter):
         return getter(
-            "live_turn_timeout_seconds", LIVE_TURN_TIMEOUT_DEFAULT_SECONDS, 1, 7200
+            "live_turn_timeout_seconds", LIVE_TURN_TIMEOUT_DEFAULT_SECONDS, 1, MAX_TIMEOUT_SECONDS
         )
     return _bounded(
         configured
@@ -71,7 +75,7 @@ def worker_timeout_seconds(bot):
 
 
 def requested_worker_timeout_seconds(default, timeout_minutes=None):
-    """Job budget: the operator default, or a model-chosen value up to 30 min."""
+    """Job budget: the operator default, or a model-chosen value up to 240 min."""
     if timeout_minutes is None:
         return default
     try:
@@ -81,6 +85,17 @@ def requested_worker_timeout_seconds(default, timeout_minutes=None):
     if not math.isfinite(minutes) or minutes <= 0:
         return default
     return max(60, min(minutes * 60, max(default, WORKER_TIMEOUT_MAX_SECONDS)))
+
+
+def worker_job_timeout_seconds(bot, timeout_minutes=None):
+    """Whole-job deadline for a detached subagent.
+
+    Deliberately ignores a connection's chat whole-task deadline (BYOK
+    turn_timeout, default 900s): that knob bounds a live chat turn, and
+    applying it here quietly killed subagents at 15 minutes. Each model call
+    still honours the connection's per-request timeout.
+    """
+    return requested_worker_timeout_seconds(worker_timeout_seconds(bot), timeout_minutes)
 
 
 def request_turn_timeout_seconds(bot, provider=None, *, premium=False):

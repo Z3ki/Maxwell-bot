@@ -203,13 +203,13 @@ def test_timeout_and_parent_cancel_join_all_children(tmp_path, monkeypatch):
 
     bot._generate_response.side_effect = generate
     monkeypatch.setattr(
-        "plugins.maxwell_extras.task_workers.worker_timeout_seconds", lambda *a: 0.01
+        "plugins.maxwell_extras.task_workers.worker_job_timeout_seconds", lambda *a, **k: 0.01
     )
     result = asyncio.run(worker.run(msg, tasks=TASKS * 2))
     assert "deadline" in result and len(stopped) == 2
     assert worker._active == 0 and not worker._users
     monkeypatch.setattr(
-        "plugins.maxwell_extras.task_workers.worker_timeout_seconds", lambda *a: 30
+        "plugins.maxwell_extras.task_workers.worker_job_timeout_seconds", lambda *a, **k: 30
     )
 
     async def cancel():
