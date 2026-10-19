@@ -262,3 +262,35 @@ def test_command_timeout_destroys_the_tenant_container(monkeypatch):
     assert destroyed == [tenant.container_name]
     assert process.killed is True
     assert tenant.container_name not in ShellTool._active_tenants
+
+
+def test_destroy_container_releases_the_cache_slot(monkeypatch):
+    tenant = ShellTenant("7", "guild:9", "mwsh-" + "b" * 24)
+
+    async def run_docker(*_args, **_kwargs):
+        return (b"", b""), 0
+
+    async def wait_gone(_name):
+        return None
+
+    monkeypatch.setattr(
+        ShellTool,
+        "_run_docker",
+        classmethod(lambda cls, *a, **k: run_docker(*a, **k)),
+    )
+    monkeypatch.setattr(
+        ShellTool,
+        "_wait_container_gone",
+        classmethod(lambda cls, *a, **k: wait_gone(*a, **k)),
+    )
+    monkeypatch.setattr(ShellTool, "_tenants", {tenant.container_name: tenant})
+    monkeypatch.setattr(
+        ShellTool, "_last_used_by_tenant", {tenant.container_name: 1.0}
+    )
+    monkeypatch.setattr(ShellTool, "_active_tenants", set())
+    monkeypatch.setattr(ShellTool, "_prepared_tenants", set())
+
+    asyncio.run(ShellTool._destroy_container_unlocked(tenant))
+
+    assert tenant.container_name not in ShellTool._tenants
+    assert tenant.container_name not in ShellTool._last_used_by_tenant

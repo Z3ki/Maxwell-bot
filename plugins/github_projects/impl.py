@@ -1,12 +1,12 @@
 """Interactive per-user GitHub repository tools with isolated workspaces."""
 from __future__ import annotations
 
-import asyncio, base64, contextlib, hashlib, hmac, json, os, re, shlex, time
+import asyncio, base64, contextlib, hashlib, hmac, json, os, re, shlex, time, uuid
 from urllib.parse import urlencode
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 import aiohttp
 
@@ -360,14 +360,45 @@ class GitHubProjectService:
         if self.user_root(uid) not in root.parents: raise ValueError("workspace escaped user root")
         return root
 
-    async def _proc(self,*args:str,timeout:int=120,env:dict[str,str]|None=None,input:bytes|None=None)->ExecResult:
-        proc=await asyncio.create_subprocess_exec(*args,stdin=asyncio.subprocess.PIPE if input is not None else None,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,env=env)
-        try: out,err=await asyncio.wait_for(proc.communicate(input=input),timeout=timeout)
+    async def _proc(
+        self, *args: str, timeout: int = 120, env: dict[str, str] | None = None,
+        input: bytes | None = None, on_timeout: Callable[[], Any] | None = None,
+    ) -> ExecResult:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE if input is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(input=input), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill();
-            with contextlib.suppress(Exception): await proc.wait()
+            if on_timeout is not None:
+                with contextlib.suppress(Exception):
+                    await on_timeout()
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
             raise RuntimeError(f"command timed out after {timeout}s") from None
-        return ExecResult(proc.returncode or 0,out.decode(errors="replace"),err.decode(errors="replace"))
+        return ExecResult(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
+
+    async def _kill_workspace_exec(self, container: str, pid_file: str) -> None:
+        """Terminate the in-container command, not just its docker client."""
+        quoted = shlex.quote(pid_file)
+        cleanup = (
+            f"pid=$(cat {quoted} 2>/dev/null); "
+            'case "$pid" in '
+            "''|*[!0-9]*) ;; "
+            f"*) kill -TERM -- -$pid 2>/dev/null; sleep 0.2; "
+            f"kill -KILL -- -$pid 2>/dev/null; rm -f {quoted} ;; "
+            "esac"
+        )
+        with contextlib.suppress(Exception):
+            await self._proc(
+                "docker", "exec", "--user", "root", container,
+                "bash", "-lc", cleanup, timeout=10,
+            )
 
     async def _ensure_image(self)->None:
         check=await self._proc("docker","image","inspect",_IMAGE,timeout=20)
@@ -420,8 +451,19 @@ class GitHubProjectService:
         if not root.exists(): raise FileNotFoundError("repo is not checked out yet")
         container=await self.ensure_container(uid); owner,name=repo.split("/",1); argv=["docker","exec","--workdir",f"/workspace/repos/{owner}/{name}"]
         for k,v in (env or {}).items(): argv += ["-e",f"{k}={v}"]
-        argv += [container,"bash","-lc",str(command)]
-        return await self._proc(*argv,timeout=max(1,min(int(timeout),3600)))
+        pid_file = f"/tmp/.maxwell-gh-{uuid.uuid4().hex}.pid"
+        quoted_pid = shlex.quote(pid_file)
+        wrapped = (
+            f"echo $$ > {quoted_pid}\n"
+            f"trap 'rm -f {quoted_pid}' EXIT\n"
+            f"{command}\n"
+        )
+        argv += [container, "bash", "-lc", wrapped]
+        return await self._proc(
+            *argv,
+            timeout=max(1, min(int(timeout), 3600)),
+            on_timeout=lambda: self._kill_workspace_exec(container, pid_file),
+        )
 
     async def inspect_repository(
         self, uid: str, repo: str, operation: str, *, ref: str = "", timeout: int = 120

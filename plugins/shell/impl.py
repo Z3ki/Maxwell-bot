@@ -227,7 +227,8 @@ class ShellTool(Tool):
             await cls._wait_container_gone(tenant.container_name)
         cls._active_tenants.discard(tenant.container_name)
         cls._prepared_tenants.discard(tenant.container_name)
-        cls._tenants[tenant.container_name] = tenant
+        cls._tenants.pop(tenant.container_name, None)
+        cls._last_used_by_tenant.pop(tenant.container_name, None)
 
     @classmethod
     def _mark_used(cls, tenant: ShellTenant) -> None:

@@ -425,7 +425,19 @@ class TaskJobs:
         tool = (getattr(self.bot, "tools", None) or {}).get("send_file")
         if not raw or tool is None or job.message is None:
             return
+        gate = getattr(self.bot, "_authorize_tool_execution", None)
         for path in reported_files(raw):
+            if callable(gate):
+                try:
+                    refusal = gate(job.message, "send_file", tool, {"path": path})
+                except Exception:
+                    logger.exception("Subagent attachment authorization failed")
+                    continue
+                if refusal:
+                    logger.info(
+                        "Subagent file attachment refused: %s", str(refusal)[:180]
+                    )
+                    continue
             try:
                 result = await tool.execute(job.message, path=path)
             except Exception:
@@ -446,17 +458,18 @@ class TaskJobs:
             return
         job.row["delivery"] = "attempting"
         text = format_job(job.view(), limit=1850)
-        await self._send_reported_files(job)
         interaction = getattr(job.message, "interaction", None)
+        if interaction is not None:
+            expired = getattr(interaction, "is_expired", lambda: True)()
+            if expired:
+                job.row["delivery"] = "expired"
+                await asyncio.to_thread(
+                    self.store.update, job.row["id"], delivery="expired"
+                )
+                return
+        await self._send_reported_files(job)
         try:
             if interaction is not None:
-                expired = getattr(interaction, "is_expired", lambda: True)()
-                if expired:
-                    job.row["delivery"] = "expired"
-                    await asyncio.to_thread(
-                        self.store.update, job.row["id"], delivery="expired"
-                    )
-                    return
                 await interaction.followup.send(
                     content=text,
                     ephemeral=bool(job.row["private"]),
