@@ -1,6 +1,6 @@
 """Canonical live tool registry.
 
-Native tool-calling, compatibility parsers, the dashboard, autonomy, and
+Native tool-calling, compatibility parsers, the dashboard, and
 plugin management all resolve tools through this registry.
 """
 

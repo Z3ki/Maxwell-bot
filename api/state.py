@@ -289,8 +289,6 @@ def _sanitize_control(control):
         out.pop(dead_key, None)
     for key in [name for name in out if str(name).startswith("vc_")]:
         out.pop(key, None)
-    for retired in [key for key in out if str(key).startswith("autonomy_")]:
-        out.pop(retired, None)
     return out
 
 

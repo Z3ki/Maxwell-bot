@@ -364,7 +364,7 @@ configure_env() {
       DISCORD_BOT_TOKEN DISCORD_TOKEN AI_BASE_URL AI_API_URL AI_MODEL AI_API_KEY \
       OLLAMA_BASE_URL OLLAMA_MODEL OLLAMA_API_KEY \
       BOT_NAME CREATOR_NAME CREATOR_ID MAXWELL_OWNER_IDS COMMAND_PREFIX \
-      MAXWELL_ADMIN_USER MAXWELL_ADMIN_PASSWORD ENABLE_AUTONOMY ENABLE_SHELL \
+      MAXWELL_ADMIN_USER MAXWELL_ADMIN_PASSWORD ENABLE_SHELL \
       > "$defaults_file"; then
       rm -f "$defaults_file"
       fail "Could not read existing .env; no settings were changed."
@@ -486,14 +486,7 @@ configure_env() {
     warn "MAXWELL_ADMIN_PASSWORD left blank; operator API will answer 503."
   fi
 
-  printf '\n%sStep 5/5: Optional background loops%s\n' "$BOLD" "$RESET"
-  printf '  Optional conversational autonomy uses LLM tokens on a timer, so the safe default is off.\n'
-  autonomy=$(yes_no "Enable autonomy background actions?" "no" "${ENABLE_AUTONOMY:-}")
-  if [ "$autonomy" = "yes" ]; then
-    set_env_value ENABLE_AUTONOMY true
-  else
-    set_env_value ENABLE_AUTONOMY false
-  fi
+  printf '\n%sStep 5/5: Shell backend%s\n' "$BOLD" "$RESET"
   set_env_value ENABLE_SHELL "${ENABLE_SHELL:-false}"
   python3 scripts/migrate_ai_env.py .env >/dev/null || true
 }

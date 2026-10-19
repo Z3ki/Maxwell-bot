@@ -124,8 +124,7 @@ def test_config_identity_defaults_are_empty_without_env():
         "    ('creator_id', v['creator_id'], ''),\n"
         "    ('self_id', v['self_id'], ''),\n"
         "    ('bot_name', v['bot_name'], 'Maxwell'),\n"
-        "    ('partner_line', v['partner_line'], ''),\n"
-        "]\n"
+                "]\n"
         "for name, got, expected in id_checks:\n"
         "    if got != expected:\n"
         "        bad.append(name)\n"
@@ -144,9 +143,6 @@ def test_identity_values_empty_owner_fields_on_blank_config(monkeypatch):
     assert values["command_prefix"] == ","
     assert values["official_invite"] == ""
     assert values["invite_line"] == ""
-    assert values["partner_line"] == ""
-    assert values["partner_id"] == ""
-    assert values["partner_name"] == ""
     assert "MAXWELL_OWNER_IDS" in values["creator_line"]
     assert _HARDCODED_SNOWFLAKE not in values["creator_id"]
     assert _HARDCODED_SNOWFLAKE not in values["creator_line"]
@@ -168,8 +164,6 @@ def test_identity_values_custom_bot_and_creator(monkeypatch):
     assert values["creator_name"] == "Ada"
     assert values["creator_id"] == "99"
     assert values["self_id"] == "1"
-    assert values["partner_id"] == ""
-    assert values["partner_line"] == ""
     assert "Ada" in values["creator_line"]
     assert "99" in values["creator_line"]
     assert "Ada" in values["authority_line"]
@@ -183,7 +177,7 @@ def test_fill_identity_replaces_bot_name_and_creator_line(monkeypatch):
     )
     assert fill_identity("You are {bot_name}", values) == "You are Nova"
     filled = fill_identity(
-        "You are {bot_name}. {creator_line} {authority_line} {partner_line} {invite_line}",
+        "You are {bot_name}. {creator_line} {authority_line} {invite_line}",
         values,
     )
     assert "You are Nova" in filled
@@ -191,17 +185,12 @@ def test_fill_identity_replaces_bot_name_and_creator_line(monkeypatch):
     assert "99" in filled
     assert "{bot_name}" not in filled
     assert "{creator_line}" not in filled
-    assert "{partner_line}" not in filled
-    assert "trusted partner" not in filled.lower()
     assert fill_identity("keep {unknown}", values) == "keep {unknown}"
 
     knowledge = fill_identity(MAXWELL_BASE_KNOWLEDGE, values)
     assert "You are Nova" in knowledge
     assert "You are Maxwell" not in knowledge
     assert "{bot_name}" not in knowledge
-    assert "{partner_line}" not in knowledge
-    assert "trusted partner" not in knowledge.lower()
-    assert "supportive partner" not in knowledge.lower()
     chat = fill_identity(DISCORD_CHAT_PROTOCOL, values)
     assert "[Nova]" in chat
     assert "[Maxwell]" not in chat
@@ -260,9 +249,6 @@ def test_old_partner_env_does_not_invent_a_companion(monkeypatch):
         )
     )
     assert values["bot_name"] == "Maxwell"
-    assert values["partner_line"] == ""
-    assert values["partner_id"] == ""
-    assert values["partner_name"] == ""
     assert "Uni" not in fill_identity(MAXWELL_BASE_KNOWLEDGE, values)
 
 

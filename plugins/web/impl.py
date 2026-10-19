@@ -8,7 +8,6 @@ from __future__ import annotations
 from tooling import helpers as _helpers
 from tools import Tool
 from discord_media import clean_media_url
-from maxwell_core.memory.scope import MemoryRequester
 from web_references import record_web_search_hits
 from web_search import SearchService
 from web_page_text import extract_page_text
@@ -56,13 +55,8 @@ class WebSearchTool(Tool):
     def __init__(self, bot):
         super().__init__(bot)
         self._search_service = None
-        self._store_tasks = set()
 
     async def close(self):
-        tasks = list(self._store_tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
         if self._search_service is not None:
             await self._search_service.close()
 
@@ -161,18 +155,6 @@ class WebSearchTool(Tool):
                     )
                 return f"No results found for '{query}'. Current facts remain unverified."
 
-            # Optional embedding writes must not hold up the answer or grow an
-            # unbounded task backlog when the embedding endpoint is slow.
-            if (
-                not result.cached
-                and len(self._store_tasks) < 2
-                and bool(getattr(cfg, "RAG_WEB_STORE_ENABLED", True))
-                and hasattr(getattr(self.bot, "memory", None), "store_web_results")
-            ):
-                task = asyncio.create_task(self._store_hits(message, query, hits))
-                self._store_tasks.add(task)
-                task.add_done_callback(self._store_tasks.discard)
-
             header = (
                 f"Web evidence: provider={result.provider}; retrieved_at={result.retrieved_at}; "
                 f"cached={'yes' if result.cached else 'no'}. "
@@ -189,27 +171,6 @@ class WebSearchTool(Tool):
                 return f"No results found for '{query}'"
             logger.error("Web search error (%s)", type(e).__name__)
             return f"Error searching: {type(e).__name__}. Current evidence is unavailable."
-
-    async def _store_hits(self, message, query, hits):
-        try:
-            cfg = getattr(self.bot, "config", None)
-            memory = getattr(self.bot, "memory", None)
-            if not bool(getattr(cfg, "RAG_WEB_STORE_ENABLED", True)) or not hasattr(memory, "store_web_results"):
-                return
-            requester = None
-            if message is not None:
-                checker = getattr(self.bot, "_is_admin", None)
-                is_admin = bool(checker(getattr(message.author, "id", None))) if callable(checker) else False
-                requester = MemoryRequester.from_message(message, is_admin=is_admin)
-            # Caller-specific scope is resolved on every invocation, including
-            # coalesced searches. Only public search hits are shared by cache.
-            await asyncio.wait_for(memory.store_web_results(
-                query=query, results=hits,
-                guild_id=requester.guild_id if requester else "",
-                requester=requester,
-            ), timeout=3.0)
-        except Exception as exc:
-            logger.debug("web_search scoped persistence skipped (%s)", type(exc).__name__)
 
 class FetchUrlTool(Tool):
     """Fetch and extract text content from a URL"""

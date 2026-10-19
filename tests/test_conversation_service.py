@@ -110,7 +110,7 @@ def service(*, failed=False, cold=False, short=False, private=False, **controls)
         memory=memory,
         user=SimpleNamespace(id=1, display_name="Maxwell"),
         bot_name="Maxwell",
-        config=SimpleNamespace(RAG_WEB_STORE_ENABLED=True),
+        config=SimpleNamespace(),
     )
 
     async def entity(*_args, **_kwargs):

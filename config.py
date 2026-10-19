@@ -4,7 +4,7 @@ Design note — optional features
 -------------------------------
 Maxwell only *requires* two things: a Discord token and an OpenAI-compatible
 model endpoint. Everything else (YouTube, web search, video frames,
-generated sites) is optional and gated behind an ``ENABLE_*`` switch. Live RAG is retired.
+generated sites) is optional and gated behind an ``ENABLE_*`` switch.
 
 Those switches are tri-state:
 
@@ -332,7 +332,6 @@ class Config:
     )
     ENABLE_AVATAR = _feature_env("ENABLE_AVATAR")
 
-    ENABLE_AUTONOMY = False  # retired; old environment flags cannot restart it
     # image_generator is text-to-image on the Gemini image model. hd_image
     # is that same model plus edits, and stays off until a model is set.
     ENABLE_IMAGE_GEN = _feature_env("ENABLE_IMAGE_GEN")
@@ -377,23 +376,6 @@ class Config:
 
     # The installer enables this when --with-shell prepares the backend.
     ENABLE_SHELL = _feature_env("ENABLE_SHELL", default=False)
-
-    # Retired. Legacy environment settings cannot start local inference.
-    ENABLE_RAG = False
-    RAG_WEB_STORE_ENABLED = False
-
-    # -------------------------------------------------------------------------
-    # Offline migration compatibility only. The live runtime never reads
-    # these settings or constructs an embedding client.
-    # -------------------------------------------------------------------------
-    EMBED_BASE_URL = _first_env(
-        "MAXWELL_EMBED_BASE_URL", "EMBED_BASE_URL", default="http://localhost:11434"
-    ).rstrip("/")
-    EMBED_MODEL = _first_env(
-        "MAXWELL_EMBED_MODEL", "EMBED_MODEL", default="qwen3-embedding:0.6b"
-    )
-    EMBED_API_KEY = _first_env("MAXWELL_EMBED_API_KEY", "EMBED_API_KEY")
-    EMBED_DIM = _int_env("MAXWELL_EMBED_DIM", 1024, min_value=8, max_value=16384)
 
     # When false (default), shell refuses to run on a turn
     # that read untrusted fetched content (URLs, web search). A new clean user

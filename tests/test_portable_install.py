@@ -34,7 +34,6 @@ def test_reconfigure_preserves_saved_provider_identity_and_disabled_shell(tmp_pa
         "COMMAND_PREFIX": "!",
         "MAXWELL_ADMIN_USER": "operator",
         "MAXWELL_ADMIN_PASSWORD": "keep-this-password",
-        "ENABLE_AUTONOMY": "true",
         "ENABLE_REM": "true",
         "ENABLE_SHELL": "false",
     }

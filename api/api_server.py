@@ -74,7 +74,6 @@ DATA_DIR = Path(os.getenv("DATA_DIR", APP_ROOT / "data"))
 # Compatibility database/routes preserve archived records for operator export.
 # The live bot stores scoped transcript history and never generates embeddings.
 RAG_DB_PATH = DATA_DIR / "maxwell_rag.db"
-RAG_EMBED_MODEL = ""
 
 
 def _rag_db() -> sqlite3.Connection:
@@ -256,7 +255,6 @@ async def rag_memory_stats(request):
                 "mode": "history_only",
                 "retrieval_enabled": False,
                 "pending_embeddings": 0,
-                "embed_model": RAG_EMBED_MODEL,
             }
         )
     except sqlite3.Error as e:
@@ -1815,7 +1813,6 @@ async def bot_status(request):
             "mode": "history_only",
             "retrieval_enabled": False,
             "pending_embeddings": 0,
-            "embed_model": RAG_EMBED_MODEL,
         }
     except sqlite3.Error:
         rag_stats = {
@@ -1828,7 +1825,6 @@ async def bot_status(request):
             "mode": "history_only",
             "retrieval_enabled": False,
             "pending_embeddings": 0,
-            "embed_model": RAG_EMBED_MODEL,
         }
     return _json_response(
         {

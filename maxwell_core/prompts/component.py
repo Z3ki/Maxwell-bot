@@ -34,7 +34,6 @@ POSITIONS = (
 SCOPES = (
     "always",
     "discord",
-    "autonomy",
     "jobs",
     "memory",
     "background",

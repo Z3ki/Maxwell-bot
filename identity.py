@@ -11,9 +11,6 @@ Placeholders understood by ``fill_identity``:
     {official_invite} {command_prefix}
     {creator_line} {authority_line} {invite_line}
 
-Retired companion-bot tokens ({partner_name}, {partner_id}, {partner_line},
-{partner_id_paren}) still expand to empty so old control.json templates do
-not leak the placeholder text.
 """
 
 from __future__ import annotations
@@ -38,11 +35,6 @@ IDENTITY_TOKENS = (
     "account_name",
     "primary_id",
     "primary_id_paren",
-    # Retired companion-bot placeholders — always empty.
-    "partner_name",
-    "partner_id",
-    "partner_line",
-    "partner_id_paren",
 )
 
 _DEFAULT_BIRTHDAY = "2026-05-21"
@@ -183,10 +175,6 @@ def identity_values(
         "self_id_paren": f" (ID {self_id})" if self_id else "",
         "primary_id": self_id_primary,
         "primary_id_paren": f" (ID {self_id_primary})" if self_id_primary else "",
-        "partner_name": "",
-        "partner_id": "",
-        "partner_line": "",
-        "partner_id_paren": "",
     }
 
 
