@@ -63,7 +63,10 @@ class _CustomToolCallBuffer:
         only an unmatched opener pattern counts. Callers use this to reject the
         stream instead of posting the raw JSON as the assistant reply.
         """
-        return self.has_pending_json and _CUSTOM_TOOL_OPEN_RE.search(self._buf) is not None
+        # Balance-check the held opener itself: "last { after last }" misses a
+        # call cut off after a nested object closed (`{"name": .., "arguments": {}`).
+        match = _CUSTOM_TOOL_OPEN_RE.search(self._buf)
+        return match is not None and _find_balanced_json_end(self._buf, match.start()) is None
 
     def feed(self, delta: str) -> str:
         """Accumulate a text delta, returning the newly revealed visible text."""

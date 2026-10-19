@@ -100,9 +100,15 @@ class RecoveryMixin:
             # One batched transaction rather than one fsync per stale row; this
             # runs synchronously inside setup_hook, so it must not block the
             # event loop for thousands of writes.
-            with contextlib.suppress(Exception):
+            try:
                 return int(suppress(boot, reason="stale_offline"))
-            return 0
+            except Exception:
+                # Fall back to the per-row sweep below so a failed batch does
+                # not silently leave stale rows to be replayed later.
+                logger.warning(
+                    "batched stale-inbound suppression failed; sweeping per row",
+                    exc_info=True,
+                )
         dropped = 0
         for row in journal.pending(limit=10000):
             created = float(row.get("created_at") or 0)

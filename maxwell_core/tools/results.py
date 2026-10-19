@@ -46,6 +46,7 @@ _NEGATION_RE = re.compile(
     r"aren'?t|unable|refus(?:e|es|ed|ing)|stop(?:ped|ping|s)?)\b",
     re.I,
 )
+_NEGATION_WINDOW_WORDS = 3
 
 
 def _promises_followup_work(result: str) -> bool:
@@ -61,11 +62,14 @@ def _promises_followup_work(result: str) -> bool:
     if not sent or len(sent) > _PROMISE_MAX_CHARS:
         return False
     for clause in re.split(r"[.!?;\n,—–]+", sent):
-        if not _PROMISE_RE.search(clause):
-            continue
-        if _NEGATION_RE.search(clause):
-            continue
-        return True
+        for match in _PROMISE_RE.finditer(clause):
+            # Only a negation just before the promise phrase negates it
+            # ("I'm not going to build"). A negation later in the clause is
+            # usually the problem being promised about ("lemme check why it's
+            # not loading") and must still loop back.
+            lead = clause[: match.start()].split()[-_NEGATION_WINDOW_WORDS:]
+            if not _NEGATION_RE.search(" ".join(lead)):
+                return True
     return False
 
 

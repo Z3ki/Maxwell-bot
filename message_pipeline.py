@@ -963,6 +963,12 @@ class Watermarks:
         # via note(); the lock makes the snapshot atomic and prevents a
         # "dictionary changed size during iteration" error mid-save.
         self._lock = threading.RLock()
+        # Serializes whole saves (periodic worker thread vs. the synchronous
+        # shutdown save) so two writers never share the .tmp file.
+        self._save_lock = threading.Lock()
+        # Bumped by every accepted note(); save() clears _dirty only if nothing
+        # changed while it was writing, so a mark noted mid-save is not lost.
+        self._version = 0
 
     def load(self) -> None:
         try:
@@ -986,22 +992,25 @@ class Watermarks:
             self._dirty = was_dirty
 
     def save(self) -> None:
-        with self._lock:
-            if not self._dirty:
-                return
-            payload = {"channels": {k: str(v) for k, v in self._marks.items()}}
-        tmp = f"{self.path}.tmp"
-        try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-            os.replace(tmp, self.path)
+        with self._save_lock:
             with self._lock:
-                self._dirty = False
-        except Exception as exc:
-            logger.warning("watermarks save failed: %s", exc)
-            with contextlib.suppress(Exception):
-                os.unlink(tmp)
+                if not self._dirty:
+                    return
+                version = self._version
+                payload = {"channels": {k: str(v) for k, v in self._marks.items()}}
+            tmp = f"{self.path}.tmp"
+            try:
+                os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle)
+                os.replace(tmp, self.path)
+                with self._lock:
+                    if self._version == version:
+                        self._dirty = False
+            except Exception as exc:
+                logger.warning("watermarks save failed: %s", exc)
+                with contextlib.suppress(Exception):
+                    os.unlink(tmp)
 
     def note(self, channel_id: Any, message_id: Any) -> None:
         cid = str(channel_id or "").strip()
@@ -1016,6 +1025,7 @@ class Watermarks:
                 return
             self._marks[cid] = mid
             self._dirty = True
+            self._version += 1
             if len(self._marks) > self.max_channels:
                 # Snowflakes are time-ordered, so the smallest ids are the
                 # coldest rooms — exactly the ones whose backlog matters least.

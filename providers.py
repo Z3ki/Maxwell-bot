@@ -1195,8 +1195,7 @@ class OpenAICompatibleProvider(ChatProvider):
                     # endpoint is one of them. Retrying it repeats the failure;
                     # drop the attachments and answer the text instead.
                     logger.warning(
-                        "No usable media endpoint remains; retrying text-only: %s",
-                        "[provider body omitted]",
+                        "No usable media endpoint remains; retrying text-only"
                     )
                     has_media = False
                     media_broken.clear()
