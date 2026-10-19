@@ -67,14 +67,13 @@ def test_persisted_personality_is_ignored(tmp_path):
     assert bot._control["base_personality"] == DEFAULT_CONTROL["base_personality"]
 
 
-def test_dead_and_autonomy_keys_are_stripped(tmp_path):
+def test_dead_keys_are_stripped(tmp_path):
     dead = sorted(DEAD_CONTROL_KEYS)[:5]
-    _write(tmp_path, {**dict.fromkeys(dead, True), "autonomy_anything": 1})
+    _write(tmp_path, {**dict.fromkeys(dead, True)})
     bot = _bot(tmp_path)
     bot._load_control()
     for key in dead:
         assert key not in bot._control
-    assert "autonomy_anything" not in bot._control
 
 
 @pytest.mark.parametrize(
@@ -184,10 +183,10 @@ def test_api_sanitize_tolerates_non_dict_input():
 def test_api_sanitize_drops_retired_keys():
     retired = sorted(DEAD_CONTROL_KEYS)[0]
     out = _sanitize_control(
-        {retired: 1, "vc_anything": 1, "autonomy_x": 1, "create_site_quota_per_user": 3}
+        {retired: 1, "vc_anything": 1, "create_site_quota_per_user": 3}
     )
     assert retired not in out
-    assert "vc_anything" not in out and "autonomy_x" not in out
+    assert "vc_anything" not in out
     assert "create_site_quota_per_user" not in out
 
 

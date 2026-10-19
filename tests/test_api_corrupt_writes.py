@@ -2,7 +2,7 @@ import asyncio
 import json
 
 import api.api_server as api
-from rag_memory import MemoryRequester, _memory_row_visible
+from maxwell_core.memory.scope import MemoryRequester, _memory_row_visible
 
 
 class FakeRequest:

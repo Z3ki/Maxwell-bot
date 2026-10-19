@@ -13,7 +13,6 @@ from media_payloads import (
     sanitize_media_memory,
     strip_media_payloads,
 )
-from rag_memory import MemoryRequester, RAGMemoryManager, _strip_for_embedding
 
 
 @pytest.mark.parametrize("kind", ["IMAGE", "AUDIO"])
@@ -28,7 +27,6 @@ def test_payloads_are_removed_before_clipping(kind, closed):
     assert "_B64__" not in clean
     if closed:
         assert "Useful result." in clean
-    assert payload[:100] not in _strip_for_embedding(raw)
 
 
 def test_metadata_scrubbing_preserves_the_input_and_normal_text():
@@ -85,44 +83,6 @@ def test_dispatch_extracts_media_but_never_persists_it(monkeypatch, kind, tool, 
 
     asyncio.run(run())
 
-
-@pytest.mark.parametrize("kind", ["IMAGE", "AUDIO"])
-def test_database_stores_clean_results_and_filters_legacy_rows(
-    tmp_path, monkeypatch, kind
-):
-    async def run():
-        manager = RAGMemoryManager(str(tmp_path))
-        monkeypatch.setattr(manager, "_embed_and_store", AsyncMock())
-        raw = f"Loaded media.\n__{kind}_B64__" + "QUFB" * 3000
-        # No closing marker: simulate the old 8000-character database cap.
-        requester = MemoryRequester(user_id="u", channel_id="c", is_dm=True)
-        message = {
-            "message_id": "tool1",
-            "author": "Tool",
-            "content": raw,
-            "is_tool": True,
-            "tool_name": "see_media",
-            "tool_result": raw,
-        }
-        await manager.add_to_channel_memory("c", message)
-        row = manager._db.execute(
-            "SELECT content, metadata FROM vectors WHERE id='tool1'"
-        ).fetchone()
-        assert "QUFB" not in row["content"] + row["metadata"]
-        # Bypass the fixed writer to reproduce an already-contaminated row.
-        manager._db.execute(
-            "UPDATE vectors SET content=?, metadata=? WHERE id='tool1'",
-            (raw[:8000], json.dumps({"is_tool": True, "tool_result": raw})),
-        )
-        history = await manager.get_channel_memory("c", requester=requester)
-        assert len(history) == 1
-        assert "QUFB" not in json.dumps(history)
-        assert "Loaded media." in history[0]["content"]
-        assert message["content"] == raw
-        await asyncio.gather(*manager._embed_tasks)
-        manager._db.close()
-
-    asyncio.run(run())
 
 
 def test_followups_retain_original_image_audio_and_new_tool_media():

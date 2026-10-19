@@ -127,7 +127,7 @@ def test_normalize_web_hit_accepts_url_and_excerpt():
 def _search_bot():
     return SimpleNamespace(
         mark_message_tainted=lambda *_a, **_k: None,
-        config=SimpleNamespace(RAG_WEB_STORE_ENABLED=False),
+        config=SimpleNamespace(),
         memory=None,
     )
 

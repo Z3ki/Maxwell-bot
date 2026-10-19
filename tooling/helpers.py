@@ -4064,7 +4064,7 @@ def _taint_gate_blocks(tool: Any, message: Any, kwargs: dict) -> bool:
 
     bot.py's dispatcher is the primary enforcement point and injects
     ``_confirmed`` when the user has actually confirmed. Tools keep their own
-    check because that dispatcher is not the only caller — the autonomy tick
+    check because that dispatcher is not the only caller — background ticks
     invokes ``tool.execute`` directly — but the two must agree on
     ``DISABLE_TAINT_GATE``, or turning the gate off in .env leaves the
     per-tool copy refusing anyway and the switch reads as broken.

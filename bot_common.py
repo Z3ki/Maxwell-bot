@@ -607,7 +607,7 @@ def _str_set(data):
 _RETIRED_PREFIX_COMMANDS = frozenset(
     {
         "stop", "bg", "jobs", "job", "prompt", "clearprompt", "clearmem",
-        "downvote", "neg", "summarize", "context", "rem", "autonomy",
+        "downvote", "neg", "summarize", "context", "rem",
         "drug", "sleep", "wake", "jailbreak", "progress", "ticket",
         "admin", "solo", "help", "usage", "premium", "x", "shell",
         "plugin", "plugins", "confirm", "blacklist", "unblacklist", "debug",

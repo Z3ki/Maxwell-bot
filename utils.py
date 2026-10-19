@@ -1182,7 +1182,7 @@ def render_discord_context_text(
     Also appends structured annotations for non-text payloads the message
     carries: polls, app-command invocations, system/welcome events, embeds,
     and direct media URLs in the text. This runs on EVERY message context
-    build (memory writes, autonomy, live replies), so media/polls/embeds
+    build (memory writes, background work, live replies), so media/polls/embeds
     from users who never pinged the bot still reach the model's context.
     """
     text = str(
@@ -1253,7 +1253,7 @@ def render_discord_context_text(
     return text
 
 
-# Alias for autonomy.py compatibility
+# Backwards-compatible alias for older imports.
 _render_discord_context_text = render_discord_context_text
 
 
@@ -1297,7 +1297,7 @@ def format_reactions_annotation(entries: list | None) -> str:
 
 # --- Cross-process file locking (Linux fcntl; best-effort elsewhere) ---
 # Used to reduce lost-update races on shared JSONs between bot and api processes
-# (bot_commands.json, autonomy state, rem state, etc.). Not a full DB, but
+# (bot_commands.json, rem state, etc.). Not a full DB, but
 # makes the existing read-modify-write pattern much safer.
 try:
     import fcntl
@@ -1390,7 +1390,7 @@ def _load_json_safe(path: Path, default):
 
     Fail closed: a transient read error must NOT overwrite the on-disk file
     with {}. Doing so wiped state/goals/watermarks in production (a corrupt
-    read of autonomy_goals.json silently deleted every user goal). The file is
+    read of a goals file silently deleted every user goal). The file is
     left intact so a human can recover it; the caller runs off in-memory
     defaults for this cycle.
     """
@@ -1437,12 +1437,10 @@ def _load_json_object_for_update(path: Path) -> dict:
 class JsonStateStore:
     """Lock-guarded JSON state + ring-buffered audit log on disk.
 
-    autonomy.AutonomyStore and context_cleanup.ContextCleanupStore had
-    byte-identical copies of all eight of these methods; the only real
-    difference was the filenames and the log ring size. They drifted once
-    already (one grew the fail-closed load fix months before the other), so
-    the shared half lives here now. Subclasses set the file paths in __init__
-    and add whatever is genuinely theirs (autonomy's goals, cleanup's control).
+    Several JSON state stores had byte-identical copies of all eight of these
+    methods; the only real difference was the filenames and the log ring size.
+    They drifted once already, so the shared half lives here now. Subclasses
+    set the file paths in __init__ and add whatever is genuinely theirs.
 
     Every write goes through _atomic_json_write_sync on a worker thread, and
     every read-modify-write holds `self._lock` for the whole cycle so two

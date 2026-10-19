@@ -39,8 +39,6 @@ logging.basicConfig(level=logging.ERROR)
 
 # Import Maxwell modules
 import config  # noqa: E402
-import rag_memory  # noqa: E402
-import context_budget  # noqa: E402
 import providers  # noqa: E402
 import tool_schemas  # noqa: E402
 import tool_registry  # noqa: E402
@@ -166,8 +164,6 @@ class DeepTestHarness:
             assert hasattr(cfg, "DISCORD_TOKEN")
             assert hasattr(cfg, "AI_MODEL")
             assert hasattr(cfg, "ENABLE_SHELL")
-            assert hasattr(cfg, "ENABLE_RAG")
-            assert hasattr(cfg, "ENABLE_AUTONOMY")
             assert isinstance(cfg.MAXWELL_OWNER_IDS, set)
             return "Config class exposes required features and attributes"
 
@@ -334,95 +330,6 @@ class DeepTestHarness:
         self.run_sync_test("Shell command normalization & arg extraction", test_shell_command_normalization)
 
     # =========================================================================
-    # SUITE 5: RAG Vector Memory & Context Budgeting
-    # =========================================================================
-    async def test_suite_rag_memory(self):
-        self.current_suite = "RAG Memory & Context Budget"
-        print(f"\n\033[1;34m=== SUITE 5: {self.current_suite} ===\033[0m")
-
-        temp_db_dir = self.make_temp_dir()
-
-        async def test_rag_database_operations():
-            mgr = rag_memory.RAGMemoryManager(data_dir=temp_db_dir)
-            assert os.path.exists(mgr.db_path)
-
-            # Insert channel memory
-            channel_id = "chan_999"
-            msg_data = {
-                "id": "msg_001",
-                "author": "Alice",
-                "author_id": "user_alice",
-                "content": "The quick brown fox jumps over the lazy dog",
-                "timestamp": time.time(),
-            }
-            await mgr.add_to_channel_memory(channel_id, msg_data)
-
-            # Retrieve channel memory
-            recent = await mgr.get_channel_memory(channel_id)
-            assert len(recent) >= 1
-            assert recent[0]["author"] == "Alice"
-            assert recent[0]["content"] == msg_data["content"]
-
-            # Global user entity memory
-            await mgr.add_entity_fact(
-                user_id="user_alice",
-                content="Likes astronomy and space exploration",
-                author="Alice",
-                source_guild_id="guild_1",
-            )
-            entities = await mgr.get_entity_facts(user_id="user_alice")
-            assert len(entities) >= 1
-            assert "astronomy" in entities[0]["content"]
-
-            # LTM storage
-            await mgr.add_long_term_memory("Maxwell was created in 2026.")
-            ltm = mgr.get_long_term_memory()
-            assert len(ltm) >= 1
-            assert any("Maxwell was created" in f["content"] for f in ltm)
-
-            # Shared context
-            await mgr.add_shared_context({
-                "content": "Project roadmap item: Voice support",
-                "scope": "global",
-                "importance": 7,
-            })
-            shared = await mgr.list_shared_context(limit=10)
-            assert len(shared) >= 1
-            assert any("Voice support" in s["content"] for s in shared)
-
-            return "SQLite vector store CRUD, channel memory & entity memory verified"
-
-        def test_context_budget_distribution():
-            total_budget = 4000
-            weights = {
-                "recent": 70,
-                "facts": 12,
-                "entity": 8,
-                "ltm": 7,
-                "web": 3,
-            }
-            budget = context_budget.allocate(total=total_budget, weights=weights)
-            assert budget.budget_for("recent") > 2000
-            assert budget.budget_for("facts") > 0
-            assert budget.used == 0
-
-            # Note usage
-            budget.note_usage("facts", 100)
-            assert budget.used == 100
-            assert budget.tiers["facts"].used == 100
-            assert budget.tiers["facts"].remaining == budget.budget_for("facts") - 100
-
-            # Fit lines
-            lines = ["line 1", "line 2", "line 3", "line 4", "line 5"]
-            fitted, count = context_budget.fit_lines(lines, budget=15)
-            assert len(fitted) < len(lines)
-            assert len("\n".join(fitted)) <= 15
-            return "Context budget tier allocation & line fitting validated"
-
-        await self.run_async_test("RAG SQLite vectors, channel memory & entity memory", test_rag_database_operations)
-        self.run_sync_test("Context budget tier allocation & line fitting", test_context_budget_distribution)
-
-    # =========================================================================
     # SUITE 6: Autonomy Engine & Turn-Taking Dynamics
     # =========================================================================
 
@@ -572,12 +479,11 @@ class DeepTestHarness:
 
         t_start = time.perf_counter()
 
-        # Run all 13 test suites
+        # Run all test suites
         self.test_suite_config()
         self.test_suite_providers()
         self.test_suite_tools()
         await self.test_suite_shell()
-        await self.test_suite_rag_memory()
         self.test_suite_chess()
         self.test_suite_sites()
         self.test_suite_security_guards()

@@ -407,7 +407,7 @@ def test_web_search_then_music_keeps_permissions_and_destructive_gate(tmp_path, 
     monkeypatch.setattr('bot_tools._DDGS_AVAILABLE', True)
     service, backend, msg, voice = fixture(tmp_path)
     bot = service.bot
-    bot.config = SimpleNamespace(DISABLE_TAINT_GATE=False, RAG_WEB_STORE_ENABLED=False)
+    bot.config = SimpleNamespace(DISABLE_TAINT_GATE=False)
     bot.memory = None
     bot._tool_breaker = ToolCircuitBreaker()
     bot.tool_concurrency = None

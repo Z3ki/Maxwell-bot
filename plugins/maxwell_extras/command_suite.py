@@ -494,7 +494,7 @@ class _GuildChannelSelect(discord.ui.ChannelSelect):
 
 
 class _OwnerDiagnosticsSelect(discord.ui.Select):
-    _SECTIONS = ("overview", "runtime", "controls", "memory", "autonomy", "tools", "plugins", "data")
+    _SECTIONS = ("overview", "runtime", "controls", "memory", "tools", "plugins", "data")
 
     def __init__(self, panel: "_ConfigPanel", row: int):
         options = [

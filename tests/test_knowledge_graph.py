@@ -1,11 +1,13 @@
-"""Hybrid knowledge graph: site routes + 1-hop facts next to vector RAG."""
+"""Hybrid knowledge graph: site routes + 1-hop facts."""
 
+import sqlite3
 
 from knowledge_graph import (
+    KnowledgeGraph,
     extract_frontend_api_paths,
     extract_python_routes,
 )
-from rag_memory import MemoryRequester, RAGMemoryManager
+from maxwell_core.memory.scope import MemoryRequester
 
 
 FLASK_APP = """
@@ -48,13 +50,17 @@ const other = '/bot/demo/api/telemetry'
 """
 
 
-
-
 def _admin():
     return MemoryRequester(
         user_id="owner", channel_id="admin-channel", guild_id="g1",
         is_dm=False, is_admin=True, channel_is_public=True,
     )
+
+
+def _graph(tmp_path):
+    db = sqlite3.connect(tmp_path / "graph.db")
+    db.row_factory = sqlite3.Row
+    return KnowledgeGraph(db), db
 
 
 def test_extracts_flask_and_fastapi_routes():
@@ -80,14 +86,14 @@ def test_extracts_frontend_api_paths():
 
 
 def test_site_index_is_queryable_without_embeddings(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
+    graph, _db = _graph(tmp_path)
     site_dir = tmp_path / "public" / "bot" / "demo"
     code_dir = tmp_path / "site_servers" / "demo"
     site_dir.mkdir(parents=True)
     code_dir.mkdir(parents=True)
     (site_dir / "index.html").write_text(PAGE, encoding="utf-8")
     (code_dir / "app.py").write_text(FASTAPI_APP, encoding="utf-8")
-    note = mgr.graph.index_site(
+    note = graph.index_site(
         slug="demo",
         title="Demo",
         owner_id="111",
@@ -98,19 +104,19 @@ def test_site_index_is_queryable_without_embeddings(tmp_path):
     )
     assert "GET /api/score" in note
     assert "frontend calls" in note
-    block = mgr.graph.prompt_block(
+    block = graph.prompt_block(
         query="fix demo telemetry", user_id="111", requester=_admin()
     )
     assert "Z3ki" in block
     assert "OWNS" in block
     assert "EXPOSES" in block or "CALLS" in block
-    mgr.graph.drop_site("demo")
-    assert mgr.graph.summarize_site("demo") == ""
+    graph.drop_site("demo")
+    assert graph.summarize_site("demo") == ""
 
 
 def test_chat_triples_link_a_person_to_a_project(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
-    n = mgr.graph.ingest_triples(
+    graph, _db = _graph(tmp_path)
+    n = graph.ingest_triples(
         [
             {"s": "Z3ki", "rel": "OWNS", "o": "LeakBot"},
             {"s": "LeakBot", "rel": "USES", "o": "hybra.onyx"},
@@ -121,7 +127,7 @@ def test_chat_triples_link_a_person_to_a_project(tmp_path):
         requester=_admin(),
     )
     assert n == 2
-    block = mgr.graph.prompt_block(
+    block = graph.prompt_block(
         query="LeakBot config", user_id="111", requester=_admin()
     )
     assert "OWNS" in block
@@ -129,20 +135,19 @@ def test_chat_triples_link_a_person_to_a_project(tmp_path):
     assert "EATS" not in block
 
 
-
 def test_chat_triples_are_limited_to_their_source_channel(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
+    graph, _db = _graph(tmp_path)
     source = MemoryRequester(
         user_id="owner", channel_id="private-one", guild_id="g1",
         is_dm=False, is_admin=True, channel_is_public=False,
     )
-    mgr.graph.ingest_triples(
+    graph.ingest_triples(
         [{"s": "Owner", "rel": "WORKS_ON", "o": "SecretProject"}],
         speaker_id="owner",
         speaker_name="Owner",
         requester=source,
     )
-    same_channel = mgr.graph.prompt_block(
+    same_channel = graph.prompt_block(
         query="SecretProject", user_id="owner", requester=source
     )
     assert "SecretProject" in same_channel
@@ -155,64 +160,63 @@ def test_chat_triples_are_limited_to_their_source_channel(tmp_path):
         user_id="owner", channel_id="same-id", guild_id="g2",
         is_dm=False, is_admin=True, channel_is_public=True,
     )
-    assert mgr.graph.prompt_block(
+    assert graph.prompt_block(
         query="SecretProject", user_id="owner", requester=other_channel
     ) == ""
-    assert mgr.graph.prompt_block(
+    assert graph.prompt_block(
         query="SecretProject", user_id="owner", requester=other_guild
     ) == ""
 
 
-
 def test_dm_graph_facts_do_not_reach_a_guild_prompt(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
+    graph, _db = _graph(tmp_path)
     dm = MemoryRequester(
         user_id="owner", channel_id="dm-owner", guild_id="",
         is_dm=True, is_admin=True, channel_is_public=False,
     )
-    mgr.graph.ingest_triples(
+    graph.ingest_triples(
         [{"s": "Owner", "rel": "PREFERS", "o": "PrivateAlias"}],
         speaker_id="owner",
         speaker_name="Owner",
         requester=dm,
     )
-    assert "PrivateAlias" in mgr.graph.prompt_block(
+    assert "PrivateAlias" in graph.prompt_block(
         query="PrivateAlias", user_id="owner", requester=dm
     )
     guild = MemoryRequester(
         user_id="owner", channel_id="guild-channel", guild_id="g1",
         is_dm=False, is_admin=True, channel_is_public=True,
     )
-    assert mgr.graph.prompt_block(
+    assert graph.prompt_block(
         query="PrivateAlias", user_id="owner", requester=guild
     ) == ""
 
 
 def test_legacy_unscoped_graph_edges_stay_hidden(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
-    mgr.graph.upsert_node("user:old", "user", "OldUser")
-    mgr.graph.upsert_node("thing:legacy", "thing", "LegacySecret")
-    mgr._db.execute(
+    graph, db = _graph(tmp_path)
+    graph.upsert_node("user:old", "user", "OldUser")
+    graph.upsert_node("thing:legacy", "thing", "LegacySecret")
+    db.execute(
         "INSERT INTO graph_edges (src, rel, dst, props, updated_at, scope) "
         "VALUES ('user:old', 'OWNS', 'thing:legacy', '{}', 0, '')"
     )
-    assert mgr.graph.prompt_block(
+    assert graph.prompt_block(
         query="LegacySecret", user_id="old", requester=_admin()
     ) == ""
 
 
 def test_prompt_block_respects_budget(tmp_path):
-    mgr = RAGMemoryManager(str(tmp_path))
-    mgr.graph.ingest_triples(
+    graph, _db = _graph(tmp_path)
+    graph.ingest_triples(
         [{"s": "Z3ki", "rel": "OWNS", "o": "Thing"}],
         speaker_id="1",
         speaker_name="Z3ki",
         requester=_admin(),
     )
-    assert mgr.graph.prompt_block(
+    assert graph.prompt_block(
         query="Thing", user_id="1", budget=20, requester=_admin()
     ) == ""
-    assert "OWNS" in mgr.graph.prompt_block(
+    assert "OWNS" in graph.prompt_block(
         query="Thing", user_id="1", budget=400, requester=_admin()
     )
 
