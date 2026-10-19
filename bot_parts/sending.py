@@ -28,7 +28,11 @@ class SendingMixin:
                 if current.strip():
                     base_chunks.append(current.strip())
                 while len(part) > limit:
-                    base_chunks.append(part[:limit].strip())
+                    # A whitespace run longer than the limit strips to "" here;
+                    # appending it sent an empty Discord message.
+                    piece = part[:limit].strip()
+                    if piece:
+                        base_chunks.append(piece)
                     part = part[limit:]
                 current = part
         if current.strip():

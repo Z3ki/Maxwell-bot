@@ -413,7 +413,14 @@ async def deliver_speech(bot: Any, message: Any, audio: bytes) -> Any:
     if not audio:
         raise RuntimeError("Error: Mistral TTS returned no audio")
     if _bot_shares_guild(bot, message):
-        converted = await transcode_voice(audio)
+        try:
+            converted = await transcode_voice(audio)
+        except Exception as exc:
+            # A missing ffmpeg (FileNotFoundError) or any transcode failure must
+            # fall through to the mp3 attachment below, which is the documented
+            # fallback; previously it aborted delivery entirely.
+            logger.warning("Voice transcode unavailable (%s)", type(exc).__name__)
+            converted = None
         if converted is not None and converted[0]:
             ogg, duration, waveform = converted
             try:

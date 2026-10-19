@@ -263,9 +263,13 @@ class ShellTool(Tool):
                     name for name, stamp in cls._last_used_by_tenant.items()
                     if now - stamp >= idle and name not in cls._active_tenants
                 ]
+                reaped = False
                 for name in expired:
                     tenant = cls._tenants.get(name)
                     if tenant is None:
+                        # Stamp with no live container: drop it so the loop
+                        # cannot spin on a name that will never be reaped.
+                        cls._last_used_by_tenant.pop(name, None)
                         continue
                     async with cls._lock_for(tenant):
                         stamp = cls._last_used_by_tenant.get(name, 0.0)
@@ -280,6 +284,14 @@ class ShellTool(Tool):
                         ) and tenant.owner_id not in cls._active_owners:
                             cls._user_slots.pop(tenant.owner_id, None)
                         logger.info("idle-recycled tenant shell %s", name)
+                        reaped = True
+                if not reaped:
+                    # Nothing was reapable: every past-idle tenant is either
+                    # currently running a command (its stamp is only refreshed
+                    # in the command's finally) or was just handled above.
+                    # Yield before re-checking — without an await here the loop
+                    # spins and wedges the event loop.
+                    await asyncio.sleep(1.0)
                 if not cls._last_used_by_tenant:
                     return
         finally:

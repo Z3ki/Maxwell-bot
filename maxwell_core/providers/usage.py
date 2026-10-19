@@ -90,8 +90,11 @@ def _normalize_llm_usage(raw) -> dict:
                 count = value if isinstance(value, int) else int(number)
             except (TypeError, ValueError, OverflowError):
                 continue
-            if count > prompt:
+            if prompt and count > prompt:
                 # Inconsistent metadata cannot support a cache hit ratio.
+                # Only meaningful when the prompt size is actually known; a
+                # provider that reports cache tokens but omits prompt_tokens
+                # (prompt == 0) would otherwise have every value dropped.
                 continue
             normalized[field] = count
             break

@@ -771,8 +771,6 @@ class LockdownTool(Tool):
             label = f"server {guild.name}"
         else:
             category, err = _find_category(guild, spec if spec.isdigit() else None, spec)
-            if err and not spec.isdigit():
-                category, err = _find_category(guild, spec, None)
             if err:
                 return err
             if category is None:

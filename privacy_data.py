@@ -318,14 +318,29 @@ def cleanup_data(root, preferences):
                 db.execute("DELETE FROM flows WHERE expires<=?", (now,))
     callback_path = root / "plugins/maxwell_extras/rich_interactions.json"
     if callback_path.is_file():
-        with FileLock(callback_path, timeout=5):
-            data = json.loads(callback_path.read_text("utf-8"))
-            from plugins.maxwell_extras.rich_interactions import _ACTION_TTL_SECONDS
+        try:
+            with FileLock(callback_path, timeout=5):
+                raw = json.loads(callback_path.read_text("utf-8"))
+                # Mirror RichInteractionStore._read: a hand-edited, restored or
+                # truncated file may be {} / null / a list, which used to raise
+                # KeyError here and abort the rest of the periodic cleanup.
+                actions = raw.get("actions") if isinstance(raw, dict) else None
+                if isinstance(actions, dict):
+                    from plugins.maxwell_extras.rich_interactions import (
+                        _ACTION_TTL_SECONDS,
+                    )
 
-            data["actions"] = {
-                key: row
-                for key, row in data["actions"].items()
-                if row.get("owner_id")
-                and float(row.get("created_at") or 0) > now - _ACTION_TTL_SECONDS
-            }
-            _atomic_json_write_sync(callback_path, data)
+                    kept = {}
+                    for key, row in actions.items():
+                        if not isinstance(row, dict) or not row.get("owner_id"):
+                            continue
+                        try:
+                            created = float(row.get("created_at") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if created > now - _ACTION_TTL_SECONDS:
+                            kept[key] = row
+                    raw["actions"] = kept
+                    _atomic_json_write_sync(callback_path, raw)
+        except (OSError, ValueError) as exc:
+            logger.warning("Rich interaction cleanup skipped: %s", exc)

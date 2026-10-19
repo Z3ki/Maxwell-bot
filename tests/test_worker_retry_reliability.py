@@ -187,7 +187,11 @@ def test_router_honors_worker_budget_and_retries_raw_transport_errors(no_sleep):
     assert result == "done" and len(primary.calls) == 3
     # The router owns the budget; each client call stays single-shot.
     assert all(call["retry_attempts"] == 1 for call in primary.calls)
-    assert no_sleep == [1.5, 3.0]
+    # Backoff base is min(8, attempt*1.5) plus up to 0.7s of jitter so parallel
+    # turns do not retry an overloaded upstream in lockstep.
+    assert len(no_sleep) == 2
+    assert 1.5 <= no_sleep[0] < 2.2
+    assert 3.0 <= no_sleep[1] < 3.7
 
 
 def test_router_transport_error_text_is_not_surfaced(no_sleep):

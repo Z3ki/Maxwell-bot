@@ -797,6 +797,12 @@ class MessagesMixin:
                     continue
                 changed = False
                 for cmd in commands_data:
+                    # The file is only checked to be a list; a hand-edited or
+                    # partially corrupt entry (42, null) would raise here and
+                    # abort the batch before results were persisted, so already
+                    # executed commands re-ran on the next tick.
+                    if not isinstance(cmd, dict):
+                        continue
                     if cmd.get("status") != "pending":
                         continue
                     changed = True

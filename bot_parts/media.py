@@ -291,7 +291,7 @@ class MediaMixin:
                 tmp_path = Path(tmp)
                 input_path = tmp_path / f"input{suffix}"
                 output_path = tmp_path / "normalized.mp4"
-                input_path.write_bytes(blob)
+                await asyncio.to_thread(input_path.write_bytes, blob)
                 cmd = [
                     *self._ffmpeg_input_argv(input_path),
                     "-vf",
@@ -329,7 +329,7 @@ class MediaMixin:
                         f"Video normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
                     )
                     return None
-                normalized = output_path.read_bytes()
+                normalized = await asyncio.to_thread(output_path.read_bytes)
                 if len(normalized) > max_size:
                     logger.warning(
                         f"Skipping normalized video {filename}: too large ({len(normalized)} bytes)"
@@ -364,7 +364,7 @@ class MediaMixin:
             with tempfile.TemporaryDirectory(prefix="maxwell-vderiv-") as tmp:
                 tmp_path = Path(tmp)
                 video_path = tmp_path / f"input{suffix}"
-                video_path.write_bytes(blob)
+                await asyncio.to_thread(video_path.write_bytes, blob)
 
                 # Extract frames at 2fps, capped at 6 frames max and 15s duration
                 if include_frames:
@@ -395,7 +395,7 @@ class MediaMixin:
                         stderr = b"timeout"
                     if proc.returncode == 0:
                         for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
-                            frame_blob = frame_path.read_bytes()
+                            frame_blob = await asyncio.to_thread(frame_path.read_bytes)
                             if len(frame_blob) > max_size:
                                 continue
                             results.append(
@@ -451,7 +451,7 @@ class MediaMixin:
                         and audio_path.exists()
                         and audio_path.stat().st_size > 44
                     ):
-                        audio_blob = audio_path.read_bytes()
+                        audio_blob = await asyncio.to_thread(audio_path.read_bytes)
                         if len(audio_blob) <= max_size:
                             results.append(
                                 self._media_item(
@@ -495,7 +495,7 @@ class MediaMixin:
                     suffix = ".gif"
                 input_path = tmp_path / f"input{suffix}"
                 output_path = tmp_path / "gif-sheet.jpg"
-                input_path.write_bytes(blob)
+                await asyncio.to_thread(input_path.write_bytes, blob)
                 cmd = [
                     *self._ffmpeg_input_argv(input_path),
                     "-vf",
@@ -519,7 +519,7 @@ class MediaMixin:
                         f"GIF normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
                     )
                     return None
-                normalized = output_path.read_bytes()
+                normalized = await asyncio.to_thread(output_path.read_bytes)
                 if len(normalized) > max_size:
                     logger.warning(
                         f"Skipping normalized GIF {filename}: too large ({len(normalized)} bytes)"
@@ -640,7 +640,7 @@ class MediaMixin:
             if not built:
                 return None
         try:
-            blob = path.read_bytes()
+            blob = await asyncio.to_thread(path.read_bytes)
         except OSError as e:
             logger.warning(f"Emoji grid unreadable ({path}): {e}")
             return None

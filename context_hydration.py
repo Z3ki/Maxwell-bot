@@ -222,14 +222,33 @@ async def _iter_preceding(channel: Any, message: Any, limit: int = 15):
         yield item
 
 
+def _is_newer_than_live(candidate_id: str, live_id: str, live_snowflake: int | None) -> bool:
+    """True when ``candidate_id`` is the live message or came after it.
+
+    Snowflakes are time-ordered, so a numerically greater id is a newer
+    message. The channel-history adapter normally excludes newer messages via
+    ``before=``, but the no-``before`` fallback and stored memory rows can both
+    contain later turns; returning one of those as "the previous message" would
+    point a pointer at something that had not been said yet.
+    """
+    if not candidate_id or candidate_id == live_id:
+        return True
+    if live_snowflake is not None and candidate_id.isdigit():
+        return int(candidate_id) >= live_snowflake
+    return False
+
+
 async def preceding_non_bot_message(bot: Any, message: Any) -> Any:
     """Immediate previous non-bot message, from channel history then memory."""
     self_ids = _self_ids(bot)
     channel = getattr(message, "channel", None)
     live_id = str(getattr(message, "id", "") or "")
+    live_snowflake = int(live_id) if live_id.isdigit() else None
     try:
         async for item in _iter_preceding(channel, message):
-            if str(getattr(item, "id", "") or "") == live_id:
+            if _is_newer_than_live(
+                str(getattr(item, "id", "") or ""), live_id, live_snowflake
+            ):
                 continue
             if _author_is_bot(getattr(item, "author", None), self_ids):
                 continue
@@ -250,7 +269,9 @@ async def preceding_non_bot_message(bot: Any, message: Any) -> Any:
     for row in reversed(rows):
         if not isinstance(row, dict) or row.get("is_tool") or row.get("author_is_bot"):
             continue
-        if str(row.get("message_id") or "") == live_id:
+        if _is_newer_than_live(
+            str(row.get("message_id") or ""), live_id, live_snowflake
+        ):
             continue
         if str(row.get("author_id") or "") in self_ids:
             continue
@@ -333,7 +354,11 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
     needs_target = pointer or (content_empty and has_reference)
     resolved = getattr(reference, "resolved", None) if reference is not None else None
     target = resolved if reference_payload_usable(resolved) else None
-    if target is None and needs_target:
+    # Only a bare pointer (^ / "this") means "the previous message". An empty
+    # reply names its own target via the reference; if that cannot be loaded we
+    # must not substitute an unrelated earlier message — fall through to the
+    # "could not be loaded" notice below instead.
+    if target is None and pointer:
         target = await preceding_non_bot_message(bot, message)
         if target is not None and not isinstance(target, dict):
             if not reference_payload_usable(target) and not str(

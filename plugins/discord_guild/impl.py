@@ -217,12 +217,8 @@ class ListAdminServersTool(Tool):
             blocks.append(
                 "Other servers with elevated perms:\n" + "\n\n".join(others[:20])
             )
-        if not blocks:
-            return (
-                "No cached Discord member/permissions. I cannot see roles in "
-                "any joined server right now."
-            )
         if current is None and not others:
+            # blocks is empty exactly here, so this is the only empty case.
             return (
                 "No servers with cached manage_channels/mod permissions. "
                 "Don't try kick/ban/channel/role tools until this lists a target."
@@ -972,7 +968,7 @@ class ManageInvitesTool(Tool):
 
     def get_description(self):
         return (
-            "List or revoke Discord invites. Requires create_instant_invite. "
+            "List or revoke Discord invites. Requires Manage Server. "
             "Params: action (list|revoke), code (for revoke), guild_id, channel_id (list filter)."
         )
 
@@ -988,7 +984,10 @@ class ManageInvitesTool(Tool):
         guild, error = await _resolve_guild(self.bot, message, guild_id)
         if error:
             return error
-        missing = _missing_cap(guild, "create_instant_invite", message)
+        # Listing and revoking invites are both MANAGE_GUILD operations in
+        # Discord; gating on create_instant_invite refused callers who actually
+        # hold the permission that matters and admitted ones who don't.
+        missing = _missing_cap(guild, "manage_guild", message)
         if missing:
             return missing
         act = str(action or "list").strip().lower()

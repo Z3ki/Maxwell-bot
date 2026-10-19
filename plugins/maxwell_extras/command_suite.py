@@ -40,7 +40,6 @@ _PERSONAL_SETTINGS = {
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("AI connection", "Connect your own AI account with an API key."),
     "worker_byok": ("Subagent AI provider", "Choose an independent API endpoint, model and generation settings for Premium workers."),
-    "agents": ("Custom agents", "Save and manage your own task-worker instructions and tool permissions."),
     "tracking": ("Privacy", "Choose whether Maxwell stores your message content."),
 }
 _SERVER_SETTINGS = {
