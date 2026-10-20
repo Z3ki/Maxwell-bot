@@ -8,7 +8,7 @@ are exercised in the live bot.
 
 from __future__ import annotations
 
-
+import io
 from types import SimpleNamespace
 
 import chess
@@ -65,6 +65,32 @@ def test_black_perspective_puts_black_back_rank_at_the_bottom():
     a1w_x, a1w_y = cg._pixel(chess.A1)
     assert a1w_x < 40 and a1w_y > 460
 
+
+
+@pytest.mark.parametrize("perspective", ["white", "black"])
+def test_light_square_on_each_players_right(perspective):
+    # a1 and h8 dark, h1 and a8 light, from either side. The renderer once had
+    # every corner flipped and nobody noticed until a user did.
+    image = pytest.importorskip("PIL.Image")
+    board = chess.Board(None)  # empty: sample square colour, not a piece glyph
+    png = cg.render_board_png(board, perspective=perspective)
+    img = image.open(io.BytesIO(png)).convert("RGBA")
+
+    def colour(square):
+        x, y = cg._pixel(square, perspective=perspective)
+        return img.getpixel((x + cg._SQUARE // 2, y + cg._SQUARE // 2))
+
+    assert colour(chess.A1) == cg._DARK_SQ
+    assert colour(chess.H8) == cg._DARK_SQ
+    assert colour(chess.H1) == cg._LIGHT_SQ
+    assert colour(chess.A8) == cg._LIGHT_SQ
+    assert colour(chess.D1) == cg._LIGHT_SQ  # queen on her own colour
+    assert colour(chess.E1) == cg._DARK_SQ
+    # The player's bottom-right corner is light either way.
+    bottom_right = chess.H1 if perspective == "white" else chess.A8
+    x, y = cg._pixel(bottom_right, perspective=perspective)
+    assert x > 460 and y > 460
+    assert colour(bottom_right) == cg._LIGHT_SQ
 
 def test_board_ascii_orientation():
     b = chess.Board()

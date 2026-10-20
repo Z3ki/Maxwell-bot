@@ -159,10 +159,12 @@ def render_board_png(board: chess.Board, perspective: str = "white") -> bytes:
     def px(sq: int) -> tuple[int, int]:
         return _pixel(sq, perspective=perspective)
 
-    # Board squares.
+    # Board squares. python-chess counts a1 as file 0, rank 0, and a1 is dark
+    # ("light on the right"), so an even sum is dark. Square colour belongs to
+    # the square, so the black-side view needs nothing extra.
     for sq in chess.SQUARES:
         x, y = px(sq)
-        shade = _LIGHT_SQ if (chess.square_file(sq) + chess.square_rank(sq)) % 2 == 0 else _DARK_SQ
+        shade = _DARK_SQ if (chess.square_file(sq) + chess.square_rank(sq)) % 2 == 0 else _LIGHT_SQ
         draw.rectangle([x, y, x + _SQUARE, y + _SQUARE], fill=shade)
 
     # Last move squares.
