@@ -430,7 +430,7 @@
         <caption class="sr-only">Free and Premium compared</caption>
         <thead><tr><th scope="col">On the hosted bot</th><th scope="col">Free</th><th scope="col">Premium</th></tr></thead>
         <tbody>
-          <tr><th scope="row">Hourly message allowance</th><td>Standard</td><td class="yes">Larger</td></tr>
+          <tr><th scope="row">Message allowance (5-hour window)</th><td>Standard</td><td class="yes">Larger</td></tr>
           <tr><th scope="row">Research, code sandbox, images, voice, music, games</th><td class="yes">Included</td><td class="yes">Included</td></tr>
           <tr><th scope="row">Hosted sites at <code>/bot/&lt;name&gt;/</code></th><td class="yes">Included</td><td class="yes">Included</td></tr>
           <tr><th scope="row">Persistent <code>/storage</code></th><td class="no">–</td><td class="yes">100 MB</td></tr>
@@ -480,7 +480,7 @@
         <div class="dm-main">
           <div class="dm-row">
             <div class="dm-card"><div class="dm-k">Plan</div><div class="dm-v"><span class="pill-premium"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></svg>Premium</span></div></div>
-            <div class="dm-card"><div class="dm-k">Messages</div><div class="dm-v">9% used<small>91% left this hour</small></div><div class="meter"><i style="width: 9%"></i></div></div>
+            <div class="dm-card"><div class="dm-k">Messages</div><div class="dm-v">9% used<small>91% left in this window</small></div><div class="meter"><i style="width: 9%"></i></div></div>
             <div class="dm-card"><div class="dm-k">Storage</div><div class="dm-v">31 MB<small>of 100 MB</small></div><div class="meter"><i style="width: 31%"></i></div></div>
           </div>
           <div class="dm-card"><div class="dm-k">Public folder</div><div class="dm-v">maxwell.z3ki.dev/u/rowan/</div></div>
@@ -541,7 +541,7 @@
     <div class="faq-list">
       <details open>
         <summary>Is Maxwell free?</summary>
-        <p>Yes. The hosted bot is free to use with an hourly message allowance, and the code is MIT licensed. Premium is a manual grant from the operator. There are no paid plans.</p>
+        <p>Yes. The hosted bot is free to use with a message allowance that refills over a rolling 5-hour window, and the code is MIT licensed. Premium is a manual grant from the operator. There are no paid plans.</p>
       </details>
       <details>
         <summary>Should I add it to a server or to my account?</summary>
