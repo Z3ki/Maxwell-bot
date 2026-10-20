@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="robots" content="noindex" />
     <meta name="referrer" content="no-referrer" />
-    <meta name="theme-color" content="#0d0e0f" />
+    <meta name="theme-color" content="#f7f3ec" />
     <title>Maxwell · Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/assets/maxwell.svg" />
     <link rel="stylesheet" href="dashboard.css" />
@@ -13,7 +13,7 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="./"><span class="mark">m.</span><span>maxwell</span><span class="tag">DASHBOARD</span></a>
+      <a class="brand" href="./"><img src="/assets/maxwell.svg" alt="" width="34" height="34" /><span>maxwell<span class="dot">.</span></span><span class="tag">Dashboard</span></a>
       <div id="account" hidden>
         <span id="plan-pill" class="pill">Free</span>
         <span id="username"></span>
@@ -23,6 +23,7 @@
 
     <main>
       <section id="login" class="welcome" hidden>
+        <img class="welcome-cat" src="/assets/maxwell.svg" alt="" width="88" height="88" />
         <p class="eyebrow">YOUR MAXWELL, YOUR WAY</p>
         <h1>Everything Maxwell<br />does for you.</h1>
         <p class="lead">Reply settings, your own AI key, files that outlive the sandbox, your public web folder, scheduled wake-ups and the servers you run. One place.</p>
@@ -78,7 +79,7 @@
                   <h2 id="plan-name">Free</h2>
                   <p id="plan-note" class="muted"></p>
                 </div>
-                <div id="plan-mark" class="plan-mark" aria-hidden="true">m.</div>
+                <img id="plan-mark" class="plan-mark" src="/assets/maxwell.svg" alt="" width="68" height="68" />
               </div>
               <ul id="feature-list" class="feature-list"></ul>
             </section>
@@ -341,7 +342,7 @@
       </div>
     </main>
     <footer>
-      <a href="/">Home</a> · <a href="/guide/">Guide</a> · <a href="/terms/">Terms</a> · <a href="/privacy/">Privacy</a> · <a href="/contact/">Contact</a>
+      <nav aria-label="Site"><a href="/">Home</a><a href="/guide/">Guide</a><a href="/install/">Install</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="/contact/">Contact</a></nav>
       <span class="footer-note">Reloading signs you out when you used a Discord link. <code>/config</code> is always there too.</span>
     </footer>
   </body>
