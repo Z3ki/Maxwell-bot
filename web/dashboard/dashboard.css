@@ -109,6 +109,24 @@ main { width: 100%; max-width: 1288px; margin: 0 auto; padding: 40px 24px 72px; 
 
 /* ---- welcome ---- */
 .welcome { max-width: 780px; padding: 48px 0 72px; }
+.welcome-split {
+  max-width: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(260px, .85fr);
+  gap: 48px;
+  align-items: center;
+}
+.welcome-preview { display: grid; gap: 12px; }
+.preview-card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 18px 20px;
+}
+.preview-card b { display: block; color: var(--ink); font: 750 1.05rem/1.2 var(--display); margin-bottom: 6px; }
+.preview-card span { color: var(--muted); font-size: .95rem; }
+.preview-card i {
+  display: block; height: 8px; margin-top: 14px; border-radius: 999px;
+  background: linear-gradient(90deg, var(--gold) 9%, var(--line) 9%);
+}
 .welcome-cat {
   width: 88px; height: 88px; border-radius: 50%; margin: 0 0 28px;
   box-shadow: 0 0 0 4px var(--paper), 0 0 0 6px var(--ink), 0 22px 40px -18px rgba(20, 18, 21, .6);
@@ -379,6 +397,8 @@ footer code { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255,
   main { padding: 24px 14px 50px; }
   h1 { font-size: 2.1rem; }
   .welcome { padding: 24px 0 40px; }
+  .welcome-split { grid-template-columns: minmax(0, 1fr); }
+  .welcome-preview { display: none; }
   .lead { font-size: 1.02rem; }
   .card { padding: 20px 18px; border-radius: 16px; }
   .plan-head h2 { font-size: 1.8rem; }
