@@ -277,18 +277,26 @@ async function loadOverview() {
   );
 
   const messages = data.messages;
-  if (!messages.enabled || messages.exempt || !(messages.limit > 0)) {
+  // An API process that predates the percent-only payload still sends used/limit.
+  // Convert it here so the raw numbers never hit the page. Delete after the restart.
+  if (messages.percent_used === undefined) {
+    messages.unlimited = !messages.enabled || messages.exempt || !(messages.limit > 0);
+    messages.percent_used = messages.unlimited ? 0 : Math.round((messages.used * 100) / messages.limit);
+  }
+  if (messages.unlimited) {
     $("msg-value").textContent = "Unlimited";
     meter($("msg-bar"), 0, 0);
     $("msg-note").textContent = messages.exempt
       ? "No message limit applies to you."
       : "This bot has no message limit right now.";
   } else {
-    $("msg-value").textContent = messages.used + " / " + messages.limit;
-    meter($("msg-bar"), messages.used, messages.limit);
-    $("msg-note").textContent =
-      "Window of " + span(messages.window_seconds) + ". " +
-      (messages.used ? "Frees up in " + span(messages.resets_in) + "." : "Nothing used yet.");
+    // The API only hands out a percentage; the real allowance never reaches the browser.
+    const percent = Math.max(0, messages.percent_used);
+    $("msg-value").textContent = percent + "% used";
+    meter($("msg-bar"), percent, 100);
+    $("msg-note").textContent = messages.resets_in > 0
+      ? Math.max(0, 100 - percent) + "% left. Frees up in " + span(messages.resets_in) + "."
+      : "Nothing used yet.";
   }
 
   const storage = data.storage;
