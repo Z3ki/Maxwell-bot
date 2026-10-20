@@ -22,19 +22,37 @@
     </header>
 
     <main>
-      <section id="login" class="welcome" hidden>
-        <img class="welcome-cat" src="/assets/maxwell.svg" alt="" width="88" height="88" />
-        <p class="eyebrow">YOUR MAXWELL, YOUR WAY</p>
-        <h1>Everything Maxwell<br />does for you.</h1>
-        <p class="lead">Reply settings, your own AI key, files that outlive the sandbox, your public web folder, scheduled wake-ups and the servers you run. One place.</p>
-        <div id="link-signin" class="signin-box" hidden>
-          <p class="signin-step"><span>1</span> In Discord, run <code>/dashboard</code> (or open <code>/config</code> → <strong>Web dashboard</strong>).</p>
-          <p class="signin-step"><span>2</span> Press <strong>Open dashboard</strong>. Maxwell's private link signs you in once.</p>
-          <p class="muted">The link expires after 15 minutes and is single use. Reloading this page signs you out, by design: your session lives only in this tab.</p>
+      <section id="login" class="welcome welcome-split" hidden>
+        <div class="welcome-copy">
+          <img class="welcome-cat" src="/assets/maxwell.svg" alt="" width="88" height="88" />
+          <p class="eyebrow">YOUR MAXWELL, YOUR WAY</p>
+          <h1>Everything Maxwell<br />does for you.</h1>
+          <p class="lead">Reply settings, your own AI key, files that outlive the sandbox, your public web folder, scheduled wake-ups and the servers you run. One place.</p>
+          <div id="link-signin" class="signin-box" hidden>
+            <p class="signin-step"><span>1</span> In Discord, run <code>/dashboard</code> (or open <code>/config</code> → <strong>Web dashboard</strong>).</p>
+            <p class="signin-step"><span>2</span> Press <strong>Open dashboard</strong>. Maxwell's private link signs you in once.</p>
+            <p class="muted">The link expires after 15 minutes and is single use. Reloading this page signs you out, by design: your session lives only in this tab.</p>
+          </div>
+          <a id="signin" class="primary big" href="../api/dashboard/login" hidden>Continue with Discord <span>→</span></a>
+          <p id="login-note" class="login-note" role="status"></p>
+          <p class="muted">Everything here is also available with <code>/config</code> in Discord.</p>
         </div>
-        <a id="signin" class="primary big" href="../api/dashboard/login" hidden>Continue with Discord <span>→</span></a>
-        <p id="login-note" class="login-note" role="status"></p>
-        <p class="muted">Everything here is also available with <code>/config</code> in Discord.</p>
+        <aside class="welcome-preview" aria-hidden="true">
+          <p class="eyebrow">PREVIEW</p>
+          <div class="preview-card">
+            <b>Overview</b>
+            <span>9% of this window used</span>
+            <i></i>
+          </div>
+          <div class="preview-card">
+            <b>Files</b>
+            <span>Storage that survives a sandbox reset</span>
+          </div>
+          <div class="preview-card">
+            <b>Schedules</b>
+            <span>Weekday digest · 09:00</span>
+          </div>
+        </aside>
       </section>
 
       <div id="loading" class="welcome">
