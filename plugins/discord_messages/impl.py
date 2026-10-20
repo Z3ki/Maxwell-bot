@@ -315,7 +315,7 @@ class SendGifTool(Tool):
     def get_description(self):
         return (
             "Send one reaction or meme GIF in this chat, with no caption. "
-            "Use occasionally when it fits the conversation or when requested. "
+            "Use it when a reaction GIF fits the moment (banter, hype, a joke landing) or when asked. "
             "query is a short search phrase. A reaction such as hug, laugh, or wave "
             "uses the keyless catalog. Other phrases use Giphy when it is configured. "
             "index optionally selects a different result (0-9). "
@@ -568,33 +568,48 @@ class CreatePollTool(Tool):
 
     def get_description(self):
         return (
-            "Create a poll. Params: question (required), options (required, comma-separated, e.g. 'Yes,No,Maybe'), "
-            "duration_hours (optional, default 24)."
+            "Post a native Discord poll in this channel. Use it when a group is choosing "
+            "or voting (where to play, which option, rate this), or when someone asks for one. "
+            "Params: question (required), options (required, 2-10 answers as a list), "
+            "duration_hours (optional, default 24), multiple (optional, allow several picks)."
         )
 
     async def execute(
         self,
         message: Message,
         question: str | None = None,
-        options: str | None = None,
-        duration_hours: str = "24",
+        options: Any = None,
+        duration_hours: Any = 24,
+        multiple: Any = False,
         **kwargs,
     ) -> str:
         if not question or not options:
             return "Error: question and options are required"
+        # A list lets an answer contain a comma. The string form is the old
+        # contract and still turns up from models that learned it.
+        raw = options if isinstance(options, list) else str(options).split(",")
+        option_list = [str(o).strip() for o in raw if str(o).strip()]
+        if len(option_list) < 2:
+            return "Error: Need at least 2 options for a poll"
+        if len(option_list) > 10:
+            return "Error: Maximum 10 options allowed"
+        too_long = [o for o in option_list if len(o) > 55]
+        if too_long:
+            return f"Error: poll answers are limited to 55 characters; shorten {too_long[0][:60]!r}"
+        question = str(question).strip()
+        if len(question) > 300:
+            return "Error: the poll question is limited to 300 characters"
         try:
-            option_list = [o.strip() for o in options.split(",") if o.strip()]
-            if len(option_list) < 2:
-                return "Error: Need at least 2 options for a poll"
-            if len(option_list) > 10:
-                return "Error: Maximum 10 options allowed"
-
-            hours = int(duration_hours)
-            if hours < 1 or hours > 168:
-                return "Error: duration_hours must be between 1 and 168"
+            hours = int(float(duration_hours))
+        except (TypeError, ValueError):
+            return "Error: duration_hours must be a number"
+        if hours < 1 or hours > 168:
+            return "Error: duration_hours must be between 1 and 168"
+        try:
             poll = discord.Poll(
                 question=question,
                 duration=timedelta(hours=hours),
+                multiple=parse_bool(multiple, False),
             )
             for opt in option_list:
                 poll.add_answer(text=opt)
@@ -602,12 +617,23 @@ class CreatePollTool(Tool):
             # Step aside for the live progress message before posting
             # the poll. The poll itself is the user-visible action.
             self._signal_streaming(message)
-            await message.channel.send(poll=poll)
-            return f"Poll created: '{question}' with options: {', '.join(option_list)}"
-        except ValueError:
-            return "Error: duration_hours must be a number"
+            sent = await message.channel.send(poll=poll)
         except Exception as e:
             return f"Error creating poll: {e}"
+        record = getattr(self.bot, "_record_delivery", None)
+        if callable(record):
+            await record(message, sent)
+        remember = getattr(self.bot, "_remember_sent_message", None)
+        if callable(remember):
+            # Discord stores a poll with no content, so the gateway copy never
+            # reaches memory. Without this Maxwell forgets he asked.
+            try:
+                await remember(
+                    message, sent, f"[poll] {question} — {' / '.join(option_list)}", message.channel
+                )
+            except Exception as exc:
+                logger.warning("Could not remember poll (%s)", type(exc).__name__)
+        return f"Poll created: '{question}' with options: {', '.join(option_list)}"
 
 class ForwardMessageTool(Tool):
     """Forward a message to another channel"""
@@ -1422,11 +1448,15 @@ class SearchMessagesTool(Tool):
     def get_description(self):
         return (
             "Look up a message by ID in this channel, by a Discord message link "
-            "in this server, or by the current request's reply reference; otherwise "
-            "search/list bounded recent history in this channel. Only channels both "
-            "you and Maxwell can view and read are available. Results include the "
-            "real ID, author, channel, timestamp, and a short content preview. "
-            "Params: message_id, message_link, reply_reference, query, limit (1-10)."
+            "in this server, or by the current request's reply reference. "
+            "Otherwise search this channel's history, including older messages. Filter "
+            "with query (substring), author (display name, username, or user ID), "
+            "and before/after (ISO-8601 time or unix seconds). A filtered search "
+            "reads up to 400 messages in that window. Only channels both you and "
+            "Maxwell can view and read are available. Results include the real "
+            "ID, author, channel, timestamp, and a short content preview. "
+            "Params: message_id, message_link, reply_reference, query, author, "
+            "before, after, limit (1-10)."
         )
 
     @staticmethod
@@ -1504,6 +1534,48 @@ class SearchMessagesTool(Tool):
             lines.append("attachments=" + ", ".join(attachments))
         return "\n".join(lines)
 
+    @staticmethod
+    def _parse_history_bound(value: str | None):
+        """Return (discord history cursor, error). Cursor is a datetime or snowflake object."""
+        from datetime import datetime, timezone
+
+        text = str(value or "").strip()
+        if not text:
+            return None, None
+        if text.isdigit():
+            number = int(text)
+            if number > 10**15:
+                return discord.Object(id=number), None
+            if number > 10**12:
+                return datetime.fromtimestamp(number / 1000, tz=timezone.utc), None
+            if number > 10**9:
+                return datetime.fromtimestamp(number, tz=timezone.utc), None
+            return None, "Error: before/after must be an ISO-8601 time or unix seconds"
+        parsed = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            when = datetime.fromisoformat(parsed)
+        except ValueError:
+            return None, "Error: before/after must be an ISO-8601 time or unix seconds"
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when, None
+
+    @staticmethod
+    def _author_matches(msg, author: str) -> bool:
+        needle = str(author or "").strip()
+        if needle.startswith("<@") and needle.endswith(">"):
+            needle = needle.strip("<@!>")
+        person = getattr(msg, "author", None)
+        if needle.isdigit() and str(getattr(person, "id", "")) == needle:
+            return True
+        low = needle.lower()
+        names = (
+            getattr(person, "display_name", None),
+            getattr(person, "global_name", None),
+            getattr(person, "name", None),
+        )
+        return any(low == str(name).lower() or low in str(name).lower() for name in names if name)
+
     async def execute(
         self,
         message: Message,
@@ -1512,6 +1584,9 @@ class SearchMessagesTool(Tool):
         message_id: str | None = None,
         message_link: str | None = None,
         reply_reference: str | None = None,
+        author: str | None = None,
+        before: str | None = None,
+        after: str | None = None,
         **kwargs,
     ) -> str:
         chan = getattr(message, "channel", None)
@@ -1520,6 +1595,13 @@ class SearchMessagesTool(Tool):
         try:
             search_limit = max(1, min(int(limit), 10))
             clean_query = str(query or "").strip().lower()
+            clean_author = str(author or "").strip()
+            before_at, before_error = self._parse_history_bound(before)
+            if before_error:
+                return before_error
+            after_at, after_error = self._parse_history_bound(after)
+            if after_error:
+                return after_error
             selectors = sum(bool(str(v or "").strip()) for v in (message_id, message_link, reply_reference))
             if selectors > 1:
                 return "Error: use only one of message_id, message_link, or reply_reference"
@@ -1548,7 +1630,7 @@ class SearchMessagesTool(Tool):
                 target_id = str(reply_reference).strip()
                 if not target_id.isdigit():
                     return "Error: reply_reference must be a message ID"
-            elif not clean_query:
+            elif not clean_query and not clean_author and before_at is None and after_at is None:
                 ref = getattr(message, "reference", None)
                 target_id = str(getattr(ref, "message_id", "") or "") or None
 
@@ -1568,11 +1650,30 @@ class SearchMessagesTool(Tool):
 
             if not hasattr(target_channel, "history"):
                 return "Error: bounded channel history is unavailable"
-            # This channel only, with a hard maximum scan of 40 messages.
-            scan = search_limit if not clean_query else min(40, max(search_limit * 4, 15))
+            # Text-only searches stay on a short recent window. Author or time
+            # filters page further back, still capped so one call cannot walk
+            # an entire channel.
+            deep = bool(clean_author or before_at is not None or after_at is not None)
+            if not clean_query and not deep:
+                scan = search_limit
+            elif deep:
+                scan = 400
+            else:
+                scan = min(40, max(search_limit * 4, 15))
+            hist_kwargs = {"limit": scan}
+            if before_at is not None:
+                hist_kwargs["before"] = before_at
+            if after_at is not None:
+                hist_kwargs["after"] = after_at
+            if before_at is not None and after_at is not None:
+                hist_kwargs["oldest_first"] = True
             results = []
+            scanned = 0
             try:
-                async for msg in target_channel.history(limit=scan):
+                async for msg in target_channel.history(**hist_kwargs):
+                    scanned += 1
+                    if clean_author and not self._author_matches(msg, clean_author):
+                        continue
                     if clean_query and clean_query not in (msg.content or "").lower():
                         continue
                     results.append(self._format_message(msg, target_channel))
@@ -1583,17 +1684,23 @@ class SearchMessagesTool(Tool):
                 return "Error searching messages: Discord history lookup failed"
 
             if not results:
-                if not clean_query:
+                if not clean_query and not deep:
                     return "No recent messages found in this channel"
-                return (
-                    f"No messages found matching '{str(query or '')[:100]}' "
-                    "in this channel"
-                )
+                window = " in the requested time window" if before_at or after_at else ""
+                who = f" from '{clean_author[:80]}'" if clean_author else ""
+                what = f" matching '{str(query or '')[:100]}'" if clean_query else ""
+                return f"No messages found{what}{who}{window} in this channel (scanned {scanned})"
+            reached_cap = scanned >= scan and len(results) < search_limit
             heading = (
                 f"Recent messages ({len(results)}):\n"
-                if not clean_query
+                if not clean_query and not deep
                 else "Search results:\n"
             )
+            if reached_cap:
+                heading += (
+                    f"Scanned {scanned} messages in this channel and stopped. "
+                    "Pass a tighter before/after to look further.\n"
+                )
             marker = getattr(self.bot, "mark_message_tainted", None)
             if callable(marker):
                 marker(message)

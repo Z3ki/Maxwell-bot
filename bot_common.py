@@ -256,6 +256,7 @@ import site_server  # noqa: E402
 import site_test  # noqa: E402
 from plugin_manager import PluginManager  # noqa: E402
 from tool_schemas import (  # noqa: E402
+    REPLY_BURST_TOOL_NAMES,
     RESULT_TOOL_NAMES,
     TURN_ENDING_TOOL_NAMES,
     returns_result,

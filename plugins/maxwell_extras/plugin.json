@@ -20,7 +20,8 @@
     },
     {
       "name": "send_rich_message",
-      "returns_result": false
+      "returns_result": false,
+      "ends_turn": true
     },
     {
       "name": "inspect_media_url",

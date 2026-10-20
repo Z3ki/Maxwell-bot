@@ -181,7 +181,7 @@ class RequestPipelineMixin:
             if tool_identifier in {
                 "create_poll",
                 "create_thread", "thread_control", "send_message", "send_file", "shell", "send_meme",
-                "send_media", "send_gif", "forward_message",
+                "send_media", "send_gif", "forward_message", "send_rich_message",
             }:
                 state["send_attempted"] = True
         try:

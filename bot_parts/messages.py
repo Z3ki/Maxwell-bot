@@ -1459,8 +1459,8 @@ class MessagesMixin:
                 {
                     "role": "system",
                     "content": (
-                        "This message addresses you. Answer substantive questions/requests with send_message "
-                        "or completed media. For a casual ping, joke, thanks or acknowledgement, "
+                        "This message addresses you. Answer substantive questions/requests with send_message, "
+                        "send_rich_message or completed media. For a casual ping, joke, thanks or acknowledgement, "
                         "react(finish=true) or send_gif can be the whole response. "
                         "Use no_response if the user requests silence or sending is unavailable. "
                         "If you cannot complete it, briefly say so; do not promise later work "

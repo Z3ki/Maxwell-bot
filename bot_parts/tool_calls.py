@@ -356,6 +356,12 @@ class ToolCallsMixin:
                 key: value for key, value in (params or {}).items() if key != "content"
             }
             result = "__MESSAGE_SENT__"
+        if (name == "send_rich_message" and result.startswith("Sent")) or (
+            name == "create_poll" and result.startswith("Poll created")
+        ):
+            # Both tools store the post under its Discord ID. A second copy
+            # here was the whole card again, in JSON, burning context.
+            return
         # Persistence happens before the follow-up parser extracts binary
         # markers. Clean here so later turns never replay base64 as chat text.
         result = strip_media_payloads(result)
@@ -402,13 +408,16 @@ class ToolCallsMixin:
             return
         # Use the request for access/visibility metadata and the actual sent
         # message for identity, timestamp and dedup against gateway snapshots.
+        # An embed, poll or file-only post has content "". Storing that blank
+        # erased the caller's text rendering, so Maxwell forgot his own answer.
+        sent_text = getattr(sent, "content", None)
         row = {
             "message_id": str(mid),
             "author": self.bot_name,
             "author_id": str(self.user.id) if self.user else "",
             "author_is_bot": True,
-            "content": sent.content
-            if isinstance(getattr(sent, "content", None), str)
+            "content": sent_text
+            if isinstance(sent_text, str) and sent_text.strip()
             else str(content),
             "timestamp": _message_created_at_iso(sent),
             "prompt_format_version": 2,
@@ -457,7 +466,7 @@ class ToolCallsMixin:
         needs_result_turn = any(
             not social_terminal(c) and (
                 returns_result(c["name"])
-                or c["name"] not in {"send_message", "no_response", "sleep", "typing", "wait"}
+                or c["name"] not in REPLY_BURST_TOOL_NAMES | {"no_response", "sleep", "typing", "wait"}
             ) for c in calls
         )
 
@@ -598,7 +607,8 @@ class ToolCallsMixin:
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
                     continue
-                if send_message_seen and call["name"] != "send_message":
+                in_burst = call["name"] in REPLY_BURST_TOOL_NAMES
+                if send_message_seen and not in_burst:
                     # A same-response message burst must be consecutive. Once
                     # anything else appears after the first visible send, the
                     # burst is closed and a later send cannot resume it.
@@ -606,8 +616,8 @@ class ToolCallsMixin:
                 if sleep_seen or (
                     send_message_seen
                     and (
-                        call["name"] not in {"send_message", "no_response"}
-                        or (call["name"] == "send_message" and not send_burst_open)
+                        (not in_burst and call["name"] != "no_response")
+                        or (in_burst and not send_burst_open)
                     )
                 ):
                     line = f"Tool {call['name']}: Skipped — the turn already ended"
@@ -703,14 +713,14 @@ class ToolCallsMixin:
                 # model round, is a normal channel post so Discord does not
                 # show several quote-replies to the same parent.
                 dispatch_call = call
-                if call["name"] == "send_message" and (
-                    send_message_seen or prior_delivery
-                ):
+                if in_burst and send_message_seen:
                     # Give consecutive messages in the same model response a
                     # tiny human-feeling beat without requiring another model
                     # turn. A later round already waited on the provider.
-                    if send_message_seen:
-                        await asyncio.sleep(0.45)
+                    await asyncio.sleep(0.45)
+                if call["name"] == "send_message" and (
+                    send_message_seen or prior_delivery
+                ):
                     dispatch_call = dict(call)
                     dispatch_args = dict(call.get("arguments") or {})
                     dispatch_args["reply"] = False
@@ -726,6 +736,10 @@ class ToolCallsMixin:
                         and not line.startswith("Tool send_message: Error")
                     )
                     if delivered:
+                        send_message_seen = True
+                        send_burst_open = True
+                elif call["name"] == "send_rich_message":
+                    if line.startswith("Tool send_rich_message: Sent"):
                         send_message_seen = True
                         send_burst_open = True
                 elif call["name"] == "sleep":

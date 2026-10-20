@@ -427,3 +427,68 @@ def test_consecutive_send_messages_form_one_burst():
     asyncio.run(run())
 
     assert sent == [("alpha", True), ("beta", False)]
+
+
+def _burst_bot(executed):
+    def tool(name, result):
+        async def execute(message, **kwargs):
+            executed.append(name)
+            return result
+
+        return SimpleNamespace(
+            execute=execute, is_destructive=False, streams_output=False, name=name
+        )
+
+    return _build_test_bot(
+        {
+            "send_message": tool("send_message", "__MESSAGE_SENT__"),
+            "send_rich_message": tool("send_rich_message", "Sent rich embed message."),
+            "send_gif": tool("send_gif", "Sent a GIF."),
+        }
+    )
+
+
+def _calls(*names):
+    return [
+        {
+            "id": f"call_{i}",
+            "type": "function",
+            "function": {"name": name, "arguments": '{"content": "x", "title": "t"}'},
+        }
+        for i, name in enumerate(names)
+    ]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [("send_message", "send_rich_message"), ("send_rich_message", "send_message")],
+)
+def test_a_line_and_a_card_in_one_response_both_send(order):
+    """A short send_message plus a rich card is one burst, in either order."""
+    from bot import MaxwellBot
+
+    # One _build_test_bot per test: a second call would stash the fake as
+    # the "real" method and the restore fixture would leak it.
+    executed: list = []
+    bot = _burst_bot(executed)
+    message = SimpleNamespace(
+        id="m4", guild=None, channel=SimpleNamespace(id="c4"), suppress_typing=True
+    )
+    asyncio.run(MaxwellBot._process_native_tool_calls(bot, message, "", _calls(*order)))
+    assert executed == list(order)
+
+
+def test_new_work_after_a_delivered_card_is_skipped():
+    from bot import MaxwellBot
+
+    executed: list = []
+    bot = _burst_bot(executed)
+    message = SimpleNamespace(
+        id="m5", guild=None, channel=SimpleNamespace(id="c5"), suppress_typing=True
+    )
+    asyncio.run(
+        MaxwellBot._process_native_tool_calls(
+            bot, message, "", _calls("send_rich_message", "send_gif", "send_message")
+        )
+    )
+    assert executed == ["send_rich_message"]

@@ -330,6 +330,13 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
 class SendRichMessageTool(Tool):
     """Send Discord embeds or Components V2 layouts."""
 
+    # This is a reply, same as send_message. It used to be a "[returns
+    # nothing]" side tool, so the model treated it as decoration, never called
+    # it, and the dispatcher skipped it whenever it followed a send_message.
+    returns_result = False
+    ends_turn = True
+    produces_visible_output = True
+
     def __init__(self, bot: Any):
         self.bot = bot
 
@@ -338,41 +345,112 @@ class SendRichMessageTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Send a polished Discord message in the current channel. Supports classic "
-            "embeds, fields, image/thumbnail/footer, link buttons, and Components V2 "
-            "(LayoutView/Container/TextDisplay) when the installed discord.py supports it. "
-            "Falls back to plain text when embeds are not permitted. "
-            "Use this only when rich presentation is useful; normal replies should stay plain."
+            "Reply with a Discord embed card. Use it as the reply in place of send_message "
+            "when the answer has structure: a comparison or specs (fields replace tables, "
+            "inline fields sit side by side), steps or a ranked list, a status or results "
+            "summary, a link you built or hosted (link buttons), or an image to show "
+            "(image_url). Keep chat, jokes and short answers in send_message. It can share "
+            "a batch with send_message, e.g. a short line plus the card. Title or description "
+            "is required; description takes Discord markdown. Falls back to plain text when "
+            "embeds are not allowed."
         )
 
     def get_parameters(self) -> dict:
         return {
             "type": "object",
             "properties": {
+                "title": {"type": "string", "description": "Card title, max 256 chars"},
+                "description": {
+                    "type": "string",
+                    "description": "Main body, Discord markdown, max 4096 chars",
+                },
+                "fields": {
+                    "type": "array",
+                    "maxItems": 25,
+                    "description": "Labelled sections. inline=true puts up to 3 on one row",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "value": {"type": "string"},
+                            "inline": {"type": "boolean"},
+                        },
+                        "required": ["name", "value"],
+                    },
+                },
+                "color": {
+                    "type": "string",
+                    "description": "Six-digit hex accent, e.g. 5865F2",
+                },
+                "footer": {"type": "string"},
+                "image_url": {
+                    "type": "string",
+                    "description": "Large image, http(s) only (e.g. a generated image URL)",
+                },
+                "thumbnail_url": {"type": "string", "description": "Small corner image, http(s)"},
+                "buttons": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "description": "Link buttons: {label, url, emoji?}",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "url": {"type": "string"},
+                            "emoji": {"type": "string"},
+                        },
+                    },
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["embed", "components_v2", "auto"],
                     "default": "auto",
-                },
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "color": {
-                    "type": "string",
-                    "description": "Six-digit hex color, e.g. 5865F2",
-                },
-                "footer": {"type": "string"},
-                "image_url": {"type": "string"},
-                "thumbnail_url": {"type": "string"},
-                "fields": {
-                    "type": "string",
-                    "description": "JSON list of {name,value,inline} objects",
-                },
-                "buttons": {
-                    "type": "string",
-                    "description": "JSON list of link buttons: {label,url,emoji?}",
+                    "description": "auto and embed send an embed. components_v2 sends a text "
+                    "layout with no fields, footer or images",
                 },
             },
         }
+
+    @staticmethod
+    def _transcript(title: str, description: str, fields: Any, footer: Any,
+                    image_url: Any, buttons: Any) -> str:
+        """What Maxwell remembers posting. Without it the next turn saw a bare
+        embed title, or nothing at all for a layout, and repeated himself."""
+        lines = ["[rich message]"]
+        if title:
+            lines.append(f"**{title}**")
+        if description:
+            lines.append(description)
+        lines.extend(
+            f"{item.get('name') or ''}: {item.get('value') or ''}"
+            for item in _json_list(fields)[:25]
+        )
+        if footer:
+            lines.append(str(footer))
+        if image_url and str(image_url).startswith(("http://", "https://")):
+            lines.append(f"image: {image_url}")
+        for item in _json_list(buttons)[:5]:
+            target = str(item.get("url") or "").strip()
+            if target:
+                lines.append(f"button {item.get('label') or 'Open'}: {target}")
+        return "\n".join(lines)[:4000]
+
+    async def _delivered(self, message: Any, sent: Any, text: str) -> None:
+        """Same bookkeeping send_gif does: mark the request delivered and put
+        the post in memory. Skipping it left the request journal convinced
+        nothing was sent and the transcript missing the answer."""
+        record = getattr(self.bot, "_record_delivery", None)
+        if callable(record) and sent is not None:
+            try:
+                await record(message, sent)
+            except Exception as exc:
+                logger.warning("Could not record rich message delivery (%s)", type(exc).__name__)
+        remember = getattr(self.bot, "_remember_sent_message", None)
+        if callable(remember) and sent is not None:
+            try:
+                await remember(message, sent, text, message.channel)
+            except Exception as exc:
+                logger.warning("Could not remember rich message (%s)", type(exc).__name__)
 
     @staticmethod
     def _link_buttons(raw: Any) -> list[discord.ui.Button]:
@@ -402,13 +480,15 @@ class SendRichMessageTool(Tool):
         description: str,
         color: str,
         buttons: Any,
-    ) -> bool:
+    ) -> tuple[bool, Any]:
+        """(sent, message). An adapter may return None for a message that did
+        go out, so success is its own flag."""
         layout_cls = getattr(discord.ui, "LayoutView", None)
         container_cls = getattr(discord.ui, "Container", None)
         text_cls = getattr(discord.ui, "TextDisplay", None)
         row_cls = getattr(discord.ui, "ActionRow", None)
         if not all((layout_cls, container_cls, text_cls, row_cls)):
-            return False
+            return False, None
 
         text = ""
         if title:
@@ -435,10 +515,10 @@ class SendRichMessageTool(Tool):
             view.add_item(container)
         except (AttributeError, TypeError, ValueError):
             logger.warning("Components V2 layout unavailable; falling back to embed")
-            return False
+            return False, None
 
         try:
-            await message.channel.send(
+            sent = await message.channel.send(
                 view=view, allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.HTTPException as exc:
@@ -447,9 +527,9 @@ class SendRichMessageTool(Tool):
             # uncertain network/server failure must not duplicate a delivery.
             if exc.status == 400 and exc.code == 50035:
                 logger.warning("Components V2 payload rejected; falling back to embed")
-                return False
+                return False, None
             raise
-        return True
+        return True, sent
 
     def _channel_permissions(self, message: Any) -> Any:
         channel = message.channel
@@ -506,12 +586,14 @@ class SendRichMessageTool(Tool):
         sent = 0
         try:
             for start in range(0, len(text), 2000):
-                await message.channel.send(
-                    content=text[start : start + 2000],
+                chunk = text[start : start + 2000]
+                posted = await message.channel.send(
+                    content=chunk,
                     view=view if start + 2000 >= len(text) else None,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 sent += 1
+                await self._delivered(message, posted, chunk)
         except (discord.Forbidden, discord.NotFound):
             if sent:
                 return (
@@ -574,13 +656,18 @@ class SendRichMessageTool(Tool):
             "fields": fields,
             "buttons": buttons,
         }
+        # The live progress message has to step aside before the card lands.
+        self._signal_streaming(message)
         if not webhook_reply and getattr(permissions, "embed_links", None) is False:
             return await self._send_plain(message, **plain_args)
 
+        transcript = self._transcript(title_s, desc_s, fields, footer, image_url, buttons)
+        # auto means embed. The V2 layout only carries title, body and buttons,
+        # so auto picking it quietly threw away every field, footer and image.
         mode_s = str(mode or "auto").strip().lower()
-        if mode_s in {"components_v2", "auto"}:
+        if mode_s == "components_v2":
             try:
-                sent = await self._send_v2(
+                sent, posted = await self._send_v2(
                     message,
                     title=title_s,
                     description=desc_s,
@@ -592,6 +679,7 @@ class SendRichMessageTool(Tool):
             except discord.NotFound:
                 return "Error: missing permissions or channel access; the channel is unavailable."
             if sent:
+                await self._delivered(message, posted, transcript)
                 return "Sent Components V2 rich message."
 
         embed = discord.Embed(
@@ -602,7 +690,8 @@ class SendRichMessageTool(Tool):
         for item in _json_list(fields)[:25]:
             name = str(item.get("name") or "\u200b")[:256]
             value = str(item.get("value") or "\u200b")[:1024]
-            embed.add_field(name=name, value=value, inline=bool(item.get("inline", False)))
+            inline = item.get("inline") is True or str(item.get("inline")).lower() == "true"
+            embed.add_field(name=name, value=value, inline=inline)
         if footer:
             embed.set_footer(text=str(footer)[:2048])
         if image_url and str(image_url).startswith(("http://", "https://")):
@@ -619,13 +708,14 @@ class SendRichMessageTool(Tool):
         if len(embed) > 6000:
             return await self._send_plain(message, **plain_args)
         try:
-            await message.channel.send(
+            posted = await message.channel.send(
                 embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.Forbidden:
             return await self._send_plain(message, **plain_args)
         except discord.NotFound:
             return "Error: missing permissions or channel access; the channel is unavailable."
+        await self._delivered(message, posted, transcript)
         return "Sent rich embed message."
 
 
