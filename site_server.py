@@ -1083,7 +1083,7 @@ async def _start_unlocked(
         # Grab the logs BEFORE tearing it down — they are the only thing that
         # tells the model what to fix. Then remove it, so a broken app is not
         # left crash-looping forever holding a port.
-        tail = await logs(data_dir, slug, lines=30)
+        tail = boot_failure_excerpt(await logs(data_dir, slug, lines=200))
         try:
             await _remove_container(slug)
         except SiteServerError as exc:
@@ -1104,6 +1104,21 @@ async def _start_unlocked(
             f"Its last output:\n{tail}"
         )
     return entry
+
+
+def boot_failure_excerpt(text: str, *, limit: int = 6000) -> str:
+    """The last traceback whole, or the tail of the log, capped from the front.
+
+    Thirty lines of a crash loop used to be the bottom half of one traceback:
+    the error line made it, the file and import that caused it did not.
+    """
+    text = str(text or "").strip()
+    marker = text.rfind("Traceback (most recent call last):")
+    excerpt = text[marker:] if marker >= 0 else text
+    if len(excerpt) > limit:
+        # Keep the end; that's where the exception type and message live.
+        excerpt = "…\n" + excerpt[-limit:]
+    return excerpt
 
 
 async def start(

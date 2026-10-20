@@ -225,9 +225,8 @@ def _sanitize_control(control):
     out["x_mention_poll_seconds"] = max(
         60, min(_safe_int(out.get("x_mention_poll_seconds"), 300), 3600)
     )
-    # Conversational turn-taking windows (autonomy_social.py). Clamped so a
-    # fat-fingered dashboard value can't either disable turn-taking outright
-    # (0 everywhere) or wedge autonomy silent for a day.
+    # History budgets. Clamped so a fat-fingered dashboard value can't zero
+    # the prompt context or ask SQLite for half a million rows per turn.
     out["memory_history_messages"] = max(0, min(out["memory_history_messages"], 2000))
     out["memory_context_budget"] = max(1000, min(out["memory_context_budget"], 500000))
     # The bot's _load_control is the source of truth for these two; parse

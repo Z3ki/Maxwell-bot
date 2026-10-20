@@ -29,8 +29,7 @@ is covered. Python 3.11 and 3.12 run the same checks in CI.
 | Provider requests | `providers.py` | OpenAI-compatible request construction, deadlines, retry and endpoint fallback |
 | Plugin lifecycle | `maxwell_core/plugins/manager.py`, `lifecycle.py` | Setup, dependencies, rollback, teardown, reload, and resource ownership |
 | Registry compatibility | `maxwell_core/tools/publication.py` | Refresh dynamic schemas without stealing built-in or another manager's entries |
-| Scoped memory policy | `maxwell_core/memory/scope.py`, `identity.py` | Authorization and deduplication tied to provenance |
-| Archived embedding validation | `maxwell_core/memory/embeddings.py` | Offline migration fixtures; not imported by the live bot |
+| Scoped memory policy | `maxwell_core/memory/scope.py`, `base.py` | Authorization and deduplication tied to provenance |
 | Memory storage | `conversation_memory.py` | Scoped recent history, edit identity, and retention without vectors |
 | Request lifecycle | `message_pipeline.py`, `concurrency_safety.py` | Uncapped admission, conversation ordering, cancellation, and journal/watermark state |
 

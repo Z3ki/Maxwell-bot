@@ -5,11 +5,13 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 """
 from __future__ import annotations
 
+import tempfile
 from typing import ClassVar
 
 from tooling import helpers as _helpers
 from tools import Tool
 from plugins.shell.isolation import (
+    SANDBOX_LIMITS,
     ShellTenant,
     docker_run_args,
     egress_policy_ready,
@@ -54,7 +56,7 @@ class ShellTool(Tool):
     DOCKERFILE_DIR = os.path.join(os.path.dirname(__file__), "docker")
     # Bump when docker-run flags or recycle policy change so an old sandbox
     # is replaced instead of reused.
-    _SANDBOX_INIT = "6"
+    _SANDBOX_INIT = "7"
 
     # Operator configuration may lower this limit, but cannot remove it.
     _TIMEOUT_CEILING_SECONDS = 900
@@ -81,6 +83,19 @@ class ShellTool(Tool):
     _state_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     _recovery_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
     _recovery_complete: ClassVar[bool] = False
+    # Persistent /storage bookkeeping, keyed by container name. "mb" is the
+    # tmpfs size the guest was started with (0 = no /storage), "gen" is the
+    # host generation last restored into it, "base" the manifest that
+    # restore produced (merge base), "fingerprint" the guest's tree hash.
+    _storage_state: ClassVar[dict[str, dict]] = {}
+    _storage_notes: ClassVar[dict[str, str]] = {}
+    # Detached jobs pin their tenant so the idle reaper can't wipe the
+    # /workspace a subagent is still building in. Count, not bool: two jobs.
+    _pins: ClassVar[dict[str, int]] = {}
+    _PREMIUM_TIMEOUT_DEFAULT = 600
+    # The reaper is a classmethod with no bot; tools register their bound
+    # save so the last /storage writes survive an idle recycle.
+    _idle_savers: ClassVar[dict[str, object]] = {}
 
     @classmethod
     def _max_output(cls) -> int:
@@ -104,6 +119,32 @@ class ShellTool(Tool):
             return 600
         return max(1, min(v, cls._TIMEOUT_CEILING_SECONDS))
 
+    def _is_premium(self, owner_id: str) -> bool:
+        ledger = getattr(self.bot, "_message_quota", None) if self.bot is not None else None
+        if ledger is None:
+            return False
+        try:
+            return ledger.plan_for(str(owner_id)) == "premium"
+        except Exception:
+            return False
+
+    @classmethod
+    def _premium_timeout_seconds(cls) -> int:
+        """Premium commands get at least this long; the ceiling still wins."""
+        try:
+            raw = int(os.environ.get("MAXWELL_SHELL_PREMIUM_TIMEOUT", "") or cls._PREMIUM_TIMEOUT_DEFAULT)
+        except ValueError:
+            raw = cls._PREMIUM_TIMEOUT_DEFAULT
+        return max(1, min(raw, cls._TIMEOUT_CEILING_SECONDS))
+
+    async def _command_timeout(self, tenant: ShellTenant) -> int:
+        base = self._timeout_seconds()
+        if self.bot is None:
+            return base
+        if await asyncio.to_thread(self._is_premium, tenant.owner_id):
+            return max(base, self._premium_timeout_seconds())
+        return base
+
     @classmethod
     def _idle_seconds(cls) -> int:
         """Seconds unused before the tenant sandbox is destroyed."""
@@ -116,6 +157,35 @@ class ShellTool(Tool):
             return cls._IDLE_SECONDS_DEFAULT
         return max(60, min(v, cls._TIMEOUT_CEILING_SECONDS))
 
+    def limits_for(self, user_id: str) -> dict:
+        """Read-only sandbox limits for get_configuration. Sync; called off-loop."""
+        premium = self.bot is not None and self._is_premium(str(user_id))
+        timeout = self._timeout_seconds()
+        if premium:
+            timeout = max(timeout, self._premium_timeout_seconds())
+        storage = self._user_storage()
+        quota = 0
+        if storage is not None:
+            try:
+                quota = storage.quota(str(user_id))
+            except Exception:
+                quota = 0
+        return {
+            "shell": {
+                "command_timeout_seconds": timeout,
+                "idle_reset_seconds": self._idle_seconds(),
+                "memory": SANDBOX_LIMITS["memory"],
+                "cpus": SANDBOX_LIMITS["cpus"],
+                "pids": SANDBOX_LIMITS["pids"],
+                "workspace_tmpfs": SANDBOX_LIMITS["workspace"],
+                "tmp_tmpfs": SANDBOX_LIMITS["tmp"],
+                "persistent_storage_mb": quota // (1024 * 1024),
+                "survives_idle_reset": ["/storage"] if quota else [],
+                "wiped_on_idle_reset": ["/workspace", "/tmp", "installed packages", "exported env vars"],
+                "can_reach_own_public_host": False,
+            }
+        }
+
     @staticmethod
     def _full_host_access() -> bool:
         """Retained for compatibility; public full-host mode is removed."""
@@ -125,30 +195,41 @@ class ShellTool(Tool):
         # Surface live limits so the model doesn't have to guess. Pulled at
         # description-build time, which happens per-turn on tool registration.
         to = self._timeout_seconds()
+        premium_to = max(to, self._premium_timeout_seconds())
         idle = self._idle_seconds()
         if idle:
             persist_note = (
-                f"Sandbox and /workspace are wiped after {idle}s idle "
-                "and recreated on the next call."
+                f"Sandbox, /workspace (512 MB) and /tmp (256 MB) are wiped after {idle}s idle, "
+                "on timeout or cancel, and on bot restart; exported env vars never carry over "
+                "between calls."
             )
         else:
             persist_note = "Container persists across calls."
+        storage_note = (
+            "Users with persistent storage (Premium) also get /storage: it survives every wipe, "
+            "is saved after each command, and its quota is the tmpfs size. Save deliverables "
+            "and anything worth keeping there, never caches or node_modules. Files in "
+            "/storage/public/ are published at the user's /u/<handle>/ address. "
+        )
         limits_note = (
             "Command text and captured stdout/stderr have no application size cap. "
-            f"Channel progress shows status only. Timeout {to}s. {persist_note}"
+            f"Channel progress shows status only. Timeout {to}s ({premium_to}s for Premium). "
+            "2 GB RAM, 1 CPU, 256 PIDs. Outbound internet works, but the sandbox cannot connect "
+            "to this bot's own public host; use fetch_url or site_server to test published sites. "
+            f"{persist_note} {storage_note}"
         )
         how = (
             "To write a file, put the redirect on the opener line: "
             "`cat << 'EOF' > path/file.py` then the body then a line containing "
             "only EOF. `cmd` is an alias for `command`. Do not prefix `$ ` or "
             "wrap the command in a markdown fence. Attach outputs with files= "
-            "(comma-separated paths under /workspace)."
+            "(comma-separated paths under /workspace or /storage)."
         )
         return (
             "Run bash -lc as root inside this user's gVisor sandbox (workdir "
             "/workspace). Root is confined by runsc; it has no host capabilities "
             "and receives only a small in-guest capability set. Params: command (required), files "
-            "(optional paths under /workspace to attach privately or publicly "
+            "(optional paths under /workspace or /storage to attach privately or publicly "
             "according to this request's visibility). Max 10 MB per file. "
             f"{how} {limits_note}"
         )
@@ -229,6 +310,49 @@ class ShellTool(Tool):
         cls._prepared_tenants.discard(tenant.container_name)
         cls._tenants.pop(tenant.container_name, None)
         cls._last_used_by_tenant.pop(tenant.container_name, None)
+        cls._storage_state.pop(tenant.container_name, None)
+        cls._idle_savers.pop(tenant.container_name, None)
+
+    @classmethod
+    async def discard_owner(cls, owner_id: str) -> int:
+        """Privacy deletion: kill this user's sandboxes without saving /storage."""
+        owner = str(owner_id)
+        count = 0
+        for tenant in [t for t in list(cls._tenants.values()) if t.owner_id == owner]:
+            async with cls._lock_for(tenant):
+                # Forget the merge state first so nothing gets written home.
+                cls._storage_state.pop(tenant.container_name, None)
+                cls._idle_savers.pop(tenant.container_name, None)
+                cls._pins.pop(tenant.container_name, None)
+                with contextlib.suppress(Exception):
+                    await cls._destroy_container_unlocked(tenant)
+                    count += 1
+        return count
+
+    @classmethod
+    def pin(cls, message) -> str | None:
+        """Keep this request's sandbox alive until unpin(); returns a token."""
+        tenant = shell_tenant(message)
+        if tenant is None:
+            return None
+        name = tenant.container_name
+        cls._pins[name] = cls._pins.get(name, 0) + 1
+        return name
+
+    @classmethod
+    def unpin(cls, name: str | None) -> None:
+        if not name:
+            return
+        count = cls._pins.get(name, 0) - 1
+        if count > 0:
+            cls._pins[name] = count
+            return
+        cls._pins.pop(name, None)
+        # Idle countdown starts when the job lets go, not when its last
+        # shell call happened two hours ago.
+        if name in cls._last_used_by_tenant:
+            cls._last_used_by_tenant[name] = time.monotonic()
+            cls._schedule_idle_reaper()
 
     @classmethod
     def _mark_used(cls, tenant: ShellTenant) -> None:
@@ -253,16 +377,24 @@ class ShellTool(Tool):
                 if idle <= 0 or not cls._last_used_by_tenant:
                     return
                 now = time.monotonic()
-                remaining = min(
-                    idle - (now - stamp)
-                    for stamp in cls._last_used_by_tenant.values()
-                )
+                candidates = [
+                    stamp for name, stamp in cls._last_used_by_tenant.items()
+                    if not cls._pins.get(name)
+                ]
+                if not candidates:
+                    # Everything left is pinned by a running job. Check back
+                    # later instead of spinning on stamps we can't reap.
+                    await asyncio.sleep(30.0)
+                    continue
+                remaining = min(idle - (now - stamp) for stamp in candidates)
                 if remaining > 0:
                     await asyncio.sleep(min(remaining, 30.0))
                     continue
                 expired = [
                     name for name, stamp in cls._last_used_by_tenant.items()
-                    if now - stamp >= idle and name not in cls._active_tenants
+                    if now - stamp >= idle
+                    and name not in cls._active_tenants
+                    and not cls._pins.get(name)
                 ]
                 reaped = False
                 for name in expired:
@@ -274,8 +406,14 @@ class ShellTool(Tool):
                         continue
                     async with cls._lock_for(tenant):
                         stamp = cls._last_used_by_tenant.get(name, 0.0)
-                        if time.monotonic() - stamp < idle:
+                        if time.monotonic() - stamp < idle or cls._pins.get(name):
                             continue
+                        # A background process may have written to /storage
+                        # after the last command's save. Last chance.
+                        saver = cls._idle_savers.get(name)
+                        if saver is not None:
+                            with contextlib.suppress(Exception):
+                                await asyncio.wait_for(saver(tenant), 60)
                         await cls._destroy_container_unlocked(tenant)
                         cls._last_used_by_tenant.pop(name, None)
                         cls._tenants.pop(name, None)
@@ -310,6 +448,12 @@ class ShellTool(Tool):
                 await task
         for tenant in list(cls._tenants.values()):
             async with cls._lock_for(tenant):
+                # Restarts wipe the guest; whatever a background process put
+                # in /storage since the last command still goes home first.
+                saver = cls._idle_savers.get(tenant.container_name)
+                if saver is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(saver(tenant), 20)
                 with contextlib.suppress(Exception):
                     await cls._destroy_container_unlocked(tenant)
         cls._active_tenants.clear()
@@ -436,6 +580,7 @@ class ShellTool(Tool):
             raise
 
     async def _ensure_container_impl(self, tenant: ShellTenant):
+        storage_mb = await self._storage_mb(tenant)
         try:
             (stdout, _stderr), code = await self._run_docker(
                 "inspect",
@@ -444,12 +589,18 @@ class ShellTool(Tool):
                 "-f",
                 '{{.State.Running}} {{index .HostConfig "Runtime"}} '
                 '{{index .Config.Labels "maxwell.shell.policy"}} '
-                '{{index .Config.Labels "maxwell.shell.controller"}}',
+                '{{index .Config.Labels "maxwell.shell.controller"}}'
+                # Tab-separated so "<no value>" (which has a space) can't
+                # shift the fields in front of it.
+                '\t{{index .Config.Labels "maxwell.shell.storage"}}',
                 tenant.container_name,
                 timeout=10,
             )
             if code == 0:
-                parts = stdout.decode(errors="replace").strip().split(None, 3)
+                text, _tab, storage_label = stdout.decode(errors="replace").strip().partition("\t")
+                storage_label = storage_label.strip()
+                current_mb = int(storage_label) if storage_label.isdigit() else 0
+                parts = text.strip().split(None, 3)
                 running = (parts[0] if parts else "").lower() == "true"
                 runtime = parts[1] if len(parts) > 1 else ""
                 policy = parts[2] if len(parts) > 2 else ""
@@ -467,8 +618,15 @@ class ShellTool(Tool):
                     and runtime == "runsc"
                     and policy == "v2"
                     and tenant.container_name in self._prepared_tenants
+                    and current_mb == storage_mb
                 ):
+                    self._storage_state.setdefault(tenant.container_name, {"mb": current_mb})
                     return
+                if current_mb and current_mb != storage_mb and tenant.container_name in self._prepared_tenants:
+                    # Plan changed under a live guest. Save what it has
+                    # before it's replaced with the right-sized /storage.
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(self._storage_save(tenant), 60)
                 await self._destroy_container_unlocked(tenant)
         except FileNotFoundError as exc:
             raise RuntimeError("docker is not installed or not on PATH") from exc
@@ -482,7 +640,7 @@ class ShellTool(Tool):
         except Exception as exc:
             raise RuntimeError(f"could not prepare sandbox image: {exc}") from exc
 
-        run_args = self._sandbox_run_args(tenant)
+        run_args = self._sandbox_run_args(tenant, storage_mb)
         (_stdout, stderr), run_code = await self._run_docker(*run_args, timeout=30)
         if run_code != 0:
             raise RuntimeError(
@@ -490,14 +648,241 @@ class ShellTool(Tool):
             )
         self._active_tenants.add(tenant.container_name)
         self._prepared_tenants.add(tenant.container_name)
+        self._storage_state[tenant.container_name] = {"mb": storage_mb}
 
-    def _sandbox_run_args(self, tenant: ShellTenant) -> list[str]:
+    def _sandbox_run_args(self, tenant: ShellTenant, storage_mb: int = 0) -> list[str]:
         return docker_run_args(
             container_name=tenant.container_name,
             image=self.IMAGE_NAME,
             runtime=self._runtime(),
             network=self._network(),
+            storage_mb=storage_mb,
         )
+
+    # ---- persistent /storage -------------------------------------------
+
+    def _user_storage(self):
+        return getattr(self.bot, "_user_storage", None) if self.bot is not None else None
+
+    async def _storage_mb(self, tenant: ShellTenant) -> int:
+        storage = self._user_storage()
+        if storage is None:
+            return 0
+        try:
+            quota = await asyncio.to_thread(storage.quota, tenant.owner_id)
+        except Exception:
+            logger.warning("storage quota lookup failed", exc_info=True)
+            return 0
+        return max(1, quota // (1024 * 1024)) if quota > 0 else 0
+
+    async def _guest_exec(
+        self, tenant: ShellTenant, script: str, *, stdin_file=None, stdout_file=None,
+        stdout_limit: int = 0, timeout: float = 60,
+    ) -> tuple[int, bytes, bytes]:
+        """Run a trusted helper script in the guest; never user input."""
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", *(["-i"] if stdin_file is not None else []),
+            "--user", "root", tenant.container_name, "sh", "-c", script,
+            stdin=asyncio.subprocess.PIPE if stdin_file is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out = bytearray()
+        received = 0
+
+        async def feed():
+            if stdin_file is None:
+                return
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(stdin_file.read, 1024 * 1024)
+                    if not chunk:
+                        break
+                    proc.stdin.write(chunk)
+                    await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                proc.stdin.close()
+
+        async def pump():
+            nonlocal received
+            while True:
+                chunk = await proc.stdout.read(1024 * 1024)
+                if not chunk:
+                    return
+                received += len(chunk)
+                if stdout_limit and received > stdout_limit:
+                    raise OverflowError("guest output exceeded its limit")
+                if stdout_file is not None:
+                    await asyncio.to_thread(stdout_file.write, chunk)
+                else:
+                    out.extend(chunk)
+
+        try:
+            _fed, _pumped, err, _waited = await asyncio.wait_for(
+                asyncio.gather(feed(), pump(), proc.stderr.read(), proc.wait()), timeout
+            )
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            raise
+        return proc.returncode, bytes(out), err
+
+    _FINGERPRINT = (
+        "find /storage -mindepth 1 -printf '%P\t%y\t%s\t%T@\n' 2>/dev/null "
+        "| LC_ALL=C sort | sha256sum | cut -c1-64"
+    )
+
+    async def _storage_fingerprint(self, tenant: ShellTenant) -> str | None:
+        try:
+            code, out, _err = await self._guest_exec(tenant, self._FINGERPRINT, timeout=30)
+        except Exception:
+            return None
+        value = out.decode(errors="replace").strip()
+        return value if code == 0 and len(value) == 64 else None
+
+    async def _storage_restore(self, tenant: ShellTenant) -> None:
+        """Load the host copy into the guest's /storage if it's stale."""
+        name = tenant.container_name
+        state = self._storage_state.get(name) or {}
+        storage = self._user_storage()
+        if storage is None or not state.get("mb"):
+            return
+        owner = tenant.owner_id
+        if "base" in state and not state.get("broken"):
+            # A background process may have written since the last save, and
+            # the restore below starts with a wipe. Merge those writes first.
+            note = await self._storage_save(tenant)
+            if note:
+                self._storage_notes[name] = note
+            state = self._storage_state.get(name) or state
+        generation = await asyncio.to_thread(storage.generation, owner)
+        if state.get("gen") == generation and "base" in state:
+            return
+        spool, manifest, generation = await asyncio.to_thread(storage.export_tar, owner)
+        try:
+            code, _out, err = await self._guest_exec(
+                tenant,
+                "find /storage -mindepth 1 -delete && tar -x -C /storage --no-same-owner -f -",
+                stdin_file=spool,
+                timeout=120,
+            )
+        except Exception as exc:
+            code, err = 1, str(type(exc).__name__).encode()
+        finally:
+            spool.close()
+        if code != 0:
+            # Partially restored is worse than empty: a save-back from here
+            # would read every missing file as "the user deleted it". Freeze.
+            used, _files = await asyncio.to_thread(storage.usage, owner)
+            self._storage_state[name] = {"mb": state["mb"], "broken": True}
+            self._storage_notes[name] = (
+                f"[storage] /storage could not be loaded ({used / 1048576:.1f} MB stored, "
+                f"{state['mb']} MB allowed), so changes to it this session will not be saved. "
+                "Free space with the storage tool or the dashboard."
+            )
+            logger.warning("storage restore failed for %s: %s", name, err.decode(errors="replace")[:200])
+            return
+        fingerprint = await self._storage_fingerprint(tenant)
+        self._storage_state[name] = {
+            "mb": state["mb"], "gen": generation, "base": manifest, "fingerprint": fingerprint,
+        }
+
+    async def _storage_save(self, tenant: ShellTenant) -> str:
+        """Merge the guest's /storage back to the host. Returns a note or ''."""
+        name = tenant.container_name
+        state = self._storage_state.get(name) or {}
+        storage = self._user_storage()
+        if storage is None or not state.get("mb") or state.get("broken") or "base" not in state:
+            return ""
+        fingerprint = await self._storage_fingerprint(tenant)
+        if fingerprint is None or fingerprint == state.get("fingerprint"):
+            return ""
+        limit = state["mb"] * 1024 * 1024 * 2 + 16 * 1024 * 1024
+        with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024) as spool:
+            try:
+                code, _out, err = await self._guest_exec(
+                    tenant, "tar -c -C /storage -f - .", stdout_file=spool,
+                    stdout_limit=limit, timeout=120,
+                )
+            except OverflowError:
+                state["fingerprint"] = fingerprint
+                return "[storage] /storage is larger than its quota; changes were not saved."
+            if code != 0:
+                logger.warning("storage export failed for %s: %s", name, err.decode(errors="replace")[:200])
+                return "[storage] could not read /storage; changes were not saved this time."
+            spool.seek(0)
+            result = await asyncio.to_thread(
+                storage.import_tar, tenant.owner_id, spool, state["base"],
+                base_generation=state.get("gen", -1),
+            )
+        # Either way, don't re-export the same tree after every command.
+        state["fingerprint"] = fingerprint
+        if result.error:
+            return f"[storage] {result.error}"
+        if result.clean and result.manifest is not None:
+            state["gen"], state["base"] = result.generation, result.manifest
+        else:
+            # Someone else wrote meanwhile; reload the merged tree next time.
+            state["gen"] = -1
+        if result.skipped:
+            shown = ", ".join(result.skipped[:5])
+            more = f" and {len(result.skipped) - 5} more" if len(result.skipped) > 5 else ""
+            return f"[storage] not saved (symlinks/special files are not kept): {shown}{more}"
+        return ""
+
+    async def persist_to_storage(self, message, paths: list[str], folder: str) -> list[str]:
+        """Copy sandbox files into /storage/<folder>/ and save. For jobs.
+
+        Returns the /storage paths that exist afterwards. Quietly does
+        nothing when this user has no persistent storage or no live sandbox.
+        """
+        tenant = shell_tenant(message)
+        if tenant is None or tenant.container_name not in self._prepared_tenants:
+            return []
+        state = self._storage_state.get(tenant.container_name) or {}
+        if not state.get("mb") or state.get("broken"):
+            return []
+        sources = []
+        for raw in paths:
+            rel = self._workspace_relative_path(raw)
+            if rel is not None:
+                sources.append("/workspace/" + rel)
+        if not sources or not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", folder or ""):
+            return []
+        dest = "/storage/" + folder.strip("/")
+        script = "mkdir -p " + shlex.quote(dest) + " && " + " ; ".join(
+            f"[ -f {shlex.quote(src)} ] && [ ! -L {shlex.quote(src)} ] && "
+            f"cp -f -- {shlex.quote(src)} {shlex.quote(dest)}/ && echo {shlex.quote(src)}"
+            for src in sources
+        )
+        async with self._user_slot(tenant):
+            async with self._lock_for(tenant):
+                if tenant.container_name not in self._prepared_tenants:
+                    return []
+                try:
+                    await self._storage_restore(tenant)
+                    _code, out, _err = await self._guest_exec(tenant, script, timeout=120)
+                    note = await self._storage_save(tenant)
+                except Exception:
+                    logger.warning("job artifact persistence failed", exc_info=True)
+                    return []
+                if note:
+                    logger.info("job artifact persistence: %s", note)
+        copied = [line.strip() for line in out.decode(errors="replace").splitlines() if line.strip()]
+        wanted = [dest + "/" + os.path.basename(src) for src in copied]
+        # The guest saying "copied" means nothing if the merge refused it
+        # (quota, concurrent edit). Only report what the host really has.
+        storage = self._user_storage()
+        kept = []
+        for path in wanted:
+            with contextlib.suppress(Exception):
+                if await asyncio.to_thread(storage.file_path, tenant.owner_id, path) is not None:
+                    kept.append(path)
+        return kept
 
     @staticmethod
     def _command_arg(command: str | None = None, **kwargs) -> str | None:
@@ -577,12 +962,19 @@ class ShellTool(Tool):
             raise RuntimeError(validation_error)
         if not sanitized:
             raise RuntimeError("empty command")
+        timeout = await self._command_timeout(tenant)
         async with self._global_slots:
             async with self._lock_for(tenant):
                 await self._ensure_container(tenant)
                 self._active_tenants.add(tenant.container_name)
                 self._active_owners.add(tenant.owner_id)
+                type(self)._idle_savers[tenant.container_name] = self._storage_save
                 try:
+                    try:
+                        await self._storage_restore(tenant)
+                    except Exception:
+                        # Storage trouble must not take the shell down with it.
+                        logger.warning("storage restore failed", exc_info=True)
                     exec_token = f"maxwell-exec-{uuid.uuid4().hex}"
                     pid_file = f"/tmp/{exec_token}.pid"
                     # Run the user's shell in its own session/process group and leave
@@ -681,12 +1073,12 @@ class ShellTool(Tool):
                                 _pump(proc.stderr, stderr_buf),
                                 proc.wait(),
                             ),
-                            timeout=self._timeout_seconds(),
+                            timeout=timeout,
                         )
                     except asyncio.TimeoutError:
                         await self._kill_container_exec(tenant, pid_file)
                         cleanup = asyncio.create_task(
-                            self._destroy_container_unlocked(tenant)
+                            self._save_then_destroy(tenant)
                         )
                         with contextlib.suppress(asyncio.CancelledError, Exception):
                             await asyncio.shield(cleanup)
@@ -698,7 +1090,7 @@ class ShellTool(Tool):
                         # Destroying the whole tenant container guarantees that
                         # disowned/session-escaped descendants cannot outlive cancel.
                         cleanup = asyncio.create_task(
-                            self._destroy_container_unlocked(tenant)
+                            self._save_then_destroy(tenant)
                         )
                         with contextlib.suppress(asyncio.CancelledError, Exception):
                             await asyncio.shield(cleanup)
@@ -720,6 +1112,13 @@ class ShellTool(Tool):
                             except Exception as e:
                                 # Usually means the process already exited.
                                 logger.debug("shell zombie cleanup: %s", e)
+                    try:
+                        note = await self._storage_save(tenant)
+                    except Exception:
+                        logger.warning("storage save failed", exc_info=True)
+                        note = "[storage] saving /storage failed; changes may not be kept."
+                    if note:
+                        type(self)._storage_notes[tenant.container_name] = note
                     return bytes(stdout_buf), bytes(stderr_buf), proc.returncode
                 finally:
                     type(self)._active_tenants.discard(tenant.container_name)
@@ -731,6 +1130,14 @@ class ShellTool(Tool):
                         type(self)._active_owners.discard(tenant.owner_id)
                     type(self)._mark_used(tenant)
                     type(self)._schedule_idle_reaper()
+
+    async def _save_then_destroy(self, tenant: ShellTenant) -> None:
+        """Timeout/cancel path: keep /storage writes, then kill the guest."""
+        with contextlib.suppress(Exception):
+            note = await asyncio.wait_for(self._storage_save(tenant), 60)
+            if note:
+                type(self)._storage_notes[tenant.container_name] = note
+        await self._destroy_container_unlocked(tenant)
 
     async def _kill_container_exec(self, tenant: ShellTenant, pid_file: str) -> None:
         """Terminate the timed-out command, not just its docker client."""
@@ -782,7 +1189,17 @@ class ShellTool(Tool):
                 normalized, tenant
             )
         except asyncio.TimeoutError:
-            return f"Error: Command timed out after {self._timeout_seconds()}s"
+            limit = await self._command_timeout(tenant)
+            note = type(self)._storage_notes.pop(tenant.container_name, "")
+            saved = (
+                " Files saved in /storage were kept."
+                if await self._storage_mb(tenant) else ""
+            )
+            return (
+                f"Error: Command timed out after {limit}s and the sandbox was reset "
+                f"(/workspace wiped).{saved} Split long work into shorter commands or run it "
+                "in the background with nohup and poll." + (f"\n{note}" if note else "")
+            )
         except Exception as e:
             logger.warning("shell execution failed (%s)", type(e).__name__)
             return (
@@ -803,6 +1220,9 @@ class ShellTool(Tool):
             combined += f"\n[exit code: {exit_code}]"
 
         result = combined if combined else "(command produced no output)"
+        note = type(self)._storage_notes.pop(tenant.container_name, "")
+        if note:
+            result += "\n" + note
 
         # Send requested files from the container
         if files:
@@ -854,9 +1274,27 @@ class ShellTool(Tool):
     ) -> tuple[bytes | None, str | None, str | None]:
         """Read a bounded regular file without host-side symlink races."""
         tenant = shell_tenant(message)
+        raw = str(path or "").strip()
+        if raw == "/storage" or raw.startswith("/storage/"):
+            # The host copy is authoritative and outlives the sandbox, which
+            # is the whole point: no live container needed.
+            storage = self._user_storage()
+            if tenant is None or storage is None:
+                return None, None, "persistent storage is not available"
+            try:
+                limit = max(1, min(int(max_size), 25 * 1024 * 1024))
+            except (TypeError, ValueError):
+                limit = 25 * 1024 * 1024
+            from plugins.user_storage.store import StorageError
+
+            try:
+                blob = await asyncio.to_thread(storage.read, tenant.owner_id, raw, max_size=limit)
+            except StorageError as exc:
+                return None, None, str(exc)
+            return blob, os.path.basename(raw.rstrip("/")), None
         relative = self._workspace_relative_path(path)
         if tenant is None or relative is None:
-            return None, None, "path must identify a file inside /workspace"
+            return None, None, "path must identify a file inside /workspace or /storage"
         if tenant.container_name not in self._prepared_tenants:
             return None, None, "this user's shell workspace is not active"
         try:

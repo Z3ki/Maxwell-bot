@@ -1,0 +1,20 @@
+{
+  "id": "user_storage",
+  "name": "user_storage",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "Per-user persistent /storage that survives shell sandbox wipes, with a public folder served at /u/<handle>/.",
+  "author": "Maxwell",
+  "bundled": true,
+  "enabled_by_default": true,
+  "permissions": ["messages.send"],
+  "tools": [
+    {
+      "name": "storage",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false,
+      "is_destructive": false
+    }
+  ]
+}

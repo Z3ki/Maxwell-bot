@@ -60,10 +60,13 @@ def _json_response(data, status=200):
 #                          (site_server.py). Caddy routes this path here.
 #   /api/github/webhook    signed GitHub wakeup; HMAC-verified, no admin auth.
 #   /api/github/oauth/...  GitHub login callback; state is HMAC-signed.
+#   /u/<handle>/...        a Premium user's public/ folder, read-only and
+#                          served under a CSP sandbox (api/user_content.py).
+#   /u/_s/...              HMAC-signed, expiring download of one stored file.
 #
 # Neither site namespace can reach another slug's data, and nothing else on
 # the API is reachable through them.
-PUBLIC_PATH_PREFIXES = ("/api/site/", "/api/github/webhook", "/api/github/oauth")
+PUBLIC_PATH_PREFIXES = ("/api/site/", "/api/github/webhook", "/api/github/oauth", "/u/")
 PUBLIC_PATH_RE = re.compile(r"^/bot/[a-z0-9-]{2,30}/api(?:/|$)")
 
 

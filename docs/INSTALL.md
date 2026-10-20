@@ -35,8 +35,7 @@ untouched but no longer loaded or updated.
 
 Optional integrations use `auto` detection. Website tools need a nonblank
 `MAXWELL_PUBLIC_BASE_URL`; `ENABLE_CREATE_SITE=true` also allows local-only
-hosting. RAG needs `MAXWELL_EMBED_MODEL` (or `EMBED_MODEL`) after you install
-that embedding model. HD images need `GEMINI_IMAGE_MODEL` supported by your
+hosting. HD images need `GEMINI_IMAGE_MODEL` supported by your
 provider. Shell stays off until `--with-shell` prepares the backend. Features without
 setup, such as keyless web search and image generation, remain available.
 Autonomous background activity is removed; memory agents and delegated workers have been removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. Generated sites do not expire

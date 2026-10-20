@@ -2069,8 +2069,9 @@ async def _reliability_middleware(request, handler):
             )
     try:
         # Public long-lived sockets must not occupy the admin API's capacity.
-        if request.path.startswith("/bot/"):
-            # site_proxy owns global/per-site admission for the stream lifetime.
+        if request.path.startswith(("/bot/", "/u/")):
+            # site_proxy and user_content own their own admission for the
+            # stream lifetime; a 30 s cap would cut off every big download.
             return await handler(request)
         async with _API_CONCURRENCY_SEM:
             return await asyncio.wait_for(
@@ -2180,6 +2181,9 @@ app = web.Application(
 from api.dashboard import register_dashboard  # noqa: E402
 
 register_dashboard(app, lambda: DATA_DIR)
+from api.user_content import register_user_content  # noqa: E402
+
+register_user_content(app, lambda: DATA_DIR)
 app.router.add_get("/health", health_check)
 app.router.add_get("/api/health", health_check)
 app.router.add_get("/api/github/oauth/callback", github_oauth_callback)

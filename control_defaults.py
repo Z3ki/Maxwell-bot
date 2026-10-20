@@ -481,7 +481,7 @@ def guild_capability_for_tool(name: str, *, plugin_owned: bool = False) -> str |
         return "sites"
     if tool in {"image_generator", "hd_image", "send_meme", "send_gif", "chess_start", "chess_move", "chess_state", "chess_resign"} or tool.startswith("checkers_"):
         return "creative"
-    if tool in {"send_file", "send_media"}:
+    if tool in {"send_file", "send_media", "storage"}:
         return "files"
     if tool in _GUILD_MODERATION_TOOLS:
         return "moderation"

@@ -83,6 +83,57 @@ Existing containers enter the protected pool when restarted through
 source, secrets, or databases. See [SITE_BACKEND_MIGRATION.md](SITE_BACKEND_MIGRATION.md).
 
 
+## Premium storage, public folders and schedules
+
+Premium is an operator grant: run the restricted `/maintenance` command with
+the **Grant premium allowance** action (`quota_premium`) and the user's Discord
+ID in `key`; **Return user to free allowance** (`quota_free`) reverts it. These
+limits apply to accounts on the `premium` plan. Free accounts keep the
+shell, sites and everything else, with no persistent storage and no schedules.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MAXWELL_STORAGE_PREMIUM_MB` | `100` | Persistent `/storage` quota for a Premium account (max 1024). |
+| `MAXWELL_STORAGE_FREE_MB` | `0` | Quota for free accounts. `0` means no `/storage`; files left from an earlier grant stay readable and deletable. |
+| `MAXWELL_STORAGE_MAX_FILES` | `2000` | File-count cap per account. |
+| `MAXWELL_SHELL_TIMEOUT` | `600` | Per-command shell limit in seconds (ceiling 900). |
+| `MAXWELL_SHELL_PREMIUM_TIMEOUT` | `600` | Premium commands get at least this long; the ceiling still wins. |
+| `MAXWELL_SHELL_IDLE_SECONDS` | `600` | Idle time before a sandbox is destroyed. `/storage` is saved first and restored on the next command. |
+| `MAXWELL_SCHEDULE_MAX_PER_USER` | `10` | Saved schedules per account. |
+| `MAXWELL_SCHEDULE_MIN_MINUTES` | `15` | Shortest allowed gap between runs. |
+| `MAXWELL_SCHEDULE_DAILY_RUNS` | `48` | Runs per account per day across all schedules. |
+| `MAXWELL_DASHBOARD_LINKS` | `1` | `/dashboard` one-time sign-in links. `0` turns link sign-in off. |
+| `MAXWELL_USER_CONTENT_STREAMS` | `32` | Concurrent `/u/` file responses the API serves at once. |
+
+Storage lives in `data/plugins/user_storage/` (one directory per Discord user
+plus a SQLite index for handles). The shell mounts a quota-sized tmpfs at
+`/storage`, restores it before each command and merges changes back after; a
+bind mount would hand an untrusted guest an unquotaed host directory. Files a
+subagent reports from `/workspace` are copied to `/storage/jobs/<job id>/`
+when the job finishes, so the idle wipe can't take them.
+
+Files under `/storage/public/` are served at `<MAXWELL_PUBLIC_BASE_URL>/u/<handle>/`
+by the API (`api/user_content.py`) with a sandboxing Content-Security-Policy.
+Private files can be shared with expiring signed links at `/u/_s/...`. Route
+`/u/*` on the public host to the API, for example in Caddy:
+
+```caddy
+handle /u/* {
+	reverse_proxy 127.0.0.1:8765
+}
+# Dev bot under /dev on the same host:
+handle /dev/u/* {
+	uri strip_prefix /dev
+	reverse_proxy 127.0.0.1:8766
+}
+```
+
+Schedules live in `data/plugins/schedules/schedules.sqlite3`. A runner checks
+every 20 seconds and starts each due schedule as a background subagent job, so
+schedules also need Premium task workers (`premium_task_workers_enabled`).
+`get_configuration` returns the resolved shell, storage, schedule and site
+limits for the requester.
+
 ## Identity and ownership
 
 | Variable | Default | Purpose |
@@ -237,7 +288,7 @@ the turn budget does not make blocked sandbox destinations reachable.
 
 `conversation_memory.py` stores scoped recent messages in SQLite without an embedding endpoint, vector search, graph retrieval, local model, or recovery worker. The existing `maxwell_rag.db` filename and schema are retained so upgrades preserve conversation history and archived facts. Archived vectors remain on disk for export and are never loaded into live prompts.
 
-`ENABLE_RAG` and legacy retrieval controls cannot enable RAG. NumPy is no longer a runtime dependency. Old vector modules and their regression fixtures remain available for offline migration work only. `doctor.py --probe` checks chat endpoints.
+`ENABLE_RAG` and legacy retrieval controls cannot enable RAG. NumPy is no longer a runtime dependency. The old vector modules and their fixtures were deleted; nothing reads embedding settings anymore. `doctor.py --probe` checks chat endpoints.
 
 ## Optional/background features
 
