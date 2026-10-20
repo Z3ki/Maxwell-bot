@@ -40,6 +40,12 @@ class MessageQuotaExceeded(Exception):
         )
 
 
+def usage_percent(used: int, limit: int) -> int:
+    """Rounded share of the allowance. Users only ever see this, never the
+    raw count or limit: the limit gets retuned and people remember numbers."""
+    return int(max(0, int(used)) * 100 / max(1, int(limit)) + 0.5)
+
+
 def format_window(seconds: int) -> str:
     seconds = max(1, int(seconds))
     if seconds % 3600 == 0:

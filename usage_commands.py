@@ -16,6 +16,7 @@ from message_quota import (
     enforced_message_limit,
     enforced_window_seconds,
     format_window,
+    usage_percent,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,9 +115,7 @@ def usage_status_text(state: dict) -> str:
     if state.get("exempt"):
         return "Unlimited messages. This account is exempt from the message limit."
     window = format_window(int(state.get("window_seconds") or FREE_WINDOW_SECONDS))
-    limit = max(1, int(state.get("limit") or 0))
-    used = max(0, int(state.get("used") or 0))
-    percent_used = int((used * 100 / limit) + 0.5)
+    percent_used = usage_percent(int(state.get("used") or 0), int(state.get("limit") or 0))
     allowance = (
         "Premium message allowance"
         if state.get("plan") == "premium"

@@ -82,7 +82,12 @@ class Panels:
     # ---- plan -----------------------------------------------------------
 
     def _plan(self, uid: str) -> dict:
-        from message_quota import MessageQuota, enforced_message_limit, enforced_window_seconds
+        from message_quota import (
+            MessageQuota,
+            enforced_message_limit,
+            enforced_window_seconds,
+            usage_percent,
+        )
         from plugins.schedules.store import daily_run_limit, max_per_user, min_interval_minutes
 
         root = self.root()
@@ -92,15 +97,17 @@ class Panels:
         premium = quota["plan"] == "premium"
         storage = self.storage().status(uid)
         workers = bool(control.get("premium_task_workers_enabled", True))
+        enabled = bool(control.get("message_quota_enabled", False))
+        unlimited = not enabled or bool(quota["exempt"])
         return {
             "plan": quota["plan"],
+            # Percent only. The raw count, limit and window stay server-side so
+            # retuning the allowance doesn't turn into a support thread.
             "messages": {
-                "enabled": bool(control.get("message_quota_enabled", False)),
-                "used": quota["used"],
-                "limit": quota["limit"],
-                "window_seconds": quota["window_seconds"],
-                "resets_in": quota["resets_in"],
-                "exempt": quota["exempt"],
+                "unlimited": unlimited,
+                "exempt": bool(quota["exempt"]),
+                "percent_used": 0 if unlimited else usage_percent(quota["used"], quota["limit"]),
+                "resets_in": 0 if unlimited else quota["resets_in"],
             },
             "storage": {
                 "enabled": _plugin_on(root, "user_storage"),

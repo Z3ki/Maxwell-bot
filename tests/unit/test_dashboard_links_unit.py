@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
 from contextlib import asynccontextmanager
@@ -236,6 +237,35 @@ def test_free_users_see_the_plan_but_cannot_write_premium_panels(tmp_path, monke
                 await client.get("/api/dashboard/schedules", headers=auth)
             ).json()
             assert listing["premium"] is False and listing["schedules"] == []
+
+    asyncio.run(run())
+
+
+def test_message_usage_reaches_the_browser_as_a_percentage_only(tmp_path, monkeypatch):
+    (tmp_path / "bot_control.json").write_text(
+        json.dumps(
+            {
+                "message_quota_enabled": True,
+                "message_quota_limit": 150,
+                "message_quota_window_seconds": 3600,
+            }
+        )
+    )
+    ledger = MessageQuota(tmp_path / "message_quota.sqlite3")
+    for _ in range(4):
+        ledger.charge(UID, 150, 3600)
+
+    async def run():
+        async with link_app(tmp_path, monkeypatch) as (dashboard, client):
+            auth = await sign_in(dashboard, client)
+            response = await client.get("/api/dashboard/plan", headers=auth)
+            raw = await response.text()
+            messages = json.loads(raw)["messages"]
+            assert messages["unlimited"] is False
+            assert messages["percent_used"] == 3  # 4 of 150, rounded
+            assert 0 < messages["resets_in"] <= 3600
+            assert set(messages) == {"unlimited", "exempt", "percent_used", "resets_in"}
+            assert "150" not in raw and "3600" not in raw
 
     asyncio.run(run())
 
