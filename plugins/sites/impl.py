@@ -151,7 +151,9 @@ class CreateSiteTool(Tool):
             'files (extra files {"path":"content"}), '
             "backend (optional, default false), encoding, permanent. "
             "Static HTML/CSS/JS is first-class. backend=true enables only the "
-            "simple site KV API. Use site_server for a full custom backend."
+            "simple site KV API, which anyone with the URL can write to: no "
+            "secrets or personal data in it. Use site_server (SQLite in /data) "
+            "for private or per-user data and any full custom backend."
         )
 
     async def _fetch_site_html(self, url: str) -> str:
@@ -868,6 +870,27 @@ class SiteServerTool(_SiteOwnedTool):
     ends_turn = False
 
 
+    def limits_for(self, user_id: str) -> dict:
+        """Per-backend container limits and KV caps, for get_configuration."""
+        return {
+            "site_backend": {
+                "memory": site_server.MEMORY,
+                "cpus": site_server.CPUS,
+                "pids": site_server.PIDS,
+                "max_source_files": site_server.MAX_FILES,
+                "max_source_bytes": site_server.MAX_CODE_BYTES,
+                "writable_path": "/data",
+                "start_timeout_seconds": site_server.START_TIMEOUT,
+            },
+            "site_kv": {
+                "max_value_kb": site_backend.MAX_VALUE_BYTES // 1000,
+                "max_items_per_list": site_backend.MAX_ITEMS_PER_COLLECTION,
+                "max_store_kb": site_backend.MAX_STORE_BYTES // 1000,
+                "public_writes": True,
+                "safe_for_secrets": False,
+            },
+        }
+
     def get_description(self):
         api_mount = f"{urlparse(self.base_url).path}/<name>/api/"
         return (
@@ -897,6 +920,8 @@ class SiteServerTool(_SiteOwnedTool):
             f"Use new URL('{api_mount}', location.origin) as apiBase, then "
             "fetch(new URL('notes', apiBase)); this works on nested pages too. "
             "Secrets belong in env, never frontend files. "
+            "Normalize input (strip, lowercase) before validating it, so a "
+            "whitespace-only field can't slip past a min-length check. "
             "Backend source, secrets, and lifecycle are owner/admin-only. "
             "Frontend pages: edit_site. This tool is the server."
         )

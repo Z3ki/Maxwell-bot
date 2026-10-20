@@ -123,17 +123,29 @@ def delete_data(root, user_id, preferences, *, sessions=None):
         ),
     ):
         run(name, lambda p=path, k=keys, n=nested: _clean_json(p, uid, k, nested=n))
+    storage_root = root / "plugins" / "user_storage"
+    if (storage_root / "storage.sqlite3").is_file():
+        from plugins.user_storage.store import UserStorage
+
+        # Files, public folder and handle. A sandbox still running can merge
+        # a stale /storage back; delete_live_data recycles it first.
+        run("persistent_storage", lambda: UserStorage(storage_root).wipe(uid))
+    schedule_path = root / "plugins" / "schedules" / "schedules.sqlite3"
+    if schedule_path.is_file():
+        from plugins.schedules.store import ScheduleStore
+
+        run("schedules", lambda: ScheduleStore(schedule_path).delete_user(uid))
     if sessions is None and (root / "dashboard/sessions.sqlite3").is_file():
 
         def delete_dashboard_sessions():
-            from api.dashboard_auth import DashboardConfig, DashboardSessions
+            from api.dashboard_auth import DashboardSessions, dashboard_key
 
-            cfg = DashboardConfig.from_env()
-            if cfg is None:
+            # Same key lookup the API and the /dashboard link minter use; a
+            # wrong key here would treat every session as unreadable junk.
+            key = dashboard_key(root)
+            if key is None:
                 raise RuntimeError("Dashboard key unavailable")
-            DashboardSessions(root / "dashboard/sessions.sqlite3", cfg.key).delete_user(
-                uid
-            )
+            DashboardSessions(root / "dashboard/sessions.sqlite3", key).delete_user(uid)
 
         run("dashboard_sessions", delete_dashboard_sessions)
     elif sessions is not None:
@@ -195,6 +207,13 @@ async def delete_live_data(bot, user_id):
                 await accounts.disconnect(uid)
         except Exception:
             lastfm_failed = True
+    shell = (getattr(bot, "tools", None) or {}).get("shell")
+    discard = getattr(type(shell), "discard_owner", None) if shell is not None else None
+    if callable(discard):
+        try:
+            await discard(uid)
+        except Exception:
+            logger.warning("Privacy deletion could not recycle shell sandboxes")
     result = await asyncio.to_thread(delete_data, bot.config.DATA_DIR, uid, preferences)
     if lastfm_failed:
         result["failed"].append("lastfm")

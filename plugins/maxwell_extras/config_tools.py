@@ -231,6 +231,28 @@ async def change_setting(bot, context, scope, setting, value, *, reset=False):
         loader(force=True)
 
 
+async def runtime_limits(bot, user_id) -> dict:
+    """Resolved sandbox/storage/site limits for this requester.
+
+    Any registered tool can publish a ``limits_for(user_id) -> dict`` hook; we
+    just merge what they hand back. One broken plugin doesn't blank the rest.
+    """
+    uid = str(user_id or "")
+    merged: dict = {}
+    for name, tool in sorted((getattr(bot, "tools", {}) or {}).items()):
+        hook = getattr(tool, "limits_for", None)
+        if not callable(hook):
+            continue
+        try:
+            part = await asyncio.to_thread(hook, uid)
+        except Exception as exc:
+            logger.warning("limits_for failed for %s (%s)", name, type(exc).__name__)
+            continue
+        if isinstance(part, dict):
+            merged.update(part)
+    return merged
+
+
 class GetConfigurationTool(Tool):
     tool_name = "get_configuration"
     returns_result = True
@@ -240,7 +262,8 @@ class GetConfigurationTool(Tool):
     def get_description(self):
         return ("Read your requester's current /config settings, available options and permissions. "
                 "scope: personal (default), server (current server managers), owner (configured app owners). "
-                "Returns your own supported configuration, including the chat model id for this account. No secrets or other users' data. "
+                "Returns your own supported configuration, including the chat model id for this account, plus resolved limits "
+                "(shell timeout/memory/idle reset, /storage quota, schedule caps, site backend and KV caps). No secrets or other users' data. "
                 "Use before changing settings or explaining your setup. For running version/commits use get_maxwell_updates; for allowance use usage.")
 
     async def execute(self, message, scope="personal", **kwargs):
@@ -254,6 +277,7 @@ class GetConfigurationTool(Tool):
             return json.dumps({"scope": scope, "current": await settings_snapshot(self.bot, context, scope),
                                "available_scopes": available_scopes,
                                "options": _choices(self.bot, scope),
+                               "limits": await runtime_limits(self.bot, getattr(getattr(message, "author", None), "id", "")),
                                "registered_tools": sorted(getattr(self.bot, "tools", {}) or {}),
                                "tool_access_note": "Registered tools may be disabled or permission-restricted; only the current turn's available tool catalog can be used.",
                                "note": "Personal settings apply only to the requesting user. Server settings apply only here. Keys use a private form. Changes affect subsequent requests."}, ensure_ascii=False)

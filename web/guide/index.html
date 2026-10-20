@@ -1,16 +1,201 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How to use Maxwell — Maxwell</title><meta name="description" content="A quick guide to requests, private replies, personal settings, server controls, and self-hosting Maxwell.">
-<meta name="theme-color" content="#080808"><meta name="color-scheme" content="dark">
-<link rel="icon" type="image/svg+xml" href="/assets/maxwell.svg"><link rel="stylesheet" href="/assets/site.css">
-<script src="/assets/site.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a>
-<header class="site-header"><div class="wrap header-inner">
-<a class="brand" href="/" aria-label="Maxwell home"><img src="/assets/maxwell.svg" width="36" height="36" alt="">maxwell<span class="brand-dot">.</span></a>
-<nav aria-label="Main navigation"><a href="/guide/">How to use it</a><a href="/#premium">Self-host</a><a href="/contact/">Contact</a><a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a></nav>
-</div></header><main id="main"><div class="wrap"><div class="page-heading"><p class="eyebrow">Quick guide</p><h1>Less setup.<br>More conversation.</h1><p class="lede">Start with one request. Adjust the rest when you need to.</p></div><div class="document wide-document">
-<h2 id="ask">Ask Maxwell</h2><p>Where Maxwell is available in Discord, type <code>/maxwell</code>, fill in <strong>prompt</strong>, and send it. Attach a supported file or image when it helps explain your question.</p><div class="notice"><strong>Replies are public by default.</strong> Choose <strong>visibility: Private</strong> for a reply only you can see. Save Private in <code>/config → Default visibility</code> to turn public replies off for your future requests. An explicit visibility option overrides your saved default.</div>
-<h2 id="settings">Make it yours</h2><p>Open <code>/config</code> to set language, answer length and reply visibility directly on the first screen. Choices save immediately. Use Personality for your tone, My AI provider for an optional API connection, and More options for advanced reply preferences. You can also <a href="/dashboard/">sign in to the dashboard with Discord</a> and edit your personal settings or servers in a single form.</p><table class="command-table"><caption>Settings you can personalize</caption><thead><tr><th scope="col">Setting</th><th scope="col">What it changes</th></tr></thead><tbody><tr><td>Default visibility</td><td>Public replies in the channel, or private replies only you can see.</td></tr><tr><td>Response mode</td><td>Normal answers, research, summaries, explanations, rewrites, translations, brainstorming, or code.</td></tr><tr><td>Web research</td><td>Automatic search, always search, or no web search.</td></tr><tr><td>Answer detail</td><td>Quick, balanced, or deep answers.</td></tr><tr><td>Channel context</td><td>None, or up to 1,000 accessible recent messages in this channel.</td></tr><tr><td>Language &amp; reply style</td><td>Your preferred language and tone. Protected instructions and permissions still apply.</td></tr><tr><td>Bring your own key</td><td>Select a supported provider and model, save an encrypted key, test it, or delete it.</td></tr></tbody></table>
-<h2 id="cancel">Change direction</h2><p>Use <code>/cancel</code> in the same channel to stop your running request. It only cancels requests that belong to you.</p><h2 id="server">Set up a server</h2><p>Server owners, administrators and members with Manage Server can open the <strong>Server settings</strong> area in <code>/config</code>. Choose response channels, optional tools, capability groups, moderation, progress messages, and ticket greetings. These choices apply to that server; your personal reply settings apply to your requests.</p><p>Private requests cannot perform server-wide actions. Switch a request to Public when asking for an action that affects the server. Discord permissions and Maxwell's tool policies still apply.</p>
-<h2 id="self-host">Run your own Maxwell</h2><p>The software is free under the MIT license. You'll need Docker, Git, curl, Python 3, an official Discord bot token, and a compatible model endpoint. Follow the installation guide for privileged Discord intents and provider setup.</p><div class="command-block"><div class="command-toolbar"><span>SELF-HOST / SHELL</span><button class="copy-button" id="copy-install" type="button">Copy command</button></div><pre><code id="install-command">curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash</code></pre><p id="copy-status" role="status" aria-live="polite"></p></div><noscript><p>Select and copy the command manually.</p></noscript><p>Read the installer before running it. Linux is the primary target; on macOS or Windows, install Docker Desktop first.</p><p><a href="https://github.com/Z3ki/Maxwell-bot/blob/main/docs/INSTALL.md">Full installation guide ↗</a> · <a href="https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh">Read the installer ↗</a></p>
-<h2 id="help">Need a hand?</h2><p>Use the <a href="/contact/">contact page</a> to report a problem. For data processing and usage terms, read <a href="/privacy/">Privacy</a> and <a href="/terms/">Terms</a>.</p></div></div></main><footer class="site-footer"><div class="wrap footer-inner"><div><a class="brand" href="/">maxwell.</a><p>A cat in your chat. Free, open source, and still in alpha.</p></div>
-<nav aria-label="Footer"><a href="/guide/">Guide</a><a href="/contact/">Contact</a><a href="/terms/">Terms</a><a href="/privacy/">Privacy</a><a href="https://github.com/Z3ki/Maxwell-bot">Source ↗</a></nav></div></footer></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to use Maxwell — Maxwell</title>
+<meta name="description" content="A guide to asking Maxwell, right-click apps, settings, the dashboard, storage, your public folder, schedules, subagents, server setup, and self-hosting.">
+<meta name="theme-color" content="#08090a">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/svg+xml" href="/assets/maxwell.svg">
+<link rel="stylesheet" href="/assets/site.css">
+<script src="/assets/site.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="/" aria-label="Maxwell home"><img src="/assets/maxwell.svg" width="32" height="32" alt="">maxwell<span class="brand-dot">.</span></a>
+    <nav aria-label="Main navigation">
+      <a href="/#features">Features</a>
+      <a href="/#premium">Premium</a>
+      <a href="/guide/" aria-current="page">Guide</a>
+      <a href="/contact/">Contact</a>
+      <a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a>
+      <a class="nav-cta" href="/dashboard/">Dashboard</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="wrap">
+  <div class="page-heading">
+    <p class="eyebrow">Guide</p>
+    <h1>Less setup.<br>More conversation.</h1>
+    <p class="lede">Start with one request. Everything on this page is there for when you need it.</p>
+  </div>
+
+  <div class="document-grid">
+    <nav class="toc" aria-label="On this page">
+      <p>On this page</p>
+      <a href="#ask">Ask Maxwell</a>
+      <a href="#apps">Right-click apps</a>
+      <a href="#settings">Make it yours</a>
+      <a href="#dashboard">The dashboard</a>
+      <a href="#storage">Storage</a>
+      <a href="#public-folder">Public folder</a>
+      <a href="#schedules">Schedules</a>
+      <a href="#subagents">Subagents</a>
+      <a href="#cancel">Change direction</a>
+      <a href="#server">Set up a server</a>
+      <a href="#byok">Your own AI key</a>
+      <a href="#extras">Music, games &amp; voice</a>
+      <a href="#self-host">Run your own</a>
+      <a href="#help">Need a hand?</a>
+    </nav>
+
+    <article class="document">
+      <h2 id="ask">Ask Maxwell</h2>
+      <p>Type <code>/maxwell</code>, write your <strong>prompt</strong>, and send it. It works in servers where Maxwell is available and in DMs once you've added it to your account. Attach a file or image when it helps explain the question.</p>
+      <p>The command has a few optional settings for one request:</p>
+      <table class="command-table">
+        <caption>/maxwell options</caption>
+        <thead><tr><th scope="col">Option</th><th scope="col">What it does</th></tr></thead>
+        <tbody>
+          <tr><td>mode</td><td>Ask, research, summarize, explain, rewrite, translate, brainstorm, or code.</td></tr>
+          <tr><td>web</td><td>Search automatically, always search, or skip the web.</td></tr>
+          <tr><td>detail</td><td>Brief, balanced, or deep answers.</td></tr>
+          <tr><td>language</td><td>Reply language for this request.</td></tr>
+          <tr><td>visibility</td><td>Public in the channel, or private so only you see the reply.</td></tr>
+          <tr><td>context</td><td>How many recent channel messages Maxwell reads, from none up to 1,000.</td></tr>
+          <tr><td>image / file</td><td>An image or attachment for Maxwell to look at.</td></tr>
+        </tbody>
+      </table>
+      <div class="notice"><p><strong>Replies are public by default.</strong> Pick <strong>visibility: Private</strong> for a reply only you can see, or save Private as your default in <code>/config</code> or the dashboard. An explicit option on a request wins over your saved default.</p></div>
+
+      <h2 id="apps">Right-click apps</h2>
+      <p>Right-click a message (long-press on mobile), open <strong>Apps</strong>, and pick one:</p>
+      <ul>
+        <li><strong>Ask Maxwell</strong> — ask anything about that message.</li>
+        <li><strong>Summarize</strong> — the short version of a long message or thread.</li>
+        <li><strong>Explain</strong> — plain-language explanation of code, jargon, or an error.</li>
+        <li><strong>Fact-check</strong> — checks claims against real sources.</li>
+        <li><strong>Rewrite / Translate</strong> — a cleaner or translated version.</li>
+      </ul>
+      <p>Right-clicking a person also offers <strong>Ask Maxwell</strong>.</p>
+
+      <h2 id="settings">Make it yours</h2>
+      <p>Open <code>/config</code> to set language, answer length, and reply visibility on the first screen. Choices save immediately. <strong>Personality</strong> sets your tone, <strong>Privacy</strong> chooses whether your messages are saved, <strong>My AI provider</strong> connects your own key, and <strong>More options</strong> covers search and recent-message context. The <strong>Web dashboard</strong> button opens the same settings in your browser.</p>
+      <table class="command-table">
+        <caption>Settings you can personalize</caption>
+        <thead><tr><th scope="col">Setting</th><th scope="col">What it changes</th></tr></thead>
+        <tbody>
+          <tr><td>Default visibility</td><td>Public replies in the channel, or private replies only you can see.</td></tr>
+          <tr><td>Response mode</td><td>Normal answers, research, summaries, explanations, rewrites, translations, brainstorming, or code.</td></tr>
+          <tr><td>Web research</td><td>Automatic search, always search, or no web search.</td></tr>
+          <tr><td>Answer detail</td><td>Brief, balanced, or deep answers.</td></tr>
+          <tr><td>Channel context</td><td>None, or up to 1,000 accessible recent messages in the channel.</td></tr>
+          <tr><td>Language &amp; personality</td><td>Your preferred language and tone. Protected instructions and permissions still apply.</td></tr>
+          <tr><td>Message storage</td><td>Saved conversation history is on by default. Turning it off deletes what was saved.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="dashboard">The dashboard</h2>
+      <p>Run <code>/dashboard</code> in Discord. Maxwell replies privately with a sign-in link that works once and expires after 15 minutes. Open it and you're in. There is no password, and the session ends when you close the tab or press <strong>Sign out</strong>.</p>
+      <ul>
+        <li><strong>Overview</strong> — your plan, message allowance, storage use, and public folder address.</li>
+        <li><strong>Reply settings</strong> — the same personal settings as <code>/config</code>.</li>
+        <li><strong>AI connection</strong> — add, test, or remove your own provider key.</li>
+        <li><strong>Files</strong> (Premium) — browse your storage, upload, create folders, edit text files, rename, delete, and share signed links. Pick your public handle here too.</li>
+        <li><strong>Schedules</strong> (Premium) — create, pause, resume, edit, and delete wake-ups.</li>
+        <li><strong>Servers</strong> — server settings for servers where you have Manage Server.</li>
+      </ul>
+      <div class="notice"><p>Treat the sign-in link like a password until it's used. If someone else opens it first, run <code>/dashboard</code> again for a fresh one.</p></div>
+
+      <h2 id="storage">Storage <small class="meta">Premium</small></h2>
+      <p>The code sandbox is a temporary Linux machine. It's wiped after about ten idle minutes. Premium accounts get a <code>/storage</code> folder with 100 MB that survives those wipes: Maxwell saves it before a reset and restores it on your next command.</p>
+      <ul>
+        <li>Ask Maxwell to "save this in my storage", or have it build straight into <code>/storage</code>.</li>
+        <li>Files a subagent makes are copied to <code>/storage/jobs/&lt;job id&gt;/</code> when the job finishes, so a finished build is never lost to a reset.</li>
+        <li>Manage everything in the dashboard's <strong>Files</strong> page. A signed link shares one private file for a set time, from an hour up to 30 days.</li>
+        <li>Anything outside <code>/storage</code> is temporary.</li>
+      </ul>
+
+      <h2 id="public-folder">Your public folder <small class="meta">Premium</small></h2>
+      <p>Everything inside <code>/storage/public/</code> is published at your own address. Pick a handle in the Files page, or ask Maxwell to set one. Handles use lowercase letters, numbers, and single hyphens, up to 30 characters.</p>
+      <div class="command-block">
+        <div class="command-toolbar"><span>EXAMPLE / HANDLE 7up</span></div>
+        <pre><code>/storage/public/cat-3d/index.html
+→ https://maxwell.z3ki.dev/u/7up/cat-3d/</code></pre>
+      </div>
+      <p>Each folder with an <code>index.html</code> works as its own page or game. Try "make a snake game and publish it as snake". Anyone with the link can open public files, so keep private things outside <code>public/</code>.</p>
+
+      <h2 id="schedules">Schedules <small class="meta">Premium</small></h2>
+      <p>A schedule is a saved prompt plus a time. When it's due, Maxwell wakes up, runs the prompt as a background job, and posts the result in the channel where you made it, or in your DMs. You can ask in plain words ("every weekday at 9, summarize my repo's new issues") and Maxwell sets it up, or create one in the dashboard.</p>
+      <table class="command-table">
+        <caption>Schedule patterns</caption>
+        <thead><tr><th scope="col">Pattern</th><th scope="col">Runs</th></tr></thead>
+        <tbody>
+          <tr><td>0 9 * * 1-5</td><td>Weekdays at 09:00</td></tr>
+          <tr><td>*/30 * * * *</td><td>Every 30 minutes</td></tr>
+          <tr><td>0 18 * * 0</td><td>Sundays at 18:00</td></tr>
+          <tr><td>@daily</td><td>Every day at midnight</td></tr>
+          <tr><td>Once</td><td>A single date and time, or "in 45m"</td></tr>
+        </tbody>
+      </table>
+      <p>Times use the timezone you pick (UTC unless you say otherwise). On the hosted bot you can keep up to 10 schedules, runs are at least 15 minutes apart, and there's a daily cap on total runs.</p>
+
+      <h2 id="subagents">Subagents <small class="meta">Premium</small></h2>
+      <p>Long jobs such as websites, bigger code changes, research, or add-ons go to a subagent that works in the background while you keep chatting. Maxwell posts one short line when it's done and attaches the result. Use <code>/tasks</code> to see your jobs or cancel one.</p>
+
+      <h2 id="cancel">Change direction</h2>
+      <p>Use <code>/cancel</code> in the same channel to stop your running request. It only cancels requests that belong to you.</p>
+
+      <h2 id="server">Set up a server</h2>
+      <p>Server owners, administrators, and members with Manage Server can open <strong>Server settings</strong> in <code>/config</code> or the dashboard's <strong>Servers</strong> page. Choose response channels, allowed and extra tools, moderation, progress updates, and ticket greetings. These choices apply to that server; personal reply settings apply to each person's own requests.</p>
+      <p>Private requests can't perform server-wide actions. Switch a request to Public when you ask for something that affects the server. Discord permissions and Maxwell's tool policies always apply.</p>
+
+      <h2 id="byok">Your own AI key</h2>
+      <p>In <code>/config → My AI provider</code> or the dashboard's <strong>AI connection</strong> page, pick a supported provider and model, save your key, and test it. Keys are stored encrypted, and you can delete them any time. Your requests then use your connection.</p>
+
+      <h2 id="extras">Music, games &amp; voice</h2>
+      <ul>
+        <li><strong>Music</strong> — join a voice channel and ask Maxwell to play something, or use <code>/music</code> in a server to play, queue, skip, pause, and turn on autoplay.</li>
+        <li><strong>Games</strong> — "play chess with me" or "let's play checkers" starts a game in the channel.</li>
+        <li><strong>Voice</strong> — ask Maxwell to say something out loud and it replies with speech.</li>
+        <li><strong>Images</strong> — ask for a picture, or attach one and ask for an edit.</li>
+      </ul>
+
+      <h2 id="self-host">Run your own Maxwell</h2>
+      <p>The software is free under the MIT license. You'll need Docker, Git, curl, Python 3, a Discord bot token, and a compatible model endpoint. On your own copy you choose the model provider, tools, limits, and who gets Premium.</p>
+      <div class="command-block">
+        <div class="command-toolbar"><span>SELF-HOST / SHELL</span><button class="copy-button" id="copy-install" type="button" data-copy-target="install-command">Copy command</button></div>
+        <pre><code id="install-command">curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash</code></pre>
+        <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
+      </div>
+      <noscript><p>Select and copy the command manually.</p></noscript>
+      <p>Read the installer before running it. Linux is the main target; on macOS or Windows, install Docker Desktop first.</p>
+      <p><a href="https://github.com/Z3ki/Maxwell-bot/blob/main/docs/INSTALL.md">Full installation guide ↗</a> · <a href="https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh">Read the installer ↗</a> · <a href="https://github.com/Z3ki/Maxwell-bot/blob/main/docs/CONFIGURATION.md">Configuration ↗</a></p>
+
+      <h2 id="help">Need a hand?</h2>
+      <p>Use the <a href="/contact/">contact page</a> to report a problem. For data processing and usage terms, read <a href="/privacy/">Privacy</a> and <a href="/terms/">Terms</a>.</p>
+    </article>
+  </div>
+</div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <div><a class="brand" href="/">maxwell<span class="brand-dot">.</span></a><p>A cat in your chat. Free, open source, and still in alpha.</p></div>
+    <nav aria-label="Footer">
+      <a href="/guide/">Guide</a>
+      <a href="/dashboard/">Dashboard</a>
+      <a href="/contact/">Contact</a>
+      <a href="/terms/">Terms</a>
+      <a href="/privacy/">Privacy</a>
+      <a href="https://github.com/Z3ki/Maxwell-bot">Source ↗</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

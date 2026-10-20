@@ -573,6 +573,31 @@ class _OwnerReloadButton(discord.ui.Button):
             await _send(interaction, "Reloaded the operator control file.")
 
 
+class _ConfigDashboardButton(discord.ui.Button):
+    """Link sign-in: the URL is a one-time token, so mint it on click."""
+
+    def __init__(self, panel: "_ConfigPanel"):
+        super().__init__(label="Web dashboard", style=discord.ButtonStyle.secondary,
+                         custom_id="maxwell:config:dashboard", row=0)
+        self.panel = panel
+
+    async def callback(self, interaction: Any) -> None:
+        if not await self.panel.authorized(interaction):
+            return
+        await _acknowledge(interaction)
+        links = getattr(self.panel.bot, "_dashboard_links", None)
+        if links is None:
+            await _send(interaction, "The web dashboard is not available on this bot right now.")
+            return
+        from plugins.web_dashboard.ui import reply_for
+
+        text, view = await reply_for(self.panel.bot, links, interaction)
+        kwargs = {"ephemeral": True, "allowed_mentions": discord.AllowedMentions.none()}
+        if view is not None:
+            kwargs["view"] = view
+        await interaction.followup.send(text, **kwargs)
+
+
 class _ConfigCloseButton(discord.ui.Button):
     def __init__(self, panel: "_ConfigPanel"):
         # Row 4 is the personal home's five shortcuts. Discord allows five
@@ -767,6 +792,8 @@ class _ConfigPanel(discord.ui.View):
         parsed = urlsplit(dashboard)
         if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.path:
             self.add_item(discord.ui.Button(label="Open web dashboard", url=dashboard + "/dashboard/", row=0))
+        elif getattr(self.bot, "_dashboard_links", None) is not None:
+            self.add_item(_ConfigDashboardButton(self))
         if self.can_choose_scope:
             for scope, label in (("personal", "My settings"), ("server", "Server settings"), ("owner", "Bot controls")):
                 if scope == "server" and not self.can_manage_server or scope == "owner" and not self.is_owner:

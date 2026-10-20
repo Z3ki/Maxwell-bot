@@ -18,6 +18,16 @@
 
 ## Unreleased
 
+- Keep subagent output: files a job reports from `/workspace` are copied to the requester's `/storage/jobs/<id>/` and attached when it finishes, and the sandbox stays pinned while a job runs. Fixes the lost `.mcaddon` after the 10-minute idle wipe.
+- Add Premium persistent storage (`user_storage` plugin): 100 MB per account at `/storage` in the shell, restored after every idle wipe, with a `storage` tool, signed private links and a public folder served at `/u/<handle>/`.
+- Add Premium schedules (`schedules` plugin): cron or one-time wake-ups that run a saved prompt as a background job and post the result. Maxwell can create them through the `schedule` tool.
+- Add `/dashboard` one-time sign-in links and new dashboard views: Overview, Files (upload, edit, rename, delete, links, handle), Schedules and a redesigned layout that works on phones.
+- Premium shell commands get a longer per-command limit (`MAXWELL_SHELL_PREMIUM_TIMEOUT`).
+- `get_configuration` returns resolved shell, storage, schedule, site backend and KV limits through a `limits_for` tool hook.
+- Site backends that fail to boot now report the whole last traceback. The KV API guidance says plainly that anyone can write to it.
+- Rebuild the public website and guide for current features; fix the privacy and terms pages that still described saved history as off by default.
+- Fix `deep_test_harness.py` crashing on startup (#126) and stale documentation (#127).
+
 - Preserve Maxwell mentions used as sentence subjects or command targets in model input as `@Maxwell (you)`; remove addressing edge pings without dropping other users' named mentions or misclassifying them as pointer-only turns.
 - Notify the original message author on ordinary and detached worker replies while keeping everyone and role mentions disabled; interaction follow-ups remain mention-suppressed.
 - Return short, tool-provided publication links from completed website workers instead of truncating model-written descriptions that can omit the URL.

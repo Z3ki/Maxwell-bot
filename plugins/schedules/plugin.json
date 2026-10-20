@@ -1,0 +1,20 @@
+{
+  "id": "schedules",
+  "name": "schedules",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "Premium cron and one-time wake-ups: Maxwell runs a saved prompt as a background job and posts the result.",
+  "author": "Maxwell",
+  "bundled": true,
+  "enabled_by_default": true,
+  "permissions": ["messages.send"],
+  "tools": [
+    {
+      "name": "schedule",
+      "returns_result": true,
+      "ends_turn": false,
+      "requires_admin": false,
+      "is_destructive": false
+    }
+  ]
+}

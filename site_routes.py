@@ -38,7 +38,8 @@ def client_guide(slug: str, *, public_base_url: str = "") -> str:
         "                ws.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';\n"
         "                new WebSocket(ws);\n"
         f"  KV store    : {prefix}{store_path(slug)}/kv is a separate built-in service.\n"
-        "                backend=true enables KV only; site_server runs Python."
+        "                backend=true enables KV only; site_server runs Python.\n"
+        "                KV accepts public writes: never secrets or personal data."
     )
 
 

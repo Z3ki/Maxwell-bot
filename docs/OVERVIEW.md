@@ -20,7 +20,6 @@ Discord bot / app commands
         ├── plugins/<feature>/     tools, hooks, prompt slices
         ├── providers.py           OpenAI-compatible adapter
         ├── conversation_memory.py scoped SQLite history
-        ├── autonomy.py            optional conversational autonomy
         └── api/                   authenticated operator and generated-site APIs
 ```
 
@@ -36,15 +35,16 @@ Discord bot / app commands
 | `providers.py` | OpenAI-compatible chat/streaming provider client, endpoint normalization, retries/fallbacks. |
 | `bot_tools.py`, `tool_registry.py`, `tool_schemas.py`, `tools.py` | Compatibility re-exports, reasoning traces, and schema helpers. Implementations live in `plugins/*/impl.py`. |
 | `conversation_memory.py` | Scoped recent conversation history, queried directly from SQLite without vectors or embedding requests. |
-| `rag_memory.py`, `knowledge_graph.py` | Archived vector/graph compatibility code for offline migrations; not used by the live bot. |
+| `knowledge_graph.py` | SQLite site/code graph, refreshed when generated sites are created, edited, or deleted (`knowledge_graph_enabled`). No vectors or embedding calls. |
 | `context_budget.py` | Prompt/context budget helpers. |
-| `autonomy.py` | Optional self-directed background action engine. |
-| `jobs.py` | Background jobs and long-running work. |
 | `message_pipeline.py` | Message-processing pipeline helpers. |
 | `user_install.py` | Discord user-install/app-command and context-menu support. |
 | `plugins/maxwell_extras/` | Owner control panel, app-command progress, rich `/maxwell` output. |
 | `api/api_server.py`, `api/state.py`, `api/storage.py` | Authenticated operator API, generated-site APIs, sanitized controls, persisted admin state. |
-| `web/` | Static public landing page, guide, contact, terms, privacy, and assets; no admin frontend. |
+| `plugins/user_storage/`, `api/user_content.py` | Premium per-user storage (mounted at `/storage` in the shell sandbox) and the public `/u/<handle>/` folder served from it. |
+| `plugins/schedules/` | Premium scheduled prompts (`schedule` tool, repeating cron or one-time `at`) and the runner that wakes Maxwell for them. |
+| `plugins/web_dashboard/`, `api/dashboard*.py`, `web/dashboard/` | `/dashboard` sign-in links and the user settings dashboard (preferences, AI connection, files, schedules, servers). |
+| `web/` | Static public landing page, guide, contact, terms, privacy, dashboard, and assets; no operator admin frontend. |
 | `site_server.py`, `site_backend.py` | Generated-site serving/backend runtime integration. |
 | `docker/` | Bot image (`maxwell.Dockerfile`), shell sandbox, and site-runtime images. |
 | `docker-compose.yml` | Linux Compose file (host network). `docker-compose.bridge.yml` is the Docker Desktop variant. |
@@ -59,7 +59,7 @@ Historical host/PM2 files may remain for compatibility/migration, but Docker is 
 
 `native_tool_calls` is enabled by default in current runtime controls. When the provider supports OpenAI-style tool calls, Maxwell uses the provider's structured `tool_calls`. A compatibility path remains for models/endpoints that do not produce native calls correctly.
 
-Plugins register tools through `maxwell_core`. Schemas are normalized in `tool_schemas.py`, and the host dispatches calls through the live registry. Multi-step work runs within the active user request; delegated background workers have been removed. Plugin timers remain available for ordinary maintenance such as reminder delivery.
+Plugins register tools through `maxwell_core`. Schemas are normalized in `tool_schemas.py`, and the host dispatches calls through the live registry. Multi-step work runs within the active user request. Premium accounts can also hand work to detached workers with `delegate_task` (`plugins/maxwell_extras/task_jobs.py`); files a worker reports are copied to `/storage/jobs/<id>/` so they outlive the sandbox's idle reset. Plugin timers handle ordinary maintenance such as reminder delivery and Premium schedules.
 
 Tools marked destructive are fail-closed when the current turn has been tainted by fetched/web content, with `shell` as the documented exception: it stays available so Maxwell can follow up on a fetched URL, but only inside the per-tenant gVisor sandbox. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action.
 
@@ -100,7 +100,6 @@ Important groups include:
 - AI/tool concurrency and timeouts.
 - Native tool calls and per-tool disable lists.
 - Conversation-history and prompt budgets.
-- Optional conversational autonomy.
 - Night/fallback routing.
 - Autofix and developer/runtime switches.
 
@@ -131,7 +130,7 @@ Most optional features use `ENABLE_*` switches with `auto|true|false` semantics:
 - `true`: force it on.
 - `false`: keep it off.
 
-Simple installs keep token-spending background loops such as conversational autonomy off by default. `doctor.py` reports resolved feature states.
+Autonomous background chatter is removed; the only self-started turns are reminders and Premium schedules a user created. `doctor.py` reports resolved feature states.
 
 ## Checking an install
 

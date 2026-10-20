@@ -21,8 +21,24 @@ from .task_job_store import TaskJobStore, active_job, LIVE_STATES
 logger = logging.getLogger(__name__)
 
 
+def _interaction(message):
+    """The app-command interaction behind an adapter, never Message.interaction.
+
+    discord.py deprecated Message.interaction; on a real gateway message it is
+    slash-command metadata with no followup anyway.
+    """
+    if message is None:
+        return None
+    original = getattr(message, "original", message)
+    if isinstance(original, discord.Message):
+        return None
+    interaction = getattr(original, "interaction", None)
+    # Only something we can actually follow up on counts.
+    return interaction if hasattr(interaction, "followup") else None
+
+
 def source_context(message):
-    interaction = getattr(message, "interaction", None)
+    interaction = _interaction(message)
     cid = str(
         getattr(interaction, "channel_id", None) or getattr(message.channel, "id", "")
     )
@@ -68,6 +84,14 @@ class Job:
     stop_reason: str = ""
     released: bool = False
     member_checked_at: float = 0
+    # Deliverable paths after persistence (/storage copies preferred).
+    artifacts: list = field(default_factory=list)
+    kept: list = field(default_factory=list)
+    unsent: list = field(default_factory=list)
+    # Scheduled wake-ups: a line above the result, and the worker's whole
+    # answer goes out because the user asked for exactly that output.
+    header: str = ""
+    direct: bool = False
 
     def view(self, *, report=True):
         result = {
@@ -77,6 +101,12 @@ class Job:
         result.update(
             steps=self.steps, tool_calls=self.tool_calls, last_tool=self.last_tool
         )
+        if self.kept:
+            result["kept"] = list(self.kept)
+        if self.unsent:
+            result["unsent"] = list(self.unsent)
+        if self.direct:
+            result["direct"] = True
         if report:
             result["reports"] = self.reports
         return result
@@ -91,7 +121,7 @@ class TaskJobs:
         self._active = 0
         self.closed = False
 
-    async def submit(self, engine, message, tasks, timeout_minutes=None):
+    async def submit(self, engine, message, tasks, timeout_minutes=None, *, header="", direct=False):
         import jsonschema
         from .task_workers import _inside_worker, _limit
 
@@ -174,7 +204,10 @@ class TaskJobs:
                     "note": "Existing job; never replay interrupted work automatically",
                 }
             )
-        job = Job(row, WorkerMessage(message), engine, arguments={"tasks": tasks})
+        job = Job(
+            row, WorkerMessage(message), engine, arguments={"tasks": tasks},
+            header=str(header or "")[:300], direct=bool(direct),
+        )
         self.jobs[row["id"]] = job
         # Empty context prevents inheriting chat deadlines, credentials, progress,
         # effects, generated-file collectors and notices. The job binds its own.
@@ -309,6 +342,16 @@ class TaskJobs:
         _current_byok_tool_budget.set({"calls": 0})
         current_plan.set((job.row["user_id"], "premium"))
         watcher = None
+        shell = (getattr(self.bot, "tools", None) or {}).get("shell")
+        pin = None
+        pinner = getattr(type(shell), "pin", None) if shell is not None else None
+        if callable(pinner):
+            # The idle reaper wiped a finished build before anyone fetched it.
+            # Hold the sandbox until delivery is over.
+            try:
+                pin = pinner(job.message)
+            except Exception:
+                logger.debug("could not pin worker sandbox", exc_info=True)
         try:
             if not await self.allowed(job):
                 raise asyncio.CancelledError
@@ -360,8 +403,10 @@ class TaskJobs:
                 and not job.stop_reason
                 and job.row["state"] not in {"cancelled", "stopped", "interrupted"}
             ):
+                await self._keep_artifacts(job, shell)
                 await self.wait_for_origin(job)
-                async with asyncio.timeout(10):
+                # Up to four attachments of up to 25 MB each go out first.
+                async with asyncio.timeout(120):
                     await self.deliver(job)
         except asyncio.CancelledError:
             job.row["state"] = job.stop_reason or "cancelled"
@@ -376,6 +421,9 @@ class TaskJobs:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
             self.release(job, len(tasks))
+            unpin = getattr(type(shell), "unpin", None) if shell is not None else None
+            if pin and callable(unpin):
+                unpin(pin)
         job.message = None
         job.arguments.clear()
         if not await asyncio.to_thread(self.store.get, job.row["id"]):
@@ -420,13 +468,44 @@ class TaskJobs:
         except Exception:
             logger.warning("Could not store subagent result for the main model")
 
-    async def _send_reported_files(self, job) -> None:
+    async def _keep_artifacts(self, job, shell) -> None:
+        """Copy reported sandbox files to /storage/jobs/<id>/ before anything else.
+
+        /workspace is a tmpfs that dies with the sandbox; a job finishing ten
+        minutes before anyone looks at it used to mean the file was gone.
+        """
         raw = "\n".join(str(item.get("report") or "") for item in (job.reports or []))
+        paths = reported_files(raw)
+        job.artifacts = list(paths)
+        persist = getattr(shell, "persist_to_storage", None) if shell is not None else None
+        workspace = [p for p in paths if p.startswith("/workspace/")]
+        if not workspace or not callable(persist) or job.message is None:
+            job.kept = [p for p in paths if p.startswith("/storage/")]
+            return
+        try:
+            kept = await asyncio.wait_for(
+                persist(job.message, workspace, f"jobs/{job.row['id']}"), 300
+            )
+        except Exception:
+            logger.warning("Could not keep subagent files in /storage", exc_info=True)
+            kept = []
+        by_name = {p.rsplit("/", 1)[-1]: p for p in kept}
+        job.artifacts = [
+            by_name.get(p.rsplit("/", 1)[-1], p) if p.startswith("/workspace/") else p
+            for p in paths
+        ]
+        job.kept = [p for p in job.artifacts if p.startswith("/storage/")]
+
+    async def _send_reported_files(self, job) -> None:
         tool = (getattr(self.bot, "tools", None) or {}).get("send_file")
-        if not raw or tool is None or job.message is None:
+        if not job.artifacts:
+            # Delivery without the keep step (no shell tool): use the report.
+            raw = "\n".join(str(item.get("report") or "") for item in (job.reports or []))
+            job.artifacts = reported_files(raw)
+        if not job.artifacts or tool is None or job.message is None:
             return
         gate = getattr(self.bot, "_authorize_tool_execution", None)
-        for path in reported_files(raw):
+        for path in job.artifacts:
             if callable(gate):
                 try:
                     refusal = gate(job.message, "send_file", tool, {"path": path})
@@ -442,9 +521,10 @@ class TaskJobs:
                 result = await tool.execute(job.message, path=path)
             except Exception:
                 logger.warning("Could not attach %s from a finished subagent", path, exc_info=True)
-                continue
+                result = "Error: attach failed"
             if not str(result).startswith("__FILE_SENT__"):
                 logger.info("Subagent file stayed unsent: %s", str(result)[:180])
+                job.unsent.append(path)
 
     async def deliver(self, job):
         if not await self.allowed(job):
@@ -457,8 +537,7 @@ class TaskJobs:
         if not await asyncio.to_thread(self.store.claim_delivery, job.row["id"]):
             return
         job.row["delivery"] = "attempting"
-        text = format_job(job.view(), limit=1850)
-        interaction = getattr(job.message, "interaction", None)
+        interaction = _interaction(job.message)
         if interaction is not None:
             expired = getattr(interaction, "is_expired", lambda: True)()
             if expired:
@@ -468,6 +547,8 @@ class TaskJobs:
                 )
                 return
         await self._send_reported_files(job)
+        head = job.header + "\n" if job.header else ""
+        text = head + format_job(job.view(), limit=1850 - len(head))
         try:
             if interaction is not None:
                 await interaction.followup.send(
@@ -627,19 +708,21 @@ class TaskJobs:
         self.jobs.clear()
 
 
-_SENDABLE_SUFFIXES = (
-    ".mp3", ".wav", ".ogg", ".flac", ".m4a",
-    ".png", ".jpg", ".jpeg", ".gif", ".webp",
-    ".mp4", ".webm", ".pdf", ".zip", ".mid", ".midi",
-)
+_ARTIFACT_RE = re.compile(r"/(?:workspace|storage)/[A-Za-z0-9_./+@-]+")
 
 
 def reported_files(text: str) -> list[str]:
-    """Workspace media paths a finished job should attach, not just name."""
+    """Files a finished job names, which delivery attaches. Any file type.
+
+    The old media-only allowlist is how a finished .mcaddon got named in the
+    report and then never sent. Paths without an extension are usually
+    folders, so those are skipped.
+    """
     found: list[str] = []
-    for match in re.findall(r"/workspace/[A-Za-z0-9_./+-]+", str(text or "")):
+    for match in _ARTIFACT_RE.findall(str(text or "")):
         path = match.rstrip(".,);]'\"")
-        if not path.lower().endswith(_SENDABLE_SUFFIXES) or path in found:
+        name = path.rsplit("/", 1)[-1]
+        if path.endswith("/") or "." not in name.strip(".") or ".." in path.split("/") or path in found:
             continue
         found.append(path)
         if len(found) == 4:
@@ -663,6 +746,24 @@ def _public_report(text: str) -> str:
     return cleaned
 
 
+def _files_note(row) -> str:
+    kept = [p for p in row.get("kept") or [] if isinstance(p, str)]
+    unsent = [p for p in row.get("unsent") or [] if isinstance(p, str)]
+    lines = []
+    if kept:
+        folder = kept[0].rsplit("/", 1)[0] + "/"
+        lines.append(f"Saved to `{folder}` (kept after the sandbox resets).")
+    stored = [p for p in unsent if p.startswith("/storage/")]
+    loose = [p for p in unsent if not p.startswith("/storage/")]
+    if stored:
+        names = ", ".join(f"`{p}`" for p in stored[:4])
+        lines.append(f"Couldn't attach {names}; it's kept, so ask me for a download link.")
+    if loose:
+        names = ", ".join(f"`{p}`" for p in loose[:4])
+        lines.append(f"Couldn't attach {names}.")
+    return ("\n" + "\n".join(lines)) if lines else ""
+
+
 def format_job(row, *, limit=1850):
     state = {
         "queued": "waiting",
@@ -670,6 +771,13 @@ def format_job(row, *, limit=1850):
         "completed": "finished",
         "incomplete": "didn't finish",
     }.get(str(row.get("state") or ""), str(row.get("state") or "unknown"))
+    if str(row.get("state") or "") == "completed" and row.get("direct"):
+        reports = row.get("reports") or []
+        body = str((reports[-1].get("report") if reports else "") or "").strip() or "Done."
+        note = _files_note(row)
+        if len(body) + len(note) > limit:
+            body = body[: max(0, limit - len(note) - 1)].rstrip() + "…"
+        return (body + note)[:limit]
     if str(row.get("state") or "") == "completed":
         reports = row.get("reports") or []
         results = []
@@ -689,15 +797,16 @@ def format_job(row, *, limit=1850):
             else:
                 results.append(_public_report(report.get("report", "")))
         if has_site:
-            return "\n".join(results)[:limit]
+            return ("\n".join(results) + _files_note(row))[:limit]
         latest = reports[-1].get("report", "") if reports else ""
-        return (_public_report(latest) or "The subagent finished.")[:limit]
+        return ((_public_report(latest) or "The subagent finished.") + _files_note(row))[:limit]
     text = f"Subagent `{row['id']}` · {state}\n"
     if row.get("last_tool"):
         text += f"Last tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"
     for report in row.get("reports", []):
         text += f"{report.get('status', 'unknown')} — {_public_report(report.get('report', ''))}\n"
     text += row.get("note", "")
+    text += _files_note(row)
     if row.get("effects") and row["state"] != "completed":
         text += "\nIt may have already changed files. Check those before trying again."
     return text[:limit]

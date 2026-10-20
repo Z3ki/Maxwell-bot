@@ -12,7 +12,7 @@ cleanup, memory policy, and plugin lifecycle have explicit module boundaries.
 | Features | `plugins/<feature>/` | Tools, prompts, jobs, hooks, API extras |
 | Provider adapter | `providers.py` | OpenAI-compatible requests, endpoint fallback, retry policy |
 | Memory storage | `conversation_memory.py` | Scoped SQLite transcript history without vector or local inference work |
-| Scheduling | `jobs.py`, `autonomy.py`, `rem.py` | Host scheduling with feature policy supplied by plugins |
+| Scheduling | `maxwell_core/plugins/context.py` (`ctx.every`, `ctx.after`) | Plugin-owned periodic jobs (reminders, Premium schedules, shell reaping) supervised by the plugin manager |
 
 See [MAINTAINABILITY.md](MAINTAINABILITY.md) for module ownership, lifecycle
 contracts, migration behavior, and the regression checks.

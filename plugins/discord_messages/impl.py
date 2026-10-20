@@ -961,7 +961,8 @@ class SendFileTool(Tool):
     def get_description(self):
         return (
             "Create or send a file attachment. Params: filename + content "
-            "(inline), or path (existing file / container path). "
+            "(inline), or path (a generated file, a /workspace file in the live sandbox, or a "
+            "/storage file, which works even after the sandbox was wiped). "
             "encoding=text|base64 (prefer base64 for code/HTML). "
             "A path is not delivery — this tool attaches the file."
         )

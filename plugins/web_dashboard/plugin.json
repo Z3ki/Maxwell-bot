@@ -1,0 +1,12 @@
+{
+  "id": "web_dashboard",
+  "name": "web_dashboard",
+  "version": "1.0.0",
+  "api_version": 1,
+  "description": "/dashboard: a private one-time sign-in link to the web dashboard (settings, files, public folder, schedules).",
+  "author": "Maxwell",
+  "bundled": true,
+  "enabled_by_default": true,
+  "permissions": ["messages.send"],
+  "tools": []
+}

@@ -388,5 +388,7 @@ def client_guide(base_path: str) -> str:
         f"Values are JSON, {MAX_VALUE_BYTES // 1000}KB per value, "
         f"{MAX_ITEMS_PER_COLLECTION} items per list (oldest drop off), "
         f"{MAX_STORE_BYTES // 1000}KB per site. Writes are public — anyone with "
-        "the URL can post, so don't store secrets and expect junk in open forms."
+        "the URL can post, so don't store secrets or personal data and expect "
+        "junk in open forms. Private or per-user data belongs in site_server "
+        "with SQLite under /data."
     )

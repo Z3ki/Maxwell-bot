@@ -143,12 +143,25 @@ def _guest_start_command() -> str:
     return f"printf '%s\\n' {servers} > /etc/resolv.conf && exec sleep infinity"
 
 
+# The numbers docker_run_args hands Docker, kept in one place so
+# get_configuration reports what the guest really gets instead of folklore.
+SANDBOX_LIMITS = {
+    "memory": "2g",
+    "cpus": "1.0",
+    "pids": "256",
+    "disk": "6G",
+    "workspace": "512m",
+    "tmp": "256m",
+}
+
+
 def docker_run_args(
     *,
     container_name: str,
     image: str,
     runtime: str = "runsc",
     network: str = "maxwell-shell-egress",
+    storage_mb: int = 0,
 ) -> list[str]:
     """Construct the mandatory confined run configuration.
 
@@ -163,6 +176,19 @@ def docker_run_args(
     if network != "maxwell-shell-egress":
         raise ValueError("the required filtered shell egress network is not configured")
     controller = controller_id()
+    storage_mb = max(0, min(int(storage_mb or 0), 1024))
+    # /storage is a quota-sized tmpfs. The host copy is the durable one; the
+    # shell tool restores it before commands and merges it back after. A
+    # bind mount would be simpler and would also hand an untrusted guest a
+    # host directory with no quota, so no.
+    storage = (
+        [
+            "--label", f"maxwell.shell.storage={storage_mb}",
+            "--tmpfs", f"/storage:rw,exec,nosuid,nodev,size={storage_mb}m,mode=0755",
+        ]
+        if storage_mb
+        else []
+    )
     return [
         "run", "-d", "--init", "--runtime", runtime,
         "--name", container_name,
@@ -179,20 +205,21 @@ def docker_run_args(
         "--security-opt", "no-new-privileges:true",
         # Omitting seccomp=unconfined retains Docker's default profile; runsc
         # adds its userspace syscall implementation and confinement.
-        "--memory", "2g", "--memory-swap", "2g",
-        "--cpus", "1.0", "--pids-limit", "256",
+        "--memory", SANDBOX_LIMITS["memory"], "--memory-swap", SANDBOX_LIMITS["memory"],
+        "--cpus", SANDBOX_LIMITS["cpus"], "--pids-limit", SANDBOX_LIMITS["pids"],
         "--ulimit", "nofile=1024:2048",
-        "--storage-opt", "size=6G",
+        "--storage-opt", f"size={SANDBOX_LIMITS['disk']}",
         "--network", network,
-        "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=512m",
-        "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m",
+        "--tmpfs", f"/workspace:rw,exec,nosuid,nodev,size={SANDBOX_LIMITS['workspace']}",
+        "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={SANDBOX_LIMITS['tmp']}",
+        *storage,
         image,
         "sh", "-c", _guest_start_command(),
     ]
 
 
 __all__ = [
-    "GUEST_CAPABILITIES", "ShellTenant", "docker_run_args", "egress_policy_ready", "resource_pool_ready",
+    "GUEST_CAPABILITIES", "SANDBOX_LIMITS", "ShellTenant", "docker_run_args", "egress_policy_ready", "resource_pool_ready",
     "validate_runsc_runtime",
     "shell_tenant",
 ]

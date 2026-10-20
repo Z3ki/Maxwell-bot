@@ -5,6 +5,9 @@ from contextvars import ContextVar
 
 current_plan = ContextVar("maxwell_current_plan", default=None)
 
+# Offered only on Premium turns. The tools recheck the durable grant themselves.
+PREMIUM_TOOLS = frozenset({"delegate_task", "schedule", "storage"})
+
 
 async def load_plan(bot, user_id):
     ledger = getattr(bot, "_message_quota", None)
@@ -35,9 +38,10 @@ def premium_withheld_note(bot, visible_names, user_id) -> str:
     if premium_for_current_request(user_id):
         return ""
     return (
-        "\n\nSubagents need an operator-granted Premium plan. "
-        "This requester does not have Premium, so delegate_task is not in this turn's tool catalog. "
-        "If they ask for a subagent, a background worker, or work that has to be delegated, "
-        "say that Premium is the reason. Do not say the tool failed to load or needs a restart. "
+        "\n\nSubagents, scheduled wake-ups and persistent /storage (plus a personal public web "
+        "folder) need an operator-granted Premium plan. This requester does not have Premium, so "
+        "delegate_task, schedule and storage are not in this turn's tool catalog. If they ask for a "
+        "subagent, a background worker, a recurring or timed run, or files that outlive the shell "
+        "sandbox, say that Premium is the reason. Do not say the tool failed to load or needs a restart. "
         "Stating this gate is not an advertisement: do not mention prices or ask them to upgrade."
     )

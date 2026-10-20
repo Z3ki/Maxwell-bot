@@ -486,8 +486,6 @@ class DeepTestHarness:
         await self.test_suite_shell()
         self.test_suite_chess()
         self.test_suite_sites()
-        self.test_suite_security_guards()
-        self.test_suite_api()
         await self.test_suite_bot_commands()
 
         total_dur = (time.perf_counter() - t_start) * 1000

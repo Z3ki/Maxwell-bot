@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,8 @@ from urllib.parse import urlencode, urlsplit
 import aiohttp
 from aiohttp import web
 
-from api.dashboard_auth import DashboardConfig, DashboardSessions
+from api.dashboard_auth import LINK_SESSION_TTL, DashboardConfig, DashboardSessions
+from api.dashboard_panels import Panels
 from control_defaults import GUILD_CAPABILITIES
 from plugins.maxwell_extras.byok import (
     PROVIDERS,
@@ -43,6 +45,32 @@ def can_manage(guild):
         )
     except (ValueError, TypeError):
         return False
+
+
+def member_can_manage(guild, member, user_id):
+    """Owner, Administrator or Manage Server, from bot-token REST payloads.
+
+    Link sign-ins carry no OAuth token, so this is the live check: the
+    member's roles OR'd with @everyone (whose role id is the guild id).
+    """
+    try:
+        if str(guild.get("owner_id")) == str(user_id):
+            return True
+        roles = {str(row["id"]): int(row.get("permissions", 0)) for row in guild.get("roles", [])}
+        bits = roles.get(str(guild.get("id")), 0)
+        for role in member.get("roles", []):
+            bits |= roles.get(str(role), 0)
+        return bool(bits & (8 | 32))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def dev_guild_allowed(guild_id):
+    """The dev bot only manages the guilds it's scoped to, web included."""
+    if os.getenv("MAXWELL_DEV_MODE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return True
+    allowed = {g.strip() for g in os.getenv("MAXWELL_DEV_GUILD_IDS", "").split(",") if g.strip()}
+    return not allowed or str(guild_id) in allowed
 
 
 def validate_personal(body):
@@ -87,11 +115,15 @@ class Dashboard:
         self.config = config
         self.sessions = self.preferences = self.vault = self.worker_vault = self.http = None
         self.login_limit = RateLimiter(rate=1 / 60, burst=5)
+        self.redeem_limit = RateLimiter(rate=1 / 6, burst=10)
         self.test_limit = RateLimiter(rate=1 / 30, burst=2)
+        self.panels = Panels(self)
 
     async def start(self, app):
         try:
-            self.config = self.config or DashboardConfig.from_env()
+            self.config = self.config or await asyncio.to_thread(
+                DashboardConfig.from_env, Path(self.data_dir())
+            )
         except ValueError:
             logger.error(
                 "Dashboard configuration is invalid; sign-in is disabled. See docs/DASHBOARD.md."
@@ -157,9 +189,26 @@ class Dashboard:
             after = max((str(row["id"]) for row in page), key=int)
         raise web.HTTPBadGateway(text="Could not load the server list.")
 
+    def session_id(self, request):
+        if self.config.link_mode:
+            value = request.headers.get("Authorization", "")
+            return value[7:].strip() if value.startswith("Bearer ") else ""
+        return request.cookies.get(self.config.cookie, "")
+
     async def authorize_guild(self, session, guild_id):
         if not guild_id.isdigit():
             raise web.HTTPBadRequest(text="Invalid server.")
+        if not dev_guild_allowed(guild_id):
+            raise web.HTTPForbidden(text="This test bot only manages its development servers.")
+        if self.config.link_mode:
+            uid = session["user"]["id"]
+            guild = await self.discord("/guilds/" + guild_id)
+            member = await self.discord("/guilds/" + guild_id + "/members/" + uid)
+            if not member_can_manage(guild, member, uid):
+                raise web.HTTPForbidden(
+                    text="You need to own this server or have Administrator / Manage Server."
+                )
+            return {"id": guild_id, "name": str(guild.get("name", ""))}
         # Never trust IDs or permission flags submitted by the browser. Check
         # live OAuth permissions on every read and write, including revocations.
         guild = next(
@@ -203,20 +252,25 @@ class Dashboard:
             session = None
             if not public:
                 session = await asyncio.to_thread(
-                    self.sessions.get, request.cookies.get(self.config.cookie, "")
+                    self.sessions.get, self.session_id(request)
                 )
                 if not session:
                     raise web.HTTPUnauthorized(
-                        text="Your session expired. Sign in with Discord again."
+                        text="Your session ended. Run /dashboard in Discord for a new sign-in link."
+                        if self.config.link_mode
+                        else "Your session expired. Sign in with Discord again."
                     )
             if request.method not in {"GET", "HEAD"}:
-                if (
-                    request.headers.get("Origin") != self.config.origin
-                    or not session
-                    or not hmac.compare_digest(
+                origin_ok = request.headers.get("Origin") == self.config.origin
+                if self.config.link_mode:
+                    # A bearer header is never attached by the browser on its
+                    # own, so it is the CSRF token. Origin is belt and braces.
+                    allowed = origin_ok and (public or session)
+                else:
+                    allowed = origin_ok and session and hmac.compare_digest(
                         request.headers.get("X-CSRF-Token", ""), session["csrf"]
                     )
-                ):
+                if not allowed:
                     raise web.HTTPForbidden(text="Refresh the dashboard before saving.")
             response = await handler(request, session)
         except web.HTTPException as exc:
@@ -280,6 +334,10 @@ class Dashboard:
         )
 
     async def static(self, request, session):
+        if request.path == "/dashboard":
+            # Relative redirect: behind /dev the proxy strips the prefix, and
+            # the page's relative asset URLs only work with the trailing slash.
+            return web.HTTPFound("dashboard/" + (f"?{request.query_string}" if request.query_string else ""))
         name = request.match_info.get("asset", "index.html")
         if name not in {"index.html", "dashboard.js", "dashboard.css"}:
             raise web.HTTPNotFound(text="Page not found.")
@@ -362,23 +420,47 @@ class Dashboard:
         return response
 
     async def session(self, request, unused):
-        session = await asyncio.to_thread(
-            self.sessions.get, request.cookies.get(self.config.cookie, "")
-        )
+        session = await asyncio.to_thread(self.sessions.get, self.session_id(request))
         return self.response(
             {
                 "configured": True,
+                "mode": self.config.mode,
                 "user": session["user"] if session else None,
                 "csrf": session["csrf"] if session else None,
             }
         )
 
-    async def logout(self, request, session):
-        await asyncio.to_thread(
-            self.sessions.delete, request.cookies.get(self.config.cookie, "")
+    async def redeem(self, request, unused):
+        """Trade a one-time /dashboard link for an in-memory bearer session."""
+        from api.auth import _get_client_ip
+
+        if not self.config.link_mode:
+            raise web.HTTPNotFound(text="Sign in with Discord instead.")
+        if not self.redeem_limit.allow(_get_client_ip(request)):
+            raise web.HTTPTooManyRequests(text="Too many sign-ins. Try again in a minute.")
+        body = await self.body(request)
+        payload = await asyncio.to_thread(self.sessions.redeem_link, str(body.get("token", "")))
+        if not payload or not str(payload.get("user", {}).get("id", "")).isdigit():
+            raise web.HTTPUnauthorized(
+                text="This sign-in link expired or was already used. Run /dashboard in Discord for a new one."
+            )
+        guilds = [
+            {"id": str(row["id"]), "name": str(row.get("name", ""))[:100]}
+            for row in payload.get("guilds", [])
+            if str(row.get("id", "")).isdigit()
+        ][:200]
+        token = await asyncio.to_thread(
+            self.sessions.create, payload["user"], "", LINK_SESSION_TTL, guilds=guilds, mode="link"
         )
+        return self.response(
+            {"token": token, "user": payload["user"], "expires_in": LINK_SESSION_TTL}
+        )
+
+    async def logout(self, request, session):
+        await asyncio.to_thread(self.sessions.delete, self.session_id(request))
         response = self.response({"ok": True})
-        self.cookie(response, self.config.cookie, "", 0)
+        if not self.config.link_mode:
+            self.cookie(response, self.config.cookie, "", 0)
         return response
 
     async def personal(self, request, session):
@@ -422,6 +504,20 @@ class Dashboard:
             "persistent_memory": "Automatic facts and embeddings are retired."})
 
     async def servers(self, request, session):
+        if self.config.link_mode:
+            # Snapshot from the bot's member cache when the link was minted;
+            # authorize_guild re-checks live on every open and save.
+            return self.response(
+                {
+                    "servers": [
+                        {**row, "installed": True}
+                        for row in session.get("guilds", [])
+                        if dev_guild_allowed(row["id"])
+                    ],
+                    "client_id": self.config.client_id,
+                    "mode": "link",
+                }
+            )
         users, bots = await asyncio.gather(self.guilds(session["token"]), self.guilds())
         bot_ids = {str(row["id"]) for row in bots}
         return self.response(
@@ -455,8 +551,9 @@ class Dashboard:
                     )
                 ),
             }
+            # Tool-less plugins (web_dashboard) have nothing to switch off per server.
             for path, manifest, error in discover_plugin_manifests()
-            if manifest and not error and not manifest.protected
+            if manifest and not error and not manifest.protected and manifest.tools
         ]
 
     async def server(self, request, session):
@@ -615,6 +712,7 @@ def register_dashboard(app, data_dir, config=None):
         ("GET", "/api/dashboard/login", dashboard.login, True),
         ("GET", "/api/dashboard/callback", dashboard.callback, True),
         ("GET", "/api/dashboard/session", dashboard.session, True),
+        ("POST", "/api/dashboard/redeem", dashboard.redeem, True),
         ("POST", "/api/dashboard/logout", dashboard.logout, False),
         ("GET", "/api/dashboard/personal", dashboard.personal, False),
         ("GET", "/api/dashboard/privacy", dashboard.privacy, False),
@@ -631,6 +729,7 @@ def register_dashboard(app, data_dir, config=None):
         ("PUT", "/api/dashboard/worker-connection", dashboard.worker_connection, False),
         ("DELETE", "/api/dashboard/worker-connection", dashboard.worker_connection, False),
         ("POST", "/api/dashboard/worker-connection/test", dashboard.test_worker_connection, False),
+        *((method, path, handler, False) for method, path, handler in dashboard.panels.routes()),
     ):
 
         async def route(request, handler=handler, public=public):

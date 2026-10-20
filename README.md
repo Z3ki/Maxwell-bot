@@ -209,7 +209,7 @@ bot_tools.py            Compatibility re-exports of plugin tools
 providers.py            OpenAI-compatible provider wrapper
 config.py               Environment-backed config
 conversation_memory.py  Scoped SQLite conversation history
-knowledge_graph.py      Entity/relationship memory
+knowledge_graph.py      Site/code graph for generated sites
 control_defaults.py     Runtime control defaults
 user_install.py         Discord user-install/app-command support
 plugin_manager.py       Compatibility façade over maxwell_core

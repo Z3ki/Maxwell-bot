@@ -382,12 +382,18 @@ def test_corrupt_settings_and_invalid_inputs_are_not_overwritten(tmp_path, monke
 def test_static_dashboard_and_safe_disabled_setup(tmp_path, monkeypatch):
     async def run():
         monkeypatch.delenv("MAXWELL_DASHBOARD_URL", raising=False)
+        monkeypatch.setenv("MAXWELL_DASHBOARD_LINKS", "0")
         app = web.Application(middlewares=[_auth_middleware_unless_login])
         register_dashboard(app, lambda: tmp_path)
         async with TestClient(TestServer(app)) as client:
+            response = await client.get("/dashboard", allow_redirects=False)
+            assert response.status == 302
+            assert response.headers["Location"] == "dashboard/"
             response = await client.get("/dashboard/")
             assert response.status == 200
-            assert "Continue with Discord" in await response.text()
+            page = await response.text()
+            assert "Continue with Discord" in page
+            assert 'href="dashboard.css"' in page and 'src="dashboard.js"' in page
             assert "unsafe-inline" not in response.headers["Content-Security-Policy"]
             assert (await client.get("/dashboard/dashboard.js")).status == 200
             assert (await client.get("/dashboard/unknown.js")).status == 404

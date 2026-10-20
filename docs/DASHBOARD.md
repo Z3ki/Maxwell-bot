@@ -4,6 +4,36 @@ The dashboard at `/dashboard/` lets Discord users edit their own reply preferenc
 
 Both interfaces use the same personal preference file, encrypted BYOK vault and server settings. Personal changes apply on the next request. Server controls reload within five seconds. The dashboard never grants application-owner or operator privileges.
 
+## Sign in from Discord (`/dashboard`)
+
+This is the default and needs no OAuth app. `/dashboard` replies privately
+with a link to `<MAXWELL_PUBLIC_BASE_URL>/dashboard/#t=<token>` (or
+`MAXWELL_DASHBOARD_URL` when set). The link works once and expires after 15
+minutes. Redeeming it starts a session of up to eight hours.
+
+- The token rides in the URL fragment, so it never reaches server logs or a
+  `Referer` header. The page removes it from the address bar after redeeming.
+- The public host also serves generated sites, so link sessions never use a
+  cookie or web storage. The page keeps a bearer token in memory; closing or
+  reloading the tab signs out, and **Sign out** deletes the session.
+- Every write needs the dashboard's exact `Origin`. Server pages check the
+  member's live permissions through the bot, and a Dev bot only lists the
+  servers it is scoped to.
+- The signing key is `MAXWELL_DASHBOARD_SECRET` when set, otherwise a key
+  generated at `data/dashboard/session.key`. `MAXWELL_DASHBOARD_LINKS=0`
+  turns link sign-in off.
+- Route `/dashboard`, `/dashboard/*` and `/api/dashboard/*` on the public host
+  to the API. `/dashboard` redirects to `/dashboard/`.
+
+Views: **Overview** (plan, message allowance, storage, public address),
+**Reply settings**, **AI connection**, **Files** and **Schedules** (Premium),
+and **Servers**. Files covers browse, upload (25 MB per file), new folder,
+rename/move, text editing, delete, signed links and choosing the public
+handle. Schedules covers create, pause, resume, edit and delete, using the
+same limits as the `schedule` tool. Free accounts see both views locked.
+
+The OAuth mode below is still supported for a dedicated dashboard hostname.
+
 ## Enable it on your host
 
 Use the **same Discord application as the bot**. In [Discord Developer Portal](https://discord.com/developers/applications), open OAuth2 and add this exact redirect URI, replacing the hostname:
