@@ -15,7 +15,7 @@ from pathlib import Path
 FREE_MESSAGE_LIMIT = 150
 PREMIUM_MESSAGE_LIMIT = 500
 PREMIUM_PLAN = "premium"
-FREE_WINDOW_SECONDS = 60 * 60
+FREE_WINDOW_SECONDS = 5 * 60 * 60
 
 
 def resolved_message_limit(default_limit: int, override_limit, plan: str) -> int:
