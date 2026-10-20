@@ -438,7 +438,8 @@ strong { color: var(--ink); font-weight: 650; }
 /* chess */
 .board { display: grid; grid-template-columns: repeat(8, 1fr); width: min(100%, 188px); aspect-ratio: 1; border-radius: 8px; overflow: hidden; box-shadow: var(--shadow-lg); border: 4px solid #3b2c22; }
 .board span { display: grid; place-items: center; background: #ead9b8; font: 400 1.25rem/1 "DejaVu Sans", "Segoe UI Symbol", "Noto Sans Symbols 2", serif; color: #1a1410; font-variant-emoji: text; }
-.board span.d { background: #b58863; }
+/* Light when (row + col) is even, row 0 = rank 8: h1 and a8 light, a1 and h8 dark. */
+.board span:is(:nth-child(16n+2), :nth-child(16n+4), :nth-child(16n+6), :nth-child(16n+8), :nth-child(16n+9), :nth-child(16n+11), :nth-child(16n+13), :nth-child(16n+15)) { background: #b58863; }
 .board span.w { color: #fff; -webkit-text-stroke: .6px #1a1410; }
 .board span.hl { box-shadow: inset 0 0 0 100px rgba(244, 182, 63, .55); }
 .chess-note { background: #fff; border-radius: 10px; padding: 7px 10px; font: 600 .74rem/1 var(--mono); color: var(--ink); box-shadow: var(--shadow); }
