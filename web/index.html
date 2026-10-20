@@ -3,14 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Maxwell — a helpful cat for your Discord</title>
-<meta name="description" content="Maxwell is a free, open-source Discord AI bot. Ask questions, research the web, run code, build and host pages, play music and games, and set it all up from a web dashboard.">
-<meta name="theme-color" content="#08090a">
-<meta name="color-scheme" content="dark">
-<meta property="og:title" content="Maxwell — a helpful cat for your Discord">
-<meta property="og:description" content="Ask, research, build, host, schedule. Maxwell works right inside your Discord conversations.">
-<meta property="og:image" content="https://maxwell.z3ki.dev/assets/maxwell.svg">
+<title>Maxwell · a helpful cat for your Discord</title>
+<meta name="description" content="Maxwell is a free, open-source AI helper for Discord. It researches with sources, runs code, builds and hosts sites and games, plays music, and keeps your files and schedules on Premium.">
+<meta name="theme-color" content="#f7f3ec">
+<meta name="color-scheme" content="light">
+<link rel="canonical" href="https://maxwell.z3ki.dev/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Maxwell">
+<meta property="og:title" content="Maxwell · a helpful cat for your Discord">
+<meta property="og:description" content="Maxwell is a free, open-source AI helper for Discord. It researches with sources, runs code, builds and hosts sites and games, plays music, and keeps your files and schedules on Premium.">
+<meta property="og:url" content="https://maxwell.z3ki.dev/">
 <link rel="icon" type="image/svg+xml" href="/assets/maxwell.svg">
+<link rel="preload" href="/assets/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/assets/site.css">
 <script src="/assets/site.js"></script>
 </head>
@@ -18,302 +23,474 @@
 <a class="skip" href="#main">Skip to content</a>
 <header class="site-header">
   <div class="wrap header-inner">
-    <a class="brand" href="/" aria-label="Maxwell home"><img src="/assets/maxwell.svg" width="32" height="32" alt="">maxwell<span class="brand-dot">.</span></a>
-    <nav aria-label="Main navigation">
+    <a class="brand" href="/" aria-label="Maxwell home"><img src="/assets/maxwell.svg" width="34" height="34" alt=""><span>maxwell<span class="dot">.</span></span></a>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
       <a href="/#features">Features</a>
       <a href="/#premium">Premium</a>
       <a href="/guide/">Guide</a>
+      <a href="/dashboard/">Dashboard</a>
       <a href="/contact/">Contact</a>
-      <a class="nav-source" href="https://github.com/Z3ki/Maxwell-bot">GitHub ↗</a>
-      <a class="nav-cta" href="/dashboard/">Dashboard</a>
     </nav>
+    <div class="header-actions">
+      <a class="icon-link" href="https://github.com/Z3ki/Maxwell-bot" aria-label="Maxwell on GitHub"><svg class="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg></a>
+      <a class="btn btn-sm" href="/install/"><svg class="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg><span>Add<span class="btn-label-long"> to Discord</span></span></a>
+      <button class="menu-toggle" type="button" aria-controls="site-nav" aria-expanded="false" aria-label="Open menu"><svg class="i open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/></svg><svg class="i close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
   </div>
 </header>
-
 <main id="main">
-<div class="hero-band">
-  <div class="wrap hero">
-    <div>
-      <p class="eyebrow status">Discord bot · public alpha</p>
-      <h1>A cat in your chat<br><span class="grad">that gets things done.</span></h1>
-      <p class="lede">Ask a question, drop in a file, build a web page, or have Maxwell check back on a schedule. It all happens right inside your Discord conversations.</p>
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <a class="badge-line" href="#premium"><b>NEW</b>Premium storage, public folders and schedules<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></a>
+      <h1>Ask the <span class="mark">cat.</span><br>It does the work.</h1>
+      <p class="lede">Maxwell is an AI helper that lives in your Discord. It looks things up with sources, runs real code, builds and hosts websites and games, plays music, and learns how you like your answers.</p>
       <div class="actions">
-        <a class="button" href="#start">Start with /maxwell</a>
-        <a class="button secondary" href="/dashboard/">Open the dashboard</a>
+        <a class="btn" href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;scope=bot+applications.commands&amp;permissions=0"><svg class="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>Add to server</a>
+        <a class="btn btn-ghost" href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;integration_type=1&amp;scope=applications.commands"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>Add to your account</a>
       </div>
-      <ul class="pills" aria-label="Highlights">
-        <li>Free &amp; open source</li>
-        <li>Slash commands &amp; right-click apps</li>
-        <li>Web research</li>
-        <li>Code sandbox</li>
-        <li>Pages &amp; games</li>
-        <li>Music &amp; voice</li>
+      <ul class="hero-meta">
+        <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 9.5a5.5 5.5 0 0 1 9.591-3.676.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5"/></svg>Free and MIT licensed</li>
+        <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>Servers, DMs and group chats</li>
+        <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg><a href="https://discord.gg/RGnXrTmWBu">Join the community</a></li>
       </ul>
     </div>
 
-    <div class="demo" aria-label="Example conversations">
-      <div class="demo-top">
-        <span># general</span>
-        <div class="demo-tabs" role="tablist" aria-label="Pick an example">
-          <button type="button" role="tab" id="tab-ask" aria-controls="scene-ask" aria-selected="true">Ask</button>
-          <button type="button" role="tab" id="tab-build" aria-controls="scene-build" aria-selected="false" tabindex="-1">Build</button>
-          <button type="button" role="tab" id="tab-schedule" aria-controls="scene-schedule" aria-selected="false" tabindex="-1">Schedule</button>
-          <button type="button" role="tab" id="tab-subagent" aria-controls="scene-subagent" aria-selected="false" tabindex="-1">Subagent</button>
+    <div class="hero-visual">
+      <img class="sticker" src="/assets/maxwell.svg" width="128" height="128" alt="Maxwell, a black and white tuxedo cat with gold eyes">
+      <span class="sticker-say" aria-hidden="true">on it.</span>
+      <div class="discord" data-autoplay>
+        <div class="discord-bar">
+          <span class="chan"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></svg>general</span>
+          <div class="demo-tabs" role="tablist" aria-label="Example conversations">
+            <button type="button" role="tab" id="tab-ask" aria-controls="scene-ask" aria-selected="true">Research</button>
+            <button type="button" role="tab" id="tab-build" aria-controls="scene-build" aria-selected="false" tabindex="-1">Build</button>
+            <button type="button" role="tab" id="tab-schedule" aria-controls="scene-schedule" aria-selected="false" tabindex="-1">Schedule</button>
+            <button type="button" role="tab" id="tab-agent" aria-controls="scene-agent" aria-selected="false" tabindex="-1">Subagent</button>
+          </div>
         </div>
-      </div>
+        <div class="discord-body">
+          <div class="scene" id="scene-ask" role="tabpanel" aria-labelledby="tab-ask" tabindex="0">
+            <div class="msg">
+              <span class="av av-a" aria-hidden="true">R</span>
+              <div>
+                <div class="who">rowan <time>Today at 9:41 AM</time></div>
+                <p><span class="slash">/maxwell</span> FastAPI or Flask for a small API? keep it short</p>
+              </div>
+            </div>
+            <div class="msg">
+              <img class="av" src="/assets/maxwell.svg" width="40" height="40" alt="">
+              <div>
+                <div class="who">Maxwell <span class="app-tag"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>APP</span><time>Today at 9:41 AM</time></div>
+                <div class="using"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>Searched the web · read 3 sources</div>
+                <p><strong>FastAPI</strong> if you want async and automatic docs. <strong>Flask</strong> if you want the smallest thing that works. For a small API either is fine. Pick FastAPI if you'll call other services a lot.</p>
+                <div class="d-embed">
+                  <b>Sources</b>
+                  <dl><dt>1</dt><dd>fastapi.tiangolo.com · Features</dd><dt>2</dt><dd>flask.palletsprojects.com · Async</dd><dt>3</dt><dd>docs.python.org · asyncio</dd></dl>
+                </div>
+              </div>
+            </div>
+          </div>
 
-      <div class="chat scene" id="scene-ask" role="tabpanel" aria-labelledby="tab-ask">
-        <div class="chat-row">
-          <div class="avatar" aria-hidden="true">Y</div>
-          <div>
-            <div class="chat-name">You</div>
-            <p><span class="slash">/maxwell</span> explain this error in plain English</p>
-            <p class="muted">Attachment · error.txt</p>
+          <div class="scene" id="scene-build" role="tabpanel" aria-labelledby="tab-build" tabindex="0" hidden>
+            <div class="msg">
+              <span class="av av-b" aria-hidden="true">J</span>
+              <div>
+                <div class="who">juno <time>Today at 2:07 PM</time></div>
+                <p><span class="slash">/maxwell</span> make a tiny platformer where a cat collects coins, and host it</p>
+              </div>
+            </div>
+            <div class="msg">
+              <img class="av" src="/assets/maxwell.svg" width="40" height="40" alt="">
+              <div>
+                <div class="who">Maxwell <span class="app-tag"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>APP</span><time>Today at 2:09 PM</time></div>
+                <div class="using"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>Built and tested in the sandbox · 4 files</div>
+                <p>Done. Arrow keys to move, space to jump. Coins come back every 20 seconds.</p>
+                <p><a class="d-link" href="#features">maxwell.z3ki.dev/bot/coin-cat/</a></p>
+                <div class="attach"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v11.5"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M8 12v-1"/><path d="M8 18v-2"/><path d="M8 7V6"/><circle cx="8" cy="20" r="2"/></svg><span><b>coin-cat.zip</b><small>18.4 KB</small></span></div>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="chat-row">
-          <img src="/assets/maxwell.svg" alt="Maxwell" width="36" height="36">
-          <div>
-            <div class="chat-name">Maxwell <span>APP</span></div>
-            <p>Your program is trying to open <code>config.json</code>, and that file isn't in the folder it's running from.</p>
-            <p>Run it from the project folder, or pass the full path. Send me the command you used and I'll point at the exact fix.</p>
-          </div>
-        </div>
-      </div>
 
-      <div class="chat scene" id="scene-build" role="tabpanel" aria-labelledby="tab-build" hidden>
-        <div class="chat-row">
-          <div class="avatar" aria-hidden="true">7</div>
-          <div>
-            <div class="chat-name">7up</div>
-            <p><span class="slash">/maxwell</span> make a tiny 3D cat game and put it in my folder as cat-3d</p>
+          <div class="scene" id="scene-schedule" role="tabpanel" aria-labelledby="tab-schedule" tabindex="0" hidden>
+            <div class="msg">
+              <span class="av av-a" aria-hidden="true">R</span>
+              <div>
+                <div class="who">rowan <time>Today at 5:30 PM</time></div>
+                <p>every weekday at 9, summarize new issues on our repo and post them here</p>
+              </div>
+            </div>
+            <div class="msg">
+              <img class="av" src="/assets/maxwell.svg" width="40" height="40" alt="">
+              <div>
+                <div class="who">Maxwell <span class="app-tag"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>APP</span><time>Today at 5:30 PM</time></div>
+                <div class="using"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v3"/><path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338"/><path d="M3 9h5.859"/><path d="M8 2v3"/><circle cx="16" cy="16" r="6"/></svg>Created a schedule · Premium</div>
+                <p>Set. I'll wake up and post the digest here every weekday morning.</p>
+                <div class="d-embed">
+                  <b>Morning issue digest</b>
+                  <dl><dt>Runs</dt><dd><code>0 9 * * 1-5</code></dd><dt>Timezone</dt><dd>Europe/Berlin</dd><dt>Next run</dt><dd>Wed 21 Oct, 09:00</dd><dt>Posts in</dt><dd>#general</dd></dl>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="chat-row">
-          <img src="/assets/maxwell.svg" alt="Maxwell" width="36" height="36">
-          <div>
-            <div class="chat-name">Maxwell <span>APP</span></div>
-            <ul class="trace" aria-label="Tools used"><li><b>shell</b> build</li><li><b>storage</b> publish</li></ul>
-            <p>Done. It's live at <a class="url" href="#premium">maxwell.z3ki.dev/u/7up/cat-3d/</a></p>
-            <p>Arrow keys to move, space to jump. The files sit in your storage, so they'll still be there tomorrow.</p>
-          </div>
-        </div>
-      </div>
 
-      <div class="chat scene" id="scene-schedule" role="tabpanel" aria-labelledby="tab-schedule" hidden>
-        <div class="chat-row">
-          <div class="avatar" aria-hidden="true">Y</div>
-          <div>
-            <div class="chat-name">You</div>
-            <p><span class="slash">/maxwell</span> every weekday at 9, check new issues on my repo and give me a short summary</p>
+          <div class="scene" id="scene-agent" role="tabpanel" aria-labelledby="tab-agent" tabindex="0" hidden>
+            <div class="msg">
+              <span class="av av-b" aria-hidden="true">J</span>
+              <div>
+                <div class="who">juno <time>Today at 6:12 PM</time></div>
+                <p>build a page for our bake sale with a signup form. no rush</p>
+              </div>
+            </div>
+            <div class="msg">
+              <img class="av" src="/assets/maxwell.svg" width="40" height="40" alt="">
+              <div>
+                <div class="who">Maxwell <span class="app-tag"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>APP</span><time>Today at 6:12 PM</time></div>
+                <div class="using"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>Started a background job · <code>/tasks</code></div>
+                <p>A subagent is on it. Keep chatting, I'll ping you when it's ready.</p>
+              </div>
+            </div>
+            <div class="msg">
+              <img class="av" src="/assets/maxwell.svg" width="40" height="40" alt="">
+              <div>
+                <div class="who">Maxwell <span class="app-tag"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>APP</span><time>Today at 6:31 PM</time></div>
+                <p>@juno the bake sale page is live. A copy is saved in <code>/storage/jobs/7f3a/</code>.</p>
+                <p><a class="d-link" href="#premium">maxwell.z3ki.dev/u/juno/bake-sale/</a></p>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="chat-row">
-          <img src="/assets/maxwell.svg" alt="Maxwell" width="36" height="36">
-          <div>
-            <div class="chat-name">Maxwell <span>APP</span></div>
-            <ul class="trace" aria-label="Tools used"><li><b>schedule</b> create</li></ul>
-            <p>Scheduled: <strong>Morning issue digest</strong>, weekdays at 09:00 (Europe/London). First run Monday morning.</p>
-            <p>Pause, edit, or delete it any time with <span class="slash">/dashboard</span>.</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="chat scene" id="scene-subagent" role="tabpanel" aria-labelledby="tab-subagent" hidden>
-        <div class="chat-row">
-          <div class="avatar" aria-hidden="true">Y</div>
-          <div>
-            <div class="chat-name">You</div>
-            <p><span class="slash">/maxwell</span> build a Minecraft Bedrock add-on with a cat block and send me the .mcaddon</p>
-          </div>
-        </div>
-        <div class="chat-row">
-          <img src="/assets/maxwell.svg" alt="Maxwell" width="36" height="36">
-          <div>
-            <div class="chat-name">Maxwell <span>APP</span></div>
-            <p>Handed that to a subagent. Follow along with <span class="slash">/tasks</span>.</p>
-            <ul class="trace" aria-label="Subagent steps"><li><b>shell</b> 9 steps</li><li><b>storage</b> saved</li></ul>
-            <p>Finished. <strong>cat-block.mcaddon</strong> is attached and saved in <code>/storage/jobs</code>.</p>
-            <p class="muted">Attachment · cat-block.mcaddon</p>
-          </div>
-        </div>
+        <div class="discord-input" aria-hidden="true"><span class="plus"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="caret"></span>Message #general</div>
       </div>
     </div>
+  </div>
+</section>
+
+<div class="ticker" aria-label="What Maxwell can do">
+  <div class="ticker-track">
+    <ul>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>Research with sources</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>Code sandbox</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09"/><path d="M9 12a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.4 22.4 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 .05 5 .05"/></svg>Hosted sites and games</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>Image generation</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>Voice replies</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V3a1 1 0 0 0-1.28-.96l-10 2.917a1 1 0 0 0-.72.96V19"/><circle cx="18" cy="16" r="3"/><circle cx="6" cy="19" r="3"/></svg>Music</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg>Chess and checkers</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/></svg>Right-click apps</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>GitHub workspaces</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>Reminders</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/></svg>100 MB storage</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v3"/><path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338"/><path d="M3 9h5.859"/><path d="M8 2v3"/><circle cx="16" cy="16" r="6"/></svg>Schedules</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>Subagents</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>Bring your own key</li>
+    </ul>
+    <ul aria-hidden="true">
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>Research with sources</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>Code sandbox</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09"/><path d="M9 12a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.4 22.4 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 .05 5 .05"/></svg>Hosted sites and games</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>Image generation</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>Voice replies</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V3a1 1 0 0 0-1.28-.96l-10 2.917a1 1 0 0 0-.72.96V19"/><circle cx="18" cy="16" r="3"/><circle cx="6" cy="19" r="3"/></svg>Music</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg>Chess and checkers</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/></svg>Right-click apps</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>GitHub workspaces</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>Reminders</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/></svg>100 MB storage</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v3"/><path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338"/><path d="M3 9h5.859"/><path d="M8 2v3"/><circle cx="16" cy="16" r="6"/></svg>Schedules</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>Subagents</li>
+      <li><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>Bring your own key</li>
+    </ul>
   </div>
 </div>
 
 <section class="section" id="features">
   <div class="wrap">
-    <div class="section-heading reveal">
-      <div><p class="eyebrow">What it can do</p><h2>One cat.<br>A lot of tools.</h2></div>
-      <p>Maxwell picks the right tool for the request. Server admins choose which tools are on, and Discord permissions always apply.</p>
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">What it does</p>
+        <h2>One cat. A frankly unreasonable number of skills.</h2>
+      </div>
+      <p>All of it works from a normal Discord message. Ask in plain words and Maxwell picks the right tool.</p>
     </div>
-    <div class="cards">
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">/</div>
-        <h3>Ask from anywhere</h3>
-        <p>Type <code>/maxwell</code> in a server or DM, or right-click a message for Summarize, Explain, Fact-check, and Rewrite / Translate.</p>
+
+    <div class="bento">
+      <article class="tile span-4">
+        <div class="viz t-sky">
+          <div class="mini-browser" aria-hidden="true">
+            <div class="mb-bar"><i></i><i></i><i></i><span>maxwell.z3ki.dev/bot/coin-cat/</span></div>
+            <div class="game">
+              <span class="sun"></span><span class="cloud c1"></span><span class="cloud c2"></span>
+              <span class="block"></span><span class="coin k1"></span><span class="coin k2"></span><span class="coin k3"></span>
+              <span class="player"></span><span class="ground"></span>
+              <span class="score"><i></i>× 12</span>
+            </div>
+          </div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09"/><path d="M9 12a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.4 22.4 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 .05 5 .05"/></svg>Builds sites and games, then hosts them</h3>
+        <p>Ask for a page, a tool or a small game. Maxwell writes it, tests it in its sandbox and replies with a live link at <code>maxwell.z3ki.dev/bot/&lt;name&gt;/</code>.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">?</div>
-        <h3>Web research</h3>
-        <p>Searches the web and reads pages when a question needs fresh facts, and links the sources it actually used.</p>
+
+      <article class="tile span-2">
+        <div class="viz t-butter">
+          <div class="research" aria-hidden="true">
+            <div class="query"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>best budget mic for streaming?</div>
+            <ul class="sources">
+              <li><b class="src-1">1</b><span>rtings.com</span><em>Best USB microphones</em></li>
+              <li><b class="src-2">2</b><span>reddit.com/r/streaming</span><em>Mic recs under $80</em></li>
+              <li><b class="src-3">3</b><span>soundguys.com</span><em>Fifine vs. Samson</em></li>
+            </ul>
+          </div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>Researches with sources</h3>
+        <p>Searches the web, reads the pages and cites what it used, so you can check the work.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">$_</div>
-        <h3>Code sandbox</h3>
-        <p>Runs commands in an isolated Linux shell to build, test, convert files, and crunch data.</p>
+
+      <article class="tile span-2">
+        <div class="viz t-ink">
+          <div class="term" aria-hidden="true">
+            <div class="term-bar"><i></i><i></i><i></i><span>sandbox</span></div>
+<pre><span class="p">$</span> python3 report.py sales.csv
+<span class="o">1,204 rows · top month: March</span>
+<span class="o">wrote chart.png</span>
+<span class="p">$</span> <span class="cur"></span></pre>
+          </div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>Runs real code</h3>
+        <p>A private Linux sandbox for Python, Node and shell. Results come back as text, files or charts.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">&lt;/&gt;</div>
-        <h3>Pages &amp; games</h3>
-        <p>Makes web pages, tools, and small browser games, then hosts them at a link you can share.</p>
+
+      <article class="tile span-2">
+        <div class="viz t-lilac">
+          <div class="ctx" aria-hidden="true">
+            <div class="ctx-msg"><b>mika</b>build failed with E0432 again??</div>
+            <div class="ctx-menu">
+              <div class="lbl">Apps</div>
+              <div><img src="/assets/maxwell.svg" alt="">Ask Maxwell</div>
+              <div><img src="/assets/maxwell.svg" alt="">Summarize</div>
+              <div class="on"><img src="/assets/maxwell.svg" alt="">Explain</div>
+              <div><img src="/assets/maxwell.svg" alt="">Fact-check</div>
+            </div>
+          </div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/></svg>Right-click any message</h3>
+        <p>Summarize, explain, fact-check, rewrite or translate from the Apps menu. Long-press works on mobile.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">[ ]</div>
-        <h3>Files &amp; media</h3>
-        <p>Reads attachments, looks at images and video, and sends files back when it makes something.</p>
+
+      <article class="tile span-2">
+        <div class="viz t-peach viz-tall">
+          <div class="imgs" aria-hidden="true">
+            <img src="/assets/maxwell.svg" alt="">
+            <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            <img class="after" src="/assets/maxwell.svg" alt="">
+          </div>
+          <div class="voice" aria-hidden="true"><span class="play"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span><span class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>0:04</div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>Images and voice</h3>
+        <p>Makes and edits pictures, reads your attachments, and answers out loud when you ask.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">✦</div>
-        <h3>Images &amp; voice</h3>
-        <p>Generates and edits images, and speaks in the channel with natural voices.</p>
+
+      <article class="tile span-2">
+        <div class="viz t-mint">
+          <div class="player-card" aria-hidden="true">
+            <div class="np"><span class="art"></span><div><b>Lo-fi beats to debug to</b><span>Playing in 🔊 Lounge</span></div></div>
+            <div class="bar"><i></i></div>
+            <div class="times"><span>1:12</span><span>3:05</span></div>
+            <div class="controls"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.971 4.285A2 2 0 0 1 21 6v12a2 2 0 0 1-3.029 1.715l-9.997-5.998a2 2 0 0 1-.003-3.432z"/><path d="M3 20V4"/></svg><span class="big"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/></svg></span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 4v16"/><path d="M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z"/></svg></div>
+            <div class="queue"><span>Up next · 4 in queue</span><b>Autoplay on</b></div>
+          </div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V3a1 1 0 0 0-1.28-.96l-10 2.917a1 1 0 0 0-.72.96V19"/><circle cx="18" cy="16" r="3"/><circle cx="6" cy="19" r="3"/></svg>Music in voice channels</h3>
+        <p>Join a voice channel and ask for a song, or use <code>/music</code> to queue, skip and turn on autoplay.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">♪</div>
-        <h3>Music</h3>
-        <p>Plays music in voice channels with a shared queue, <code>/music</code> controls, and an AI DJ.</p>
+
+      <article class="tile span-2">
+        <div class="viz t-sky">
+          <div class="board" aria-hidden="true">
+            <span>♜</span><span class="d">♞</span><span>♝</span><span class="d">♛</span><span>♚</span><span class="d">♝</span><span class="hl"></span><span class="d">♜</span>
+            <span class="d">♟</span><span>♟</span><span class="d">♟</span><span>♟</span><span class="d"></span><span>♟</span><span class="d">♟</span><span>♟</span>
+            <span></span><span class="d"></span><span></span><span class="d"></span><span></span><span class="d hl">♞</span><span></span><span class="d"></span>
+            <span class="d"></span><span></span><span class="d"></span><span></span><span class="d">♟</span><span></span><span class="d"></span><span></span>
+            <span></span><span class="d"></span><span></span><span class="d"></span><span class="w">♟</span><span class="d"></span><span></span><span class="d"></span>
+            <span class="d"></span><span></span><span class="d"></span><span></span><span class="d"></span><span class="w">♞</span><span class="d"></span><span></span>
+            <span class="w">♟</span><span class="d w">♟</span><span class="w">♟</span><span class="d w">♟</span><span class="d"></span><span class="w">♟</span><span class="d w">♟</span><span class="w">♟</span>
+            <span class="d w">♜</span><span class="w">♞</span><span class="d w">♝</span><span class="w">♛</span><span class="d w">♚</span><span class="w">♝</span><span class="d"></span><span class="w">♜</span>
+          </div>
+          <span class="chess-note" aria-hidden="true">Nf6 · your move</span>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"/></svg>Games with friends</h3>
+        <p>Chess and checkers right in the channel. Say “play chess with me” and make your move.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">♞</div>
-        <h3>Games</h3>
-        <p>Play chess or checkers against Maxwell right in the channel.</p>
+
+      <article class="tile span-2 md-full">
+        <div class="viz t-butter">
+          <div class="poll" aria-hidden="true">
+            <b>Movie night this Friday?</b>
+            <div class="opt" style="--w: 64%"><span>🍿 Yes, 8 PM</span><span>64%</span></div>
+            <div class="opt" style="--w: 27%"><span>🕘 Later, 10 PM</span><span>27%</span></div>
+            <div class="opt" style="--w: 9%"><span>😴 Skip this week</span><span>9%</span></div>
+            <small>22 votes · closes in 6 hours</small>
+          </div>
+        </div>
+        <h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>Helps run your server</h3>
+        <p>Polls, reminders, moderation help and ticket greetings, all inside the permissions and tools you allow.</p>
       </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">#</div>
-        <h3>Server helper</h3>
-        <p>Polls, threads, channels, roles, and moderation for members allowed to do those things.</p>
-      </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">⎇</div>
-        <h3>GitHub workspaces</h3>
-        <p>Clones and works on repositories in a private workspace for each person.</p>
-      </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">⏲</div>
-        <h3>Reminders</h3>
-        <p>"Remind me in two hours" works. Maxwell pings you when it's time.</p>
-      </article>
-      <article class="card reveal">
-        <div class="icon" aria-hidden="true">⚿</div>
-        <h3>Your own AI key</h3>
-        <p>Connect a supported provider and pick your model. Keys are stored encrypted, and you can test or delete them any time.</p>
-      </article>
+    </div>
+
+    <div class="more">
+      <div><h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6a9 9 0 0 0-9 9V3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>GitHub workspaces</h3><p>Clone a repo, make the change and open a pull request with your own token.</p></div>
+      <div><h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>Reminders</h3><p>“Remind me Friday at 5 to send the invoice.” That's the whole setup.</p></div>
+      <div><h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>Your own AI key</h3><p>Connect your own provider and model. Keys are stored encrypted.</p></div>
+      <div><h3><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M12 12v6"/><path d="m15 15-3-3-3 3"/></svg>Files and attachments</h3><p>Drop in a PDF, spreadsheet, image or zip and ask about it.</p></div>
     </div>
   </div>
 </section>
 
-<section class="section premium-band" id="premium">
+<section class="section alt" id="start">
   <div class="wrap">
-    <div class="section-heading reveal">
-      <div><p class="eyebrow">Premium</p><h2>More room<br>to build.</h2></div>
-      <p>Premium accounts get space that sticks around, a public folder, schedules, and background subagents. The person running the bot grants Premium per account. On your own Maxwell, you decide who has it.</p>
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Get started</p>
+        <h2>Up and running in about a minute.</h2>
+      </div>
+      <p>No sign-up and nothing to download. Add Maxwell to Discord, type a slash, and ask.</p>
     </div>
-    <div class="premium-grid">
-      <article class="perk reveal">
-        <h3>100 MB that stays <small>Storage</small></h3>
-        <p>Your shell gets a <code>/storage</code> folder that survives sandbox resets. Builds, exports, and notes stay put between conversations, and subagent files land there automatically.</p>
-        <p><span class="path">/storage/jobs/3f9c2a/cat-block.mcaddon</span></p>
+    <ol class="steps">
+      <li class="step">
+        <span class="num">1</span>
+        <h3>Add Maxwell</h3>
+        <p>Add it to a server you manage, or to your own account so it follows you into DMs and group chats.</p>
+        <div class="step-actions">
+          <a class="btn btn-sm" href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;scope=bot+applications.commands&amp;permissions=0"><svg class="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>Add to server</a>
+          <a class="btn btn-sm btn-ghost" href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;integration_type=1&amp;scope=applications.commands">Add to account</a>
+        </div>
+      </li>
+      <li class="step">
+        <span class="num">2</span>
+        <h3>Type <code>/maxwell</code></h3>
+        <p>Ask anything in plain words. Attach a file or image when it helps explain the question.</p>
+        <div class="prompt-chip"><span class="slash">/maxwell</span><em>summarize this thread</em></div>
+      </li>
+      <li class="step">
+        <span class="num">3</span>
+        <h3>Make it yours</h3>
+        <p>Set language, answer length and reply visibility in <code>/config</code>, or open the web dashboard.</p>
+        <div class="prompt-chip"><span class="slash">/dashboard</span><em>one-time sign-in link</em></div>
+      </li>
+    </ol>
+    <div class="commands" aria-label="Slash commands">
+      <div><code>/maxwell</code><span>Ask, research, build or create.</span></div>
+      <div><code>/config</code><span>Personal and server settings.</span></div>
+      <div><code>/dashboard</code><span>Sign in to the web dashboard.</span></div>
+      <div><code>/tasks</code><span>See or cancel background jobs.</span></div>
+      <div><code>/cancel</code><span>Stop your running request.</span></div>
+      <div><code>/music</code><span>Play, queue and skip in voice.</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section dark" id="premium">
+  <div class="wrap">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Premium</p>
+        <h2>Room to build bigger things.</h2>
+      </div>
+      <p>Premium adds storage that sticks around, a public home for what you make, and a cat that wakes up on its own schedule.</p>
+    </div>
+
+    <div class="perks">
+      <article class="perk">
+        <div class="perk-top"><span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/></svg></span><span class="perk-tag">100 MB</span></div>
+        <h3>Storage that stays</h3>
+        <p>The code sandbox resets after about ten idle minutes. Your <code>/storage</code> folder survives every reset, and Maxwell restores it on your next command.</p>
+        <span class="path">/storage/notes/ideas.md</span>
       </article>
-      <article class="perk reveal">
-        <h3>Your own public folder <small>Hosting</small></h3>
-        <p>Pick a handle and publish HTML pages and games from your storage. Each folder becomes a page anyone can open. Manage it all from the Files console.</p>
-        <p><span class="path">maxwell.z3ki.dev/u/7up/cat-3d/</span></p>
+      <article class="perk">
+        <div class="perk-top"><span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg></span><span class="perk-tag">Your handle</span></div>
+        <h3>Your own public folder</h3>
+        <p>Anything in <code>/storage/public/</code> goes live under your handle. Every folder with an <code>index.html</code> becomes its own page or game.</p>
+        <span class="path">maxwell.z3ki.dev/u/7up/cat-3d/</span>
       </article>
-      <article class="perk reveal">
-        <h3>Schedules <small>Cron</small></h3>
-        <p>Maxwell wakes up on a schedule you set, or one it sets for you when you ask: every weekday at 9, every few hours, or once next Friday. Results post back in the channel or your DMs.</p>
-        <p><span class="path">0 9 * * 1-5</span></p>
+      <article class="perk">
+        <div class="perk-top"><span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v3"/><path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338"/><path d="M3 9h5.859"/><path d="M8 2v3"/><circle cx="16" cy="16" r="6"/></svg></span><span class="perk-tag">Cron or once</span></div>
+        <h3>Schedules Maxwell sets itself</h3>
+        <p>Say “every weekday at 9, check my repo” and Maxwell creates the schedule. When it's due, it runs the prompt and posts the result.</p>
+        <span class="path">0 9 * * 1-5 · Europe/Berlin</span>
       </article>
-      <article class="perk reveal">
-        <h3>Background subagents <small>Tasks</small></h3>
-        <p>Hand long jobs to a subagent: websites, code changes, research, add-ons. Keep chatting while it works, and check on it with <code>/tasks</code>. Finished files are saved before the sandbox resets.</p>
-        <p><span class="path">/tasks</span></p>
+      <article class="perk">
+        <div class="perk-top"><span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></span><span class="perk-tag">/tasks</span></div>
+        <h3>Background subagents</h3>
+        <p>Big builds run in the background while you keep chatting. Finished files are copied to your storage, so a reset never eats the result.</p>
+        <span class="path">/storage/jobs/&lt;job id&gt;/</span>
       </article>
     </div>
 
-    <table class="compare reveal">
-      <caption class="sr-only">Free and Premium features</caption>
-      <thead><tr><th scope="col">Feature</th><th scope="col">Everyone</th><th scope="col">Premium</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">Ask, research, files, images, voice, music, games</th><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><th scope="row">Code sandbox</th><td class="yes">✓</td><td class="yes">✓ longer commands</td></tr>
-        <tr><th scope="row">Hosted pages at a share link</th><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><th scope="row">Dashboard, reply settings, your own AI key</th><td class="yes">✓</td><td class="yes">✓</td></tr>
-        <tr><th scope="row">Storage that survives resets</th><td class="no">—</td><td class="yes">100 MB</td></tr>
-        <tr><th scope="row">Public folder at /u/&lt;handle&gt;/</th><td class="no">—</td><td class="yes">✓</td></tr>
-        <tr><th scope="row">Schedules</th><td class="no">—</td><td class="yes">Up to 10</td></tr>
-        <tr><th scope="row">Background subagents</th><td class="no">—</td><td class="yes">✓</td></tr>
-        <tr><th scope="row">Hourly message allowance</th><td>Standard</td><td class="yes">Higher</td></tr>
-      </tbody>
-    </table>
-    <p class="footnote">Limits on the hosted bot can change during the alpha. Self-hosted operators set their own.</p>
+    <div class="compare-wrap">
+      <table class="compare">
+        <caption class="sr-only">Free and Premium compared</caption>
+        <thead><tr><th scope="col">On the hosted bot</th><th scope="col">Free</th><th scope="col">Premium</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Messages per hour</th><td>150</td><td class="yes">500</td></tr>
+          <tr><th scope="row">Research, code sandbox, images, voice, music, games</th><td class="yes">Included</td><td class="yes">Included</td></tr>
+          <tr><th scope="row">Hosted sites at <code>/bot/&lt;name&gt;/</code></th><td class="yes">Included</td><td class="yes">Included</td></tr>
+          <tr><th scope="row">Persistent <code>/storage</code></th><td class="no">–</td><td class="yes">100 MB</td></tr>
+          <tr><th scope="row">Public folder at <code>/u/&lt;handle&gt;/</code></th><td class="no">–</td><td class="yes">Included</td></tr>
+          <tr><th scope="row">Signed share links</th><td class="no">–</td><td class="yes">1 hour to 30 days</td></tr>
+          <tr><th scope="row">Schedules</th><td class="no">–</td><td class="yes">Up to 10</td></tr>
+          <tr><th scope="row">Background subagents</th><td class="no">–</td><td class="yes">Included</td></tr>
+          <tr><th scope="row">Shell command time limit</th><td>Standard</td><td class="yes">600 seconds</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="footnote">Premium is a manual grant from the bot's operator. There are no paid plans. Running your own copy? Grant it with <code>/maintenance</code> → Grant premium allowance.</p>
   </div>
 </section>
 
 <section class="section" id="dashboard">
   <div class="wrap split">
-    <div class="reveal">
+    <div>
       <p class="eyebrow">Dashboard</p>
-      <h2>Set it up<br>yourself.</h2>
-      <p>Run <code>/dashboard</code> in Discord and Maxwell sends you a private sign-in link. It works once and expires after 15 minutes, so there's no password to remember.</p>
-      <ul class="checklist">
-        <li>Language, answer length, reply visibility, and style</li>
-        <li>Your AI provider and model</li>
-        <li>Files console: upload, edit, rename, and share signed links</li>
-        <li>Your public folder and handle</li>
-        <li>Schedules: create, pause, edit, and delete</li>
-        <li>Server settings for members with Manage Server</li>
+      <h2>Every setting, one tab away.</h2>
+      <p>Run <code>/dashboard</code> and Maxwell sends you a private sign-in link. One click and you're in. No password to remember.</p>
+      <ul class="checks">
+        <li>Language, answer length, tone and reply visibility</li>
+        <li>Connect and test your own AI provider key</li>
+        <li>Browse, upload, edit and share your storage files</li>
+        <li>Create, pause and edit schedules</li>
+        <li>Server settings for every server you manage</li>
       </ul>
       <div class="actions">
-        <a class="button" href="/dashboard/">Open the dashboard</a>
-        <a class="text-link" href="/guide/#dashboard">How sign-in works ↗</a>
+        <a class="btn" href="/dashboard/"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>Open the dashboard</a>
+        <a class="text-link" href="/guide/#dashboard">How sign-in works</a>
       </div>
     </div>
 
-    <div class="mock reveal" aria-hidden="true">
-      <div class="mock-bar"><i></i><i></i><i></i><span>maxwell.z3ki.dev/dashboard</span></div>
-      <div class="mock-body">
-        <div class="mock-side">
-          <b>Overview</b>
-          <em>Reply settings</em>
-          <em>AI connection</em>
-          <em>Files</em>
-          <em>Schedules</em>
-          <em>Servers</em>
+    <div class="dash-mock" aria-hidden="true">
+      <div class="mb-bar"><i></i><i></i><i></i><span>maxwell.z3ki.dev/dashboard/</span></div>
+      <div class="dm-body">
+        <div class="dm-side">
+          <div class="dm-user"><img src="/assets/maxwell.svg" alt="">rowan</div>
+          <span class="on"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>Overview</span>
+          <span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>Reply settings</span>
+          <span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>AI connection</span>
+          <span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>Files</span>
+          <span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v3"/><path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338"/><path d="M3 9h5.859"/><path d="M8 2v3"/><circle cx="16" cy="16" r="6"/></svg>Schedules</span>
+          <span><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>Servers</span>
         </div>
-        <div class="mock-main">
-          <div class="mock-two">
-            <div class="mock-card">
-              <div class="k">STORAGE</div>
-              <div class="v">34.2 MB</div>
-              <div class="mock-meter"><span></span></div>
-            </div>
-            <div class="mock-card">
-              <div class="k">PUBLIC FOLDER</div>
-              <div class="v">/u/7up/</div>
-            </div>
+        <div class="dm-main">
+          <div class="dm-row">
+            <div class="dm-card"><div class="dm-k">Plan</div><div class="dm-v"><span class="pill-premium"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></svg>Premium</span></div></div>
+            <div class="dm-card"><div class="dm-k">Messages</div><div class="dm-v">42<small>of 500 this hour</small></div><div class="meter"><i style="width: 9%"></i></div></div>
+            <div class="dm-card"><div class="dm-k">Storage</div><div class="dm-v">31 MB<small>of 100 MB</small></div><div class="meter"><i style="width: 31%"></i></div></div>
           </div>
-          <div class="mock-card">
-            <div class="k">SCHEDULES</div>
-            <div class="mock-row"><span>Morning issue digest</span><span>Weekdays 09:00</span></div>
-            <div class="mock-row"><span>Check the build</span><span>Every 30 min</span></div>
-            <div class="mock-row"><span>Friday recap</span><span>Once, Fri 17:00</span></div>
-          </div>
-          <div class="mock-card">
-            <div class="k">FILES</div>
-            <div class="mock-row"><span>public/cat-3d/index.html</span><span>12 KB</span></div>
-            <div class="mock-row"><span>jobs/3f9c2a/cat-block.mcaddon</span><span>1.8 MB</span></div>
+          <div class="dm-card"><div class="dm-k">Public folder</div><div class="dm-v">maxwell.z3ki.dev/u/rowan/</div></div>
+          <div class="dm-card">
+            <div class="dm-k">Schedules</div>
+            <div class="dm-list">
+              <div><span>Morning issue digest</span><span>0 9 * * 1-5</span></div>
+              <div><span>Weekly backup of notes</span><span>0 18 * * 0</span></div>
+              <div><span>Check the deploy</span><span>once · in 45m</span></div>
+            </div>
           </div>
         </div>
       </div>
@@ -321,80 +498,133 @@
   </div>
 </section>
 
-<section class="section" id="start">
+<section class="section alt" id="open">
   <div class="wrap">
-    <div class="section-heading reveal">
-      <div><p class="eyebrow">Getting started</p><h2>Four commands<br>cover most of it.</h2></div>
-      <p>If Maxwell is in your server, or you've added it to your account, start with a question. Everything else can wait until you need it.</p>
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Open by default</p>
+        <h2>Built in the open.</h2>
+      </div>
+      <p>Maxwell is an independent project. Here is how it treats your server and your data.</p>
     </div>
-    <div class="steps">
-      <div class="step reveal"><span class="number">01 / ASK</span><code>/maxwell</code><p>Write your request. Replies are public by default; pick <strong>visibility: Private</strong> for one only you can see.</p></div>
-      <div class="step reveal"><span class="number">02 / RIGHT-CLICK</span><code>Apps →</code><p>On any message, open Apps and pick Ask Maxwell, Summarize, Explain, Fact-check, or Rewrite / Translate.</p></div>
-      <div class="step reveal"><span class="number">03 / MAKE IT YOURS</span><code>/config</code><p>Language, answer length, visibility, personality, and your AI provider, right inside Discord.</p></div>
-      <div class="step reveal"><span class="number">04 / SIGN IN</span><code>/dashboard</code><p>A private link to the web dashboard for settings, files, schedules, and servers.</p></div>
+    <div class="trust">
+      <article>
+        <span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></svg></span>
+        <h3>Free and open source</h3>
+        <p>Every line is on GitHub under the MIT license. Read it, fork it, or run your own copy with one command.</p>
+        <p><a class="text-link" href="https://github.com/Z3ki/Maxwell-bot">View the source</a></p>
+      </article>
+      <article>
+        <span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+        <h3>Your data, your call</h3>
+        <p>Saved history is on by default. Turn it off in <code>/config</code> → Privacy and what was saved gets deleted. Private replies are one option away.</p>
+        <p><a class="text-link" href="/privacy/">Read the privacy policy</a></p>
+      </article>
+      <article>
+        <span class="perk-ico"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg></span>
+        <h3>Permissions first</h3>
+        <p>The install link asks for no extra permissions. Maxwell works inside Discord's permissions and the tools your server admins allow.</p>
+        <p><a class="text-link" href="/terms/">Read the terms</a></p>
+      </article>
     </div>
-    <p class="footnote reveal">Also handy: <code>/cancel</code> stops your running request, <code>/tasks</code> shows your subagent jobs, and <code>/music</code> controls playback. <a class="text-link" href="/guide/">Read the full guide ↗</a></p>
   </div>
 </section>
 
-<section class="section faq" id="faq">
-  <div class="wrap">
-    <p class="eyebrow">Good to know</p>
-    <h2>Before you ask.</h2>
-    <details>
-      <summary>Can I turn public replies off?</summary>
-      <p>Yes. Pick Private in the command's visibility option, or save Private as your default in <code>/config</code> or the dashboard. Private replies still pass through Maxwell and its configured AI providers.</p>
-    </details>
-    <details>
-      <summary>What happens to files when the sandbox resets?</summary>
-      <p>The code sandbox is wiped after about ten idle minutes. Premium <code>/storage</code> is saved before the wipe and restored on your next command, and subagent results are copied there when a job finishes. Anything outside <code>/storage</code> is temporary.</p>
-    </details>
-    <details>
-      <summary>Who can see my public folder?</summary>
-      <p>Anyone with the link. Files under your public folder are served at <code>/u/&lt;your handle&gt;/</code>. The rest of your storage stays private; share a single file with a signed link that expires.</p>
-    </details>
-    <details>
-      <summary>How do schedules work?</summary>
-      <p>A schedule is a saved prompt plus a time: a cron pattern such as weekdays at 9, or a single date. When it's due, Maxwell runs the prompt in the background and posts the result where you made the schedule, or in your DMs if you prefer. Runs are at least 15 minutes apart, and Maxwell can create schedules for you when you ask.</p>
-    </details>
-    <details>
-      <summary>What can server admins change?</summary>
-      <p>Members with Manage Server choose response channels, available tools, moderation, and progress messages, in <code>/config</code> or the dashboard's Servers page. Personal reply preferences apply only to your own requests.</p>
-    </details>
-    <details>
-      <summary>Is Maxwell ready for anything?</summary>
-      <p>It's in public alpha. Features and limits can change, and outages or data loss can happen. Check important answers and keep copies of files you care about.</p>
-    </details>
-    <details>
-      <summary>What happens to my messages?</summary>
-      <p>Maxwell processes the context needed for your request and may keep conversation memory. Relevant content goes to the configured AI and tool providers. The <a href="/privacy/">Privacy Policy</a> covers details and how to delete your data.</p>
-    </details>
+<section class="section" id="faq">
+  <div class="wrap faq-grid">
+    <div class="faq-side">
+      <p class="eyebrow">FAQ</p>
+      <h2>Questions, answered.</h2>
+      <p>Still stuck? The community server is the quickest place to get help, share what you built, or suggest a feature.</p>
+      <a class="btn btn-ghost" href="https://discord.gg/RGnXrTmWBu"><svg class="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>Join the community</a>
+    </div>
+    <div class="faq-list">
+      <details open>
+        <summary>Is Maxwell free?</summary>
+        <p>Yes. The hosted bot is free to use with an hourly message allowance, and the code is MIT licensed. Premium is a manual grant from the operator. There are no paid plans.</p>
+      </details>
+      <details>
+        <summary>Should I add it to a server or to my account?</summary>
+        <p>Add it to a server to give everyone there slash commands and right-click apps. Add it to your account to use it in DMs, group chats, and servers that allow external apps. You can do both.</p>
+      </details>
+      <details>
+        <summary>Can other people see my replies?</summary>
+        <p>Replies are public by default. Pick <strong>visibility: Private</strong> on a request, or save Private as your default in <code>/config</code>, and only you will see them.</p>
+      </details>
+      <details>
+        <summary>What happens to my files when the sandbox resets?</summary>
+        <p>The sandbox is wiped after about ten idle minutes. Hosted sites and games stay live. On Premium, everything in <code>/storage</code> is saved and restored, and finished subagent builds are copied to <code>/storage/jobs/</code>.</p>
+      </details>
+      <details>
+        <summary>How do schedules work?</summary>
+        <p>A schedule is a saved prompt plus a time. When it's due, Maxwell runs the prompt as a background job and posts the result where you made it, or in your DMs. Ask in plain words or set one up in the dashboard.</p>
+      </details>
+      <details>
+        <summary>Can I use my own AI provider?</summary>
+        <p>Yes. In <code>/config</code> → My AI provider or the dashboard, pick a provider and model, save your key and test it. Keys are stored encrypted and you can delete them at any time.</p>
+      </details>
+      <details>
+        <summary>Can I run my own Maxwell?</summary>
+        <p>Yes. You need Docker, a Discord bot token and a compatible model endpoint, and the installer handles the rest. See <a class="text-link" href="/guide/#self-host">Run your own Maxwell</a>.</p>
+      </details>
+    </div>
   </div>
 </section>
 
-<section class="cta">
-  <div class="wrap reveal">
-    <h2>Say hi to Maxwell.</h2>
-    <p>Type <code>/maxwell</code> in Discord, or set things up first in the dashboard. It's free and open source, and you can run your own copy.</p>
-    <div class="actions">
-      <a class="button" href="/dashboard/">Open the dashboard</a>
-      <a class="button secondary" href="/guide/#self-host">Run your own</a>
+<section class="wrap" aria-label="Add Maxwell">
+  <div class="cta-card">
+    <img class="cta-cat" src="/assets/maxwell.svg" width="190" height="190" alt="">
+    <div>
+      <h2>Give your server a cat.</h2>
+      <p>Add Maxwell in one click and ask your first question in under a minute.</p>
+      <div class="actions">
+        <a class="btn btn-gold" href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;scope=bot+applications.commands&amp;permissions=0"><svg class="i" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>Add to server</a>
+        <a class="btn btn-line-light" href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;integration_type=1&amp;scope=applications.commands"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>Add to your account</a>
+      </div>
     </div>
   </div>
 </section>
 </main>
-
 <footer class="site-footer">
-  <div class="wrap footer-inner">
-    <div><a class="brand" href="/">maxwell<span class="brand-dot">.</span></a><p>A cat in your chat. Free, open source, and still in alpha.</p></div>
-    <nav aria-label="Footer">
-      <a href="/guide/">Guide</a>
-      <a href="/dashboard/">Dashboard</a>
-      <a href="/contact/">Contact</a>
-      <a href="/terms/">Terms</a>
-      <a href="/privacy/">Privacy</a>
-      <a href="https://github.com/Z3ki/Maxwell-bot">Source ↗</a>
-    </nav>
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href="/"><img src="/assets/maxwell.svg" width="34" height="34" alt=""><span>maxwell<span class="dot">.</span></span></a>
+        <p>A helpful cat for your Discord. Free, open source under the MIT license, and still in public alpha.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <nav aria-label="Product">
+          <a href="/#features">Features</a>
+          <a href="/#premium">Premium</a>
+          <a href="/guide/">Guide</a>
+          <a href="/dashboard/">Dashboard</a>
+        </nav>
+      </div>
+      <div>
+        <h4>Get Maxwell</h4>
+        <nav aria-label="Get Maxwell">
+          <a href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;scope=bot+applications.commands&amp;permissions=0">Add to a server</a>
+          <a href="https://discord.com/oauth2/authorize?client_id=1472755214623703190&amp;integration_type=1&amp;scope=applications.commands">Add to your account</a>
+          <a href="https://discord.gg/RGnXrTmWBu">Community server</a>
+          <a href="/guide/#self-host">Run your own</a>
+        </nav>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <nav aria-label="Project">
+          <a href="https://github.com/Z3ki/Maxwell-bot">Source code</a>
+          <a href="https://github.com/Z3ki/Maxwell-bot/issues">Issues</a>
+          <a href="/contact/">Contact</a>
+          <a href="/privacy/">Privacy</a>
+          <a href="/terms/">Terms</a>
+        </nav>
+      </div>
+    </div>
+    <div class="footer-base">
+      <span>MIT licensed. Maintained by <a href="https://github.com/Z3ki">Z3ki</a>.</span>
+      <span>Maxwell is an independent project and is not affiliated with Discord.</span>
+    </div>
   </div>
 </footer>
 </body>
