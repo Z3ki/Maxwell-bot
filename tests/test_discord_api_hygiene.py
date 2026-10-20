@@ -100,6 +100,61 @@ def test_search_messages_only_reads_this_channel():
     assert "channel_id=100" in out
 
 
+def test_search_messages_filters_older_history_by_author_and_time():
+    class Hist:
+        def __init__(self):
+            self.kwargs = None
+
+        def history(self, **kwargs):
+            self.kwargs = kwargs
+
+            async def gen():
+                yield SimpleNamespace(
+                    id=1,
+                    content="not this",
+                    author=SimpleNamespace(id=8, display_name="Bea", name="bea"),
+                )
+                yield SimpleNamespace(
+                    id=2,
+                    content="older cats",
+                    author=SimpleNamespace(id=7, display_name="Ada", name="ada"),
+                )
+
+            return gen()
+
+    chan = Hist()
+    chan.id = 100
+    chan.name = "general"
+    guild = SimpleNamespace(id=10, me=SimpleNamespace(id=999))
+    requester = SimpleNamespace(id=7, guild=guild, display_name="Ada")
+    guild.get_member = lambda uid: requester if int(uid) == 7 else None
+    chan.guild = guild
+    chan.permissions_for = lambda _member: SimpleNamespace(
+        view_channel=True, read_message_history=True
+    )
+    msg = SimpleNamespace(channel=chan, guild=guild, author=requester, reference=None)
+    out = asyncio.run(
+        SearchMessagesTool(SimpleNamespace()).execute(
+            msg,
+            query="cats",
+            author="7",
+            before="2026-10-01T00:00:00Z",
+            after="2026-09-01T00:00:00+00:00",
+        )
+    )
+    assert "older cats" in out
+    assert "not this" not in out
+    assert chan.kwargs["limit"] == 400
+    assert chan.kwargs["oldest_first"] is True
+    assert chan.kwargs["before"].isoformat().startswith("2026-10-01")
+    assert chan.kwargs["after"].isoformat().startswith("2026-09-01")
+
+    bad = asyncio.run(
+        SearchMessagesTool(SimpleNamespace()).execute(msg, before="not-a-time")
+    )
+    assert bad.startswith("Error:")
+
+
 def test_message_lookup_by_id_and_reply_reference_is_current_channel_scoped():
     guild = SimpleNamespace(id=10, me=SimpleNamespace(id=999))
     requester = SimpleNamespace(id=7, guild=guild, display_name="Ada")

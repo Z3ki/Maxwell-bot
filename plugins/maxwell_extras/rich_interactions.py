@@ -248,11 +248,23 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
     def parameters_wrapper(self: Any) -> dict[str, Any]:
         schema = original_parameters()
         props = schema.setdefault("properties", {})
-        buttons = props.setdefault("buttons", {"type": "string"})
+        buttons = props.setdefault("buttons", {"type": "array", "maxItems": 5})
         buttons["description"] = (
-            "JSON list (max 5) of Discord buttons. Link: {label,url,emoji?}. "
-            "Callback: {label,style:primary|secondary|success|danger,prompt,emoji?,"
-            "disabled?,one_shot?}; clicking becomes a new Maxwell turn."
+            "Up to 5 buttons. Link: {label,url,emoji?}. Callback: {label,"
+            "style:primary|secondary|success|danger,prompt,emoji?,disabled?,one_shot?}; "
+            "a click starts a new Maxwell turn for whoever clicked, with prompt as the instruction."
+        )
+        item = buttons.setdefault("items", {"type": "object"})
+        item.setdefault("properties", {}).update(
+            {
+                "style": {
+                    "type": "string",
+                    "enum": ["link", "primary", "secondary", "success", "danger"],
+                },
+                "prompt": {"type": "string"},
+                "disabled": {"type": "boolean"},
+                "one_shot": {"type": "boolean"},
+            }
         )
         return schema
 

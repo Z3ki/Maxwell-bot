@@ -109,9 +109,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "create_poll": _obj(
         {
-            "question": _str("Poll question"),
-            "options": _str("Comma-separated options"),
-            "duration_hours": _num("Optional poll duration in hours"),
+            "question": _str("Poll question, max 300 chars"),
+            "options": _json_value(
+                "2-10 answers, max 55 chars each: a list of strings, or one comma-separated string",
+                "array", "string",
+            ),
+            "duration_hours": _num("Optional, 1-168 hours, default 24"),
+            "multiple": _bool("Optional: let people pick more than one answer"),
         },
         ["question", "options"],
     ),
@@ -164,8 +168,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
     ),
     "search_messages": _obj(
         {
-            "query": _str("Optional recent-history search text", maxLength=200),
-            "limit": _int("Max results (default 5)"),
+            "query": _str("Optional substring to match in message text", maxLength=200),
+            "author": _str("Author display name, username, or user ID", maxLength=100),
+            "before": _str("Only messages before this ISO-8601 time or unix seconds", maxLength=40),
+            "after": _str("Only messages after this ISO-8601 time or unix seconds", maxLength=40),
+            "limit": _int("Max results, 1-10 (default 5)"),
             "message_id": _str("Look up a numeric message ID in the current channel", maxLength=22),
             "message_link": _str("Look up a Discord message link in this server", maxLength=300),
             "reply_reference": _str("Look up a reply target by numeric message ID", maxLength=22),
@@ -991,8 +998,12 @@ CHAT_CORE_TOOL_NAMES: frozenset[str] = frozenset(
 # Tools that end the turn outright. Nothing after them runs, and there is no
 # follow-up turn unless a RESULT tool shared the same batch.
 TURN_ENDING_TOOL_NAMES: frozenset[str] = frozenset(
-    {"send_message", "no_response", "sleep", "send_gif"}
+    {"send_message", "send_rich_message", "no_response", "sleep", "send_gif"}
 )
+
+# Visible replies that may run back to back in one model response, e.g. a
+# short line and then a card. Anything else after a delivered reply is skipped.
+REPLY_BURST_TOOL_NAMES: frozenset[str] = frozenset({"send_message", "send_rich_message"})
 
 # Plugin tools that declared ``returns_result = True``. Plugin names cannot live
 # in the static set above — they are discovered at import time — and without
