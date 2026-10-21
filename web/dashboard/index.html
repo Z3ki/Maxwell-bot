@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="robots" content="noindex" />
     <meta name="referrer" content="no-referrer" />
-    <meta name="theme-color" content="#f7f3ec" />
+    <meta name="theme-color" content="#141216" />
+    <meta name="color-scheme" content="dark" />
     <title>Maxwell · Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/assets/maxwell.svg" />
     <link rel="stylesheet" href="dashboard.css" />
@@ -25,7 +26,7 @@
       <section id="login" class="welcome welcome-split" hidden>
         <div class="welcome-copy">
           <img class="welcome-cat" src="/assets/maxwell.svg" alt="" width="88" height="88" />
-          <p class="eyebrow">YOUR MAXWELL, YOUR WAY</p>
+          <p class="eyebrow">Sign in</p>
           <h1>Everything Maxwell<br />does for you.</h1>
           <p class="lead">Reply settings, your own AI key, files that outlive the sandbox, your public web folder, scheduled wake-ups and the servers you run. One place.</p>
           <div id="link-signin" class="signin-box" hidden>
@@ -33,12 +34,12 @@
             <p class="signin-step"><span>2</span> Press <strong>Open dashboard</strong>. Maxwell's private link signs you in once.</p>
             <p class="muted">The link expires after 15 minutes and is single use. Reloading this page signs you out, by design: your session lives only in this tab.</p>
           </div>
-          <a id="signin" class="primary big" href="../api/dashboard/login" hidden>Continue with Discord <span>→</span></a>
+          <a id="signin" class="primary big" href="../api/dashboard/login" hidden>Continue with Discord</a>
           <p id="login-note" class="login-note" role="status"></p>
           <p class="muted">Everything here is also available with <code>/config</code> in Discord.</p>
         </div>
         <aside class="welcome-preview" aria-hidden="true">
-          <p class="eyebrow">PREVIEW</p>
+          <p class="eyebrow">Preview</p>
           <div class="preview-card">
             <b>Overview</b>
             <span>9% of this window used</span>
@@ -56,7 +57,7 @@
       </section>
 
       <div id="loading" class="welcome">
-        <p class="eyebrow">MAXWELL DASHBOARD</p>
+        <p class="eyebrow">Dashboard</p>
         <h1>Getting ready…</h1>
       </div>
 
@@ -66,11 +67,11 @@
             <button class="nav active" type="button" data-view="overview">Overview</button>
             <button class="nav" type="button" data-view="settings">Reply settings</button>
             <button class="nav" type="button" data-view="ai">AI connection</button>
-            <button class="nav" type="button" data-view="files">Files <span class="badge" id="files-badge" hidden>PREMIUM</span></button>
-            <button class="nav" type="button" data-view="schedules">Schedules <span class="badge" id="schedules-badge" hidden>PREMIUM</span></button>
+            <button class="nav" type="button" data-view="files">Files <span class="badge" id="files-badge" hidden>Premium</span></button>
+            <button class="nav" type="button" data-view="schedules">Schedules <span class="badge" id="schedules-badge" hidden>Premium</span></button>
           </nav>
           <details id="server-picker" class="server-picker" open>
-            <summary>YOUR SERVERS</summary>
+            <summary>Your servers</summary>
             <label class="sr-only" for="server-search">Find a server</label>
             <input id="server-search" type="search" placeholder="Find a server…" />
             <div id="server-list"></div>
@@ -82,7 +83,7 @@
 
         <section class="content">
           <div class="heading">
-            <p class="eyebrow" id="scope-label">JUST FOR YOU</p>
+            <p class="eyebrow" id="scope-label">Just for you</p>
             <h1 id="page-title">Overview</h1>
             <p id="page-description"></p>
           </div>
@@ -93,7 +94,7 @@
             <section class="card plan-card">
               <div class="plan-head">
                 <div>
-                  <p class="eyebrow">YOUR PLAN</p>
+                  <p class="eyebrow">Your plan</p>
                   <h2 id="plan-name">Free</h2>
                   <p id="plan-note" class="muted"></p>
                 </div>
@@ -103,19 +104,19 @@
             </section>
             <div class="meters">
               <section class="card meter-card">
-                <p class="eyebrow">MESSAGES</p>
+                <p class="eyebrow">Messages</p>
                 <p class="meter-value" id="msg-value">—</p>
                 <div class="bar"><span id="msg-bar"></span></div>
                 <p class="muted" id="msg-note"></p>
               </section>
               <section class="card meter-card">
-                <p class="eyebrow">STORAGE</p>
+                <p class="eyebrow">Storage</p>
                 <p class="meter-value" id="store-value">—</p>
                 <div class="bar"><span id="store-bar"></span></div>
                 <p class="muted" id="store-note"></p>
               </section>
               <section class="card meter-card">
-                <p class="eyebrow">PUBLIC FOLDER</p>
+                <p class="eyebrow">Public folder</p>
                 <p class="meter-value small" id="site-value">—</p>
                 <p class="muted" id="site-note">Anything in <code>/storage/public/</code> is a website.</p>
               </section>
@@ -170,7 +171,7 @@
           <!-- AI connection -->
           <div class="view" id="view-ai" hidden>
             <section class="card">
-              <h2>Bring your own AI <span class="optional">OPTIONAL</span></h2>
+              <h2>Bring your own AI <span class="optional">Optional</span></h2>
               <p>Maxwell already includes AI. Connect a provider only if you want chat or Premium subagents to use your own API account.</p>
               <label>AI connection for<select id="connection-scope"><option value="chat">Chat</option><option value="worker">Subagents (Premium)</option></select></label>
               <p class="muted">Subagents can use their own endpoint, key, model, reasoning, context and deadlines. Without a separate key they inherit your chat BYOK, then the operator worker default. Operator worker limits still apply.</p>
@@ -226,7 +227,7 @@
               <section class="card site-card">
                 <div class="site-row">
                   <div>
-                    <p class="eyebrow">YOUR PUBLIC FOLDER</p>
+                    <p class="eyebrow">Your public folder</p>
                     <a id="public-link" class="public-link" target="_blank" rel="noopener noreferrer"></a>
                     <p class="muted">Files in <code>public/</code> are served there. A folder with an <code>index.html</code> is a page: <code>public/cat-3d/index.html</code> → <code>…/cat-3d/</code>. Pages run sandboxed: scripts work, cookies and saved browser storage don’t persist.</p>
                   </div>
@@ -353,7 +354,7 @@
           <div class="view card" id="view-install" hidden>
             <h2>Add Maxwell first</h2>
             <p>You can manage this server, but Maxwell has not been added yet.</p>
-            <a id="invite" class="primary" target="_blank" rel="noopener noreferrer">Add Maxwell to this server →</a>
+            <a id="invite" class="primary" target="_blank" rel="noopener noreferrer">Add Maxwell to this server</a>
             <p class="muted">Come back and refresh the server list after installing.</p>
           </div>
         </section>

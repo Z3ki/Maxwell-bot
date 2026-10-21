@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy Policy · Maxwell</title>
 <meta name="description" content="What the hosted Maxwell service processes, where it goes, and the choices you have.">
-<meta name="theme-color" content="#f7f3ec">
-<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#141216">
+<meta name="color-scheme" content="dark">
 <link rel="canonical" href="https://maxwell.z3ki.dev/privacy/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Maxwell">
@@ -41,7 +41,7 @@
 <main id="main">
 <section class="page-hero">
   <div class="wrap">
-    <p class="eyebrow">Hosted service · Policies</p>
+    <p class="eyebrow">Policies</p>
     <h1>Privacy Policy</h1>
     <p class="lede">Saved conversation history is optional. Turning it off does not stop requests from being processed by AI providers.</p>
     <p class="meta"><span>Last updated 20 October 2026</span><span>Policy version 2026-10-20</span></p>
@@ -73,7 +73,7 @@
 <h2 id="section-7">7. Deletion and its limits</h2><p>Use <code>/config → Privacy → Off</code> to stop and delete saved conversation content. <strong>Delete my data</strong> in Privacy or the dashboard also processes supported personal preferences, optional consents, custom agent profiles, worker job metadata and cached reports, manual Premium grants, BYOK credentials, reminders, schedules, persistent storage files, your public folder and handle, callback records, traces, GitHub account metadata and dashboard sessions where available. Running shell sandboxes are recycled first so an old copy of your storage can't be written back. A small storage-suppression record remains so old writes cannot recreate erased history. Short-lived anti-abuse usage metadata may remain.</p><p>Deletion reports failed subsystems and can be retried. The result does not claim all copies are gone. Published files/sites, shell/GitHub workspaces, inbox/thread and optional-plugin records may require stopping active jobs and operator intervention. Backups, operator support messages, Discord posts and existing third-party copies cannot be erased by this button. The operator must apply deletion suppression after restoring backups and handle provider/backup requests through private support.</p>
 <h2 id="section-8">8. Security, cookies and credentials</h2><p>BYOK credentials and dashboard session payloads use authenticated encryption with an operator-managed key. Session cookies are HttpOnly, SameSite=Lax and Secure for HTTPS deployments; settings changes require a CSRF token. Link sign-in from <code>/dashboard</code> keeps its session token in the open page's memory only, and changes must come from the dashboard's own origin. Files in your public folder are readable by anyone with the address; signed file links work for anyone holding them until they expire. Discord OAuth requests identify/guild permissions to manage your account and authorized servers. This does not authorize unrelated processing. The repository does not provide encrypted storage for every SQLite/JSON file: disk/database encryption, access control, backup protection, HTTPS and incident response remain deployment requirements. No security certification is claimed.</p>
 <h2 id="section-9">9. Your choices and support</h2><p>Review, withdraw and delete optional choices in <code>/config → Privacy</code>. Request private support there for access, export, correction, workspace/backup deletion or other applicable rights. The support form sends only what you choose to the configured operator; do not include credentials. Public issue trackers are unsuitable for personal requests. Applicable rights and retention exceptions depend on law and must be assessed by the operator.</p><p>Policies are versioned. Delivering a disclosure never records agreement; server administrators cannot supply each member’s optional consent. No unsolicited legal DMs or public consent prompts are sent.</p>
-    <p class="doc-next">Read next: <a href="/terms/">Terms of Service</a> · <a href="/contact/">Contact</a></p>
+    <p class="doc-next">Read next: <a href="/terms/">Terms of Service</a> or <a href="/contact/">Contact</a></p>
   </article>
 </div>
 </main>
