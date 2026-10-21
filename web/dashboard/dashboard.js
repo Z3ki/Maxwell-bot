@@ -43,11 +43,11 @@ if (window.matchMedia("(max-width:620px)").matches)
   $("server-picker").open = false;
 
 const VIEWS = {
-  overview: ["JUST FOR YOU", "Overview", "Your plan, your usage and what Maxwell can do for you."],
-  settings: ["JUST FOR YOU", "Reply settings", "Make Maxwell feel familiar. Your choices stay in sync with Discord."],
-  ai: ["JUST FOR YOU", "AI connection", "Optional: point chat or Premium subagents at your own AI provider."],
-  files: ["PREMIUM · PERSISTENT STORAGE", "Files", "Your /storage folder. It survives sandbox wipes, and public/ is your website."],
-  schedules: ["PREMIUM · WAKE-UPS", "Schedules", "Maxwell wakes up on time, runs the task in the background and sends you the result."],
+  overview: ["Just for you", "Overview", "Your plan, your usage and what Maxwell can do for you."],
+  settings: ["Just for you", "Reply settings", "Make Maxwell feel familiar. Your choices stay in sync with Discord."],
+  ai: ["Just for you", "AI connection", "Optional: point chat or Premium subagents at your own AI provider."],
+  files: ["Premium storage", "Files", "Your /storage folder. It survives sandbox wipes, and public/ is your website."],
+  schedules: ["Premium wake-ups", "Schedules", "Maxwell wakes up on time, runs the task in the background and sends you the result."],
 };
 const TEXT_FILE = /\.(html?|css|m?js|json|txt|md|csv|tsv|xml|svg|py|ya?ml|toml|ini|cfg|conf|sh|ts|tsx|jsx|lua|gd|mcfunction|mcmeta|lang|log)$/i;
 const WEB_FILE = /\.(html?|css|m?js|svg)$/i;
@@ -788,8 +788,8 @@ function renderSchedules(data) {
     : "Schedules are turned off on this bot";
   $("schedule-new").disabled = !allowed || data.schedules.length >= data.limits.max;
   $("schedule-limits").textContent =
-    data.schedules.length + " of " + data.limits.max + " schedules · at least " + data.limits.min_minutes +
-    " minutes apart · up to " + data.limits.daily_runs + " runs a day.";
+    data.schedules.length + " of " + data.limits.max + " schedules, at least " + data.limits.min_minutes +
+    " minutes apart, up to " + data.limits.daily_runs + " runs a day.";
   $("cron-floor").textContent = "Runs at most every " + data.limits.min_minutes + " minutes.";
   $("schedule-list").replaceChildren(...data.schedules.map(scheduleCard));
   $("schedule-empty").hidden = data.schedules.length > 0;
@@ -807,7 +807,7 @@ function scheduleCard(row) {
   const card = el("article", "schedule" + (row.enabled ? "" : " off"));
   const body = el("div");
   const title = el("h3", "", row.name);
-  title.append(el("span", "state" + (row.enabled ? " on" : ""), row.enabled ? "ACTIVE" : "PAUSED"));
+  title.append(el("span", "state" + (row.enabled ? " on" : ""), row.enabled ? "Active" : "Paused"));
   const once = row.kind === "once" ? zonedLocal(row.spec, row.tz).replace("T", " ") : "";
   body.append(title, el("p", "when", once ? "Once, " + once + " (" + row.tz + ")" : row.summary));
   body.append(el("p", "prompt muted", row.prompt.length > 220 ? row.prompt.slice(0, 220) + "…" : row.prompt));
@@ -991,7 +991,7 @@ async function openServer(server) {
   let data;
   if (server.installed) data = await api("servers/" + server.id);
   selected = server.id;
-  heading("FOR EVERYONE IN THIS SERVER", server.name, "Manage where Maxwell replies and which tools are available.");
+  heading("This server", server.name, "Manage where Maxwell replies and which tools are available.");
   highlight();
   if (!server.installed) {
     showPanel("view-install");

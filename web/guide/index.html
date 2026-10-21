@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Guide · Maxwell</title>
 <meta name="description" content="How to add and use Maxwell: asking, right-click apps, settings, the dashboard, Premium storage, your public folder, schedules, subagents, server setup, your own AI key and self-hosting.">
-<meta name="theme-color" content="#f7f3ec">
-<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#141216">
+<meta name="color-scheme" content="dark">
 <link rel="canonical" href="https://maxwell.z3ki.dev/guide/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Maxwell">
@@ -156,7 +156,7 @@
     <h2 id="public-folder">Your public folder <span class="tag">Premium</span></h2>
     <p>Everything inside <code>/storage/public/</code> is published at your own address. Pick a handle in the Files page, or ask Maxwell to set one. Handles use lowercase letters, numbers, and single hyphens, up to 30 characters.</p>
     <div class="codeblock">
-      <div class="codeblock-bar"><span>Example · handle 7up</span></div>
+      <div class="codeblock-bar"><span>Example, handle 7up</span></div>
       <pre><code>/storage/public/cat-3d/index.html
 → https://maxwell.z3ki.dev/u/7up/cat-3d/</code></pre>
     </div>
@@ -203,7 +203,7 @@
     <h2 id="self-host">Run your own Maxwell</h2>
     <p>The software is free under the MIT license. You'll need Docker, Git, curl, Python 3, a Discord bot token, and a compatible model endpoint. On your own copy you choose the model provider, tools, limits, and who gets Premium.</p>
     <div class="codeblock">
-      <div class="codeblock-bar"><span>Self-host · shell</span><button class="copy" id="copy-install" type="button" data-copy-target="install-command">Copy</button></div>
+      <div class="codeblock-bar"><span>Self-host</span><button class="copy" id="copy-install" type="button" data-copy-target="install-command">Copy</button></div>
       <pre><code id="install-command">curl -fsSL https://raw.githubusercontent.com/Z3ki/Maxwell-bot/main/easy-install.sh | bash</code></pre>
       <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
     </div>
