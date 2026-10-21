@@ -1,11 +1,11 @@
 # Dev/test dependencies
-pytest>=8.3.5
+pytest>=9.1.1
 pytest-cov>=7.1.0,<8
-ruff>=0.16.6,<0.17
+ruff>=0.17.1,<0.18
 # CI quality gates: type check, dependency audit, static security scan.
 mypy>=2.4,<3
-pip-audit>=2.10,<3
+pip-audit>=2.10.1,<3
 bandit>=1.9.4,<2
 # Archived vector-store fixtures and offline migration benchmarks only.
 numpy>=2.3.5,<2.4; python_version < "3.12"
-numpy>=2.5.1; python_version >= "3.12"
+numpy>=2.5.4; python_version >= "3.12"

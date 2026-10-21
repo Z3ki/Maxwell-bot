@@ -251,7 +251,7 @@ def test_numpy_is_dev_only_and_supports_python311_and312():
         for line in (ROOT / "requirements-dev.txt").read_text().splitlines()
         if line.strip() and not line.startswith("#")
     ]
-    for python_version, numpy_version in [("3.11", "2.3.5"), ("3.12", "2.5.1")]:
+    for python_version, numpy_version in [("3.11", "2.3.5"), ("3.12", "2.5.4")]:
         candidates = [
             r
             for r in requirements
