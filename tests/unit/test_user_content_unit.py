@@ -91,6 +91,9 @@ def test_folder_redirects_and_misses(tmp_path, monkeypatch):
                 await client.get("/u/7up/%2e%2e/private/build.mcaddon")
             ).status == 404
             assert (await client.get("/u/nobody/x")).status == 404
+            # A path through an existing file is a miss, not a server error.
+            assert (await client.get("/u/7up/cat-3d/index.html/x")).status == 404
+            assert (await client.get("/u/7up/cat-3d/game.js/extra")).status == 404
 
     run(go())
 

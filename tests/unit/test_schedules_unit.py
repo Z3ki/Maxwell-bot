@@ -15,6 +15,7 @@ from plugins.schedules.cron import (
     upcoming,
     zone,
 )
+from plugins.schedules.planning import plan_cron
 from plugins.schedules.runner import GRACE_SECONDS, ScheduleRunner
 from plugins.schedules.store import ScheduleLimitError, ScheduleStore
 from plugins.schedules.tool import ScheduleTool
@@ -61,6 +62,29 @@ def test_cron_daylight_saving_edges():
         "11-01 01:30",
         "11-02 01:30",
     ]
+
+
+def test_fall_back_second_pass_stays_in_the_future():
+    # 2026-11-01 06:10 UTC is 01:10 EST, the second pass of the repeated hour.
+    tz = zone("America/New_York")
+    now = datetime(2026, 11, 1, 6, 10, tzinfo=UTC)
+    assert next_after(parse("*/15 * * * *"), now, tz) == datetime(
+        2026, 11, 1, 7, tzinfo=UTC
+    )
+    assert next_after(parse("30 1 * * *"), now, tz) == datetime(
+        2026, 11, 2, 6, 30, tzinfo=UTC
+    )
+    # The first pass still fires while that wall time is ahead.
+    first = datetime(2026, 11, 1, 5, 10, tzinfo=UTC)
+    assert next_after(parse("30 1 * * *"), first, tz) == datetime(
+        2026, 11, 1, 5, 30, tzinfo=UTC
+    )
+    runs = upcoming(parse("*/15 * * * *"), now, tz, 4)
+    assert runs[0] > now
+    assert all(later > earlier for earlier, later in zip(runs, runs[1:]))
+    text, stamp = plan_cron("30 1 * * *", "America/New_York", now)
+    assert text == "30 1 * * *"
+    assert stamp > now.timestamp()
 
 
 @pytest.mark.parametrize(
