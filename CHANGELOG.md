@@ -39,6 +39,9 @@
 - Stop sending a sampling temperature. Remove the env knob, the personal-connection creativity field, and the provider retry that rewrote temperature.
 - Tell each turn which chat model is answering, including a personal connection's model id, and return that id from get_configuration. Keys and endpoints stay hidden.
 - Document how a server's disabled chess plugin hides its tools despite successful startup registration, and how to restore it without changing other server settings.
+- Keep a schedule's next fire strictly in the future during the autumn DST repeated hour, so a create, edit, resume, or finished run in that hour cannot refire every tick. Fixes #128.
+- Treat a storage path that steps through a file as missing. Reads and public `/u/` requests 404, and writes say the name is a file, not a folder. Fixes #129.
+- Document the message quota window default as 18000 seconds (five hours). Fixes #130.
 
 ## 0.1.14 — 2026-10-14
 

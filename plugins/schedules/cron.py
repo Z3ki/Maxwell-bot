@@ -173,7 +173,12 @@ def next_after(cron: Cron, after: datetime, tz: ZoneInfo) -> datetime | None:
                 local = local.replace(minute=0) + timedelta(hours=1)
             continue
         if _exists(local, tz):
-            return local.replace(tzinfo=tz).astimezone(timezone.utc)
+            # fold=0 is the first pass of a repeated autumn hour. During the
+            # second pass that instant is already behind `after`; the hour
+            # still fires only once, so keep walking until a later UTC time.
+            found = local.replace(fold=0, tzinfo=tz).astimezone(timezone.utc)
+            if found > after:
+                return found
         local += timedelta(minutes=1)
     return None
 

@@ -340,13 +340,16 @@ class UserStorage:
         return out
 
     def _resolve(self, base: Path, rel: str) -> Path | None:
-        """Walk component by component with lstat; any symlink means no."""
+        """Walk component by component with lstat; any symlink means no.
+
+        A path through a file (``notes.txt/x``) is missing, not an OS error.
+        """
         current = base
         for part in rel.split("/"):
             current = current / part
             try:
                 info = os.lstat(current)
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 return None
             if stat.S_ISLNK(info.st_mode):
                 return None

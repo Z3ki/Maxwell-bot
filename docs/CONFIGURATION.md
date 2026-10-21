@@ -254,7 +254,7 @@ Frequently used controls include:
 | `memory_history_messages` | Most recent channel messages per turn (default 40) |
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
 | `message_quota_limit` | Free messages per rolling window (default 150) |
-| `message_quota_window_seconds` | Rolling window length (default 3600, one hour) |
+| `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
 | `message_quota_enabled` | Forced off for unlimited request admission |
 | `store_memory` | Conversation-memory storage switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |

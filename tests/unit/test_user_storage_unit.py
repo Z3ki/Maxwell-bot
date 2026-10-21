@@ -103,6 +103,20 @@ def test_quota_and_file_count(storage, monkeypatch):
         storage.write(PREMIUM, "one-too-many", b"")
 
 
+def test_path_through_a_file_is_not_an_os_error(storage):
+    storage.write(PREMIUM, "notes.txt", b"hi")
+    assert storage.file_path(PREMIUM, "notes.txt/x") is None
+    with pytest.raises(StorageError, match="not found"):
+        storage.read(PREMIUM, "notes.txt/x")
+    with pytest.raises(StorageError, match="does not exist"):
+        storage.list(PREMIUM, "notes.txt/x")
+    with pytest.raises(StorageError, match="nothing at that path"):
+        storage.delete(PREMIUM, "notes.txt/x")
+    with pytest.raises(StorageError, match="file, not a folder"):
+        storage.write(PREMIUM, "notes.txt/x", b"a")
+    assert storage.read(PREMIUM, "notes.txt") == b"hi"
+
+
 def test_host_symlinks_are_never_followed(storage, tmp_path):
     storage.write(PREMIUM, "real.txt", b"ok")
     secret = tmp_path / "secret"
