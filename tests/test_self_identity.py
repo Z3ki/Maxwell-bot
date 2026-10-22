@@ -150,6 +150,7 @@ def test_build_messages_injects_guild_nick_into_dynamic_context():
     assert "server nickname in Cool Guild" in volatile
     assert "Your Discord access in Cool Guild" in volatile
     assert "Asker alice (456) Discord access in Cool Guild" in volatile
+    assert "Action permissions in #general" in volatile
     assert "Server map Cool Guild" in volatile
     assert "list_channels / list_roles / list_members" in volatile
     assert "Your name here: Sparky" not in static
@@ -234,6 +235,7 @@ def test_build_messages_dm_uses_account_name():
     assert "no server nickname" in volatile
     assert "Your Discord access" not in volatile
     assert "Asker alice" not in volatile
+    assert "Action permissions" not in volatile
 
 
 def test_build_messages_author_without_bot_flag():

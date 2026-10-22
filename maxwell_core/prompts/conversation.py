@@ -23,7 +23,12 @@ from context_budget import BudgetPlan, fit_lines
 from control_defaults import DEFAULT_CONTROL, audio_input_enabled
 from discord_threads import is_discord_thread
 from identity import process_name
-from tooling.helpers import _guild_access_line, _guild_room_context, _user_access_line
+from tooling.helpers import (
+    _guild_access_line,
+    _guild_room_context,
+    _permission_context_line,
+    _user_access_line,
+)
 from user_install import is_user_install_message, merge_user_install_history
 from context_hydration import (
     hydration_value,
@@ -208,6 +213,10 @@ class ConversationPromptBuilder:
         )
         if asker:
             dynamic_parts.append(asker)
+        if getattr(message, "guild", None) is not None:
+            permission_line = _permission_context_line(message.guild, message)
+            if permission_line:
+                dynamic_parts.append(permission_line)
         room = _guild_room_context(
             getattr(message, "guild", None),
             getattr(message, "channel", None),

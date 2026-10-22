@@ -850,6 +850,156 @@ def _mod_tools_allowed(guild, message) -> set[str]:
     return set(_tools_for_caps(bot_caps)) & set(_tools_for_caps(user_caps))
 
 
+# Mod tools gated by _mod_tools_allowed. delete_message stays open for own
+# messages and create_invite can target another server the asker manages;
+# both still check permissions inside the tool.
+_GATED_MOD_TOOLS = frozenset(_ALL_MOD_TOOLS) - {"delete_message", "create_invite"}
+
+# Permissions that decide which server actions exist this turn, in prompt order.
+_ACTION_PERM_NAMES = (
+    "manage_channels",
+    "manage_roles",
+    "move_members",
+    "mute_members",
+    "deafen_members",
+    "kick_members",
+    "ban_members",
+    "moderate_members",
+    "manage_messages",
+    "pin_messages",
+    "manage_nicknames",
+    "manage_guild",
+    "view_audit_log",
+    "manage_expressions",
+    "create_instant_invite",
+)
+
+
+def _turn_action_caps(guild, message) -> tuple[set[str] | None, set[str] | None]:
+    """Channel-effective caps for (asker, bot), the same view tool gating uses.
+
+    None means that side could not be read. Only the current guild and the
+    asker's Member in it are consulted, never another server.
+    """
+    channel = getattr(message, "channel", None) if message is not None else None
+    me = _guild_me(guild)
+    bot_caps = None
+    if me is not None and _member_channel_perms(me, channel) is not None:
+        bot_caps, _ = _admin_caps(guild, me, channel)
+    member = _resolve_requester_member(guild, message)
+    user_caps = None
+    if member is not None and _member_channel_perms(member, channel) is not None:
+        user_caps, _ = _member_caps(member, channel)
+    return user_caps, bot_caps
+
+
+def _voice_state_text(member) -> str:
+    voice = getattr(member, "voice", None)
+    vc = getattr(voice, "channel", None)
+    if vc is None:
+        return "not in voice"
+    return f"in voice #{getattr(vc, 'name', 'voice')} ({getattr(vc, 'id', '?')})"
+
+
+def _permission_context_line(guild, message) -> str:
+    """Per-turn line: who can do which server action here, and why not.
+
+    Uses channel-effective permissions for the asker and for the bot, matching
+    _mod_tools_allowed. An action runs only when both sides hold the perm.
+    """
+    if guild is None or message is None:
+        return ""
+    user_caps, bot_caps = _turn_action_caps(guild, message)
+    channel = getattr(message, "channel", None)
+    where = f"#{getattr(channel, 'name', None) or 'this channel'}"
+    head = f"Action permissions in {where} (asker AND me both need the perm): "
+    if user_caps is None and bot_caps is None:
+        body = "unknown (permissions not readable); actions stay checked when run"
+    else:
+        user_admin = user_caps is not None and "administrator" in user_caps
+        bot_admin = bot_caps is not None and "administrator" in bot_caps
+        available: list[str] = []
+        asker_lacks: list[str] = []
+        bot_lacks: list[str] = []
+        both_lack: list[str] = []
+        for cap in _ACTION_PERM_NAMES:
+            user_ok = user_caps is not None and _has_cap(user_caps, cap)
+            bot_ok = bot_caps is not None and _has_cap(bot_caps, cap)
+            if user_ok and bot_ok:
+                available.append(cap)
+            elif bot_ok:
+                asker_lacks.append(cap)
+            elif user_ok:
+                bot_lacks.append(cap)
+            else:
+                both_lack.append(cap)
+        if user_admin and bot_admin:
+            bits = ["available=all (both administrator)"]
+        else:
+            bits = [f"available={', '.join(available) or 'none'}"]
+            if user_caps is None:
+                bits.append("asker perms unreadable")
+            elif asker_lacks:
+                bits.append(f"asker lacks={', '.join(asker_lacks)}")
+            if bot_caps is None:
+                bits.append("my perms unreadable")
+            elif bot_lacks:
+                bits.append(f"I lack={', '.join(bot_lacks)}")
+            if both_lack and user_caps is not None and bot_caps is not None:
+                bits.append(f"both lack={', '.join(both_lack)}")
+        body = " | ".join(bits)
+        if not (user_admin and bot_admin):
+            body += (
+                ". Tools for unavailable actions are hidden. If asked for one, "
+                "say whether the asker or I lack which permission; do not guess "
+                "or promise it"
+            )
+    member = _resolve_requester_member(guild, message)
+    voice = f" | Asker {_voice_state_text(member)}" if member is not None else ""
+    return head + body + voice + "."
+
+
+def _mod_tool_refusal(guild, message, tool: str, params=None) -> str:
+    """Explain why a gated mod tool cannot run here, or "" if it may proceed.
+
+    Mirrors _mod_tools_allowed (it never allows more). Calls aimed at another
+    server via guild_id are left to the tool's own checks for that server.
+    """
+    if guild is None or tool not in _GATED_MOD_TOOLS:
+        return ""
+    target = (params or {}).get("guild_id") if isinstance(params, dict) else None
+    if target not in (None, "") and str(target).strip() != str(getattr(guild, "id", "")):
+        return ""
+    if tool in _mod_tools_allowed(guild, message):
+        return ""
+    needed = tuple(cap for cap, names in _CAP_TOOLS.items() if tool in names)
+    shown = " or ".join(needed) or "the required permission"
+    user_caps, bot_caps = _turn_action_caps(guild, message)
+    user_ok = user_caps is not None and any(_has_cap(user_caps, c) for c in needed)
+    bot_ok = bot_caps is not None and any(_has_cap(bot_caps, c) for c in needed)
+    channel = getattr(message, "channel", None)
+    where = (
+        f"#{getattr(channel, 'name', None) or 'this channel'} in "
+        f"{getattr(guild, 'name', None) or 'this server'}"
+    )
+    member = _resolve_requester_member(guild, message)
+    who = getattr(member, "display_name", None) or getattr(member, "name", None) or "you"
+    if not user_ok and not bot_ok:
+        return (
+            f"Error: {tool} is unavailable: neither {who} nor I have {shown} "
+            f"in {where}. Do not retry."
+        )
+    if not bot_ok:
+        return (
+            f"Error: {tool} is unavailable: I (the bot) lack {shown} in {where}. "
+            "A server admin must grant my role that permission. Do not retry."
+        )
+    return (
+        f"Error: {tool} is unavailable: {who} lacks {shown} in {where}. "
+        "I only run this for people who hold that permission. Do not retry."
+    )
+
+
 def _needed_cap_label(cap: str, alt_caps: tuple[str, ...] = ()) -> str:
     needed = tuple(dict.fromkeys((cap,) + tuple(alt_caps)))
     return needed[0] if len(needed) == 1 else " or ".join(needed)

@@ -164,6 +164,14 @@ class ToolCallsMixin:
                     "Error: Discord server and moderation tools are not "
                     "available in DMs. Reply here instead."
                 )
+            elif (
+                getattr(message, "guild", None) is not None
+                and name in _GATED_MOD_TOOLS
+                and (mod_refusal := _mod_tool_refusal(message.guild, message, name, params))
+            ):
+                # Same view as the hidden catalog: say which side lacks the
+                # perm instead of letting the model guess or retry.
+                result_text = mod_refusal
             elif name not in compatible and not plugin_allowed:
                 result_text = "Error - tool is not available on this platform"
             elif name not in self.tools and not plugin_allowed:
@@ -1161,15 +1169,9 @@ class ToolCallsMixin:
             names.difference_update(DM_BLOCKED_TOOLS)
         if guild is not None:
             allowed_mod = _mod_tools_allowed(guild, message)
-            for tool in _ALL_MOD_TOOLS:
-                # Own-message deletes stay available without manage_messages.
-                if tool == "delete_message":
-                    continue
-                # Invites can target another server the asker has perm in.
-                if tool == "create_invite":
-                    continue
-                if tool not in allowed_mod:
-                    names.discard(tool)
+            # _GATED_MOD_TOOLS leaves out delete_message (own messages) and
+            # create_invite (can target another server the asker manages).
+            names.difference_update(_GATED_MOD_TOOLS - allowed_mod)
         if (
             str(getattr(message, "user_install_web_mode", "auto") or "auto")
             .strip()
