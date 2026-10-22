@@ -180,7 +180,7 @@ on every action; retired message-limit controls are no longer advertised.
 prefix commands and standalone personality/owner settings commands are retired.
 Maxwell's shared system prompt cannot be edited through `/config`.
 
-Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, checkout, price, or token quota. When the quota is on, the free allowance defaults to 200 messages per five hours. An operator can grant premium, which raises that allowance to 2,000 messages in the same window and uses `AI_PREMIUM_MODEL` when that variable is set.
+Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, checkout, price, or token quota. When the quota is on, the free allowance defaults to 150 messages per five hours. An operator can grant premium, which raises that allowance to at least 500 messages (or the higher configured free limit) in the same window and uses `AI_PREMIUM_MODEL` when that variable is set.
 
 ### A loaded tool is missing in one server
 
