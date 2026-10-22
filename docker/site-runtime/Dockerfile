@@ -16,26 +16,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     # request/response
-    flask==3.1.0 \
+    flask==3.1.3 \
     waitress==3.0.2 \
     # websockets / async — this is what multiplayer runs on
-    fastapi==0.115.6 \
+    fastapi==0.133.1 \
+    # fastapi<0.133 caps starlette below the patched 1.3.1 line
+    starlette==1.3.1 \
     "uvicorn[standard]==0.34.0" \
     websockets==14.1 \
-    python-multipart==0.0.20 \
+    python-multipart==0.0.31 \
     # accounts: password hashing and signed tokens
     bcrypt==4.2.1 \
-    pyjwt==2.10.1 \
+    pyjwt==2.15.0 \
     itsdangerous==2.2.0 \
     # data
     sqlalchemy==2.0.36 \
     # chess rules (import chess)
     python-chess==1.999 \
     # outbound + rendering + media
-    requests==2.32.3 \
+    requests==2.33.0 \
     httpx==0.28.1 \
-    jinja2==3.1.5 \
-    pillow==11.1.0
+    jinja2==3.1.6 \
+    pillow==13.0.0
 
 # Unprivileged. The code mount is read-only; /data is the only writable path
 # that survives a restart.
