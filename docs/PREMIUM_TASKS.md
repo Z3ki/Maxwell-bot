@@ -93,14 +93,23 @@ processing can already have reached a provider; published websites and sandbox
 files retain their separate tool/operator deletion lifecycle.
 
 Defaults: one job per user, at most two siblings, four active worker slots globally,
-100 LLM steps each, and a 7200-second (120-minute) job deadline. The model may
+200 tool rounds each, and a 7200-second (120-minute) job deadline. The model may
 request up to 240 minutes per job with `delegate_task` `timeout_minutes`. The text budget follows
 `AI_WORKER_CONTEXT_WINDOW` (output tokens reserved, about four characters per
 token). With no window configured it is 2,000,000 characters. Set
-`task_workers_context_chars` only to tighten that. Workers have independent request/job deadlines; chat keeps its own
+`task_workers_context_chars` only to tighten that. At 75% of the remaining history
+budget, workers checkpoint older rounds with their selected AI connection and
+continue the same task. Original task/tool instructions and complete recent tool
+batches remain; checkpoints carry completed actions, paths, source/publication
+URLs, failures and next steps so completed side effects are not deliberately
+replayed. Large transcripts are summarized in bounded fragments; checkpoint calls
+cannot execute tools, do not consume tool rounds and remain inside the job deadline
+and authorization checks. An invalid checkpoint fails the job rather than silently
+forgetting earlier work. Tasks/tool schemas that cannot fit initially still return
+`context_limit`. Workers have independent request/job deadlines; chat keeps its own
 normal deadline. Sibling tool calls serialize; model calls may overlap. Controls:
 `premium_task_workers_enabled`, `task_workers_max_active` (1–8),
-`task_workers_max_steps` (1–100, default 100), `task_workers_timeout_seconds` (60–14400, default 7200) and
+`task_workers_max_steps` (1–200, default 200), `task_workers_timeout_seconds` (60–14400, default 7200) and
 `task_workers_context_chars` (up to 2,000,000). Permission, Premium, privacy and
 source-access checks run before model/tool steps; a two-second watchdog also
 stops long in-flight work when access is revoked. A request already sent externally

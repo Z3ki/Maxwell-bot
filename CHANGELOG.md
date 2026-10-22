@@ -18,6 +18,7 @@
 
 ## Unreleased
 
+- Compact subagent context into bounded working-memory checkpoints and continue the same task instead of stopping when tool history fills the window. Preserve original instructions and recent complete tool batches; carry completed actions, paths, sources and next steps forward without running tools during compaction. Raise the default and maximum worker tool rounds from 100 to 200.
 - Keep subagent output: files a job reports from `/workspace` are copied to the requester's `/storage/jobs/<id>/` and attached when it finishes, and the sandbox stays pinned while a job runs. Fixes the lost `.mcaddon` after the 10-minute idle wipe.
 - Add Premium persistent storage (`user_storage` plugin): 100 MB per account at `/storage` in the shell, restored after every idle wipe, with a `storage` tool, signed private links and a public folder served at `/u/<handle>/`.
 - Add Premium schedules (`schedules` plugin): cron or one-time wake-ups that run a saved prompt as a background job and post the result. Maxwell can create them through the `schedule` tool.

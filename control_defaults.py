@@ -104,7 +104,7 @@ DEFAULT_CONTROL = {
     "live_turn_timeout_seconds": 900,
     "premium_task_workers_enabled": True,
     "task_workers_max_active": 4,
-    "task_workers_max_steps": 100,
+    "task_workers_max_steps": 200,
     # Subagent whole-job budget (2h). The model may ask for up to 4h via
     # delegate_task timeout_minutes; see provider_limits.WORKER_TIMEOUT_MAX_SECONDS.
     "task_workers_timeout_seconds": 7200,
