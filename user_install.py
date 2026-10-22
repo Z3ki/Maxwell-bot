@@ -986,6 +986,74 @@ class UserInstallSession:
         return last
 
 
+INTERACTION_FALLBACK_TEXT = "Maxwell couldn't finish this /maxwell request. Please try again."
+INTERACTION_STOPPED_TEXT = (
+    "This /maxwell request was stopped before Maxwell replied. Please try again."
+)
+_INTERACTION_TERMINAL = frozenset({"delivered", "suppressed", "failed", "superseded"})
+
+
+async def resolve_unanswered_interaction(
+    bot: Any, message: Any, *, cancelled: bool = False, turn_finished: bool = False
+) -> bool:
+    """Give a deferred /maxwell interaction a final reply if it never got one.
+
+    Discord shows "Maxwell is thinking..." until the deferred response gets a
+    follow-up. Any path that ends the turn without one (error, cancellation,
+    suppression) leaves the command stuck, so this posts a short notice.
+    A request still queued, running, or awaiting a retry is left to that turn.
+    Returns True when a fallback was sent.
+    """
+    if not is_user_install_message(message):
+        return False
+    session = getattr(message, "_session", None)
+    if session is None or getattr(session, "_sent", 0) or getattr(session, "_resolving", False):
+        return False
+    status = ""
+    state = getattr(bot, "_request_state", None)
+    if callable(state):
+        try:
+            status = str(((await state(message)) or {}).get("status") or "")
+        except Exception:
+            status = ""
+    if status == "delivered":
+        return False
+    if not cancelled:
+        if status and status not in _INTERACTION_TERMINAL:
+            return False  # Queued, running, or deferred for a retry.
+        if not status and not turn_finished:
+            return False
+    session._resolving = True
+    try:
+        if getattr(session, "_sent", 0):
+            return False
+        text = INTERACTION_STOPPED_TEXT if cancelled else INTERACTION_FALLBACK_TEXT
+        # Shield the send so a second cancellation cannot abort the one
+        # message that unsticks the interaction.
+        send = asyncio.ensure_future(session._send_impl(text))
+        try:
+            await asyncio.wait_for(asyncio.shield(send), timeout=10)
+        except asyncio.CancelledError:
+            if not cancelled:
+                raise
+            return False
+        except Exception as exc:
+            logger.warning("user-install fallback reply failed: %s", type(exc).__name__)
+            return False
+        record = getattr(bot, "_record_request_outcome", None)
+        if callable(record) and status not in _INTERACTION_TERMINAL:
+            # A retry must not answer again after the fallback.
+            with contextlib.suppress(Exception):
+                await record(
+                    message,
+                    "failed",
+                    "interaction_cancelled" if cancelled else "interaction_unanswered",
+                )
+        return True
+    finally:
+        session._resolving = False
+
+
 # Base send (no plugin wrappers yet). _rebuild_session_send re-applies the
 # note layer whenever the wrapper chain changes.
 UserInstallSession.send = _with_policy_notice(UserInstallSession._send_impl)  # type: ignore[method-assign]
@@ -1217,10 +1285,20 @@ async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
 
         # Public replies cannot keep an ephemeral follow-up: Discord deletes
         # it as soon as the answer lands. DM that one notice instead.
-        if visibility != "private":
-            await maybe_notice(bot, interaction)
-        if callable(on_message):
-            await on_message(message)
+        try:
+            if visibility != "private":
+                await maybe_notice(bot, interaction)
+            if callable(on_message):
+                await on_message(message)
+        except asyncio.CancelledError:
+            await resolve_unanswered_interaction(bot, message, cancelled=True)
+            raise
+        except Exception:
+            logger.exception("user-install turn admission failed")
+            await resolve_unanswered_interaction(bot, message, turn_finished=True)
+        else:
+            # Suppressed at admission (disabled, ignored, ...) without a reply.
+            await resolve_unanswered_interaction(bot, message)
 
     if callable(spawn) and callable(on_message):
         spawn(run_turn())
