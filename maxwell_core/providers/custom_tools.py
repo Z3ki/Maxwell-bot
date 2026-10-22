@@ -48,6 +48,13 @@ class _CustomToolCallBuffer:
         self.completed: list[dict] = []
         self._on_partial_name = on_partial_name
         self._announced_names: set[str] = set()
+        # Incremental brace/string state for the pending candidate. Rescanning
+        # the whole JSON on every SSE delta is quadratic and stalls the loop.
+        self._scan_start: int | None = None
+        self._scan_cursor = 0
+        self._scan_depth = 0
+        self._scan_in_str = False
+        self._scan_escape = False
 
     @property
     def has_pending_json(self) -> bool:
@@ -108,12 +115,28 @@ class _CustomToolCallBuffer:
                 self._announced_names.add(opener_name)
                 with contextlib.suppress(Exception):
                     self._on_partial_name(opener_name)
-            end = _find_balanced_json_end(self._buf, match.start())
+            if self._scan_start != match.start():
+                self._scan_start = match.start()
+                self._scan_cursor = match.start()
+                self._scan_depth = 0
+                self._scan_in_str = False
+                self._scan_escape = False
+            end, self._scan_cursor, self._scan_depth, self._scan_in_str, self._scan_escape = (
+                _scan_json_end(
+                    self._buf,
+                    self._scan_cursor,
+                    self._scan_depth,
+                    self._scan_in_str,
+                    self._scan_escape,
+                )
+            )
             if end is None:
                 if len(self._buf) - match.start() > _GIVE_UP_BYTES:
                     release(match.start() + 1)
+                    self._reset_scan()
                     continue
                 break
+            self._reset_scan()
             obj = _safe_parse_tool_call_candidate(self._buf[match.start() : end])
             if (
                 not isinstance(obj, dict)
@@ -124,6 +147,7 @@ class _CustomToolCallBuffer:
                 # Advancing the search must also release the skipped brace.
                 # Dropping it silently corrupted ordinary malformed JSON.
                 release(match.start() + 1)
+                self._reset_scan()
                 continue
             self.completed.append(
                 {
@@ -138,9 +162,21 @@ class _CustomToolCallBuffer:
                 }
             )
             self._released_len = end
-        self._buf = self._buf[self._released_len :]
+        released = self._released_len
+        self._buf = self._buf[released:]
+        if self._scan_start is not None:
+            # Keep the incremental cursor aligned with the trimmed buffer.
+            self._scan_start -= released
+            self._scan_cursor -= released
         self._released_len = 0
         return "".join(visible)
+
+    def _reset_scan(self) -> None:
+        self._scan_start = None
+        self._scan_cursor = 0
+        self._scan_depth = 0
+        self._scan_in_str = False
+        self._scan_escape = False
 
     def drain(self) -> None:
         """Release any incomplete candidate when generation has ended."""
@@ -148,6 +184,37 @@ class _CustomToolCallBuffer:
             self.text_parts.append(self._buf)
             self._buf = ""
         self._released_len = 0
+
+
+def _scan_json_end(text: str, cursor: int, depth: int, in_str: bool, escape: bool):
+    """Resume a balanced-object scan from *cursor*.
+
+    Returns ``(end_or_None, cursor, depth, in_str, escape)``. The caller keeps
+    the state across deltas so a large streamed tool call is scanned once, not
+    once per chunk.
+    """
+    i = cursor
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1, i + 1, 0, False, False
+        i += 1
+    return None, i, depth, in_str, escape
 
 
 def _find_balanced_json_end(text: str, start: int) -> int | None:

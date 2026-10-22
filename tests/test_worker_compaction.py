@@ -82,7 +82,12 @@ def test_invalid_checkpoint_stops_without_replaying_completed_work(tmp_path, inv
 def test_compaction_rechecks_entitlement_between_fragments(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
     base = [{"role": "user", "content": "Research without repeating writes"}]
-    chunks = [[{"role": "tool", "content": "雪\\\"" * 10000}]]
+    # An older batch provides multiple checkpoint fragments; the newest batch
+    # is deliberately retained raw (issue #134) and is not part of the summary.
+    chunks = [
+        [{"role": "tool", "content": "雪\\\"" * 10000}],
+        [{"role": "tool", "content": "recent output"}],
+    ]
 
     async def generate(messages, **kwargs):
         bot._message_quota.configure("123", plan="free")
@@ -106,3 +111,56 @@ def test_worker_allows_200_rounds_but_stops_before_201(tmp_path, configured):
     assert report["status"] == "step_limit"
     assert shell.execute.await_count == 200
     assert report["completed"] == [{"tool": "shell", "status": "returned"}] * 200
+
+
+def test_newest_tool_batch_is_kept_before_summarization(tmp_path):
+    """Issue #134: the model must read the output it just requested."""
+    bot, msg, shell, worker = setup(tmp_path)
+    bot._control["task_workers_context_chars"] = 60000
+    outputs = {
+        "warmup": "w" * 200000,
+        "read-a": "SECRET-LINE-A " + "a" * 200000,
+        "read-b": "SECRET-LINE-B " + "b" * 200000,
+    }
+
+    async def run_shell(_message, command, **_kwargs):
+        return outputs[command]
+
+    shell.execute.side_effect = run_shell
+
+    def batch(*commands):
+        return ProviderResult(
+            "",
+            tool_calls=[
+                {
+                    "id": f"c{i}",
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "arguments": json.dumps({"command": command}),
+                    },
+                }
+                for i, command in enumerate(commands)
+            ],
+        )
+
+    seen = []
+    rounds = 0
+
+    async def generate(messages, **kwargs):
+        nonlocal rounds
+        if not kwargs["tools"]:
+            seen.append(("checkpoint", "SECRET-LINE-A" in json.dumps(messages)))
+            return ProviderResult("Ran warmup, read-a, read-b.")
+        rounds += 1
+        seen.append(("tools-round", rounds, "SECRET-LINE-A" in json.dumps(messages)))
+        if rounds == 1:
+            return batch("warmup")
+        if rounds == 2:
+            return batch("read-a", "read-b")
+        return ProviderResult("done")
+
+    bot._generate_response.side_effect = generate
+    asyncio.run(worker.run(msg, tasks=TASKS))
+    assert ("checkpoint", False) in seen
+    assert ("tools-round", 3, True) in seen

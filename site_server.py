@@ -188,6 +188,14 @@ def prepare_state_dir(data_dir, slug: str) -> Path:
                     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                         raise SiteServerError(f"unsupported file in backend data: {name}")
+                # A directory the site created for itself with 0700 is not
+                # traversable by a cap-dropped controller. The site already
+                # has the access it needs, so do not descend (fwalk would open
+                # it before we could skip it and fail every later deploy).
+                for name in list(dirs):
+                    info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if info.st_uid == SITE_UID and info.st_mode & 0o005 != 0o005:
+                        dirs.remove(name)
                 for name in files:
                     info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                     if info.st_uid == SITE_UID and info.st_mode & 0o600 == 0o600:
@@ -988,6 +996,10 @@ async def _start_unlocked(
     await _check_host_ready()
     await _admit_backend(slug)
     await _ensure_image()
+    if not previous:
+        # No registry row: this is a fresh claim of the slug (often after a
+        # deletion). Never hand the previous tenant's database to a new owner.
+        await _clear_state(data_dir, slug)
     if env is None:
         previous_env = previous.get("env")
         env = (
@@ -1155,15 +1167,78 @@ async def stop(data_dir, slug: str) -> bool:
         return await _stop_unlocked(data_dir, slug)
 
 
+async def _clear_state(data_dir, slug: str) -> None:
+    """Empty the site's writable /data, including directories it owns."""
+    state = state_dir(data_dir, slug)
+    if not state.exists():
+        return
+    try:
+        await asyncio.to_thread(shutil.rmtree, state)
+        return
+    except OSError:
+        pass
+    script = (
+        "import os,shutil,sys\n"
+        "root='/cleanup'\n"
+        "failed=False\n"
+        "for name in os.listdir(root):\n"
+        "    path=os.path.join(root,name)\n"
+        "    try:\n"
+        "        if os.path.isdir(path) and not os.path.islink(path):\n"
+        "            shutil.rmtree(path)\n"
+        "        else:\n"
+        "            os.unlink(path)\n"
+        "    except OSError:\n"
+        "        failed=True\n"
+        "sys.exit(1 if failed else 0)\n"
+    )
+    code, out, err = await _docker(
+        "run", "--rm", "--network", "none", "--read-only",
+        "--memory", "128m", "--memory-swap", "128m", "--pids-limit", "32",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m",
+        "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+        "--user", f"{SITE_UID}:{SITE_GID}",
+        "-v", f"{docker_bind_path(state.resolve())}:/cleanup:rw",
+        "--entrypoint", "python3", IMAGE, "-c", script, timeout=60,
+    )
+    if code != 0:
+        raise SiteServerError(
+            "could not remove site data: "
+            + ((err or out).strip()[:300] or "cleanup container failed")
+        )
+    with contextlib.suppress(FileNotFoundError):
+        await asyncio.to_thread(shutil.rmtree, state)
+
+
+async def _remove_tree(data_dir, slug: str) -> None:
+    """Remove a site's code and data, including files the site owns.
+
+    The controller runs with cap_drop=ALL and is "other" to files the backend
+    created (often 0700 uid 10001), so a plain rmtree can fail halfway. Clear
+    /data from a one-shot container running as the site uid, then remove the
+    remaining controller-owned tree.
+    """
+    source = code_dir(data_dir, slug)
+    if not source.exists():
+        return
+    try:
+        await asyncio.to_thread(shutil.rmtree, source)
+        return
+    except OSError:
+        pass
+    await _clear_state(data_dir, slug)
+    await asyncio.to_thread(shutil.rmtree, source)
+
+
 async def _destroy_unlocked(data_dir, slug: str) -> None:
     """Site is gone: container, code, database, secrets, registry row."""
     slug = _check_slug(slug)
+    # Drop the registry row (and the env secrets in it) first. Any later
+    # teardown failure must not leave credentials available to a new owner.
+    _write_entry(data_dir, slug, None)
     await _remove_container(slug)
     await _remove_site_image(slug)
-    source = code_dir(data_dir, slug)
-    if source.exists():
-        shutil.rmtree(source)
-    _write_entry(data_dir, slug, None)
+    await _remove_tree(data_dir, slug)
 
 
 async def destroy(data_dir, slug: str) -> None:

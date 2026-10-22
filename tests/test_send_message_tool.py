@@ -569,3 +569,14 @@ def test_failed_effect_checkpoint_prevents_send():
         assert message.channel.sent == []
 
     asyncio.run(run())
+
+
+def test_long_fenced_code_is_closed_and_reopened_across_chunks():
+    code = "```python\n" + "\n".join(f"print({i})" for i in range(700)) + "\n```"
+    chunks = SendMessageTool._chunks(code)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 1900 for chunk in chunks)
+    for chunk in chunks[1:]:
+        assert chunk.startswith("```python")
+    for chunk in chunks[:-1]:
+        assert chunk.rstrip().endswith("```")

@@ -532,3 +532,19 @@ def test_proxy_releases_admission_slot_on_cancellation(data_dir, monkeypatch):
                 release.set()
 
     run(scenario())
+
+
+def test_proxy_rewrites_loopback_and_relative_redirects(monkeypatch):
+    monkeypatch.setenv("MAXWELL_PUBLIC_BASE_URL", "https://bot.example/dev")
+    assert api._rewrite_site_location(
+        "http://127.0.0.1:8800/login?x=1", "demo"
+    ) == "https://bot.example/dev/bot/demo/api/login?x=1"
+    assert api._rewrite_site_location("/login", "demo") == (
+        "/dev/bot/demo/api/login"
+    )
+    assert api._rewrite_site_location("/bot/demo/api/login", "demo") == (
+        "/dev/bot/demo/api/login"
+    )
+    assert api._rewrite_site_location(
+        "/dev/bot/demo/api/login", "demo"
+    ) == "/dev/bot/demo/api/login"

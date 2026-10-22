@@ -370,6 +370,29 @@ def install_rich_interactions(bot: Any, ctx: PluginContext, tool: Any) -> RichIn
             await _expired(interaction)
             return
 
+        # The stored prompt runs with the *clicker's* identity and permissions.
+        # Only the user who created the card may execute that hidden
+        # instruction; otherwise this is a confused-deputy escalation.
+        clicker = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+        owner = str(row.get("owner_id") or "")
+        if not owner or clicker != owner:
+            response = getattr(interaction, "response", None)
+            try:
+                is_done = getattr(response, "is_done", None)
+                if callable(is_done) and is_done():
+                    followup = getattr(interaction, "followup", None)
+                    if callable(getattr(followup, "send", None)):
+                        await followup.send(
+                            "This button belongs to another user.", ephemeral=True
+                        )
+                elif callable(getattr(response, "send_message", None)):
+                    await response.send_message(
+                        "This button belongs to another user.", ephemeral=True
+                    )
+            except Exception:
+                pass
+            return
+
         await _ack_interaction(interaction)
         label = str(row.get("label") or "action")
         action_prompt = str(row.get("prompt") or "").strip()

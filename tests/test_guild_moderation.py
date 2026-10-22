@@ -77,7 +77,8 @@ def test_list_admin_servers_includes_current_server_without_extra_perms():
     result = asyncio.run(ListAdminServersTool(bot).execute(msg))
     assert "This server:" in result
     assert "Here" in result
-    assert "There" in result
+    # Other guilds the bot is in are not the requester's to enumerate.
+    assert "There" not in result
 
 
 def test_kick_member_refuses_without_permission():

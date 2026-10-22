@@ -183,47 +183,21 @@ class ListAdminServersTool(Tool):
 
     def get_description(self):
         return (
-            "Inspect Discord roles/permissions. Shows which of YOUR roles grant "
-            "mod/admin perms and which tools those unlock. No args: current "
-            "server first, then every server where you have elevated perms. "
-            "Params: guild_id (optional, one server in detail)."
+            "Inspect this server's Discord roles and the bot's permissions. "
+            "Shows which permissions unlock which mod/admin tools. "
+            "Params: guild_id (optional; must be the current server)."
         )
 
     async def execute(
         self, message: Message, guild_id: str | None = None, **kwargs
     ) -> str:
-        current = getattr(message, "guild", None)
-        wanted = _parse_snowflake(guild_id)
-        if wanted is not None:
-            guild = self.bot.get_guild(wanted)
-            if guild is None:
-                return f"Error: I am not in server {guild_id} or it is not cached"
-            return _guild_access_detail(guild)
-
-        blocks = []
-        if current is not None:
-            blocks.append("This server:\n" + _guild_access_detail(current))
-        others = []
-        for guild in getattr(self.bot, "guilds", []) or []:
-            if current is not None and getattr(guild, "id", None) == getattr(
-                current, "id", None
-            ):
-                continue
-            caps, _reason = _admin_caps(guild)
-            if not caps:
-                continue
-            others.append(_guild_access_detail(guild))
-        if others:
-            blocks.append(
-                "Other servers with elevated perms:\n" + "\n\n".join(others[:20])
-            )
-        if current is None and not others:
-            # blocks is empty exactly here, so this is the only empty case.
-            return (
-                "No servers with cached manage_channels/mod permissions. "
-                "Don't try kick/ban/channel/role tools until this lists a target."
-            )
-        return "\n\n".join(blocks)
+        # Never resolve arbitrary guild IDs for the caller: a bot membership
+        # is not the requester's membership, and guild names, role IDs and
+        # channel counts are not public to someone outside it.
+        guild, error = await _resolve_listing_guild(self.bot, message, guild_id)
+        if error:
+            return error
+        return "This server:\n" + _guild_access_detail(guild)
 
 class ListChannelsTool(Tool):
     """List a guild's channels with ids and settings."""

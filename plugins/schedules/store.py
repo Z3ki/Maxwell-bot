@@ -210,8 +210,12 @@ class ScheduleStore:
             if current is None:
                 return False
             row = {**dict(current), "last_status": status[:200], "updated_at": now}
-            # Someone rescheduled or paused it while we were firing: keep their next_run/enabled.
-            if expected_next is None or current["next_run"] == expected_next:
+            # Someone rescheduled or paused it while we were firing: keep their
+            # next_run/enabled. A pause leaves next_run untouched, so the
+            # enabled flag must match too or this write silently resumes it.
+            if expected_next is None or (
+                current["next_run"] == expected_next and current["enabled"]
+            ):
                 row["next_run"], row["enabled"] = next_run, int(bool(enabled))
             if ran:
                 row.update(last_run=now, runs=int(row["runs"]) + 1, failures=0, last_job=job)

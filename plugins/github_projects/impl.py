@@ -334,7 +334,21 @@ class GitHubProjectService:
         return self.user_tokens.peek(uid)
 
     async def _api(self, uid: str, policy: dict[str, Any], method: str, path: str, *, json_body: Any=None, accept: str="application/vnd.github+json") -> tuple[int,str,Any]:
-        identity = str(policy.get("identity") or "user"); token = self.token(uid, identity)
+        identity = str(policy.get("identity") or "user")
+        if identity == "bot":
+            # The shared operator token can see private/org repos that the
+            # caller cannot. Check live admin status on every call, not only
+            # when the policy was first saved.
+            checker = getattr(self.bot, "_is_admin", None)
+            allowed = False
+            if callable(checker):
+                with contextlib.suppress(Exception):
+                    allowed = bool(checker(uid))
+            if not allowed:
+                raise PermissionError(
+                    "the shared bot GitHub identity is available to Maxwell admins only"
+                )
+        token = self.token(uid, identity)
         if not token:
             if identity=="bot":
                 raise PermissionError("no GitHub credential configured; set MAXWELL_GITHUB_TOKEN")

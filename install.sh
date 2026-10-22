@@ -85,7 +85,7 @@ while [ "$#" -gt 0 ]; do
     --dir) shift; [ "$#" -gt 0 ] || fail "--dir requires a path"; INSTALL_DIR="$1" ;;
     --version) shift; [ "$#" -gt 0 ] || fail "--version requires a release"; RELEASE_VERSION="$1" ;;
     --ref) shift; [ "$#" -gt 0 ] || fail "--ref requires a commit"; RELEASE_REF="$1" ;;
-    --local) LOCAL_MODE=1; INSTALL_DIR="$SCRIPT_DIR"; SKIP_SYSTEM_DEPS="${MAXWELL_SKIP_SYSTEM_DEPS:-1}" ;;
+    --local) LOCAL_MODE=1; INSTALL_DIR="$SCRIPT_DIR" ;;
     *) fail "unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -649,7 +649,7 @@ main() {
   start_stack
   if [ "$WITH_SHELL" = "1" ]; then
     step "Configuring the isolated shell host"
-    bash "$SCRIPT_DIR/scripts/setup_shell_host.sh"
+    run_as_root bash "$SCRIPT_DIR/scripts/setup_shell_host.sh"
     ok "shell host configured"
   fi
   run_doctor

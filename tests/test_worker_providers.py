@@ -291,7 +291,8 @@ def test_worker_byok_shares_parent_tool_budget_across_siblings(tmp_path, monkeyp
     )
 
     async def generate(messages, **kwargs):
-        return call() if len(messages) == 2 else ProviderResult("finished")
+        used_tool = any(row.get("role") == "tool" for row in messages)
+        return ProviderResult("finished") if used_tool else call()
 
     bot._generate_response.side_effect = generate
     budget = {"calls": 23}

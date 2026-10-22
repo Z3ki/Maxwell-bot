@@ -230,11 +230,15 @@ class Config:
     AI_BASE_URL = _first_env(
         "AI_BASE_URL", "AI_API_URL", "OLLAMA_BASE_URL", default="http://localhost:11434"
     )
-    # An explicitly blank friendly key clears a stale legacy credential.
-    AI_API_KEY = os.getenv(
-        "AI_API_KEY",
-        os.getenv("OLLAMA_API_KEY", os.getenv("OPENAI_COMPAT_API_KEY", "")),
-    ).strip()
+    # An explicitly blank friendly key clears a stale legacy credential, but
+    # the documented catch-all still applies when the resolved key is empty.
+    AI_API_KEY = (
+        os.getenv(
+            "AI_API_KEY",
+            os.getenv("OLLAMA_API_KEY", ""),
+        ).strip()
+        or os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
+    )
     # No default model on purpose: a hardcoded one that your endpoint does
     # not serve fails later, as an opaque 404 from the provider. Empty fails
     # at startup with a sentence that says what to do.

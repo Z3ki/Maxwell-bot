@@ -2098,22 +2098,34 @@ class MessagesMixin:
             await message.channel.send(str(e))
             normal_reply_sent = True
         except ProviderUsageExhaustedError as e:
-            if (await MaxwellBot._request_state(self, message)):
+            # A journal row exists for every normal turn; only an already
+            # terminal outcome means this notice was handled elsewhere.
+            state = await MaxwellBot._request_state(self, message)
+            if state.get("status") in _REQUEST_TERMINAL:
                 raise
             logger.warning(f"Provider usage exhausted while handling message: {type(e).__name__}")
             if self._control.get("error_replies", True):
                 try:
-                    await message.channel.send(e.user_message)
+                    await self._mark_request_effect(message)
+                    sent = await self._send_with_slowmode(
+                        message.channel, e.user_message, reply_to=message
+                    )
+                    await self._record_delivery(message, sent)
                     normal_reply_sent = True
                 except discord.Forbidden as _exc:
                     pass
         except ProviderEmptyResponseError as e:
-            if (await MaxwellBot._request_state(self, message)):
+            state = await MaxwellBot._request_state(self, message)
+            if state.get("status") in _REQUEST_TERMINAL:
                 return
             logger.warning("Provider returned no usable response: %s", e)
             if self._control.get("error_replies", True):
                 try:
-                    await message.channel.send(e.user_message)
+                    await self._mark_request_effect(message)
+                    sent = await self._send_with_slowmode(
+                        message.channel, e.user_message, reply_to=message
+                    )
+                    await self._record_delivery(message, sent)
                     normal_reply_sent = True
                 except discord.Forbidden as _exc:
                     pass

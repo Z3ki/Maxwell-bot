@@ -89,6 +89,18 @@ class TaskJobStore:
                 )
             ]
 
+    def list_channel(self, channel_id, guild_id, *, private=False):
+        """Public jobs in one chat, regardless of requester."""
+        with self.db() as db:
+            return [
+                dict(r)
+                for r in db.execute(
+                    "SELECT * FROM jobs WHERE channel_id=? AND guild_id=? AND private=0 "
+                    "ORDER BY created_at DESC LIMIT 20",
+                    (str(channel_id), str(guild_id)),
+                )
+            ] if not private else []
+
     def update(self, job_id, **values):
         if not values or not values.keys() <= {
             "state",

@@ -72,7 +72,10 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # ubuntu-latest now installs ffmpeg from a slow mirror on some runs. The
+    # 15-minute budget was reached before the suite finished; keep headroom so
+    # a slow apt mirror cannot cancel the whole matrix.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

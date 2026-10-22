@@ -153,7 +153,8 @@ def test_parent_turn_timeout_does_not_cancel_background_subagent(tmp_path):
         async def generate(messages, **kwargs):
             entered.set()
             await release.wait()
-            return call() if len(messages) == 2 else ProviderResult("Verified worker result")
+            used_tool = any(row.get("role") == "tool" for row in messages)
+            return call() if not used_tool else ProviderResult("Verified worker result")
 
         bot._generate_response.side_effect = generate
         receipt = {}

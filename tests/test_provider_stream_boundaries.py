@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from maxwell_core.providers.protocol import ProviderProtocolError
 from providers import _read_sse_response
 
 
@@ -179,3 +180,21 @@ def test_done_marker_stops_reading_without_waiting_for_another_network_chunk():
         assert result["choices"][0]["message"]["content"] == "ok"
 
     asyncio.run(run())
+
+
+def test_length_truncated_native_tool_arguments_are_rejected():
+    """A cut-off native call must not become a send_message content argument."""
+    call = {
+        "index": 0,
+        "id": "call_truncated",
+        "type": "function",
+        "function": {"name": "send_message", "arguments": '{"content": "half'},
+    }
+    with pytest.raises(ProviderProtocolError):
+        read([encode(event({"tool_calls": [call]}, finish="length"))])
+
+    complete = {**call, "function": {"name": "send_message", "arguments": '{"content": "hi"}'}}
+    result = read([encode(event({"tool_calls": [complete]}, finish="length"))])
+    assert result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] == (
+        '{"content": "hi"}'
+    )

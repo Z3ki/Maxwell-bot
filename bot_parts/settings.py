@@ -371,9 +371,14 @@ class SettingsMixin:
                         site_backend.destroy, self.config.DATA_DIR, slug
                     )
                 # And its backend container, code, database, and secrets — an
-                # expired site must not leave a server running.
-                with contextlib.suppress(Exception):
+                # expired site must not leave a server running. destroy scrubs
+                # the registry row first; report a partial teardown.
+                try:
                     await site_server.destroy(self.config.DATA_DIR, slug)
+                except Exception as e:
+                    logger.error(
+                        "Expired site backend teardown failed for %s: %s", slug, e
+                    )
             except Exception as e:
                 logger.error(f"Failed to delete site {slug}: {e}")
             expired.append(slug)

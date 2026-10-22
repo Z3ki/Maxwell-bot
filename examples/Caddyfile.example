@@ -58,7 +58,18 @@ maxwell.example.com {
 	handle_path /bot/* {
 		file_server
 	}
-	# Never expose /admin, /api, or /data on the generated-site origin.
+	# Public endpoints the generated pages and GitHub integration use. These
+	# are unauthenticated by design (KV is openly writable; OAuth/webhook
+	# verify their own tokens). Keep the operator API on its separate origin.
+	@public_api path /api/site/* /api/github/webhook /api/github/oauth/*
+	handle @public_api {
+		reverse_proxy 127.0.0.1:8765
+	}
+	# Premium public storage links.
+	handle /u/* {
+		reverse_proxy 127.0.0.1:8765
+	}
+	# Never expose /admin, the operator API, or /data on the site origin.
 	handle {
 		respond "Not found" 404
 	}
