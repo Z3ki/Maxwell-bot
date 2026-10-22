@@ -238,6 +238,7 @@ from user_install import (  # noqa: E402
     USER_INSTALL_COMMANDS,
     handle_user_install_interaction,
     is_user_install_message,
+    resolve_unanswered_interaction,
 )
 from tool_progress import (  # noqa: E402
     is_hidden_progress_tool,

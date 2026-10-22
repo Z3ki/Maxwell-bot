@@ -476,6 +476,8 @@ class RequestPipelineMixin:
         active_messages[cid] = message
         started = time.monotonic()
         request_provider = None
+        user_install = is_user_install_message(message)
+        cancelled = False
         try:
             row = await journal.submit(begin_turn) if journal is not None else {}
             if row and row["status"] in _REQUEST_TERMINAL:
@@ -511,9 +513,12 @@ class RequestPipelineMixin:
                     message, "no_visible_output", retryable=True, normal_completion=True
                 )
         except asyncio.CancelledError:
+            cancelled = True
             row = (await self._request_state(message))
+            # A /maxwell interaction is answered now (see finally), so it must
+            # not also be retried later.
             await self._record_request_outcome(message,
-            "failed" if row.get("effects_started") else "deferred",
+            "failed" if row.get("effects_started") or user_install else "deferred",
             "cancelled_after_effect" if row.get("effects_started") else "cancelled",)
             raise
         except MessageQuotaExceeded as exc:
@@ -541,6 +546,15 @@ class RequestPipelineMixin:
                 ),
             )
         finally:
+            if user_install:
+                # Defensive: every exit path must leave the deferred
+                # interaction with a final reply, or /maxwell stays stuck.
+                try:
+                    await resolve_unanswered_interaction(
+                        self, message, cancelled=cancelled, turn_finished=True
+                    )
+                except Exception:
+                    logger.exception("user-install interaction fallback failed")
             # _handle_message's historic inner finally starts after preparation.
             # This outer cleanup also covers failures before that point.
             state = (getattr(self, "_inflight_context", None) or {}).get(
@@ -624,7 +638,11 @@ class RequestPipelineMixin:
                 return "superseded"
             drop_author = getattr(self._reply_queue, "drop_author", None)
             if callable(drop_author):
-                for entry in drop_author(channel_id, getattr(message.author, "id", "")):
+                for entry in drop_author(
+                    channel_id,
+                    getattr(message.author, "id", ""),
+                    keep=is_user_install_message,
+                ):
                     await self._record_request_outcome(entry.message, "superseded", "same_user_interrupt")
         journal = getattr(self, "_request_journal", None)
         if journal is not None:
@@ -679,6 +697,40 @@ class RequestPipelineMixin:
         author = getattr(getattr(entry.message, "author", None), "id", None)
         return "" if author is None else str(author)
 
+    def _inflight_reply_message(self, channel_id: Any):
+        """Message of the turn currently being answered in this channel."""
+        cid = str(channel_id or "")
+        active = (getattr(self, "_active_requests", None) or {}).get(cid)
+        if active is not None and not active.done():
+            message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
+            if message is not None:
+                return message
+        queue = getattr(self, "_reply_queue", None)
+        state = (getattr(queue, "_channels", None) or {}).get(cid)
+        running = getattr(state, "running", None)
+        entry = getattr(state, "running_entry", None)
+        if entry is None or running is None or running.done():
+            return None
+        return entry.message
+
+    def _inflight_uninterruptible(self, channel_id: Any, user_id: Any) -> bool:
+        """True when this user's in-flight turn came from /maxwell.
+
+        Slash-command runs answer a deferred interaction; cancelling one
+        leaves Discord's "thinking..." placeholder unresolved.
+        """
+        uid = str(user_id or "")
+        message = MaxwellBot._inflight_reply_message(self, channel_id)
+        if not uid or message is None or not is_user_install_message(message):
+            return False
+        return str(getattr(getattr(message, "author", None), "id", "") or "") == uid
+
+    def _queued_entries(self, channel_id: Any) -> list:
+        state = (getattr(getattr(self, "_reply_queue", None), "_channels", None) or {}).get(
+            str(channel_id or "")
+        )
+        return list(getattr(state, "queue", None) or [])
+
     def _should_interrupt_inflight(self, message) -> bool:
         """Stop a generation only when the same user addresses Maxwell again.
 
@@ -695,6 +747,16 @@ class RequestPipelineMixin:
         cid = str(getattr(channel, "id", "") or "")
         if not cid:
             return False
+        uid = str(getattr(author, "id", "") or "")
+        if MaxwellBot._inflight_uninterruptible(self, cid, uid):
+            # A /maxwell turn owns a deferred interaction that only it can
+            # resolve. The new message waits its turn; it may still replace
+            # this user's older queued normal messages, never the slash run.
+            return any(
+                str(getattr(getattr(entry.message, "author", None), "id", "") or "") == uid
+                and not is_user_install_message(entry.message)
+                for entry in MaxwellBot._queued_entries(self, cid)
+            )
         active_task = (getattr(self, "_active_requests", None) or {}).get(cid)
         active_user = (getattr(self, "_active_request_user", None) or {}).get(cid)
         if active_task is not None and not active_task.done() and active_user:
@@ -783,6 +845,10 @@ class RequestPipelineMixin:
             return
         active_user = MaxwellBot._inflight_reply_user(self, cid)
         active_message = (getattr(self, "_active_request_messages", None) or {}).get(cid)
+        if MaxwellBot._inflight_uninterruptible(self, cid, uid):
+            # Never supersede or cancel a /maxwell run; only older queued
+            # normal messages from this user are replaced below.
+            active_user = ""
         if active_user == uid:
             if active_message is not None and str(getattr(active_message, "id", "") or "") != str(
                 getattr(message, "id", "") or ""
@@ -790,7 +856,7 @@ class RequestPipelineMixin:
                 self._record_request_outcome(active_message, "superseded", "same_user_interrupt")
         queue = getattr(self, "_reply_queue", None)
         if queue is not None and hasattr(queue, "drop_author"):
-            for entry in queue.drop_author(cid, uid):
+            for entry in queue.drop_author(cid, uid, keep=is_user_install_message):
                 self._record_request_outcome(entry.message, "superseded", "same_user_interrupt")
             if active_user == uid:
                 queue.cancel_channel(cid, clear_queue=False)

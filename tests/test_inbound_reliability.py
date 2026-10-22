@@ -1196,3 +1196,81 @@ def test_same_user_cancel_during_journal_begin_is_durable(tmp_path, monkeypatch)
     finally:
         blocker.close()
         journal.close()
+
+
+def _slash_message(bot, mid=101):
+    from user_install import UserInstallSession
+
+    followup = SimpleNamespace(payloads=[])
+
+    async def send(content=None, **kwargs):
+        followup.payloads.append(content)
+        return SimpleNamespace(id=20000 + len(followup.payloads), content=content)
+
+    followup.send = send
+    interaction = SimpleNamespace(
+        id=mid,
+        channel_id=22,
+        channel=SimpleNamespace(id=22, name="chat"),
+        guild=None,
+        user=SimpleNamespace(id=11),
+        response=SimpleNamespace(is_done=lambda: True),
+        followup=followup,
+    )
+    message = _message(bot, mid)
+    message.user_install = True
+    message._session = UserInstallSession(interaction, visibility="public")
+    bot._request_journal.accept(mid, 22, 11, directed=True)
+    bot._request_journal.update(mid, "queued")
+    return message, followup
+
+
+def test_reliable_turn_always_answers_a_slash_interaction_on_error(tmp_path):
+    from user_install import INTERACTION_FALLBACK_TEXT
+
+    bot = _bot(tmp_path)
+    message, followup = _slash_message(bot)
+    bot._handle_message = AsyncMock(side_effect=RuntimeError("boom"))
+    asyncio.run(bot._run_reliable_turn(message, "question"))
+    assert followup.payloads == [INTERACTION_FALLBACK_TEXT]
+    assert bot._request_journal.get(message.id)["status"] == "failed"
+
+
+def test_reliable_turn_answers_a_cancelled_slash_interaction(tmp_path):
+    from user_install import INTERACTION_STOPPED_TEXT
+
+    bot = _bot(tmp_path)
+    message, followup = _slash_message(bot)
+
+    async def run():
+        started = asyncio.Event()
+
+        async def hang(_message, _content):
+            started.set()
+            await asyncio.Event().wait()
+
+        bot._handle_message = hang
+        turn = asyncio.create_task(bot._run_reliable_turn(message, "question"))
+        await started.wait()
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        await bot._request_journal.drain()
+
+    asyncio.run(run())
+    assert followup.payloads == [INTERACTION_STOPPED_TEXT]
+    # Answered now, so no later retry may post a second reply.
+    assert bot._request_journal.get(message.id)["status"] == "failed"
+
+
+def test_reliable_turn_adds_no_fallback_after_a_delivered_slash_answer(tmp_path):
+    bot = _bot(tmp_path)
+    message, followup = _slash_message(bot)
+
+    async def answer(msg, _content):
+        sent = await msg._session.send("the answer")
+        await bot._record_delivery(msg, sent)
+
+    bot._handle_message = answer
+    asyncio.run(bot._run_reliable_turn(message, "question"))
+    assert followup.payloads == ["the answer"]

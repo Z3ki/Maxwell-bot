@@ -460,8 +460,13 @@ class ReplyQueue:
             return True
         return False
 
-    def drop_author(self, channel_id: Any, user_id: Any) -> list[_Pending]:
-        """Drop queued turns from one author. The running turn is left alone."""
+    def drop_author(
+        self, channel_id: Any, user_id: Any, *, keep: Any = None
+    ) -> list[_Pending]:
+        """Drop queued turns from one author. The running turn is left alone.
+
+        Entries whose message satisfies ``keep(message)`` are never dropped.
+        """
         cid = str(channel_id or "")
         uid = str(user_id or "")
         state = self._channels.get(cid)
@@ -471,7 +476,9 @@ class ReplyQueue:
         dropped: list[_Pending] = []
         for entry in state.queue:
             author = getattr(getattr(entry.message, "author", None), "id", None)
-            if str(author or "") == uid:
+            if str(author or "") == uid and not (
+                callable(keep) and keep(entry.message)
+            ):
                 dropped.append(entry)
                 # submit() counted this turn. The pump only decrements entries
                 # it pops, so a dropped queued turn must release the slot here
