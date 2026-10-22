@@ -81,6 +81,8 @@ from tooling.helpers import (  # noqa: E402
     _ALL_MOD_TOOLS,
     DM_BLOCKED_TOOLS,
     _mod_tools_allowed,
+    _GATED_MOD_TOOLS,
+    _mod_tool_refusal,
     _is_youtube_url,
     preserve_message_delivery,
     _get_shared_session,
