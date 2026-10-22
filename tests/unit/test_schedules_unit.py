@@ -381,3 +381,43 @@ def test_direct_job_report_is_posted_whole():
     assert format_job(row) == report
     normal = {"id": "j", "state": "completed", "reports": [{"report": report}]}
     assert "details" not in format_job(normal)
+
+
+def test_record_does_not_resume_a_schedule_paused_mid_run(tmp_path):
+    store = ScheduleStore(tmp_path / "schedules.sqlite3")
+    row = store.add(
+        user_id=UID,
+        name="digest",
+        kind="cron",
+        spec="0 9 * * *",
+        tz="UTC",
+        prompt="send it",
+        channel_id="9",
+        guild_id="5",
+        dm=False,
+        next_run=time.time() + 60,
+    )
+    assert store.update(UID, row["id"], enabled=False, last_status="paused by user")
+    store.record(
+        row["id"],
+        status="ran",
+        next_run=time.time() + 86400,
+        enabled=True,
+        ran=True,
+        expected_next=row["next_run"],
+    )
+    after = store.get(UID, row["id"])
+    assert after["enabled"] is False
+    assert after["next_run"] == row["next_run"]
+
+
+def test_one_time_in_repeated_autumn_hour_uses_the_future_pass():
+    tz = zone("America/New_York")
+    first_pass = datetime(2026, 11, 1, 5, 10, tzinfo=UTC)
+    second_pass = datetime(2026, 11, 1, 6, 10, tzinfo=UTC)
+    assert parse_at("2026-11-01T01:30", tz, first_pass) == datetime(
+        2026, 11, 1, 5, 30, tzinfo=UTC
+    )
+    assert parse_at("2026-11-01T01:30", tz, second_pass) == datetime(
+        2026, 11, 1, 6, 30, tzinfo=UTC
+    )

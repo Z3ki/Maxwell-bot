@@ -28,8 +28,10 @@ class SleepTool(Tool):
     returns_result = False
     ends_turn = True
 
-
-    is_destructive: bool = False
+    # set_sleep() is process-wide: any caller could silence every guild for
+    # an hour. Keep it operator-only and block it on prompt-injected turns.
+    requires_admin = True
+    is_destructive: bool = True
     streams_output: bool = False
 
     def get_description(self):

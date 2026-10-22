@@ -290,14 +290,24 @@ class FetchUrlTool(Tool):
         mime = (content_type or "").split(";", 1)[0].strip().lower()
         if mime.startswith("image/"):
             if self.bot is not None:
-                return await SeeImageTool(self.bot).result_from_blob(
-                    raw, mime, url, message
+                # A content-type-detected image is still a see_image call and
+                # must pass the same permissions/capability checks.
+                media_tool, denied = _authorize_nested_media(
+                    self.bot, message, "see_image", url
                 )
+                if denied:
+                    return denied
+                return await media_tool.result_from_blob(raw, mime, url, message)
             return "Error: URL contains image media, not readable text; use see_image"
         url_ext = Path(urlparse(url).path).suffix.lower()
         if mime.startswith("video/") or url_ext in SeeVideoTool.VIDEO_EXTS:
             if self.bot is not None:
-                return await SeeVideoTool(self.bot).result_from_blob(
+                media_tool, denied = _authorize_nested_media(
+                    self.bot, message, "see_video", url
+                )
+                if denied:
+                    return denied
+                return await media_tool.result_from_blob(
                     raw, mime or "video/mp4", url, message
                 )
             return "Error: URL contains video media, not readable text; use see_video"

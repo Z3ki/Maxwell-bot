@@ -81,39 +81,51 @@ def load_or_create_key(path: str | os.PathLike, size: int = 32) -> bytes:
 
     Both processes boot at once and both want the key. The naive
     create-then-write lets the loser read a zero-byte file, "repair" it, and
-    walk off with a different key than the winner. Write a temp file, then
-    link() it into place: the name only ever appears with the full key in it.
+    walk off with a different key than the winner. Serialize creation with a
+    sidecar flock, then write a temp file and link() it into place: the name
+    only ever appears with the full key in it.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(5):
+    lock_path = path.with_name(path.name + ".lock")
+    with open(lock_path, "a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            for _ in range(5):
+                try:
+                    data = path.read_bytes()
+                    exists = True
+                except FileNotFoundError:
+                    data = b""
+                    exists = False
+                if len(data) >= size:
+                    return data[:size]
+                tmp = path.with_name(
+                    f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}"
+                )
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(secrets.token_bytes(size))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    if exists:
+                        # A short file (including zero bytes) is crash debris
+                        # from the old writer; replace it. os.link() cannot
+                        # repair an existing empty file.
+                        os.replace(tmp, path)
+                    else:
+                        with contextlib.suppress(FileExistsError):
+                            os.link(tmp, path)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(tmp)
             data = path.read_bytes()
-        except FileNotFoundError:
-            data = b""
-        if len(data) >= size:
+            if len(data) < size:
+                raise OSError(f"could not create key file {path}")
             return data[:size]
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(secrets.token_bytes(size))
-                handle.flush()
-                os.fsync(handle.fileno())
-            if data:
-                # A short file is crash debris from the old writer; anything
-                # signed with it was never verifiable. Replace it.
-                os.replace(tmp, path)
-            else:
-                with contextlib.suppress(FileExistsError):
-                    os.link(tmp, path)
         finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp)
-    data = path.read_bytes()
-    if len(data) < size:
-        raise OSError(f"could not create key file {path}")
-    return data[:size]
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 class StorageError(Exception):
@@ -483,8 +495,9 @@ class UserStorage:
             shutil.rmtree(self.users / uid, ignore_errors=True)
             with self._db() as db:
                 db.execute("DELETE FROM users WHERE uid=?", (uid,))
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self.locks / f"{uid}.lock")
+        # Keep locks/<uid>.lock. Unlinking it splits any waiter already blocked
+        # on the old inode from the next opener, so two mutations could run at
+        # once. An empty lock file costs nothing.
         return True
 
     # ---- handles --------------------------------------------------------
@@ -510,11 +523,17 @@ class UserStorage:
             owner = db.execute("SELECT uid FROM users WHERE handle=?", (value,)).fetchone()
             if owner and owner[0] != uid:
                 raise StorageError("that handle is taken")
-            db.execute(
-                "INSERT INTO users(uid, handle, gen, updated) VALUES(?, ?, 0, ?) "
-                "ON CONFLICT(uid) DO UPDATE SET handle=excluded.handle, updated=excluded.updated",
-                (uid, value, time.time()),
-            )
+            try:
+                db.execute(
+                    "INSERT INTO users(uid, handle, gen, updated) VALUES(?, ?, 0, ?) "
+                    "ON CONFLICT(uid) DO UPDATE SET handle=excluded.handle, updated=excluded.updated",
+                    (uid, value, time.time()),
+                )
+            except sqlite3.IntegrityError as exc:
+                # The SELECT above is not atomic with the write; another user
+                # can claim the same suggested handle in between. Report it as
+                # a normal collision so ensure_handle tries the next suffix.
+                raise StorageError("that handle is taken") from exc
         return value
 
     def ensure_handle(self, uid: str, name: str = "") -> str:
@@ -715,6 +734,19 @@ class UserStorage:
                 return result
 
             with self.locked(uid):
+                # The quota/plan or the whole tree may have changed while this
+                # merge waited for the lock. Re-read it now: a revoked plan or
+                # a privacy wipe must not be undone by a stale import.
+                quota = self.quota(uid)
+                if quota <= 0:
+                    result.error = "persistent storage is not enabled for this user"
+                    return result
+                if base_generation and self.generation(uid) == 0:
+                    result.error = (
+                        "storage was deleted while the job was running; "
+                        "changes were not saved"
+                    )
+                    return result
                 live_base = self.user_dir(uid)
                 live = self.manifest(uid)
                 result.clean = self.generation(uid) == base_generation and live == base

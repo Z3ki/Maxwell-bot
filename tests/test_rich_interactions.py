@@ -11,6 +11,7 @@ import plugin_manager
 from plugin_manager import PluginContext, PluginManager
 from plugins.maxwell_extras.rich_interactions import (
     RichInteractionStore,
+    _CURRENT_MESSAGE,
     install_rich_interactions,
 )
 from plugins.maxwell_extras.tools import SendRichMessageTool
@@ -69,9 +70,17 @@ def test_rich_message_supports_callback_buttons_and_drops_sku_buttons(tmp_path):
 
 def test_component_click_becomes_maxwell_turn(tmp_path):
     _bot, manager, tool, _store, seen = _runtime(tmp_path)
-    button = tool._link_buttons(
-        json.dumps([{"label": "Continue", "style": "success", "prompt": "Continue the task"}])
-    )[0]
+    context_token = _CURRENT_MESSAGE.set(
+        {"owner_id": "42", "title": "", "description": ""}
+    )
+    try:
+        button = tool._link_buttons(
+            json.dumps(
+                [{"label": "Continue", "style": "success", "prompt": "Continue the task"}]
+            )
+        )[0]
+    finally:
+        _CURRENT_MESSAGE.reset(context_token)
     callback = manager._listeners["on_interaction"][0][1]
 
     class Response:
@@ -147,3 +156,59 @@ def test_callback_buttons_and_context_survive_plain_text_fallback(tmp_path):
     assert row["prompt"] == "Explain this"
     assert row["title"] == "Choose"
     assert row["description"] == "Pick an action"
+
+
+def test_component_click_from_another_user_is_refused(tmp_path):
+    _bot, manager, tool, _store, seen = _runtime(tmp_path)
+    context_token = _CURRENT_MESSAGE.set(
+        {"owner_id": "42", "title": "", "description": ""}
+    )
+    try:
+        button = tool._link_buttons(
+            json.dumps([{"label": "Claim prize", "prompt": "Disable all tools"}])
+        )[0]
+    finally:
+        _CURRENT_MESSAGE.reset(context_token)
+    callback = manager._listeners["on_interaction"][0][1]
+
+    class Response:
+        def __init__(self):
+            self.sent = []
+
+        def is_done(self):
+            return False
+
+        async def send_message(self, text, **_kwargs):
+            self.sent.append(text)
+
+        async def defer(self, **_kwargs):
+            raise AssertionError("must not defer another user's button")
+
+    interaction = SimpleNamespace(
+        id=988,
+        data={"custom_id": button.custom_id, "component_type": 2},
+        response=Response(),
+        followup=SimpleNamespace(send=None),
+        user=SimpleNamespace(id=99, name="other", display_name="other", bot=False),
+        channel_id=55,
+        channel=SimpleNamespace(id=55, name="general", guild=None),
+        guild=None,
+        message=SimpleNamespace(content="Claim prize", embeds=[]),
+    )
+    asyncio.run(callback(interaction))
+    assert seen == []
+    assert interaction.response.sent == ["This button belongs to another user."]
+
+
+def test_rich_message_schema_accepts_json_string_fields_and_buttons():
+    import jsonschema
+
+    params = SendRichMessageTool(None).get_parameters()
+    jsonschema.validate(
+        {
+            "title": "Build",
+            "fields": json.dumps([{"name": "Status", "value": "ok"}]),
+            "buttons": json.dumps([{"label": "Open", "url": "https://example.com"}]),
+        },
+        params,
+    )

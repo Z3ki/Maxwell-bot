@@ -152,6 +152,25 @@ class _ChatStreamAssembler:
             and (self.custom is None or not self.custom.completed)
         ):
             raise ProviderProtocolError("Provider stream produced no choices")
+        if self.finish_reason == "length":
+            # A native call cut off at the token limit has an unterminated
+            # arguments string. Downstream decoding falls back to sending the
+            # raw text as a content argument, so a truncated send_message can
+            # post half a JSON object. Refuse it and let the caller retry.
+            for tool in self.tools.values():
+                arguments = (tool.get("function") or {}).get("arguments")
+                if not isinstance(arguments, str) or not arguments.strip():
+                    continue
+                try:
+                    decoded = json.loads(arguments)
+                except ValueError as exc:
+                    raise ProviderProtocolError(
+                        "Provider stream truncated a native tool call"
+                    ) from exc
+                if not isinstance(decoded, dict):
+                    raise ProviderProtocolError(
+                        "Provider stream truncated a native tool call"
+                    )
         if self.custom is not None:
             if self.custom.truncated_tool_call:
                 # The stream was cut mid tool call (finish_reason="length", or

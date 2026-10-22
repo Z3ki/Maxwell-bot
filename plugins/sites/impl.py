@@ -8,6 +8,15 @@ from __future__ import annotations
 from tooling import helpers as _helpers
 from tools import Tool
 
+
+def _loggable_url(url) -> str:
+    """Strip query/fragment before logging a signed or credential-bearing URL."""
+    try:
+        parsed = urlparse(str(url))
+        return parsed._replace(query="", fragment="").geturl()
+    except Exception:
+        return "(invalid URL)"
+
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
 for _name in dir(_helpers):
@@ -291,9 +300,51 @@ class CreateSiteTool(Tool):
             return f"Error: site too large (max {SITE_MAX_TOTAL_BYTES // 1000}KB across all files)"
 
         site_dir = os.path.join(self.base_dir, slug)
-        created_new_dir = not os.path.isdir(site_dir)
+        # Serialize every create for this slug across processes, then re-read
+        # the authoritative ownership before writing a single file. The
+        # in-memory check above can be stale, and the loser of a concurrent
+        # create must never write into the winner's directory.
+        slug_lock = FileLock(
+            Path(self.bot.config.DATA_DIR) / "site_locks" / f"{slug}.lock",
+            timeout=15.0,
+        )
         try:
-            os.makedirs(site_dir, exist_ok=True)
+            await asyncio.to_thread(slug_lock.__enter__)
+        except Exception as exc:
+            return (
+                f"Error creating site: another update for '{slug}' is in progress "
+                f"({type(exc).__name__})"
+            )
+        try:
+            os.makedirs(self.base_dir, exist_ok=True)
+            try:
+                os.mkdir(site_dir)
+                created_new_dir = True
+            except FileExistsError:
+                created_new_dir = False
+            if hasattr(self.bot, "_load_sites"):
+                self.bot._load_sites(quiet=True)
+            sites_now = getattr(self.bot, "_sites", None)
+            existing = sites_now.get(slug) if isinstance(sites_now, dict) else None
+            if isinstance(existing, dict):
+                owner = str(existing.get("user_id") or "")
+                if owner and owner != user_id:
+                    if created_new_dir:
+                        with contextlib.suppress(Exception):
+                            shutil.rmtree(site_dir, ignore_errors=True)
+                    if slug_lock._locked:
+                        await asyncio.to_thread(
+                            slug_lock.__exit__, None, None, None
+                        )
+                    return (
+                        f"Error: site slug '{slug}' is already owned by another user. "
+                        "Pick a different name."
+                    )
+        except Exception:
+            if slug_lock._locked:
+                await asyncio.to_thread(slug_lock.__exit__, None, None, None)
+            raise
+        try:
 
             # Copy images into site's images/ directory
             image_urls = []
@@ -332,11 +383,17 @@ class CreateSiteTool(Tool):
                         if dest:
                             public_url = f"{self.base_url}/{slug}/images/{os.path.basename(dest)}"
                             image_urls.append(public_url)
-                            logger.info(f"Downloaded site image {src_url} -> {dest}")
+                            logger.info(
+                                "Downloaded site image %s -> %s",
+                                _loggable_url(src_url),
+                                dest,
+                            )
                         else:
                             missing_images.append(src_url)
                             logger.warning(
-                                f"Site image URL failed: {src_url} ({err or 'unknown'})"
+                                "Site image URL failed: %s (%s)",
+                                _loggable_url(src_url),
+                                err or "unknown",
                             )
                         continue
                     if not src_path or not callable(workspace_reader):
@@ -433,10 +490,9 @@ class CreateSiteTool(Tool):
                 return f"Error creating site: {e}"
             if not committed:
                 # Overwrite disallowed by a concurrent owner change discovered
-                # under the lock; clean up only a directory we created.
-                if created_new_dir:
-                    with contextlib.suppress(Exception):
-                        shutil.rmtree(site_dir, ignore_errors=True)
+                # under the lock. Do NOT remove the directory: another owner
+                # may have committed it while this call was writing, and the
+                # files here are no longer ours to delete.
                 return (
                     f"Error: site slug '{slug}' could not be committed "
                     "(ownership changed concurrently). Try again."
@@ -480,6 +536,9 @@ class CreateSiteTool(Tool):
         except Exception as e:
             logger.error(f"Failed to create site {slug}: {e}")
             return f"Error creating site: {e}"
+        finally:
+            if slug_lock._locked:
+                await asyncio.to_thread(slug_lock.__exit__, None, None, None)
 
     def _commit_site_locked(
         self, slug: str, user_id: str, entry: dict
@@ -589,10 +648,13 @@ class EditSiteTool(_SiteOwnedTool):
         if err:
             return err
         act = str(action or "list").strip().lower()
+        owner = str(entry.get("user_id") or "")
+        author = str(getattr(getattr(message, "author", None), "id", "") or "")
+        privileged = bool(owner and author and owner == author) or _caller_is_admin(
+            self.bot, message
+        )
         if act in SITE_MUTATING_ACTIONS:
-            owner = str(entry.get("user_id") or "")
-            author = str(getattr(getattr(message, "author", None), "id", "") or "")
-            if not owner or not author or owner != author:
+            if not privileged:
                 return f"Error: site '{slug}' belongs to someone else"
             site_read_loop_guard(message, key="", label="", action=act)
         url = f"{self.base_url}/{slug}/"
@@ -604,17 +666,25 @@ class EditSiteTool(_SiteOwnedTool):
             lines = [f"  • {rel} ({size} bytes)" for rel, size in tree]
             out = f"{url}\n" + "\n".join(lines)
             out += f"\nLifetime: {site_expiry_label(entry, self._control())}."
-            if entry.get("backend"):
+            if privileged and entry.get("backend"):
                 out += "\nKV store: on — " + site_backend.summarize(
                     self.bot.config.DATA_DIR, slug
                 )
             if entry.get("server"):
-                server_files = site_server.list_code(self.bot.config.DATA_DIR, slug)
-                names = ", ".join(rel for rel, _ in server_files) or "no source"
-                out += (
-                    f"\nPython backend: on at {url}api/ ({names}). "
-                    "Edit it with site_server (list/read/write/replace), not this tool."
-                )
+                if privileged:
+                    server_files = site_server.list_code(
+                        self.bot.config.DATA_DIR, slug
+                    )
+                    names = ", ".join(rel for rel, _ in server_files) or "no source"
+                    out += (
+                        f"\nPython backend: on at {url}api/ ({names}). "
+                        "Edit it with site_server (list/read/write/replace), not this tool."
+                    )
+                else:
+                    out += (
+                        f"\nPython backend: on at {url}api/. "
+                        "Its source is visible to the site owner only."
+                    )
             out += _site_graph_note(self.bot, slug, refresh=False)
             return out
 
@@ -843,13 +913,26 @@ class DeleteSiteTool(_SiteOwnedTool):
             # its secrets behind because metadata persistence failed is worse
             # than returning an error for a partially completed delete.
             save_error = exc
+        # The site URL and metadata are already gone. site_server.destroy
+        # scrubs the registry row (including env secrets) first, so a later
+        # teardown failure cannot leak credentials. Still say so rather than
+        # silently claiming a complete cleanup.
+        teardown_warning = ""
         with contextlib.suppress(Exception):
             await asyncio.to_thread(
                 site_backend.destroy, self.bot.config.DATA_DIR, slug
             )
         # Container, server code, database, and secrets go too.
-        with contextlib.suppress(Exception):
+        try:
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
+        except Exception as exc:
+            logger.warning(
+                "Site backend teardown failed for %s: %s", slug, type(exc).__name__
+            )
+            teardown_warning = (
+                " Backend cleanup did not finish; some server files or data may "
+                "remain, but its registry secrets were removed."
+            )
         # Drop the site's knowledge-graph node and edges; index_site only
         # rebuilds slugs still in sites.json, so a deleted site's subgraph
         # would otherwise linger in the prompt block forever.
@@ -861,6 +944,7 @@ class DeleteSiteTool(_SiteOwnedTool):
             return f"Error deleting site '{slug}': {save_error}"
         return (
             f"Deleted site '{slug}' ({entry.get('title') or 'untitled'}). URL is gone."
+            + teardown_warning
         )
 
 class SiteServerTool(_SiteOwnedTool):

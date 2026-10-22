@@ -365,18 +365,23 @@ class SendRichMessageTool(Tool):
                     "description": "Main body, Discord markdown, max 4096 chars",
                 },
                 "fields": {
-                    "type": "array",
-                    "maxItems": 25,
-                    "description": "Labelled sections. inline=true puts up to 3 on one row",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "value": {"type": "string"},
-                            "inline": {"type": "boolean"},
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "maxItems": 25,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "value": {"type": "string"},
+                                    "inline": {"type": "boolean"},
+                                },
+                                "required": ["name", "value"],
+                            },
                         },
-                        "required": ["name", "value"],
-                    },
+                        {"type": "string", "description": "JSON array of fields"},
+                    ],
+                    "description": "Labelled sections. inline=true puts up to 3 on one row",
                 },
                 "color": {
                     "type": "string",
@@ -389,17 +394,22 @@ class SendRichMessageTool(Tool):
                 },
                 "thumbnail_url": {"type": "string", "description": "Small corner image, http(s)"},
                 "buttons": {
-                    "type": "array",
-                    "maxItems": 5,
-                    "description": "Link buttons: {label, url, emoji?}",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "url": {"type": "string"},
-                            "emoji": {"type": "string"},
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "maxItems": 5,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {"type": "string"},
+                                    "url": {"type": "string"},
+                                    "emoji": {"type": "string"},
+                                },
+                            },
                         },
-                    },
+                        {"type": "string", "description": "JSON array of buttons"},
+                    ],
+                    "description": "Link buttons: {label, url, emoji?}",
                 },
                 "mode": {
                     "type": "string",

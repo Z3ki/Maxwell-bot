@@ -11,6 +11,7 @@ from plugins.user_storage.store import (
     StorageError,
     UserStorage,
     clean_path,
+    load_or_create_key,
     tar_bytes,
     valid_handle,
 )
@@ -297,3 +298,11 @@ def test_privacy_deletion_wipes_storage_and_schedules(tmp_path):
     assert storage.usage(PREMIUM) == (0, 0)
     assert storage.uid_for_handle("mine") is None
     assert schedules.list_user(PREMIUM) == []
+
+
+def test_zero_byte_key_file_is_repaired(tmp_path):
+    key_path = tmp_path / "link.key"
+    key_path.write_bytes(b"")
+    key = load_or_create_key(key_path)
+    assert len(key) == 32
+    assert key_path.read_bytes() == key

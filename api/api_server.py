@@ -16,6 +16,7 @@ import hashlib
 import time
 import uuid as _uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -975,6 +976,59 @@ _SITE_PROXY_HOP_HEADERS = {
 _SITE_PROXY_DROP_RESPONSE_HEADERS = _SITE_PROXY_HOP_HEADERS | {"clear-site-data"}
 
 
+def _site_public_path(slug: str) -> str:
+    """Deployment path prefix plus the site's public API mount."""
+    base = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    prefix = urlsplit(base).path.rstrip("/") if base else ""
+    return prefix + server_path(slug)
+
+
+def _rewrite_site_location(value: str, slug: str) -> str:
+    """Keep backend redirects on the public origin and site mount.
+
+    Starlette/FastAPI build Location from the internal request URL, so a
+    redirect can point the browser at 127.0.0.1. The proxy strips the public
+    mount before forwarding, so relative redirects are relative to the site's
+    API root, not the public origin.
+    """
+    raw = str(value or "")
+    if not raw:
+        return raw
+    parsed = urlsplit(raw)
+    public = os.getenv("MAXWELL_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if parsed.scheme in {"http", "https"} and parsed.hostname in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
+        if not public:
+            return raw
+        public_origin = urlsplit(public)
+        base = (
+            f"{public_origin.scheme}://{public_origin.netloc}"
+            if public_origin.scheme and public_origin.netloc
+            else public
+        )
+        tail = parsed.path or "/"
+        rewritten = base + _site_public_path(slug) + ("" if tail == "/" else tail)
+        if parsed.query:
+            rewritten += "?" + parsed.query
+        if parsed.fragment:
+            rewritten += "#" + parsed.fragment
+        return rewritten
+    if raw.startswith("/") and not raw.startswith("//"):
+        mount = _site_public_path(slug)
+        if raw == mount or raw.startswith(mount + "/"):
+            return raw
+        local_mount = server_path(slug)
+        if raw == local_mount or raw.startswith(local_mount + "/"):
+            public_origin = urlsplit(public) if public else None
+            prefix = public_origin.path.rstrip("/") if public_origin else ""
+            return prefix + raw
+        return mount + raw
+    return raw
+
+
 def _scope_site_cookie(value: str, slug: str) -> str | None:
     """Force a proxied Set-Cookie onto /bot/<slug>/ and drop Domain."""
     parts = [part.strip() for part in str(value or "").split(";") if part.strip()]
@@ -1232,6 +1286,9 @@ async def _site_proxy_request(request, slug: str):
                 scoped = _scope_site_cookie(value, slug)
                 if scoped:
                     out.headers.add("Set-Cookie", scoped)
+                continue
+            if lowered in {"location", "content-location"}:
+                out.headers[key] = _rewrite_site_location(value, slug)
                 continue
             out.headers[key] = value
         out.headers["Access-Control-Allow-Origin"] = "*"

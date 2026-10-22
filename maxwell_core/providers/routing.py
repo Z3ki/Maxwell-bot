@@ -56,6 +56,10 @@ class ProviderRouter(ChatProvider):
         self.vision = vision
         self.name = primary.name
         self.model = getattr(primary, "model", "")
+        # Callers (worker output budgeting) read this attribute directly. A
+        # router that hides the primary's configured cap silently falls back
+        # to their 4096-token default on every call.
+        self.max_tokens = getattr(primary, "max_tokens", None)
         self.capabilities = replace(
             primary.capabilities,
             vision=primary.capabilities.vision

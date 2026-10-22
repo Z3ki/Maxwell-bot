@@ -109,6 +109,51 @@ def _limit(control, key, default, maximum):
         return default
 
 
+def _shrink_batch(batch, limit):
+    """Fit one tool batch into *limit* JSON chars by truncating tool output.
+
+    The newest batch has not been read by the model yet, so summarizing it
+    loses information the worker just asked for. Truncate the raw output
+    instead and keep every assistant/tool pair intact.
+    """
+    if not batch:
+        return []
+    if len(json.dumps(batch)) <= limit:
+        return batch
+    marker = "\n[... output truncated to fit the subagent context]"
+    tool_rows = [
+        row
+        for row in batch
+        if row.get("role") == "tool" and isinstance(row.get("content"), str)
+    ]
+    if not tool_rows:
+        return None
+    overhead = len(json.dumps(batch)) - sum(
+        len(json.dumps(row["content"])) for row in tool_rows
+    )
+    per_row = (limit - overhead) // len(tool_rows)
+    if per_row <= len(marker) + 64:
+        return None
+    out = []
+    for row in batch:
+        if row.get("role") == "tool" and isinstance(row.get("content"), str):
+            content = row["content"]
+            if len(json.dumps(content)) > per_row:
+                # Measure the *encoded* size: quotes and non-ASCII escapes
+                # expand the raw prefix inside the JSON payload.
+                low, high = 0, len(content)
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    if len(json.dumps(content[:mid] + marker)) <= per_row:
+                        low = mid
+                    else:
+                        high = mid - 1
+                row = dict(row)
+                row["content"] = content[:low] + marker
+        out.append(row)
+    return out if len(json.dumps(out)) <= limit else None
+
+
 def _site_result_url(name: str, result: str) -> str | None:
     """Keep publication links from tool results, not the worker's prose."""
     if name == "create_site":
@@ -290,12 +335,23 @@ class DelegateTaskTool(Tool):
                 return "Error: worker AI connection is unavailable; no task started. Review /config → More options → Subagent AI provider or ask the operator."
             timeout = worker_job_timeout_seconds(self.bot, timeout_minutes)
             async with asyncio.timeout(timeout):
-                reports = await asyncio.gather(
-                    *(
+                # gather() propagates a child's CancelledError but does not
+                # cancel its siblings. A revoked request raises deliberately
+                # inside one worker, so stop and await the other one before
+                # releasing capacity or closing the shared provider.
+                workers = [
+                    asyncio.create_task(
                         self._worker(message, task, provider, execution_lock)
-                        for task in tasks
                     )
-                )
+                    for task in tasks
+                ]
+                try:
+                    reports = await asyncio.gather(*workers)
+                except BaseException:
+                    for worker in workers:
+                        worker.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
+                    raise
             return json.dumps(reports, ensure_ascii=False)
         except TimeoutError:
             return "Error: task deadline reached; workers stopped. Completed tool changes may remain; inspect them before retrying."
@@ -318,12 +374,23 @@ class DelegateTaskTool(Tool):
         summary_chars = min(16000, available // 5)
         if summary_chars < 512:
             raise ValueError("Worker context has no room for a safe checkpoint")
-        # Retain whole recent batches: never orphan a tool result from its call.
-        split = len(chunks)
-        recent_size = 0
+        # Always retain the newest batch: the model asked for that output and
+        # has not read it yet. Summarizing it here silently loses the data.
+        # If it does not fit, truncate its raw tool rows instead.
+        allowance = available - summary_chars - 2048
+        newest = _shrink_batch(chunks[-1], allowance)
+        if newest is None:
+            raise ValueError(
+                "The newest tool output is too large for the worker context; "
+                "request a smaller section"
+            )
+        # Retain whole additional recent batches: never orphan a tool result
+        # from its call.
+        split = len(chunks) - 1
+        recent_size = len(json.dumps(newest))
         while split > 1:
             size = len(json.dumps(chunks[split - 1]))
-            if recent_size + size > available // 4:
+            if recent_size + size > min(available // 4, allowance):
                 break
             recent_size += size
             split -= 1
@@ -398,7 +465,7 @@ class DelegateTaskTool(Tool):
             ),
         }
         logger.info("Task worker compacted %d earlier context batches", split)
-        return [[checkpoint]] + chunks[split:]
+        return [[checkpoint]] + chunks[split:-1] + [newest]
 
     async def _worker(self, message, task, provider, execution_lock):
         from bot import MaxwellBot, _current_request_provider
@@ -513,7 +580,7 @@ class DelegateTaskTool(Tool):
             # A promise with no tool call is not a result. DeepSeek often
             # answers "I'll build it" and stops; keep asking until a tool runs.
             text_only = 0
-            for _ in range(steps):
+            for round_index in range(steps):
                 from .task_job_store import active_job
                 context = active_job.get()
                 if context:
@@ -537,8 +604,36 @@ class DelegateTaskTool(Tool):
                     messages = base + [row for chunk in chunks for row in chunk]
                 if len(json.dumps(messages)) > budget:
                     raise ValueError("Worker checkpoint exceeds context budget")
+                remaining = max(0, steps - round_index - 1)
+                if remaining <= 5:
+                    pressure = (
+                        "FINAL ROUNDS. Stop exploring; call only the tool needed to "
+                        "deliver, then report the result and full path."
+                    )
+                elif remaining <= max(10, steps // 10):
+                    pressure = (
+                        "Wrap up within the remaining rounds. Do not start new "
+                        "exploration or repeat completed work."
+                    )
+                else:
+                    pressure = (
+                        "Work efficiently. Do not re-inspect what you already know "
+                        "and do not repeat completed side effects."
+                    )
+                # Keep the countdown at the end so it does not invalidate the
+                # cacheable prefix of the conversation.
+                budget_note = {
+                    "role": "system",
+                    "content": (
+                        f"[Worker budget] Round {round_index + 1} of {steps}; "
+                        f"{remaining} tool round(s) remain. {pressure}"
+                    ),
+                }
+                payload = messages + [budget_note]
+                if len(json.dumps(payload)) > budget:
+                    payload = messages
                 result = await self.bot._generate_response(
-                    messages,
+                    payload,
                     provider=provider,
                     tools=schemas,
                     timeout=request_timeout_seconds(self.bot, selected),

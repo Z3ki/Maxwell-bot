@@ -49,15 +49,18 @@ def test_same_channel_chat_and_reply_queue_remain_available_before_worker_finish
         bot, msg, shell, engine, manager = environment(tmp_path)
         entered, release, launched, chatted = (asyncio.Event() for _ in range(4))
         main_answers = []
+        worker_rounds = 0
 
         async def generate(messages, **kwargs):
+            nonlocal worker_rounds
             if active_job.get() is None:
                 return ProviderResult("A normal answer while your site is building")
+            worker_rounds += 1
             entered.set()
             await release.wait()
             return (
                 call()
-                if len(messages) == 2
+                if worker_rounds == 1
                 else ProviderResult("Verified worker result")
             )
 

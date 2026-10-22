@@ -348,3 +348,28 @@ def test_fetch_redirects_share_one_deadline(monkeypatch):
     _run(_fetch_public_url("https://example.org/old", max_bytes=100, timeout=5))
     assert session.calls[0][1]["timeout"].total == 4
     assert session.calls[1][1]["timeout"].total == 2
+
+
+def test_fetch_url_authorizes_content_type_detected_image(monkeypatch):
+    session = FakeSession(
+        {
+            "https://ex.com/pic": FakeResp(
+                200,
+                headers={"Content-Type": "image/png"},
+                body=b"\x89PNG\r\n\x1a\n",
+            )
+        }
+    )
+
+    async def _session():
+        return session
+
+    monkeypatch.setattr("bot_tools._get_shared_session", _session)
+    bot = SimpleNamespace(
+        mark_message_tainted=lambda *_a, **_k: None,
+        tools={"see_image": object()},
+        _authorize_tool_execution=lambda *_a, **_k: "refused: image tools disabled",
+    )
+    msg = SimpleNamespace(id=1, channel=SimpleNamespace(id=2), guild=None)
+    result = _run(FetchUrlTool(bot).execute(msg, url="https://ex.com/pic"))
+    assert result.startswith("refused: image tools disabled")

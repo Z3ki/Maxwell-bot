@@ -223,7 +223,15 @@ def parse_at(text: str, tz: ZoneInfo, now: datetime) -> datetime:
     if moment.tzinfo is None:
         if not _exists(moment, tz):
             raise CronError("that local time does not exist (daylight-saving gap)")
-        moment = moment.replace(tzinfo=tz)
+        aware = moment.replace(tzinfo=tz)
+        # In the autumn repeated hour the same wall time occurs twice. Use the
+        # first pass if it is still ahead, otherwise the second pass; do not
+        # reject a time that is only "past" in its first fold.
+        first = aware.replace(fold=0).astimezone(timezone.utc)
+        second = aware.replace(fold=1).astimezone(timezone.utc)
+        if second > first and first < now:
+            aware = aware.replace(fold=1)
+        moment = aware
     return moment.astimezone(timezone.utc)
 
 

@@ -583,3 +583,22 @@ def test_send_file_works_for_non_admin_user():
         assert sent.fp.read() == b"hi from a non-admin"
 
     asyncio.run(run())
+
+
+def test_send_file_accepts_line_wrapped_base64():
+    import textwrap
+
+    tool = SendFileTool(bot=None)
+    message = FakeMessage()
+    payload = textwrap.fill(base64.b64encode(b"wrapped payload").decode("ascii"), 16)
+
+    async def run():
+        result = await tool.execute(
+            message, filename="wrapped.txt", content=payload, encoding="base64"
+        )
+        assert result.startswith("__FILE_SENT__")
+        sent = message.files[0]
+        sent.fp.seek(0)
+        assert sent.fp.read() == b"wrapped payload"
+
+    asyncio.run(run())

@@ -599,4 +599,18 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
     bot._maxwell_interaction_progress_installed = True
 
 
-__all__ = ["install_interaction_progress"]
+def uninstall_interaction_progress(bot: Any) -> None:
+    """Allow a plugin reload to install the handlers again.
+
+    teardown unregisters the interaction handler and unwraps the session
+    sender, but the bot attribute and module guards would otherwise survive
+    and make the next setup return early.
+    """
+    global _SESSION_PATCHED, _TOOL_PROGRESS_PATCHED
+
+    bot._maxwell_interaction_progress_installed = False
+    _SESSION_PATCHED = False
+    _TOOL_PROGRESS_PATCHED = False
+
+
+__all__ = ["install_interaction_progress", "uninstall_interaction_progress"]

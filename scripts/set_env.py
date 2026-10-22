@@ -44,6 +44,13 @@ def set_env(path: str | Path, key: str, value: str) -> None:
         raise ValueError(f"invalid environment key: {key!r}")
     if "\n" in value or "\r" in value:
         raise ValueError(f"environment value for {key} must be one line")
+    if "${" in value:
+        # python-dotenv interpolates ${NAME} in every loaded value, quoted or
+        # not, and offers no escape. Writing it would silently change the
+        # credential the runtime reads.
+        raise ValueError(
+            f"environment value for {key} contains '${{...}}', which dotenv would rewrite"
+        )
 
     env_path = Path(path)
     text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""

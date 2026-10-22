@@ -800,7 +800,9 @@ def test_failed_teardown_never_deletes_persistent_state(data_dir, monkeypatch):
     with pytest.raises(site_server.SiteServerError, match="container still present"):
         run(site_server.destroy(data_dir, "demo"))
     assert database.read_bytes() == b"persistent database"
-    assert site_server.get_entry(data_dir, "demo")["running"] is True
+    # The registry row (and its env secrets) is scrubbed first even when the
+    # container cannot be removed; data files are left for a retry.
+    assert site_server.get_entry(data_dir, "demo") is None
 
 
 def test_reconciliation_keeps_missing_backends_restart_config(data_dir, monkeypatch):

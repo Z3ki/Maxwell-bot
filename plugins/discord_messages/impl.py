@@ -744,20 +744,55 @@ class SendMessageTool(Tool):
         )
 
     @staticmethod
-    def _chunks(text: str, limit: int = 1900) -> list[str]:
-        # Discord hard-fails over 2000 chars. Keep this dumb and reliable; fancy
-        # code-fence stitching lives in bot.py, but tools must not explode.
-        chunks = []
+    def _open_fence(text: str) -> str | None:
+        """The fence marker if *text* ends inside a fenced code block."""
+        opener = None
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if not stripped.startswith("```"):
+                continue
+            if opener is None:
+                opener = stripped.rstrip()
+            elif not stripped.strip("`").strip():
+                # A closing fence has no info string.
+                opener = None
+        return opener
+
+    @classmethod
+    def _chunks(cls, text: str, limit: int = 1900) -> list[str]:
+        # Discord hard-fails over 2000 chars. Keep each chunk inside the limit
+        # and, when a split lands inside a fence, close it and reopen the same
+        # fence on the next message so the code stays readable.
+        chunks: list[str] = []
         remaining = text
+        prefix = ""
         while remaining:
-            if len(remaining) <= limit:
-                chunks.append(remaining)
+            room = max(1, limit - len(prefix))
+            if len(remaining) + len(prefix) <= limit:
+                chunks.append(prefix + remaining)
                 break
-            cut = remaining.rfind("\n", 0, limit)
-            if cut < limit // 2:
-                cut = limit
-            chunks.append(remaining[:cut].rstrip())
-            remaining = remaining[cut:].lstrip()
+            # Reserve room for a closing fence only when the cut will land
+            # inside one; otherwise use the full limit.
+            probe = remaining[:room]
+            usable = (
+                max(1, room - 8)
+                if cls._open_fence(prefix + probe) is not None
+                else room
+            )
+            cut = remaining.rfind("\n", 0, usable)
+            if cut < usable // 2:
+                cut = usable
+            piece = remaining[:cut].rstrip()
+            opener = cls._open_fence(prefix + piece)
+            if opener is not None:
+                run = len(opener) - len(opener.lstrip("`"))
+                piece += "\n" + "`" * max(3, run)
+                next_prefix = opener + "\n"
+            else:
+                next_prefix = ""
+            chunks.append(prefix + piece)
+            remaining = remaining[cut:].lstrip("\n")
+            prefix = next_prefix
         return chunks or [""]
 
     async def execute(
@@ -1035,9 +1070,12 @@ class SendFileTool(Tool):
         mode = str(encoding or "text").strip().lower()
         try:
             if mode in {"base64", "b64"}:
-                if len(str(content)) > ((self.MAX_SIZE + 2) // 3) * 4:
+                # Standard base64 output is line-wrapped (CLI, MIME, many
+                # encoders). Whitespace is not part of the payload.
+                encoded = "".join(str(content).split())
+                if len(encoded) > ((self.MAX_SIZE + 2) // 3) * 4:
                     return "Error: file is too large"
-                blob = base64.b64decode(str(content), validate=True)
+                blob = base64.b64decode(encoded, validate=True)
             elif mode in {"text", "utf8", "utf-8"}:
                 blob = str(content).encode("utf-8")
             else:
@@ -1478,7 +1516,7 @@ class SearchMessagesTool(Tool):
             return None
 
     @staticmethod
-    def _read_denial(message, channel) -> str | None:
+    async def _read_denial(message, channel) -> str | None:
         guild = getattr(channel, "guild", None)
         if guild is None:
             return None if channel is getattr(message, "channel", None) else (
@@ -1505,6 +1543,17 @@ class SearchMessagesTool(Tool):
                 return f"Error: {label} cannot view that channel"
             if not getattr(permissions, "read_message_history", False):
                 return f"Error: {label} cannot read that channel's history"
+            if label == "you" and isinstance(channel, discord.Thread):
+                # Thread.permissions_for inherits the parent channel and does
+                # not account for private-thread membership.
+                if getattr(channel, "type", None) == discord.ChannelType.private_thread:
+                    if not getattr(permissions, "manage_threads", False):
+                        try:
+                            await channel.fetch_thread_member(requester.id)
+                        except (discord.NotFound, AttributeError):
+                            return "Error: you are not a member of that private thread"
+                        except discord.HTTPException:
+                            return "Error: private thread membership could not be verified"
         return None
 
     @staticmethod
@@ -1634,7 +1683,7 @@ class SearchMessagesTool(Tool):
                 ref = getattr(message, "reference", None)
                 target_id = str(getattr(ref, "message_id", "") or "") or None
 
-            denial = self._read_denial(message, target_channel)
+            denial = await self._read_denial(message, target_channel)
             if denial:
                 return denial
             if target_id:
@@ -1741,7 +1790,26 @@ class CreateInviteTool(Tool):
         ).strip()
         guild = None
         if target:
-            guild, err = _find_guild(list(self.bot.guilds or []), target)
+            # Only search servers the requester can actually see. Matching
+            # against every bot guild leaks unrelated names and IDs through
+            # both the match and the ambiguity error.
+            author_id = getattr(getattr(message, "author", None), "id", None)
+            current_guild = getattr(message, "guild", None)
+            visible = []
+            for candidate in list(self.bot.guilds or []):
+                if current_guild is not None and getattr(candidate, "id", None) == getattr(
+                    current_guild, "id", None
+                ):
+                    visible.append(candidate)
+                    continue
+                getter = getattr(candidate, "get_member", None)
+                if author_id is not None and callable(getter):
+                    try:
+                        if getter(author_id) is not None:
+                            visible.append(candidate)
+                    except Exception:
+                        pass
+            guild, err = _find_guild(visible, target)
             if guild is None:
                 return err
         elif getattr(message, "guild", None):

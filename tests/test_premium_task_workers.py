@@ -202,8 +202,10 @@ def test_timeout_and_parent_cancel_join_all_children(tmp_path, monkeypatch):
             stopped.append(True)
 
     bot._generate_response.side_effect = generate
+    # Long enough for both workers to reach the blocking model call before the
+    # deadline; 10 ms could expire during provider selection on a busy runner.
     monkeypatch.setattr(
-        "plugins.maxwell_extras.task_workers.worker_job_timeout_seconds", lambda *a, **k: 0.01
+        "plugins.maxwell_extras.task_workers.worker_job_timeout_seconds", lambda *a, **k: 0.5
     )
     result = asyncio.run(worker.run(msg, tasks=TASKS * 2))
     assert "deadline" in result and len(stopped) == 2
@@ -258,8 +260,11 @@ def test_text_only_reply_is_not_a_finished_website(tmp_path):
     assert result["status"] == "reported"
     assert result["report"] == "Published the site."
     shell.execute.assert_awaited_once()
-    nudge = bot._generate_response.await_args_list[1].args[0][-1]["content"]
-    assert "have not called any tools" in nudge
+    second_prompt = bot._generate_response.await_args_list[1].args[0]
+    assert any(
+        "have not called any tools" in str(row.get("content", ""))
+        for row in second_prompt
+    )
 
 
 @pytest.mark.parametrize(
@@ -401,7 +406,8 @@ def test_worker_keeps_tool_output_up_to_the_context_window(tmp_path):
     bot._generate_response.side_effect = generate
     result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "reported"
-    tool_text = seen[1][-1]["content"]
+    tool_rows = [row for row in seen[1] if row.get("role") == "tool"]
+    tool_text = tool_rows[-1]["content"]
     assert tool_text.endswith(long_output)
     assert len(tool_text) > 8000
     assert bot._generate_response.await_args.kwargs["max_tokens"] == 32768
@@ -421,7 +427,8 @@ def test_large_tool_output_is_shared_and_still_read(tmp_path):
     bot._generate_response.side_effect = generate
     result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert result["status"] == "reported"
-    first, second = seen[1][-2:]
+    tool_rows = [row for row in seen[1] if row.get("role") == "tool"]
+    first, second = tool_rows[-2:]
     assert first["content"].endswith("[output truncated]")
     assert first["content"].count('"') > 1000
     assert second["content"].count('"') > 1000
@@ -470,3 +477,22 @@ def test_invalid_tasks_do_not_start_anything(tmp_path, tasks):
     bot, msg, shell, worker = setup(tmp_path)
     assert "Error" in asyncio.run(worker.run(msg, tasks=tasks))
     bot._generate_response.assert_not_awaited()
+
+
+def test_worker_injects_round_and_remaining_budget(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    seen = []
+
+    async def generate(messages, **kwargs):
+        seen.append(messages)
+        return call() if len(seen) == 1 else ProviderResult("Report ready")
+
+    bot._generate_response.side_effect = generate
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "reported"
+    notes = [
+        row["content"]
+        for row in seen[0]
+        if row.get("role") == "system" and "[Worker budget]" in row.get("content", "")
+    ]
+    assert notes and "Round 1 of" in notes[0]

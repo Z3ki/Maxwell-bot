@@ -19,6 +19,14 @@
 ## Unreleased
 
 - Compact subagent context into bounded working-memory checkpoints and continue the same task instead of stopping when tool history fills the window. Preserve original instructions and recent complete tool batches; carry completed actions, paths, sources and next steps forward without running tools during compaction. Raise the default and maximum worker tool rounds from 100 to 200.
+- Give subagents a visible round budget (`Round X of N; Y rounds remain`, with a final-rounds warning), always keep the newest tool batch raw before summarization, and cancel/await both workers when one is revoked. Fixes #134.
+- Show other users' running public worker jobs in a channel context, status-only, so a chat turn does not assume the job died or launch a duplicate.
+- Refuse a rich-message button click from anyone except the user who created the card; the stored prompt no longer runs with the clicker's permissions. Make `sleep` operator-only and taint-blocked.
+- `search_messages` now checks private-thread membership; `list_admin_servers` and `create_invite` only expose the requester's own servers; the shared GitHub bot token is admin-only on every call.
+- Site deletion scrubs registry secrets first and removes site-owned data as the site uid; concurrent `create_site` calls are serialized per slug and never delete the winner's files. Proxy redirects stay on the public origin, and site state walks skip site-owned 0700 directories.
+- Repair zero-byte storage keys, keep the per-user lock file across wipes, retry handle collisions, re-check storage quota under the lock, and make quota/schedule races less lossy.
+- Reject truncated native tool calls at `finish_reason="length"`, make the custom-call scanner linear, keep fenced code balanced across `send_message` chunks, accept line-wrapped base64 in `send_file`, and preserve the configured worker output cap through `ProviderRouter`.
+- Installer fixes: no implicit `--local` dependency skip, `--with-shell` uses sudo, empty `#` values no longer become search-provider settings, the catch-all API key is honored, and `${...}` values are refused by the env writer. Raise the CI test timeout for slow apt mirrors.
 - Keep subagent output: files a job reports from `/workspace` are copied to the requester's `/storage/jobs/<id>/` and attached when it finishes, and the sandbox stays pinned while a job runs. Fixes the lost `.mcaddon` after the 10-minute idle wipe.
 - Add Premium persistent storage (`user_storage` plugin): 100 MB per account at `/storage` in the shell, restored after every idle wipe, with a `storage` tool, signed private links and a public folder served at `/u/<handle>/`.
 - Add Premium schedules (`schedules` plugin): cron or one-time wake-ups that run a saved prompt as a background job and post the result. Maxwell can create them through the `schedule` tool.
