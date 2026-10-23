@@ -18,6 +18,7 @@
 
 ## Unreleased
 
+- Fix mixed JSON/string tool parameters by declaring explicit schema alternatives with array items scoped to arrays. Gemini-compatible gateways now accept the native tool catalog instead of rejecting it and forcing tool-less replies; retain file maps/lists, image lists, poll options and arbitrary JSON request bodies.
 - Compact subagent context into bounded working-memory checkpoints and continue the same task instead of stopping when tool history fills the window. Preserve original instructions and recent complete tool batches; carry completed actions, paths, sources and next steps forward without running tools during compaction. Raise the default and maximum worker tool rounds from 100 to 200.
 - Give subagents a visible round budget (`Round X of N; Y rounds remain`, with a final-rounds warning), always keep the newest tool batch raw before summarization, and cancel/await both workers when one is revoked. Fixes #134.
 - Show other users' running public worker jobs in a channel context, status-only, so a chat turn does not assume the job died or launch a duplicate.

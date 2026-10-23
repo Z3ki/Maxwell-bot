@@ -33,10 +33,21 @@ def _str(desc: str = "", **extra: Any) -> dict[str, Any]:
     return out
 
 
-def _json_value(desc: str, *types: str) -> dict[str, Any]:
-    """A parameter models may send as native JSON or its string encoding."""
-    listed = list(types) if len(types) > 1 else types[0]
-    return {"type": listed, "description": desc}
+def _json_value(
+    desc: str, *types: str, items: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Native JSON or its string encoding, with array constraints scoped to arrays.
+
+    Explicit branches keep OpenAI-compatible schema translators from attaching
+    array items to the string/object member of a mixed ``type`` list.
+    """
+    branches = []
+    for kind in types:
+        branch: dict[str, Any] = {"type": kind}
+        if kind == "array":
+            branch["items"] = items if items is not None else {}
+        branches.append(branch)
+    return {"description": desc, "anyOf": branches}
 
 
 def _bool(desc: str = "") -> dict[str, Any]:
@@ -113,6 +124,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "options": _json_value(
                 "2-10 answers, max 55 chars each: a list of strings, or one comma-separated string",
                 "array", "string",
+                items={"type": "string"},
             ),
             "duration_hours": _num("Optional, 1-168 hours, default 24"),
             "multiple": _bool("Optional: let people pick more than one answer"),
@@ -524,6 +536,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "split a big page up, add subpages, ship a data.json. Paths are "
                 "relative to the site root.",
                 "string", "object", "array",
+                items={"type": "object"},
             ),
             "backend": _bool(
                 "Optional, default false. Enables only the built-in simple KV API. "
@@ -537,6 +550,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             "images": _json_value(
                 "Optional local image paths to include (a list, or a JSON list)",
                 "string", "array",
+                items={"type": "string"},
             ),
         },
         ["name", "title"],
@@ -554,6 +568,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 '"app.js": "..."} or [{"path": ..., "content": ...}] — native JSON '
                 "or a JSON string.",
                 "string", "object", "array",
+                items={"type": "object"},
             ),
             "find": _str("For replace: exact existing text to swap out"),
             "replace": _str("For replace: what to put there (empty string deletes it)"),
@@ -595,6 +610,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
                 "fetch(new URL('notes', apiBase)). Endpoint names have no leading "
                 "slash. This works from nested pages too.",
                 "string", "object", "array",
+                items={"type": "object"},
             ),
             "path": _str(
                 "For read/replace/rm/write-one-file: server file (default app.py). "
