@@ -4524,6 +4524,8 @@ def _chess_resolve_player(message, opponent, bot) -> tuple[str, str]:
             raise ValueError(
                 f"cannot play against {_chess_bot_name(bot)} — pick a human opponent"
             )
+        if getattr(user, "bot", False):
+            raise ValueError("bot opponents are not supported in chess; pick a human opponent")
         uid = str(getattr(user, "id", "") or "")
         if not uid:
             raise ValueError("opponent has no user id")
@@ -4535,6 +4537,7 @@ def _chess_resolve_player(message, opponent, bot) -> tuple[str, str]:
             u
             for u in mentions
             if not _chess_is_self(bot, u)
+            and not getattr(u, "bot", False)
             and str(getattr(u, "id", "") or "") != author_id
         ]
         if len(others) == 1:
@@ -4550,7 +4553,7 @@ def _chess_resolve_player(message, opponent, bot) -> tuple[str, str]:
         found = _chess_lookup_id(bot, message, uid)
         if found is not None:
             return _from_user(found)
-        return uid, raw
+        raise ValueError("could not verify that opponent is human; mention a user visible in this server")
 
     if raw.isdigit() and len(raw) >= 15:
         for user in mentions:
@@ -4559,7 +4562,7 @@ def _chess_resolve_player(message, opponent, bot) -> tuple[str, str]:
         found = _chess_lookup_id(bot, message, raw)
         if found is not None:
             return _from_user(found)
-        return raw, raw
+        raise ValueError("could not verify that opponent is human; mention a user visible in this server")
 
     needle = raw.lstrip("@").strip().lower()
     pool: list = list(mentions)

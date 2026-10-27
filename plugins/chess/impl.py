@@ -28,9 +28,10 @@ class ChessStartTool(Tool):
         name = _chess_bot_name(self.bot)
         return (
             f"Start a chess game in this channel. Pass opponent= to choose who "
-            f"{name} plays — a mention, Discord user id, or display name. Omit "
-            f"it to play the person who asked, or the single @mentioned human "
-            f"in the message. One game per channel; only that opponent may "
+            f"{name} plays — a human mention, Discord user id, or display name. "
+            f"Bot opponents are not supported. Omit it to play the person who "
+            f"asked, or the single @mentioned human in the message. One game "
+            f"per channel; only that opponent may "
             f"move. Posts the starting board to Discord only; returns FEN and "
             f"annotated legal moves. {name} plays his own moves: if {name} is "
             f"white, this returns the opening position and you pick the first "

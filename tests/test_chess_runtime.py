@@ -141,6 +141,32 @@ def test_failed_discord_board_still_returns_text_position(runtime, monkeypatch, 
     assert "Game started" in result
 
 
+@pytest.mark.parametrize("opponent", ["Sun", "<@123456789012345678>", "123456789012345678"])
+def test_bot_opponent_is_rejected_before_starting(runtime, opponent):
+    manager, message, call = runtime
+    msg = message()
+    sun = SimpleNamespace(id=123456789012345678, name="sun", display_name="Sun", bot=True)
+    msg.mentions = [sun]
+    msg.guild = SimpleNamespace(
+        members=[sun],
+        get_member=lambda uid: sun if uid == sun.id else None,
+        get_member_named=lambda name: sun if name.lower() == "sun" else None,
+    )
+    result = asyncio.run(call(msg, "chess_start", opponent=opponent, bot_side="white"))
+    assert "bot" in result.lower() and "human" in result.lower()
+    assert manager.active("10") is None
+    assert msg.channel.send.await_count == 0
+
+
+@pytest.mark.parametrize("opponent", ["<@123456789012345678>", "123456789012345678"])
+def test_unknown_opponent_id_is_not_accepted(runtime, opponent):
+    manager, message, call = runtime
+    msg = message()
+    result = asyncio.run(call(msg, "chess_start", opponent=opponent))
+    assert "could not verify" in result.lower()
+    assert manager.active("10") is None
+
+
 def test_dispatch_lifecycle_multiple_channels_and_restart(runtime, tmp_path):
     manager, message, call = runtime
 
