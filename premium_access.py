@@ -6,7 +6,24 @@ from contextvars import ContextVar
 current_plan = ContextVar("maxwell_current_plan", default=None)
 
 # Offered only on Premium turns. The tools recheck the durable grant themselves.
+# delegate_task drops out of this set while subagents_require_premium is off.
 PREMIUM_TOOLS = frozenset({"delegate_task", "schedule", "storage"})
+
+
+def subagents_require_premium(bot) -> bool:
+    """Whether delegate_task still checks the Premium grant.
+
+    Default is open. The control key is the way back, not a code edit.
+    """
+    from control_defaults import DEFAULT_CONTROL
+
+    control = getattr(bot, "_control", None) or {}
+    return bool(
+        control.get(
+            "subagents_require_premium",
+            DEFAULT_CONTROL["subagents_require_premium"],
+        )
+    )
 
 
 async def load_plan(bot, user_id):
@@ -35,6 +52,8 @@ def premium_withheld_note(bot, visible_names, user_id) -> str:
             "\n\nSubagents are switched off on this bot. "
             "delegate_task is registered but not available this turn."
         )
+    if not subagents_require_premium(bot):
+        return ""
     if premium_for_current_request(user_id):
         return ""
     return (

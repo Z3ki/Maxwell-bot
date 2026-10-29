@@ -97,6 +97,8 @@ class Panels:
         premium = quota["plan"] == "premium"
         storage = self.storage().status(uid)
         workers = bool(control.get("premium_task_workers_enabled", True))
+        # Same temporary switch as delegate_task. Missing key stays open.
+        subagents_open = not bool(control.get("subagents_require_premium", False))
         enabled = bool(control.get("message_quota_enabled", False))
         unlimited = not enabled or bool(quota["exempt"])
         return {
@@ -122,7 +124,7 @@ class Panels:
                 "daily_runs": daily_run_limit(),
             },
             "features": [
-                {"id": "subagents", "label": "Background subagents (delegate_task)", "on": premium and workers},
+                {"id": "subagents", "label": "Background subagents (delegate_task)", "on": workers and (premium or subagents_open)},
                 {"id": "storage", "label": "Persistent /storage that survives sandbox wipes", "on": premium},
                 {"id": "hosting", "label": "Your own public web folder at /u/<handle>/", "on": premium},
                 {"id": "schedules", "label": "Scheduled wake-ups (cron or one time)", "on": premium and workers},

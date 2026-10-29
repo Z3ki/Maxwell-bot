@@ -45,7 +45,7 @@ if (window.matchMedia("(max-width:620px)").matches)
 const VIEWS = {
   overview: ["Just for you", "Overview", "Your plan, your usage and what Maxwell can do for you."],
   settings: ["Just for you", "Reply settings", "Make Maxwell feel familiar. Your choices stay in sync with Discord."],
-  ai: ["Just for you", "AI connection", "Optional: point chat or Premium subagents at your own AI provider."],
+  ai: ["Just for you", "AI connection", "Optional: point chat or subagents at your own AI provider."],
   files: ["Premium storage", "Files", "Your /storage folder. It survives sandbox wipes, and public/ is your website."],
   schedules: ["Premium wake-ups", "Schedules", "Maxwell wakes up on time, runs the task in the background and sends you the result."],
 };

@@ -1153,15 +1153,21 @@ class ToolCallsMixin:
         # leftover no-op from the old gated catalog — keep the handler so a
         # stale call does not error, but do not offer it.
         names.discard("more_tools")
-        from premium_access import PREMIUM_TOOLS, premium_for_current_request
-        if names & PREMIUM_TOOLS:
-            if not premium_for_current_request(author_id):
-                # The tools refuse free users anyway; offering them just
-                # spends tokens and invites the model to talk about plans.
-                names.difference_update(PREMIUM_TOOLS)
-            elif not self._control.get("premium_task_workers_enabled", True):
-                # Schedules run as worker jobs, so they go dark together.
-                names.difference_update({"delegate_task", "schedule"})
+        from premium_access import (
+            PREMIUM_TOOLS,
+            premium_for_current_request,
+            subagents_require_premium,
+        )
+        gated = set(PREMIUM_TOOLS)
+        if not subagents_require_premium(self):
+            gated.discard("delegate_task")
+        if names & gated and not premium_for_current_request(author_id):
+            # Offering a plan-only tool spends tokens and invites a sales pitch.
+            names.difference_update(gated)
+        control = getattr(self, "_control", {}) or {}
+        if not control.get("premium_task_workers_enabled", True):
+            # Schedules run as worker jobs, so they go dark together.
+            names.difference_update({"delegate_task", "schedule"})
         channel = getattr(message, "channel", None) if message is not None else None
         if is_discord_thread(channel):
             names.discard("create_thread")

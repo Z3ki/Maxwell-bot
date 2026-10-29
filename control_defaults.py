@@ -103,6 +103,10 @@ DEFAULT_CONTROL = {
     # multi-step tool work (site builds, shell + verify) mid-turn.
     "live_turn_timeout_seconds": 900,
     "premium_task_workers_enabled": True,
+    # Temporary open gate. False means every account can delegate. Flip this
+    # back to True when the free-for-all ends. Schedules and storage stay
+    # on the plan either way.
+    "subagents_require_premium": False,
     "task_workers_max_active": 4,
     "task_workers_max_steps": 200,
     # Subagent whole-job budget (2h). The model may ask for up to 4h via

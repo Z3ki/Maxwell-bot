@@ -8,10 +8,16 @@ import aiohttp
 import pytest
 
 from maxwell_core.providers.base import ChatProvider
-from maxwell_core.providers.errors import ProviderUnavailableError
+from maxwell_core.providers.errors import (
+    ProviderAuthenticationError,
+    ProviderEmptyResponseError,
+    ProviderError,
+    ProviderUnavailableError,
+)
 from maxwell_core.providers.factory import openai_compat_provider
 from maxwell_core.providers.models import ProviderResult
 from maxwell_core.providers.routing import ProviderRouter
+from plugins.maxwell_extras.task_jobs import format_job
 from plugins.maxwell_extras.task_workers import WORKER_RETRY_ATTEMPTS
 from plugins.maxwell_extras.worker_providers import select_worker_provider
 from providers import OpenAICompatibleProvider
@@ -247,13 +253,50 @@ def test_worker_failure_is_logged_with_traceback_and_redacted(tmp_path, caplog):
     with caplog.at_level(logging.ERROR, logger="plugins.maxwell_extras.task_workers"):
         report = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
     assert report["status"] == "failed"
-    assert "ProviderUnavailableError: Provider call failed" in report["report"]
+    assert "AI provider was unavailable" in report["report"]
+    assert "Provider call failed" not in report["report"]
     logged = caplog.text
     assert "Task worker job failed: ProviderUnavailableError" in logged
     assert "Traceback (most recent call last)" in logged
     assert "proxy.example" in logged
     for leaked in ("abc123", "token=", "user:pw", "byok-private-key-987"):
         assert leaked not in logged and leaked not in report["report"]
+
+
+@pytest.mark.parametrize(
+    ("error_type", "reason"),
+    [
+        (ProviderAuthenticationError, "AI provider authentication failed"),
+        (ProviderUnavailableError, "AI provider was unavailable"),
+        (ProviderEmptyResponseError, "AI provider returned an empty response"),
+    ],
+)
+def test_provider_failure_public_report_has_only_fixed_reason(
+    tmp_path, no_sleep, error_type, reason
+):
+    bot, msg, shell, worker = setup(tmp_path)
+    secret = "private internal exception text https://internal.example/path?key=secret"
+    bot._generate_response.side_effect = error_type(secret)
+    report = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    public = format_job({"id": "job", "state": "incomplete", "reports": [report]})
+
+    assert report["status"] == "failed"
+    assert reason in report["report"] and reason in public
+    assert secret not in report["report"] and secret not in public
+    assert "internal.example" not in report["report"] and "internal.example" not in public
+    assert len(public) < 200
+
+
+def test_other_provider_failure_strips_exception_message(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    bot._generate_response.side_effect = ProviderError("private provider detail")
+    report = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    public = format_job({"id": "job", "state": "incomplete", "reports": [report]})
+
+    assert "(ProviderError)" in report["report"]
+    assert "private provider detail" not in report["report"]
+    assert "private provider detail" not in public
+    assert "ProviderError" not in public
 
 
 def test_non_provider_failure_report_keeps_only_the_type(tmp_path, caplog):

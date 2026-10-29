@@ -243,6 +243,90 @@ def test_plugin_tool_schemas_are_identical_after_registry_and_property_reorderin
     assert schema == original  # canonicalization must not mutate plugin state
 
 
+def test_native_json_value_schemas_scope_items_to_array_branches():
+    import copy
+
+    import jsonschema
+
+    from maxwell_core.tools.spec import ToolSpec
+    from tool_schemas import TOOL_PARAMETERS
+
+    original = copy.deepcopy(TOOL_PARAMETERS)
+    native = build_openai_tools({name: _FakeTool() for name in TOOL_PARAMETERS})
+    # The registry has its own native exporter; both consume these declarations.
+    native.extend(
+        ToolSpec(name=name, plugin="sites", tool=_FakeTool(), parameters=TOOL_PARAMETERS[name]).openai_tool()
+        for name in ("create_poll", "create_site", "edit_site", "site_server")
+    )
+
+    def check_array_items(schema):
+        assert not isinstance(schema.get("type"), list)
+        if "items" in schema:
+            assert schema.get("type") == "array"
+            check_array_items(schema["items"])
+        if schema.get("type") == "array":
+            assert isinstance(schema.get("items"), dict)
+        for child in schema.get("properties", {}).values():
+            check_array_items(child)
+        for keyword in ("anyOf", "oneOf", "allOf"):
+            for child in schema.get(keyword, []):
+                check_array_items(child)
+        additional = schema.get("additionalProperties")
+        if isinstance(additional, dict):
+            check_array_items(additional)
+
+    for tool in native:
+        schema = tool["function"]["parameters"]
+        jsonschema.Draft202012Validator.check_schema(schema)
+        check_array_items(schema)
+    assert TOOL_PARAMETERS == original
+
+    exported = next(tool for tool in native if tool["function"]["name"] == "create_site")
+    files = exported["function"]["parameters"]["properties"]["files"]
+    array = next(branch for branch in files["anyOf"] if branch["type"] == "array")
+    array["items"]["type"] = "string"
+    assert TOOL_PARAMETERS == original
+
+
+def test_native_json_value_schemas_preserve_supported_inputs():
+    import jsonschema
+
+    native = {
+        tool["function"]["name"]: tool["function"]["parameters"]["properties"]
+        for tool in build_openai_tools(
+            {name: _FakeTool() for name in ("create_poll", "create_site", "edit_site", "site_server")}
+        )
+    }
+    for name in ("create_site", "edit_site", "site_server"):
+        schema = native[name]["files"]
+        for value in (
+            {"app.py": "print('hello')"},
+            [{"path": "app.py", "content": "print('hello')"}],
+            '[{"path":"app.py","content":"print(1)"}]',
+        ):
+            jsonschema.validate(value, schema)
+        assert not jsonschema.Draft202012Validator(schema).is_valid(["app.py"])
+
+    for value in (["yes", "no"], "yes,no"):
+        jsonschema.validate(value, native["create_poll"]["options"])
+    for value in (["/tmp/image.png"], '["/tmp/image.png"]'):
+        jsonschema.validate(value, native["create_site"]["images"])
+    for name, parameter in (("create_poll", "options"), ("create_site", "images")):
+        assert not jsonschema.Draft202012Validator(native[name][parameter]).is_valid([{}])
+
+    # API request bodies allow arbitrary JSON, including heterogeneous arrays.
+    for value in (
+        {"nested": [1, True, None]},
+        [1, "two", {"three": [False, None]}],
+        '{"encoded":true}',
+        1,
+        1.5,
+        True,
+        None,
+    ):
+        jsonschema.validate(value, native["site_server"]["body"])
+
+
 def test_reasoning_param_schema_is_stable():
     # same shape everywhere — no per-tool drift
     assert REASONING_PARAM["type"] == "string"

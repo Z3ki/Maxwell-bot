@@ -39,7 +39,7 @@ _PERSONAL_SETTINGS = {
     "language": ("Language", "Set a preferred language, such as English or Spanish."),
     "style": ("Personality", "Your reply personality across channels, servers and DMs."),
     "byok": ("AI connection", "Connect your own AI account with an API key."),
-    "worker_byok": ("Subagent AI provider", "Choose an independent API endpoint, model and generation settings for Premium workers."),
+    "worker_byok": ("Subagent AI provider", "Choose an independent API endpoint, model and generation settings for subagents."),
     "tracking": ("Privacy", "Choose whether Maxwell stores your message content."),
 }
 _SERVER_SETTINGS = {

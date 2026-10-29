@@ -10,6 +10,11 @@ import traceback
 from contextvars import ContextVar
 from typing import ClassVar
 
+from maxwell_core.providers.errors import (
+    ProviderAuthenticationError,
+    ProviderEmptyResponseError,
+    ProviderUnavailableError,
+)
 from tools import Tool
 from provider_limits import (
     WORKER_TIMEOUT_MAX_SECONDS,
@@ -21,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # One dropped or reset provider stream must not end the whole job.
 WORKER_RETRY_ATTEMPTS = 3
+# Additional worker-level recovery after the provider's own retry budget.
+WORKER_EMPTY_RESPONSE_RETRIES = 2
 
 _inside_worker = ContextVar("maxwell_inside_task_worker", default=False)
 _FAMILIES = {
@@ -201,11 +208,15 @@ def _error_summary(
     return f"{name}: {detail}" if detail else name
 
 
-def _report_error(exc: BaseException, secrets=()) -> str:
-    """Provider errors carry designed, user-safe text; other text stays in logs."""
-    from maxwell_core.providers.errors import ProviderError
-
-    return _error_summary(exc, secrets, message=isinstance(exc, ProviderError))
+def _report_error(exc: BaseException) -> str:
+    """Use fixed public reasons; exception messages are diagnostics only."""
+    if isinstance(exc, ProviderEmptyResponseError):
+        return "The subagent stopped because the AI provider returned an empty response (ProviderEmptyResponseError)"
+    if isinstance(exc, ProviderAuthenticationError):
+        return "The subagent stopped because AI provider authentication failed (ProviderAuthenticationError)"
+    if isinstance(exc, ProviderUnavailableError):
+        return "The subagent stopped because the AI provider was unavailable (ProviderUnavailableError)"
+    return f"The subagent stopped before it finished ({type(exc).__name__})"
 
 
 def _log_failure(stage: str, exc: BaseException, secrets=()) -> None:
@@ -256,8 +267,15 @@ class DelegateTaskTool(Tool):
         self._active = 0
 
     def get_description(self):
+        from premium_access import subagents_require_premium
+
+        opening = (
+            "Premium: hand substantial work to a subagent."
+            if subagents_require_premium(self.bot)
+            else "Hand substantial work to a subagent."
+        )
         return (
-            "Premium: hand substantial work to a subagent. Delegate one or two focused tasks. Each task is the concrete work to do, with the requirements and context that job needs. "
+            opening + " Delegate one or two focused tasks. Each task is the concrete work to do, with the requirements and context that job needs. "
             "The subagent uses the caller's existing tools. It uses a dedicated personal worker connection, chat BYOK, the operator worker model, or the default AI, in that order, with bounded "
             "steps and time (120 minutes by default; set timeout_minutes up to 240 for very large builds). Returns a background job ID immediately; keep chatting while it runs. "
             "Do not poll or wait in this turn. Completion returns to the originating context. "
@@ -269,8 +287,13 @@ class DelegateTaskTool(Tool):
         )
 
     async def _eligible(self, message):
+        from premium_access import subagents_require_premium
+
         uid = str(getattr(getattr(message, "author", None), "id", ""))
-        if not uid.isdecimal() or not await asyncio.to_thread(
+        if not uid.isdecimal():
+            return False
+        # Privacy still fails closed. The plan check is the temporary part.
+        if subagents_require_premium(self.bot) and not await asyncio.to_thread(
             has_premium, self.bot, uid
         ):
             return False
@@ -311,7 +334,11 @@ class DelegateTaskTool(Tool):
             _log_failure("entitlement check", exc)
             return "refused: Premium entitlement or privacy state could not be verified"
         if not eligible:
-            return "refused: this feature requires an operator-granted Premium plan and a current request"
+            from premium_access import subagents_require_premium
+
+            if subagents_require_premium(self.bot):
+                return "refused: this feature requires an operator-granted Premium plan and a current request"
+            return "refused: a current authorized request is required"
         uid = str(message.author.id)
         tasks = [{"task": task["task"], "kind": "task"} for task in tasks]
         capacity = _limit(control, "task_workers_max_active", 4, 8)
@@ -363,6 +390,24 @@ class DelegateTaskTool(Tool):
                     await provider.close()
                 except Exception as exc:
                     _log_failure("provider cleanup", exc, _provider_secrets(provider))
+
+    async def _generate_worker_response(self, message, messages, **kwargs):
+        """Retry an empty model response without replaying completed tools."""
+        from .task_job_store import active_job
+
+        for attempt in range(WORKER_EMPTY_RESPONSE_RETRIES + 1):
+            try:
+                return await self.bot._generate_response(messages, **kwargs)
+            except ProviderEmptyResponseError:
+                if attempt == WORKER_EMPTY_RESPONSE_RETRIES:
+                    raise
+                logger.warning("Empty worker response; retrying model request")
+                await asyncio.sleep(attempt + 1)
+                context = active_job.get()
+                if context and not await context[0].allowed(context[1]):
+                    raise asyncio.CancelledError from None
+                if not await self._eligible(message):
+                    raise PermissionError("request invalidated") from None
 
     async def _compact_context(
         self, message, base, chunks, budget, provider, selected, output_tokens
@@ -439,8 +484,8 @@ class DelegateTaskTool(Tool):
                     high = mid - 1
             if not low:
                 raise ValueError("Worker checkpoint input exceeds context budget")
-            result = await self.bot._generate_response(
-                prompt(low),
+            result = await self._generate_worker_response(
+                message, prompt(low),
                 provider=provider,
                 tools=[],
                 timeout=request_timeout_seconds(self.bot, selected),
@@ -591,11 +636,17 @@ class DelegateTaskTool(Tool):
                         raise asyncio.CancelledError
                     job.steps += 1
                 if not await self._eligible(message):
+                    from premium_access import subagents_require_premium
+
                     return {
                         "kind": task["kind"],
                         "status": "stopped",
                         "completed": completed,
-                        "report": "Premium revoked or request invalidated",
+                        "report": (
+                            "Premium revoked or request invalidated"
+                            if subagents_require_premium(self.bot)
+                            else "request invalidated"
+                        ),
                     }
                 messages = base + [row for chunk in chunks for row in chunk]
                 available = budget - len(json.dumps(base))
@@ -635,8 +686,8 @@ class DelegateTaskTool(Tool):
                 payload = messages + [budget_note]
                 if len(json.dumps(payload)) > budget:
                     payload = messages
-                result = await self.bot._generate_response(
-                    payload,
+                result = await self._generate_worker_response(
+                    message, payload,
                     provider=provider,
                     tools=schemas,
                     timeout=request_timeout_seconds(self.bot, selected),
@@ -826,8 +877,8 @@ class DelegateTaskTool(Tool):
                 "report": "Step budget reached; inspect completed changes before retrying",
             }
         except Exception as exc:
-            # Task content and tool arguments stay out of logs and reports;
-            # the error text is redacted and bounded.
+            # Task content, tool arguments and exception messages stay out of
+            # reports; diagnostics are redacted and bounded in logs.
             secrets = _provider_secrets(provider or getattr(self.bot, "ai_provider", None))
             _log_failure("job", exc, secrets)
             return {
@@ -835,8 +886,7 @@ class DelegateTaskTool(Tool):
                 "status": "failed",
                 "completed": completed,
                 "report": (
-                    "The subagent stopped before it finished "
-                    f"({_report_error(exc, secrets)}). "
+                    f"{_report_error(exc)}. "
                     "Anything it already changed may still be there."
                 ),
             }

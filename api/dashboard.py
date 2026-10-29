@@ -689,7 +689,7 @@ class Dashboard:
         return self.response(
             {
                 "ok": True,
-                "message": "Connection works. Premium subagents will use this AI." if worker else "Connection works. Your messages will use this AI.",
+                "message": "Connection works. Subagents will use this AI." if worker else "Connection works. Your messages will use this AI.",
             }
         )
 

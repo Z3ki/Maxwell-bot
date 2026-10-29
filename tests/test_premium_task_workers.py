@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from bot import MaxwellBot, ToolCircuitBreaker, _current_request_provider
+from maxwell_core.providers.errors import ProviderEmptyResponseError
 from maxwell_core.providers.models import ProviderResult
 from message_quota import MessageQuota
 from plugins.maxwell_extras.task_workers import DelegateTaskTool, _inside_worker
@@ -110,8 +111,63 @@ def test_premium_worker_executes_via_real_authorization_and_does_not_save_messag
     }
 
 
-def test_free_plan_and_unverified_entitlement_fail_closed(tmp_path):
+def test_worker_recovers_empty_response_after_tool_without_replaying_it(tmp_path, monkeypatch):
+    bot, msg, shell, worker = setup(tmp_path)
+    monkeypatch.setattr("plugins.maxwell_extras.task_workers.asyncio.sleep", AsyncMock())
+    bot._generate_response.side_effect = [
+        call(),
+        ProviderEmptyResponseError("Empty response from provider"),
+        ProviderResult("Verified task result"),
+    ]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "reported"
+    assert result["report"] == "Verified task result"
+    assert result["completed"] == [{"tool": "shell", "status": "returned"}]
+    shell.execute.assert_awaited_once()
+    assert bot._generate_response.await_count == 3
+
+
+def test_worker_reports_exhausted_empty_responses_without_replaying_tool(tmp_path, monkeypatch):
+    bot, msg, shell, worker = setup(tmp_path)
+    monkeypatch.setattr("plugins.maxwell_extras.task_workers.asyncio.sleep", AsyncMock())
+    bot._generate_response.side_effect = [
+        call(),
+        *[ProviderEmptyResponseError("Empty response from provider") for _ in range(3)],
+    ]
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "failed"
+    assert "ProviderEmptyResponseError" in result["report"]
+    assert result["completed"] == [{"tool": "shell", "status": "returned"}]
+    shell.execute.assert_awaited_once()
+    assert bot._generate_response.await_count == 4
+
+
+def test_worker_does_not_retry_after_request_revoked(tmp_path, monkeypatch):
+    bot, msg, shell, worker = setup(tmp_path)
+    monkeypatch.setattr("plugins.maxwell_extras.task_workers.asyncio.sleep", AsyncMock())
+
+    async def empty_then_revoke(*args, **kwargs):
+        bot._control["subagents_require_premium"] = True
+        bot._message_quota.configure("123", plan="free")
+        raise ProviderEmptyResponseError("Empty response from provider")
+
+    bot._generate_response.side_effect = empty_then_revoke
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "failed"
+    assert bot._generate_response.await_count == 1
+    shell.execute.assert_not_awaited()
+
+
+def test_free_plan_runs_while_the_premium_gate_is_open(tmp_path):
     bot, msg, shell, worker = setup(tmp_path, premium=False)
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["status"] == "reported"
+    shell.execute.assert_awaited_once()
+
+
+def test_premium_gate_fails_closed_when_restored(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path, premium=False)
+    bot._control["subagents_require_premium"] = True
     assert "requires" in asyncio.run(worker.run(msg, tasks=TASKS))
     bot._message_quota.plan_for = lambda uid: (_ for _ in ()).throw(
         OSError("private-error")
@@ -123,6 +179,7 @@ def test_free_plan_and_unverified_entitlement_fail_closed(tmp_path):
 
 def test_plan_is_durable_and_revocation_stops_before_next_tool(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
+    bot._control["subagents_require_premium"] = True
     bot._message_quota = MessageQuota(tmp_path / "quota.sqlite3")
 
     async def generate(*a, **k):

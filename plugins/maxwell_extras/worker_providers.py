@@ -33,12 +33,41 @@ async def select_worker_provider(bot, user_id, inherited=None):
     key = getattr(config, "AI_WORKER_API_KEY", None)
     if key is None:
         key = "" if endpoint else getattr(config, "AI_API_KEY", "")
+    from maxwell_core.providers.http import normalize_base_url
+
+    worker_url = endpoint or getattr(config, "AI_BASE_URL", "")
+    fallback = {}
+    for prefix in ("AI_FALLBACK", "AI"):
+        url = (getattr(config, f"{prefix}_BASE_URL", "") or "").strip()
+        alternate_model = (getattr(config, f"{prefix}_MODEL", "") or "").strip()
+        alternate_key = (getattr(config, f"{prefix}_API_KEY", "") or "").strip()
+        if not (url and alternate_model and alternate_key):
+            continue
+        if prefix == "AI" and normalize_base_url(url) == normalize_base_url(worker_url):
+            continue
+        if (normalize_base_url(url), alternate_model) == (
+            normalize_base_url(worker_url), model
+        ):
+            continue
+        fallback = {
+            "fallback_base_url": url,
+            "fallback_model": alternate_model,
+            "fallback_api_key": alternate_key,
+            "fallback_disable_reasoning": getattr(
+                config, f"{prefix}_DISABLE_REASONING", True
+            ),
+            "fallback_reasoning_effort": getattr(
+                config, f"{prefix}_REASONING_EFFORT", ""
+            ),
+        }
+        break
+
     from maxwell_core.providers.models import ProviderPolicy
 
     output = getattr(config, "AI_WORKER_MAX_OUTPUT_TOKENS", 8192)
     provider = bot._make_chat_provider(
         name="worker",
-        base_url=endpoint or getattr(config, "AI_BASE_URL", ""),
+        base_url=worker_url,
         api_key=key,
         model=model,
         max_tokens=output,
@@ -48,12 +77,13 @@ async def select_worker_provider(bot, user_id, inherited=None):
         retry_attempts=3,
         empty_response_retries=0,
         policy=ProviderPolicy(
-            allow_provider_fallback=False,
+            allow_provider_fallback=bool(fallback),
             max_request_seconds=getattr(
                 config, "AI_WORKER_REQUEST_TIMEOUT_SECONDS", 600
             ),
             max_output_tokens=output,
         ),
+        **fallback,
     )
     # Informational ceiling for this route. The job deadline itself comes from
     # provider_limits.worker_job_timeout_seconds (default or model-requested).

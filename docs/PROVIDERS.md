@@ -91,6 +91,16 @@ so concurrent requests never change a client's generation defaults. Model
 overrides apply to the primary slot; alternate providers use their own models.
 Personal BYOK clients bypass the funded router entirely.
 
+An independently configured operator worker route may fall back first to
+`AI_FALLBACK_BASE_URL`, `AI_FALLBACK_MODEL`, and `AI_FALLBACK_API_KEY` when
+all three are nonblank and the endpoint/model pair differs from the worker.
+Otherwise it may fall back to the distinct primary `AI_BASE_URL`, `AI_MODEL`,
+and `AI_API_KEY`, again only when all three are nonblank. Endpoint comparison
+uses normalized API roots. Each route uses its own key and reasoning settings;
+no key is inherited by a fallback destination. A personal worker or inherited
+personal chat provider never falls back to operator routes. Without a separate
+operator worker model, workers use the existing chat provider as before.
+
 The concrete HTTP client remains in `providers.py`, alongside actively used
 stream parsing and model compatibility helpers. Its old multi-endpoint
 constructor keywords remain a deprecated compatibility path for external

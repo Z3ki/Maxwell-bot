@@ -220,7 +220,8 @@ def test_free_users_see_the_plan_but_cannot_write_premium_panels(tmp_path, monke
             plan = await (await client.get("/api/dashboard/plan", headers=auth)).json()
             assert plan["plan"] == "free"
             assert plan["storage"]["quota_bytes"] == 0
-            assert not any(row["on"] for row in plan["features"])
+            on = {row["id"] for row in plan["features"] if row["on"]}
+            assert on == {"subagents"}
             files = await (
                 await client.get("/api/dashboard/files", headers=auth)
             ).json()

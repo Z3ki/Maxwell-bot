@@ -77,6 +77,36 @@ def test_dedicated_worker_byok_wins_and_honors_its_settings(tmp_path):
 
     asyncio.run(run())
 
+def test_personal_worker_auth_failure_never_uses_operator_routes(tmp_path):
+    from maxwell_core.providers.errors import ProviderAuthenticationError
+
+    class BrokenAuthentication:
+        async def headers(self):
+            raise RuntimeError("private credential")
+
+    bot, _, _, _ = setup(tmp_path)
+    worker, _ = routes(bot, tmp_path)
+    save(worker)
+    bot.config.AI_WORKER_MODEL = "operator"
+    bot.config.AI_FALLBACK_BASE_URL = "https://fallback.example/v1"
+    bot.config.AI_FALLBACK_MODEL = "backup"
+    bot.config.AI_FALLBACK_API_KEY = "operator-secret"
+    inherited = object()
+
+    async def run():
+        provider, owned = await select_worker_provider(bot, "123", inherited)
+        try:
+            assert owned and not provider.policy.allow_provider_fallback
+            assert not hasattr(provider, "fallback")
+            provider.authentication = BrokenAuthentication()
+            provider.available = True
+            with pytest.raises(ProviderAuthenticationError):
+                await provider.generate_response([{"role": "user", "content": "work"}])
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
 
 def test_empty_locked_vault_allows_operator_but_existing_locked_key_fails_closed(
     tmp_path,
@@ -131,6 +161,112 @@ def test_operator_route_credentials_never_leak_to_new_destination(
     assert captured["context_window"] == 200000 and captured["max_tokens"] == 20000
     assert captured["policy"].max_request_seconds == 1800
     assert client.turn_timeout_seconds == 14400
+
+@pytest.mark.parametrize(
+    "fallback_url,fallback_model,fallback_key,primary_url,primary_model,primary_key,expected",
+    [
+        ("https://fallback.example/v1", "backup", "fallback-key", "https://chat.example/v1", "chat", "chat-key", "fallback"),
+        ("https://fallback.example/v1", "backup", "", "https://chat.example/v1", "chat", "chat-key", "chat"),
+        ("", "backup", "fallback-key", "https://chat.example/v1", "chat", "chat-key", "chat"),
+        ("https://worker.example", "worker", "fallback-key", "https://chat.example/v1", "chat", "chat-key", "chat"),
+        ("", "", "", "https://worker.example/v1/", "worker", "chat-key", None),
+        ("https://fallback.example/v1", "", "fallback-key", "https://chat.example/v1", "chat", "chat-key", "chat"),
+        ("", "", "", "", "chat", "chat-key", None),
+        ("", "", "", "https://chat.example/v1", "", "chat-key", None),
+        ("", "", "", "https://chat.example/v1", "chat", "", None),
+    ],
+)
+def test_operator_fallback_requires_complete_distinct_route(
+    tmp_path, fallback_url, fallback_model, fallback_key,
+    primary_url, primary_model, primary_key, expected,
+):
+    bot, _, _, _ = setup(tmp_path)
+    bot._make_chat_provider = openai_compat_provider
+    bot.config = SimpleNamespace(
+        AI_WORKER_BASE_URL="https://worker.example/v1",
+        AI_WORKER_MODEL="worker",
+        AI_WORKER_API_KEY="worker-key",
+        AI_FALLBACK_BASE_URL=fallback_url,
+        AI_FALLBACK_MODEL=fallback_model,
+        AI_FALLBACK_API_KEY=fallback_key,
+        AI_BASE_URL=primary_url,
+        AI_MODEL=primary_model,
+        AI_API_KEY=primary_key,
+    )
+
+    async def run():
+        provider, owned = await select_worker_provider(bot, "123")
+        try:
+            assert owned
+            assert provider.policy.allow_provider_fallback is (expected is not None)
+            if expected:
+                assert provider.fallback.model == ("backup" if expected == "fallback" else "chat")
+                assert provider.fallback.api_key == ("fallback-key" if expected == "fallback" else "chat-key")
+                assert provider.primary.api_key == "worker-key"
+            else:
+                assert not hasattr(provider, "fallback")
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("use_fallback", [True, False])
+def test_operator_auth_failure_routes_with_only_selected_credentials(tmp_path, use_fallback):
+    from aiohttp import web
+
+    async def run():
+        requests = []
+
+        async def handle(request):
+            payload = await request.json()
+            requests.append((request.path, request.headers.get("Authorization"), payload["model"]))
+            if request.path.startswith("/worker/"):
+                return web.json_response({"error": {"message": "invalid key"}}, status=401)
+            return web.json_response({"choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+
+        app = web.Application()
+        app.router.add_post("/{route}/v1/chat/completions", handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+        bot, _, _, _ = setup(tmp_path)
+        bot._make_chat_provider = openai_compat_provider
+        bot.config = SimpleNamespace(
+            AI_WORKER_BASE_URL=f"{base}/worker/v1",
+            AI_WORKER_MODEL="worker",
+            AI_WORKER_API_KEY="worker-key",
+            AI_FALLBACK_BASE_URL=f"{base}/fallback/v1",
+            AI_FALLBACK_MODEL="backup",
+            AI_FALLBACK_API_KEY="fallback-key" if use_fallback else "",
+            AI_BASE_URL=f"{base}/chat/v1",
+            AI_MODEL="chat",
+            AI_API_KEY="chat-key",
+        )
+        provider = None
+        try:
+            provider, _ = await select_worker_provider(bot, "123")
+            for client in provider.providers:
+                client.available = True
+            result = await provider.generate_response(
+                [{"role": "user", "content": "work"}], stream=False
+            )
+            assert result == "ok"
+            assert requests == [
+                ("/worker/v1/chat/completions", "Bearer worker-key", "worker"),
+                (f"/{'fallback' if use_fallback else 'chat'}/v1/chat/completions",
+                 f"Bearer {'fallback-key' if use_fallback else 'chat-key'}",
+                 "backup" if use_fallback else "chat"),
+            ]
+        finally:
+            if provider:
+                await provider.close()
+            await runner.cleanup()
+
+    asyncio.run(run())
 
 
 def test_partial_operator_config_refuses_workers_without_breaking_chat(tmp_path):

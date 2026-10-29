@@ -142,7 +142,11 @@ class TaskJobs:
             return "refused: task workers are disabled"
         try:
             if not await engine._eligible(message):
-                return "refused: Premium and a current authorized request are required"
+                from premium_access import subagents_require_premium
+
+                if subagents_require_premium(self.bot):
+                    return "refused: Premium and a current authorized request are required"
+                return "refused: a current authorized request is required"
         except Exception:
             return "refused: Premium or privacy state is unavailable"
         uid, source = str(message.author.id), str(message.id)

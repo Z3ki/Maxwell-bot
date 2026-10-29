@@ -1110,7 +1110,11 @@ class MessagesMixin:
                 except Exception:
                     logger.warning("Could not hand a work draft to the subagent", exc_info=True)
             return "Handed that to a subagent. The working notes stay there."
-        return "That working draft stays off this chat. Building it needs a subagent, which needs Premium."
+        from premium_access import subagents_require_premium
+
+        if subagents_require_premium(self):
+            return "That working draft stays off this chat. Building it needs a subagent, which needs Premium."
+        return "That working draft stays off this chat. Subagents are not available on this turn."
 
     async def _deliver_normal_reply(self, message, response, active_progresses):
         """Deliver final text and native stickers with a single first-chunk owner."""
