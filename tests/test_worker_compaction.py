@@ -81,6 +81,7 @@ def test_invalid_checkpoint_stops_without_replaying_completed_work(tmp_path, inv
 
 def test_compaction_rechecks_entitlement_between_fragments(tmp_path):
     bot, msg, shell, worker = setup(tmp_path)
+    bot._control["subagents_require_premium"] = True
     base = [{"role": "user", "content": "Research without repeating writes"}]
     # An older batch provides multiple checkpoint fragments; the newest batch
     # is deliberately retained raw (issue #134) and is not part of the summary.
