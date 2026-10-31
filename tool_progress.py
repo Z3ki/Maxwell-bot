@@ -3,10 +3,9 @@
 What this is
 ------------
 Progress stays silent until a tool name or meaningful streamed content is
-available. There is no generic acknowledgement message. While the
-tools run, we EDIT that same message with a rolling tail of the model's
-own streamed text. When the tool batch finishes success or fail, we DELETE
-the status message so the channel is left with only the tool's real output.
+available. There is no generic acknowledgement message. While tools run,
+the same message shows a filtered preview of the model's streamed text.
+The status is deleted when the batch ends.
 
 Why bother
 ----------
@@ -44,6 +43,14 @@ import logging
 import re
 import time
 from typing import Any
+
+from response_guard import (
+    _INTERNAL_CONTEXT_MARKERS,
+    _INTERNAL_CONTEXT_PATTERNS,
+    _PRIVATE_BLOCK,
+    _PRIVATE_CLOSE,
+    strip_internal_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +144,68 @@ _HIDDEN_PROGRESS_TOOLS = frozenset(
 
 def is_hidden_progress_tool(tool_name: str | None) -> bool:
     return str(tool_name or "").strip().lower() in _HIDDEN_PROGRESS_TOOLS
+
+
+_PREVIEW_MARKERS = _INTERNAL_CONTEXT_MARKERS + (
+    "[private internal context]",
+    "[/private internal context]",
+)
+_PREVIEW_SENTENCE = re.compile(r".+?(?:[.!?…]+(?=\s|$)|$)")
+
+
+def _safe_preview(text: str) -> str:
+    """Drop unsafe sentences before formatting or truncating streamed text.
+
+    A marker prefix at a word boundary in the unterminated final chunk may
+    still be completing, so that chunk is withheld until it diverges.
+    """
+    private_spans = [m.span() for m in _PRIVATE_BLOCK.finditer(text)]
+    kept = []
+    for match in _PREVIEW_SENTENCE.finditer(text):
+        chunk = match.group()
+        folded = chunk.casefold()
+        candidate = folded.rstrip()
+        unsafe = (
+            any(match.start() < end and match.end() > start for start, end in private_spans)
+            or _PRIVATE_CLOSE.search(chunk)
+            or any(marker in folded for marker in _PREVIEW_MARKERS)
+            or any(pattern.search(chunk) for pattern in _INTERNAL_CONTEXT_PATTERNS)
+        )
+        if (
+            not unsafe
+            and match.end() == len(text)
+            and not candidate.endswith((".", "!", "?", "…"))
+        ):
+            for marker in _PREVIEW_MARKERS:
+                for length in range(1, min(len(marker), len(candidate)) + 1):
+                    prefix = marker[:length]
+                    if not candidate.endswith(prefix):
+                        continue
+                    start = len(candidate) - length
+                    if start == 0 or not candidate[start - 1].isalnum():
+                        unsafe = True
+                        break
+                if unsafe:
+                    break
+        if not unsafe:
+            kept.append(chunk)
+    return "".join(kept).strip()
+
+
+def _continues_preview_marker(previous: str, delta: str) -> bool:
+    """Keep split marker tokens intact despite the normal delta space join."""
+    previous = previous.casefold()
+    delta = delta.casefold()
+    for marker in _PREVIEW_MARKERS:
+        for length in range(1, min(len(marker) - 1, len(previous)) + 1):
+            start = len(previous) - length
+            if (
+                (start == 0 or not previous[start - 1].isalnum())
+                and previous.endswith(marker[:length])
+                and marker[length:].startswith(delta[:1])
+            ):
+                return True
+    return False
 
 
 def _latest_complete_sentence(text: str) -> str:
@@ -245,8 +314,8 @@ class ToolProgress:
             return
         if self._platform != "discord":
             try:
-                content = self._render()
-                if not content:
+                content = strip_internal_context(self._render())
+                if not content.strip():
                     return
                 self._posted = True
                 posted = await self._post_reply(content)
@@ -290,8 +359,8 @@ class ToolProgress:
             await asyncio.sleep(_GRACE_BEFORE_FIRST_POST)
             if self._stopped or self._tool_streaming or self._posted is not None:
                 return
-            content = self._render()
-            if not content:
+            content = strip_internal_context(self._render())
+            if not content.strip():
                 return
             posted = await self._post_reply(content)
             if self._stopped:
@@ -313,6 +382,9 @@ class ToolProgress:
         Falls back to reply() if the message object doesn't expose a
         channel send (Telegram adapter, mocked tests).
         """
+        content = strip_internal_context(content)
+        if not content.strip():
+            return None
         msg = self._msg
         channel = getattr(msg, "channel", None)
         send_fn = getattr(channel, "send", None)
@@ -343,7 +415,11 @@ class ToolProgress:
         if prev and text:
             last_ch = prev[-1]
             first_ch = text[0]
-            if not last_ch.isspace() and not first_ch.isspace():
+            if (
+                not last_ch.isspace()
+                and not first_ch.isspace()
+                and not _continues_preview_marker(prev, text)
+            ):
                 merged = prev + " " + text
             else:
                 merged = prev + text
@@ -363,11 +439,8 @@ class ToolProgress:
         the model's latest thought, not an accumulation. tick() is
         the path that APPENDS per-token streaming deltas.
 
-        ``snippet`` is an optional code/artifact head (e.g. the first
-        ~80 chars of an HTML body or a shell command). When set, it's
-        shown on a second line of the progress message so the user
-        can watch the model generate the artifact in real time.
-        Pass ``""`` to clear it; omit to leave the current value.
+        ``snippet`` is an optional code/artifact head shown on a second line.
+        Unsafe preview sentences are removed before display.
         """
         if (
             self._stopped
@@ -398,7 +471,7 @@ class ToolProgress:
             # scroll by, so we keep the LAST _SNIPPET_BUDGET chars
             # (the most recently generated portion is what reads as
             # "still being written").
-            normalized = _SNIPPET_JOIN_CHAR.join(snippet.split())
+            normalized = _safe_preview(_SNIPPET_JOIN_CHAR.join(snippet.split()))
             if len(normalized) > _SNIPPET_BUDGET:
                 normalized = normalized[-_SNIPPET_BUDGET:]
             self._snippet_buffer = normalized
@@ -501,7 +574,8 @@ class ToolProgress:
         self._first_tick_done = True
 
     async def _flush(self, content: str) -> None:
-        if not content:
+        content = strip_internal_context(content)
+        if not content.strip():
             return
         async with self._lock:
             if self._stopped or not self._posted or self._edits_disabled:
@@ -590,7 +664,7 @@ class ToolProgress:
             if visible:
                 return "Maxwell is using: " + ", ".join(visible)
 
-        raw = self._reasoning_buffer.strip()
+        raw = _safe_preview(self._reasoning_buffer.strip())
         # A provider may stream the old acknowledgement in several deltas.
         # Never publish it as progress, including repeated copies.
         acknowledgement = re.sub(r"[\s.…!,-]+", " ", raw).strip().casefold()
@@ -759,7 +833,8 @@ class ToolProgress:
         """
         if self._stopped or self._platform != "discord" or not self._posted:
             return False
-        if not content:
+        content = strip_internal_context(content)
+        if not content.strip():
             return False
         posted = self._posted
         self._stopped = True

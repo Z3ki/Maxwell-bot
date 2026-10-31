@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from tooling import helpers as _helpers
 from tools import Tool
+from response_guard import strip_internal_context
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -420,6 +421,9 @@ class EditMessageTool(Tool):
     ) -> str:
         if not message_id or content is None:
             return "Error: message_id and content are required"
+        content = strip_internal_context(str(content))
+        if not content.strip():
+            return "Error: content is empty after safety filtering"
         if len(str(content)) > 2000:
             return "Error: message content exceeds Discord's 2000-character limit"
         requested_channel = kwargs.get("channel_id")
@@ -588,7 +592,9 @@ class CreatePollTool(Tool):
         # A list lets an answer contain a comma. The string form is the old
         # contract and still turns up from models that learned it.
         raw = options if isinstance(options, list) else str(options).split(",")
-        option_list = [str(o).strip() for o in raw if str(o).strip()]
+        option_list = [strip_internal_context(str(o)).strip() for o in raw if str(o).strip()]
+        if any(not option for option in option_list):
+            return "Error: poll options cannot be empty after safety filtering"
         if len(option_list) < 2:
             return "Error: Need at least 2 options for a poll"
         if len(option_list) > 10:
@@ -596,7 +602,9 @@ class CreatePollTool(Tool):
         too_long = [o for o in option_list if len(o) > 55]
         if too_long:
             return f"Error: poll answers are limited to 55 characters; shorten {too_long[0][:60]!r}"
-        question = str(question).strip()
+        question = strip_internal_context(str(question)).strip()
+        if not question:
+            return "Error: poll question is empty after safety filtering"
         if len(question) > 300:
             return "Error: the poll question is limited to 300 characters"
         try:
@@ -805,7 +813,7 @@ class SendMessageTool(Tool):
         user_id: str | None = None,
         **kwargs,
     ) -> str:
-        text = str(content or "").strip()
+        text = strip_internal_context(str(content or "")).strip()
         if not text:
             return "Error: content is required"
         sent_any = False

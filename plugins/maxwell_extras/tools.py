@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import aiohttp
 import discord
 
+from response_guard import strip_internal_context
 from tools import Tool
 from maxwell_core.memory.scope import MemoryRequester
 
@@ -299,7 +300,11 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
             logger.warning("Reminder %s channel %s is unavailable", rid, channel_id)
             continue
         _UNAVAILABLE_CHANNEL_UNTIL.pop(channel_id, None)
-        text = str(item.get("text") or "")[:1800]
+        text = strip_internal_context(str(item.get("text") or ""))
+        if not text.strip():
+            await store.remove(rid)
+            continue
+        text = text[:1800]
         try:
             await channel.send(
                 f"<@{owner_id}> reminder: {text}",
@@ -466,8 +471,10 @@ class SendRichMessageTool(Tool):
     def _link_buttons(raw: Any) -> list[discord.ui.Button]:
         out: list[discord.ui.Button] = []
         for item in _json_list(raw)[:5]:
-            label = str(item.get("label") or "Open")[:80]
-            url = str(item.get("url") or "").strip()
+            label = strip_internal_context(str(item.get("label") or "Open"))[:80]
+            if not label.strip():
+                continue
+            url = strip_internal_context(str(item.get("url") or "")).strip()
             if not url.startswith(("https://", "http://")):
                 continue
             kwargs: dict[str, Any] = {
@@ -585,7 +592,9 @@ class SendRichMessageTool(Tool):
             for url in (image_url, thumbnail_url)
             if url and str(url).startswith(("https://", "http://"))
         )
-        text = "\n\n".join(part for part in parts if part)
+        text = strip_internal_context("\n\n".join(part for part in parts if part))
+        if not text.strip():
+            return "Error: content is empty after safety filtering."
         link_buttons = self._link_buttons(buttons)
         view = None
         if link_buttons:
@@ -631,8 +640,17 @@ class SendRichMessageTool(Tool):
         buttons: Any = None,
         **kwargs,
     ) -> str:
-        title_s = str(title or "").strip()
-        desc_s = str(description or "").strip()
+        title_s = strip_internal_context(str(title or "")).strip()
+        desc_s = strip_internal_context(str(description or "")).strip()
+        footer = strip_internal_context(str(footer or ""))
+        image_url = strip_internal_context(str(image_url or ""))
+        thumbnail_url = strip_internal_context(str(thumbnail_url or ""))
+        fields = [
+            {**item,
+             "name": strip_internal_context(str(item.get("name") or "")),
+             "value": strip_internal_context(str(item.get("value") or ""))}
+            for item in _json_list(fields)
+        ]
         if not title_s and not desc_s:
             return "Error: title or description is required."
 

@@ -139,6 +139,133 @@ def test_half_sentence_reasoning_shows_partial_tail():
     )
 
 
+def test_final_transition_filters_context_and_rejects_empty():
+    async def run():
+        msg = FakeMessage()
+        prog = _progress_for_known_tool(msg)
+        await prog.start()
+        assert not await prog.transition_to_final("[PRIVATE INTERNAL CONTEXT]secret[/PRIVATE INTERNAL CONTEXT]")
+        assert await prog.transition_to_final("Hello.\n[PRIVATE INTERNAL CONTEXT]secret[/PRIVATE INTERNAL CONTEXT]")
+        await _drain()
+        assert msg.replies == ["Hello."]
+
+    asyncio.run(run())
+
+
+def test_preview_filters_internal_markers_before_post_and_edit(monkeypatch):
+    async def run():
+        for text in (
+            "Watch signals: private details.",
+            "Watch",
+            "w",
+            "[",
+            "[PRI",
+            "reply",
+            "The note says Watch sig",
+            "Private instructions: reply press",
+            "Context is [PRIVATE",
+            "Context is [/PRIVATE",
+            "Details: [PRIVATE INTERNAL CONTEXT]secret[/PRIVATE INTERNAL CONTEXT]",
+            "An internal reply pressure is high.",
+            "x " * 100 + "Watch signals: secret.",
+        ):
+            msg = FakeMessage()
+            prog = _progress_for_known_tool(msg)
+            prog._reasoning_buffer = text
+            await prog.start()
+            assert msg.channel.sent[0].content == "using shell…"
+            prog._last_edit = 0
+            await prog.update("shell", "Checking a safe thing.")
+            assert msg.channel.sent[0].content == "thinking: Checking a safe thing. → shell"
+            prog._last_edit = 0
+            await prog.update("shell", text)
+            assert msg.channel.sent[0].content == "using shell…"
+            await prog.stop()
+
+    monkeypatch.setattr(tool_progress, "_DEFERRED_POST_WINDOW", 0)
+    monkeypatch.setattr(tool_progress, "_GRACE_BEFORE_FIRST_POST", 0)
+    asyncio.run(run())
+
+
+def test_streamed_split_marker_never_reaches_progress(monkeypatch):
+    async def run():
+        msg = FakeMessage()
+        prog = _progress_for_known_tool(msg)
+        await prog.start()
+        for delta in ("W", "atch sig", "nals: private details."):
+            prog._last_edit = 0
+            await prog.tick(reasoning_delta=delta)
+            assert msg.channel.sent[0].content == "using shell…"
+        assert prog._reasoning_buffer == "Watch signals: private details."
+        await prog.stop()
+
+    monkeypatch.setattr(tool_progress, "_DEFERRED_POST_WINDOW", 0)
+    monkeypatch.setattr(tool_progress, "_GRACE_BEFORE_FIRST_POST", 0)
+    asyncio.run(run())
+
+def test_preview_only_withholds_partial_markers_in_unterminated_final_chunk():
+    for punctuation in ".!?…":
+        text = f"Thank you{punctuation} Check the room{punctuation}"
+        assert tool_progress._safe_preview(text) == text
+        assert tool_progress._safe_preview(f"Thank you{punctuation} you las") == (
+            f"Thank you{punctuation}"
+        )
+    assert tool_progress._safe_preview("Thank you. you last spoke here.") == "Thank you."
+    assert tool_progress._safe_preview("The note says Watch sig.") == "The note says Watch sig."
+
+
+def test_preview_retains_safe_sentences_and_snippets():
+    prog = _progress_for_known_tool(FakeMessage())
+    for text in (
+        "I will check. Watch sig",
+        "I will check. [PRIVATE INTERNAL CONTEXT]secret. More secret",
+    ):
+        prog._reasoning_buffer = text
+        assert prog._render() == "thinking: I will check. → shell"
+    prog._reasoning_buffer = "I will watch the logs"
+    assert prog._render() == "thinking: I will watch the logs → shell"
+
+    async def run():
+        msg = FakeMessage()
+        progress = _progress_for_known_tool(msg)
+        await progress.start()
+        progress._last_edit = 0
+        await progress.update("shell", "Checking.", snippet="echo hello")
+        assert msg.channel.sent[0].content == "thinking: Checking. → shell\n⤷ echo hello"
+        progress._last_edit = 0
+        await progress.update("shell", "Checking.", snippet="x " * 100 + "[PRIVATE")
+        assert msg.channel.sent[0].content == "thinking: Checking. → shell"
+        await progress.stop()
+
+    asyncio.run(run())
+
+
+def test_post_and_flush_filter_internal_context_on_all_platforms(monkeypatch):
+    async def run():
+        msg = FakeMessage("telegram")
+        prog = _progress_for_known_tool(msg)
+        prog._reasoning_buffer = "[PRIVATE"
+        await prog.start()
+        assert msg.channel.sent[0].content == "using shell…"
+        assert await prog._post_reply("[PRIVATE INTERNAL CONTEXT]secret") is None
+        assert len(msg.channel.sent) == 1
+        await prog.stop()
+
+        msg = FakeMessage()
+        prog = _progress_for_known_tool(msg)
+        await prog.start()
+        prog._last_edit = 0
+        await prog._flush("Visible.\n[PRIVATE INTERNAL CONTEXT]secret")
+        assert msg.channel.sent[0].content == "Visible."
+        await prog._flush("[PRIVATE INTERNAL CONTEXT]secret")
+        assert msg.channel.sent[0].content == "Visible."
+        await prog.stop()
+
+    monkeypatch.setattr(tool_progress, "_DEFERRED_POST_WINDOW", 0)
+    monkeypatch.setattr(tool_progress, "_GRACE_BEFORE_FIRST_POST", 0)
+    asyncio.run(run())
+
+
 def test_update_replaces_in_place():
     msg = FakeMessage()
     prog = _progress_for_known_tool(msg)

@@ -12,6 +12,8 @@ for _name in dir(_common):
         continue
     globals().setdefault(_name, getattr(_common, _name))
 del _name
+from response_guard import strip_internal_context
+
 
 class SendingMixin:
 
@@ -151,6 +153,10 @@ class SendingMixin:
         Also drains the channel's typing indicator before dispatch so no
         typing event can trail the message (see typing_status).
         """
+        if content is not None:
+            content = strip_internal_context(content)
+            if not content.strip() and file is None and not kwargs.get("stickers"):
+                return None
         await self._respect_slowmode(channel)
         request = _current_inbound.get()
         if request is not None:

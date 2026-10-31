@@ -133,11 +133,11 @@ async def _drain(bot, spins=400):
             return
 
 
-def test_watch_default_is_one_minute():
-    assert DEFAULT_CONTROL["conversation_watch_enabled"] is True
+def test_watch_defaults_to_disabled_with_one_minute_window():
+    assert DEFAULT_CONTROL["conversation_watch_enabled"] is False
     assert DEFAULT_CONTROL["conversation_watch_seconds"] == 60
     missing = SimpleNamespace(_control={})
-    assert MaxwellBot._conversation_watch_enabled(missing) is True
+    assert MaxwellBot._conversation_watch_enabled(missing) is False
     assert MaxwellBot._conversation_watch_seconds(missing) == 60.0
     garbage = SimpleNamespace(_control={"conversation_watch_seconds": "nope"})
     assert MaxwellBot._conversation_watch_seconds(garbage) == 60.0

@@ -17,6 +17,8 @@ from bot_parts._compat import (  # noqa: F401
     _get_shared_session,
     _read_response_limited,
 )
+from response_guard import strip_internal_context
+
 
 class MessagesMixin:
 
@@ -1118,6 +1120,9 @@ class MessagesMixin:
 
     async def _deliver_normal_reply(self, message, response, active_progresses):
         """Deliver final text and native stickers with a single first-chunk owner."""
+        response = strip_internal_context(str(response or ""))
+        if not response.strip():
+            return "", False
         response = _auto_format_discord(response)
         response = self._render_custom_emojis(response, message.guild)
         response, send_stickers = self._extract_stickers_from_text(

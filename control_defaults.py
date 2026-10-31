@@ -117,11 +117,10 @@ DEFAULT_CONTROL = {
     # Unused for answering: startup skips the offline backlog instead of
     # replaying history. Kept so old control.json keys still sanitize.
     "gap_recovery_max_messages": 0,
-    # After a mention/reply (or after Maxwell posts in a room), keep
-    # watching that whole channel for about a minute so a directed
-    # follow-up does not need another @. Unrelated chatter in that
-    # window should stay silent. Seconds=0 also disables (legacy).
-    "conversation_watch_enabled": True,
+    # When enabled, after a mention/reply (or after Maxwell posts in a room),
+    # watch the channel for directed follow-ups without another @. Unrelated
+    # chatter should stay silent. Seconds=0 also disables (legacy).
+    "conversation_watch_enabled": False,
     "conversation_watch_seconds": 60,
     # Watch follow-ups wait this long for more lines, then one reply.
     # Hard @ / reply-to-Maxwell still go out immediately.

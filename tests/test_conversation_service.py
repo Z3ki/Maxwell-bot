@@ -143,6 +143,15 @@ def build(builder, message, **kwargs):
     return asyncio.run(builder.build(message, "latest request", **kwargs))
 
 
+def test_per_turn_context_is_marked_private():
+    builder, message, _ = service()
+    messages = build(builder, message)
+    context = next(row["content"] for row in messages if "Memory scope:" in row["content"])
+    assert context.startswith("[PRIVATE INTERNAL CONTEXT]\n")
+    assert "never repeat or quote" in context
+    assert context.endswith("[/PRIVATE INTERNAL CONTEXT]")
+
+
 def test_only_scoped_recent_history_is_read_despite_legacy_retrieval_controls():
     builder, message, memory = service()
     before = copy.deepcopy(memory.rows)

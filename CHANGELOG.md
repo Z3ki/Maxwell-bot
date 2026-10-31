@@ -18,6 +18,8 @@
 
 ## Unreleased
 
+- Disable conversation watch by default, including when its control setting is missing.
+- Mark per-turn prompt context private and strip distinctive internal hints from Discord-bound model output. Progress previews retain safe reasoning and snippets while suppressing sentences containing internal markers and unterminated trailing marker prefixes.
 - Route operator subagents to a separately configured fallback after provider failures; keep personal credentials isolated. Report authentication, availability and empty-response failures without exposing provider details.
 - Retry empty subagent model responses twice after provider retries, including checkpoint requests, without repeating completed tools; stop on cancellation or revoked access.
 - Reject bot chess opponents and unresolved opponent IDs before starting a game, rather than creating a match the requester cannot play.

@@ -15,6 +15,7 @@ from typing import ClassVar
 
 import discord
 
+from response_guard import strip_internal_context
 from tools import Tool
 from .task_job_store import TaskJobStore, active_job, LIVE_STATES
 
@@ -551,8 +552,12 @@ class TaskJobs:
                 )
                 return
         await self._send_reported_files(job)
-        head = job.header + "\n" if job.header else ""
-        text = head + format_job(job.view(), limit=1850 - len(head))
+        head = strip_internal_context(job.header) + "\n" if job.header else ""
+        text = strip_internal_context(head + format_job(job.view(), limit=1850 - len(head)))
+        if not text.strip():
+            job.row["delivery"] = "suppressed"
+            await asyncio.to_thread(self.store.update, job.row["id"], delivery="suppressed")
+            return
         try:
             if interaction is not None:
                 await interaction.followup.send(
@@ -766,7 +771,7 @@ def reported_files(text: str) -> list[str]:
 def _public_report(text: str) -> str:
     """Working notes and code stay in the job. The chat gets a short result."""
     import re
-    cleaned = re.sub(r"```.*?```", " ", str(text or ""), flags=re.S)
+    cleaned = re.sub(r"```.*?```", " ", strip_internal_context(str(text or "")), flags=re.S)
     cleaned = " ".join(cleaned.split())
     if not cleaned:
         return "The subagent finished."
@@ -806,8 +811,13 @@ def format_job(row, *, limit=1850):
     }.get(str(row.get("state") or ""), str(row.get("state") or "unknown"))
     if str(row.get("state") or "") == "completed" and row.get("direct"):
         reports = row.get("reports") or []
-        body = str((reports[-1].get("report") if reports else "") or "").strip() or "Done."
-        note = _files_note(row)
+        raw_body = str((reports[-1].get("report") if reports else "") or "")
+        body = strip_internal_context(raw_body).strip()
+        note = strip_internal_context(_files_note(row))
+        if raw_body and not body and not note:
+            return ""
+        if not raw_body:
+            body = "Done."
         if len(body) + len(note) > limit:
             body = body[: max(0, limit - len(note) - 1)].rstrip() + "…"
         return (body + note)[:limit]
@@ -830,9 +840,9 @@ def format_job(row, *, limit=1850):
             else:
                 results.append(_public_report(report.get("report", "")))
         if has_site:
-            return ("\n".join(results) + _files_note(row))[:limit]
+            return strip_internal_context("\n".join(results) + _files_note(row))[:limit]
         latest = reports[-1].get("report", "") if reports else ""
-        return ((_public_report(latest) or "The subagent finished.") + _files_note(row))[:limit]
+        return strip_internal_context((_public_report(latest) or "The subagent finished.") + _files_note(row))[:limit]
     text = f"Subagent `{row['id']}` · {state}\n"
     if row.get("last_tool"):
         text += f"Last tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"
@@ -842,7 +852,7 @@ def format_job(row, *, limit=1850):
     text += _files_note(row)
     if row.get("effects") and row["state"] != "completed":
         text += "\nIt may have already changed files. Check those before trying again."
-    return text[:limit]
+    return strip_internal_context(text)[:limit]
 
 
 class ManageTasksTool(Tool):

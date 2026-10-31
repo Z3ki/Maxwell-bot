@@ -33,7 +33,7 @@ class WatchMixin:
         is the older disable and still works.
         """
         control = getattr(self, "_control", None) or {}
-        if not parse_bool(control.get("conversation_watch_enabled", True), True):
+        if not parse_bool(control.get("conversation_watch_enabled", False), False):
             return False
         getter = getattr(self, "_conversation_watch_seconds", None)
         if callable(getter):
