@@ -203,6 +203,43 @@ def test_streamed_split_marker_never_reaches_progress(monkeypatch):
     monkeypatch.setattr(tool_progress, "_GRACE_BEFORE_FIRST_POST", 0)
     asyncio.run(run())
 
+def _appended(deltas):
+    prog = tool_progress.ToolProgress.__new__(tool_progress.ToolProgress)
+    prog._reasoning_buffer = ""
+    for delta in deltas:
+        prog._append(delta)
+    return prog._reasoning_buffer
+
+
+def test_short_words_that_prefix_a_marker_keep_their_space():
+    # Issue #135: "me" prefixes "memory scope…"/"media available…" and "a"
+    # prefixes "available …", so e7d9a82 glued ordinary words together.
+    assert _appended(["Let me", "more carefully check"]) == "Let me more carefully check"
+    assert _appended(["then a", "valid path"]) == "then a valid path"
+    assert _appended(["Let me", "more carefully check", "then a", "valid path"]) == (
+        "Let me more carefully check then a valid path"
+    )
+    assert _appended(["Let me", "check"]) == "Let me check"
+
+
+def test_split_markers_still_join_and_are_stripped():
+    assert _appended(["W", "atch sig", "nals: private details."]) == (
+        "Watch signals: private details."
+    )
+    assert _appended(["me", "mory scope: transcript is private."]) == (
+        "memory scope: transcript is private."
+    )
+    assert _appended(["[PRI", "VATE INTERNAL CONTEXT]secret"]) == (
+        "[PRIVATE INTERNAL CONTEXT]secret"
+    )
+    for deltas in (
+        ["Checking. W", "atch sig", "nals: private details."],
+        ["Checking. me", "mory scope: transcript is private."],
+        ["Checking. a", "vailable current-server/application emojis: x."],
+    ):
+        assert tool_progress._safe_preview(_appended(deltas)) == "Checking."
+
+
 def test_preview_only_withholds_partial_markers_in_unterminated_final_chunk():
     for punctuation in ".!?…":
         text = f"Thank you{punctuation} Check the room{punctuation}"

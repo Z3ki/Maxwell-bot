@@ -193,16 +193,23 @@ def _safe_preview(text: str) -> str:
 
 
 def _continues_preview_marker(previous: str, delta: str) -> bool:
-    """Keep split marker tokens intact despite the normal delta space join."""
+    """Keep split marker tokens intact despite the normal delta space join.
+
+    The delta must keep spelling the marker for as far as both run, not just
+    share its next character: "Let me" + "more" is two words, not "memory".
+    """
     previous = previous.casefold()
     delta = delta.casefold()
     for marker in _PREVIEW_MARKERS:
         for length in range(1, min(len(marker) - 1, len(previous)) + 1):
             start = len(previous) - length
+            rest = marker[length:]
+            overlap = min(len(rest), len(delta))
             if (
-                (start == 0 or not previous[start - 1].isalnum())
+                overlap
+                and (start == 0 or not previous[start - 1].isalnum())
                 and previous.endswith(marker[:length])
-                and marker[length:].startswith(delta[:1])
+                and delta[:overlap] == rest[:overlap]
             ):
                 return True
     return False
