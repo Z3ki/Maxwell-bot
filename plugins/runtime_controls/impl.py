@@ -109,8 +109,10 @@ class WaitTool(Tool):
     def get_description(self):
         return (
             "Pause this tool batch (`wait`) for `seconds` (float, default 2, max 10). "
-            "Put wait before the final send_message; it cannot reopen an ended turn. "
-            "Wait does not schedule another model turn. If someone is typing, pause briefly. "
+            "For directed requests, never wait before the first visible reply; "
+            "use it only for pacing after a reply, when the batch permits. "
+            "Ambient waits are available. A send ends the batch, and wait cannot "
+            "reopen an ended turn or schedule another model turn. "
             "Distinct from sleep (minutes, ends dispatch)."
         )
 

@@ -134,6 +134,30 @@ def test_wait_tool_description_mentions_cap_and_sleep():
     assert "wait" in desc.lower()
     assert "sleep" in desc.lower()
 
+def test_wait_guidance_forbids_directed_wait_before_reply():
+    from maxwell_core.prompts.protocols import TOOL_PROTOCOL
+    from tool_schemas import TOOL_PARAMETERS
+
+    description = WaitTool(bot=None).get_description().lower()
+    schema = TOOL_PARAMETERS["wait"]["properties"]["seconds"]["description"].lower()
+    assert "never wait before the first visible reply" in description
+    assert "pacing after a reply" in description
+    assert "ambient waits are available" in description
+    assert "put wait before" not in description
+    assert "do not wait before replying" in schema
+    assert "not before replying" in TOOL_PROTOCOL.lower()
+
+def test_typing_prompt_does_not_direct_wait_before_reply():
+    from bot import MaxwellBot
+
+    owner = SimpleNamespace(
+        _typing_in_channel=lambda channel_id: [{"name": "Pat", "id": "1"}]
+    )
+    prompt = MaxwellBot._typing_prompt_lines(owner, "channel")[0].lower()
+    assert "for ambient conversation prefer wait or no_response" in prompt
+    assert "for a directed request, reply before using wait" in prompt
+    assert "wait for them to send" not in prompt
+
 
 # ---------------------------------------------------------------------------
 # Multi-terminal dispatch integration tests
