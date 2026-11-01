@@ -267,9 +267,12 @@ def test_anthropic_stream_reassembles_parallel_tool_json_and_usage():
             {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': ' now'}},
             {'type': 'content_block_start', 'index': 1, 'content_block': {'type': 'tool_use', 'id': 'a', 'name': 'lookup', 'input': {}}},
             {'type': 'content_block_start', 'index': 2, 'content_block': {'type': 'tool_use', 'id': 'b', 'name': 'lookup', 'input': {}}},
+            {'type': 'content_block_start', 'index': 3, 'content_block': {'type': 'tool_use', 'id': 'c', 'name': 'empty', 'input': {}}},
             {'type': 'content_block_delta', 'index': 1, 'delta': {'type': 'input_json_delta', 'partial_json': '{"q":'}},
             {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'input_json_delta', 'partial_json': '{"q":"two"}'}},
             {'type': 'content_block_delta', 'index': 1, 'delta': {'type': 'input_json_delta', 'partial_json': '"one"}'}},
+            {'type': 'content_block_delta', 'index': 3, 'delta': {'type': 'input_json_delta', 'partial_json': ''}},
+            {'type': 'content_block_stop', 'index': 3},
             {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'}, 'usage': {'output_tokens': 6}},
             {'type': 'message_stop'},
         ]
@@ -294,10 +297,10 @@ def test_anthropic_stream_reassembles_parallel_tool_json_and_usage():
                 await asyncio.sleep(0)
                 assert result.content == 'Working now'
                 assert [token['content'] for token in tokens if token['content']] == ['Working', ' now']
-                assert [token['tool_name'] for token in tokens if token['tool_name']] == ['lookup', 'lookup']
-                assert tool_names == [('lookup', ''), ('lookup', '')]
+                assert [token['tool_name'] for token in tokens if token['tool_name']] == ['lookup', 'lookup', 'empty']
+                assert tool_names == [('lookup', ''), ('lookup', ''), ('empty', '')]
                 assert [(call['id'], json.loads(call['function']['arguments'])) for call in result.tool_calls] == [
-                    ('a', {'q': 'one'}), ('b', {'q': 'two'})]
+                    ('a', {'q': 'one'}), ('b', {'q': 'two'}), ('c', {})]
                 assert result.usage['prompt_tokens'] == 14
                 assert result.usage['cached_tokens'] == 4
                 assert result.usage['completion_tokens'] == 6

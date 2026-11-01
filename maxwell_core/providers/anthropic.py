@@ -205,6 +205,8 @@ async def _read_anthropic_stream(resp, *, max_bytes, callbacks):
     if not completed:
         raise ProviderProtocolError("Provider returned incomplete Messages stream")
     for index, fragments in arguments.items():
+        if not any(fragments):
+            continue
         try:
             blocks[index]["input"] = json.loads("".join(fragments))
         except ValueError:

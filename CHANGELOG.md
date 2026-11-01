@@ -19,6 +19,7 @@
 
 ## Unreleased
 
+- Accept empty streamed Anthropic tool arguments for zero-argument worker tools.
 - Fix gated type checking for the Anthropic worker provider.
 
 - Allow deletion of messages authored by Maxwell even when they were not attributed to a request, without changing permissions for other authors.
