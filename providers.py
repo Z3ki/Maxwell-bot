@@ -799,9 +799,7 @@ class OpenAICompatibleProvider(ChatProvider):
                 or "tools is not supported" in err
                 or "does not support" in err
             ):
-                logger.warning(
-                    "Provider rejected native tools; retrying without tools: %s", e
-                )
+                logger.warning("Provider rejected native tools; retrying without tools (%s)", type(e).__name__)
                 kwargs = dict(kwargs)
                 kwargs.pop("tools", None)
                 message = await self.generate_chat_completion(

@@ -730,8 +730,7 @@ class TtsTool(Tool):
                 }
         await _record(self.bot, message, sent)
         logger.info(
-            "TTS provider: mistral voice=%s chars=%s bytes=%s",
-            label,
+            "TTS provider: mistral chars=%s bytes=%s",
             len(spoken),
             len(audio),
         )

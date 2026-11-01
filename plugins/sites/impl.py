@@ -9,14 +9,6 @@ from tooling import helpers as _helpers
 from tools import Tool
 
 
-def _loggable_url(url) -> str:
-    """Strip query/fragment before logging a signed or credential-bearing URL."""
-    try:
-        parsed = urlparse(str(url))
-        return parsed._replace(query="", fragment="").geturl()
-    except Exception:
-        return "(invalid URL)"
-
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
 for _name in dir(_helpers):
@@ -383,32 +375,21 @@ class CreateSiteTool(Tool):
                         if dest:
                             public_url = f"{self.base_url}/{slug}/images/{os.path.basename(dest)}"
                             image_urls.append(public_url)
-                            logger.info(
-                                "Downloaded site image %s -> %s",
-                                _loggable_url(src_url),
-                                dest,
-                            )
+                            logger.info("Downloaded site image")
                         else:
                             missing_images.append(src_url)
-                            logger.warning(
-                                "Site image URL failed: %s (%s)",
-                                _loggable_url(src_url),
-                                err or "unknown",
-                            )
+                            logger.warning("Site image URL download failed")
                         continue
                     if not src_path or not callable(workspace_reader):
                         missing_images.append(src_path or "(empty path)")
-                        logger.warning(f"Site image blocked or not found: {src_path}")
+                        logger.warning("Site image blocked or not found")
                         continue
                     image_blob, workspace_name, read_error = await workspace_reader(
                         message, str(src_path), max_size=10 * 1024 * 1024
                     )
                     if image_blob is None or workspace_name is None:
                         missing_images.append(str(src_path))
-                        logger.warning(
-                            "Site image workspace read failed (%s)",
-                            read_error or "unavailable",
-                        )
+                        logger.warning("Site image workspace read failed")
                         continue
                     filename = entry.get("filename") or workspace_name
                     # Sanitize filename: only safe chars, and strip path
@@ -424,15 +405,13 @@ class CreateSiteTool(Tool):
                         [os.path.abspath(dest), os.path.abspath(img_dir)]
                     ) != os.path.abspath(img_dir):
                         missing_images.append(src_path)
-                        logger.warning(
-                            f"Site image filename escapes images dir: {filename}"
-                        )
+                        logger.warning("Site image filename escapes images dir")
                         continue
                     try:
                         await asyncio.to_thread(Path(dest).write_bytes, image_blob)
                         public_url = f"{self.base_url}/{slug}/images/{filename}"
                         image_urls.append(public_url)
-                        logger.info("Copied request workspace image to site: %s", filename)
+                        logger.info("Copied request workspace image to site")
                     except Exception as e:
                         logger.warning("Failed to copy workspace image: %s", type(e).__name__)
 
@@ -486,7 +465,7 @@ class CreateSiteTool(Tool):
                 if created_new_dir:
                     with contextlib.suppress(Exception):
                         shutil.rmtree(site_dir, ignore_errors=True)
-                logger.error(f"Failed to commit site metadata for {slug}: {e}")
+                logger.error("Failed to commit site metadata: %s", e)
                 return f"Error creating site: {e}"
             if not committed:
                 # Overwrite disallowed by a concurrent owner change discovered
@@ -534,7 +513,7 @@ class CreateSiteTool(Tool):
             result += _site_graph_note(self.bot, slug)
             return result
         except Exception as e:
-            logger.error(f"Failed to create site {slug}: {e}")
+            logger.error("Failed to create site: %s", e)
             return f"Error creating site: {e}"
         finally:
             if slug_lock._locked:
@@ -926,9 +905,7 @@ class DeleteSiteTool(_SiteOwnedTool):
         try:
             await site_server.destroy(self.bot.config.DATA_DIR, slug)
         except Exception as exc:
-            logger.warning(
-                "Site backend teardown failed for %s: %s", slug, type(exc).__name__
-            )
+            logger.warning("Site backend teardown failed: %s", type(exc).__name__)
             teardown_warning = (
                 " Backend cleanup did not finish; some server files or data may "
                 "remain, but its registry secrets were removed."

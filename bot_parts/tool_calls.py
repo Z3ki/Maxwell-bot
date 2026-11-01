@@ -103,7 +103,6 @@ class ToolCallsMixin:
             "list_channel": "list_channels",
             "list_role": "list_roles",
         }
-        raw_name = name
         if name not in self.tools and name in _TOOL_ALIASES:
             resolved = _TOOL_ALIASES[name]
             logger.info(
@@ -187,7 +186,7 @@ class ToolCallsMixin:
             elif name not in compatible and not plugin_allowed:
                 result_text = "Error - tool is not available on this platform"
             elif name not in self.tools and not plugin_allowed:
-                logger.warning("Unknown tool called: %r (original: %r)", name, raw_name)
+                logger.warning("Unknown tool called (name length=%d)", len(name))
                 result_text = f"Error - unknown tool '{name}'"
             elif self._tool_breaker.is_open(name):
                 result_text = (
@@ -1032,9 +1031,8 @@ class ToolCallsMixin:
         if not calls:
             return [], text
         logger.warning(
-            "Recovered %d text-form tool call(s) the model wrote as content: %s",
+            "Recovered %d text-form tool call(s) the model wrote as content",
             len(calls),
-            ", ".join(c["function"]["name"] for c in calls),
         )
         return calls, leftover
 

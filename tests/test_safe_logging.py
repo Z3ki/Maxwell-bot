@@ -2,6 +2,8 @@ import json
 import logging
 import sys
 
+import pytest
+
 from diagnostics_safety import SafeLogFormatter, log_context, redact_diagnostics
 
 
@@ -12,17 +14,16 @@ def _record(level, message, **extra):
     return record
 
 
-def test_info_omits_untrusted_message_and_propagates_context():
-    token = log_context.set({"channel_id": "123", "message": "private text"})
+def test_info_preserves_message_and_propagates_context():
+    token = log_context.set({"channel_id": "123"})
     try:
         data = json.loads(SafeLogFormatter(json_format=True).format(
-            _record(logging.INFO, "private text")
+            _record(logging.INFO, "gateway reconnected")
         ))
     finally:
         log_context.reset(token)
-    assert data["message"] == "[message omitted]"
+    assert data["message"] == "gateway reconnected"
     assert data["channel_id"] == "123"
-    assert "private text" not in json.dumps(data)
 
 
 def test_safe_events_and_debug_are_redacted_and_bounded(monkeypatch):
@@ -36,17 +37,46 @@ def test_safe_events_and_debug_are_redacted_and_bounded(monkeypatch):
     assert json.loads(formatter.format(event))["message"] == "turn finished"
 
 
-def test_exception_only_contains_type_and_stack_locations():
+def test_exception_contains_type_message_and_stack_locations():
     try:
-        raise ValueError("private message")
+        raise ValueError("provider unavailable")
     except ValueError:
-        record = _record(logging.ERROR, "failed: private message")
+        record = _record(logging.ERROR, "provider call failed")
         record.exc_info = sys.exc_info()
-    output = SafeLogFormatter(json_format=True).format(record)
-    data = json.loads(output)
-    assert "private message" not in output
+    data = json.loads(SafeLogFormatter(json_format=True).format(record))
+    assert data["message"] == "provider call failed"
     assert data["exception_type"] == "ValueError"
+    assert data["exception_message"] == "provider unavailable"
     assert data["stack"]
+
+
+@pytest.mark.parametrize("json_format", [False, True])
+def test_messages_and_exceptions_redact_secrets_before_truncation(monkeypatch, json_format):
+    monkeypatch.setenv("CUSTOM_SECRET", "configured-private-value")
+    secrets = [
+        "configured-private-value",
+        "sk-abcdefghijklmnop",
+        "Bearer abcdefghijklmnopqrstuvwxyz",
+        "https://discord.com/api/webhooks/123456/very-private-token",
+        "abcdefghijklmnopqrstuvwx.abcdef.abcdefghijklmnopqrstuvwxyz",
+    ]
+    text = " ".join(secrets)
+    try:
+        raise ValueError(text + " " + "x" * 400)
+    except ValueError:
+        record = _record(logging.WARNING, text + " " + "x" * 400)
+        record.exc_info = sys.exc_info()
+    output = SafeLogFormatter(json_format=json_format).format(record)
+    for secret in secrets:
+        assert secret not in output
+    assert "[redacted" in output
+    assert "ValueError" in output
+    if json_format:
+        data = json.loads(output)
+        assert len(data["message"]) <= 300
+        assert len(data["exception_message"]) <= 300
+        assert data["message"].endswith("…")
+        assert data["exception_message"].endswith("…")
 
 
 def test_discord_webhooks_and_tokens_are_redacted():

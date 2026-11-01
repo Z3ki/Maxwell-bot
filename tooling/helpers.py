@@ -2192,7 +2192,7 @@ def _persist_public_image(
         path = os.path.join(img_dir, name)
         with open(path, "wb") as f:
             f.write(image_bytes)
-        logger.info(f"Persisted public image {path}")
+        logger.info("Persisted public image (%s bytes)", len(image_bytes))
         return path, f"{pub_base}/{name}" if pub_base else None
     except Exception as e:
         logger.warning(f"Failed to persist public image: {e}")

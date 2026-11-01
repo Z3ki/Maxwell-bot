@@ -39,7 +39,8 @@ _LOG_FIELDS = frozenset({
     "error_type", "outcome", "correlation_id", "model_calls", "tool_count",
 })
 _SAFE_FIELD = re.compile(r"^[a-zA-Z0-9_.:/-]{1,100}$")
-_MAX_LOG_MESSAGE = 200
+_MAX_LOG_MESSAGE = 300
+_MAX_DEBUG_MESSAGE = 200
 
 
 def redact_diagnostics(text: str) -> str:
@@ -55,24 +56,24 @@ def redact_diagnostics(text: str) -> str:
     text = _DISCORD_CREDENTIAL_RE.sub("[redacted]", text)
     return _SECRET_VALUE_RE.sub("[redacted]", text)
 
+def _bounded_diagnostic(value: str, limit: int) -> str:
+    text = redact_diagnostics(value)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 class SafeLogFormatter(logging.Formatter):
-    """Format logs without exposing arbitrary application data at INFO or above."""
+    """Format bounded, credential-redacted diagnostics and structured fields."""
 
     def __init__(self, *, json_format: bool = False):
         super().__init__()
         self.json_format = json_format
 
     def format(self, record: logging.LogRecord) -> str:
-        # Arbitrary existing logging calls may contain user content, including in
-        # f-strings and exception messages. Only explicitly safe instrumentation
-        # may opt into retaining its message at INFO and above.
-        if record.levelno < logging.INFO or getattr(record, "safe_log", False) is True:
-            try:
-                message = redact_diagnostics(record.getMessage())[:_MAX_LOG_MESSAGE]
-            except Exception:
-                message = "[unavailable]"
-        else:
-            message = "[message omitted]"
+        try:
+            limit = _MAX_DEBUG_MESSAGE if record.levelno < logging.INFO else _MAX_LOG_MESSAGE
+            message = _bounded_diagnostic(record.getMessage(), limit)
+        except Exception:
+            message = "[unavailable]"
         data: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "level": record.levelname,
@@ -90,8 +91,12 @@ class SafeLogFormatter(logging.Formatter):
                 data[key] = redact_diagnostics(value)
         if record.exc_info and record.exc_info[0]:
             data["exception_type"] = record.exc_info[0].__name__
-            # Never include exception text or source lines: both may contain
-            # prompts, tool results, or credentials.
+            try:
+                data["exception_message"] = _bounded_diagnostic(
+                    str(record.exc_info[1]), _MAX_LOG_MESSAGE
+                )
+            except Exception:
+                data["exception_message"] = "[unavailable]"
             data["stack"] = [
                 f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}"
                 for frame in traceback.extract_tb(record.exc_info[2])[-20:]

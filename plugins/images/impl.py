@@ -260,7 +260,7 @@ class HDImageGeneratorTool(Tool):
         for ref in refs:
             raw, err = await self._load_one(ref)
             if raw is None:
-                logger.warning(f"hd_image input rejected: {err}")
+                logger.warning("hd_image input rejected")
                 return f"Error: {err}"
             shrunk, mime = self._shrink(raw)
             parts.append(
@@ -350,8 +350,8 @@ class HDImageGeneratorTool(Tool):
 
             said = re.sub(r"\s+", " ", str(content)).strip()
             logger.warning(
-                f"HD image attempt {attempt + 1}/{self.MAX_ATTEMPTS} returned no "
-                f"image. Text: {said[:200]!r}"
+                "HD image attempt %s/%s returned no image (text_chars=%s)",
+                attempt + 1, self.MAX_ATTEMPTS, len(str(content)),
             )
             if said:
                 # Actual words back means a refusal or a misread instruction,

@@ -247,7 +247,7 @@ def test_worker_failure_is_logged_with_traceback_and_redacted(tmp_path, caplog):
     bot, msg, shell, worker = setup(tmp_path)
     bot.ai_provider.api_key = "byok-private-key-987"
     bot._generate_response.side_effect = ProviderUnavailableError(
-        "Provider call failed: Server disconnected "
+        "Provider call failed: private prompt marker "
         "https://user:pw@proxy.example/v1/chat?token=abc123 byok-private-key-987"
     )
     with caplog.at_level(logging.ERROR, logger="plugins.maxwell_extras.task_workers"):
@@ -258,8 +258,8 @@ def test_worker_failure_is_logged_with_traceback_and_redacted(tmp_path, caplog):
     logged = caplog.text
     assert "Task worker job failed: ProviderUnavailableError" in logged
     assert "Traceback (most recent call last)" in logged
-    assert "proxy.example" in logged
-    for leaked in ("abc123", "token=", "user:pw", "byok-private-key-987"):
+    assert "[provider response omitted]" in logged
+    for leaked in ("private prompt marker", "proxy.example", "abc123", "token=", "user:pw", "byok-private-key-987"):
         assert leaked not in logged and leaked not in report["report"]
 
 

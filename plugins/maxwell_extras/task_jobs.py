@@ -518,17 +518,15 @@ class TaskJobs:
                     logger.exception("Subagent attachment authorization failed")
                     continue
                 if refusal:
-                    logger.info(
-                        "Subagent file attachment refused: %s", str(refusal)[:180]
-                    )
+                    logger.info("Subagent file attachment refused")
                     continue
             try:
                 result = await tool.execute(job.message, path=path)
             except Exception:
-                logger.warning("Could not attach %s from a finished subagent", path, exc_info=True)
+                logger.warning("Could not attach file from a finished subagent", exc_info=True)
                 result = "Error: attach failed"
             if not str(result).startswith("__FILE_SENT__"):
-                logger.info("Subagent file stayed unsent: %s", str(result)[:180])
+                logger.info("Subagent file stayed unsent (result_chars=%s)", len(str(result)))
                 job.unsent.append(path)
 
     async def deliver(self, job):

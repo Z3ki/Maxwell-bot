@@ -156,7 +156,7 @@ class MoreToolsTool(Tool):
         )
 
     async def execute(self, message: Message, need: str | None = None, **kwargs) -> str:
-        logger.info("more_tools: no-op (catalog is already full, need=%r)", str(need or "")[:120])
+        logger.info("more_tools: no-op (catalog is already full, need_chars=%s)", len(str(need or "")))
         return (
             "You already have the full tool catalog this turn. "
             "Call the tool you need directly — more_tools does not unlock anything."

@@ -117,19 +117,13 @@ class MediaMixin:
             absolute_max = 50 * 1024 * 1024  # 50MB hard cap
             att_size = int(getattr(attachment, "size", 0) or 0)
             if att_size > absolute_max:
-                logger.warning(
-                    f"Skipping attachment {attachment.filename}: exceeds absolute limit ({att_size} bytes)"
-                )
+                logger.warning("Skipping attachment: exceeds absolute limit (%d bytes)", att_size)
                 continue
             if att_size > max_size and not is_known_text:
-                logger.warning(
-                    f"Skipping attachment {attachment.filename}: too large ({att_size} bytes)"
-                )
+                logger.warning("Skipping attachment: too large (%d bytes)", att_size)
                 continue
             if is_known_text and att_size > TEXT_ATTACHMENT_MAX_BYTES:
-                logger.warning(
-                    f"Skipping text attachment {attachment.filename}: too large ({att_size} bytes)"
-                )
+                logger.warning("Skipping text attachment: too large (%d bytes)", att_size)
                 continue
             try:
                 blob = await self._read_attachment_bytes(
@@ -220,13 +214,9 @@ class MediaMixin:
                     item["source"] = "forward"
                 media.append(item)
                 kind = "text" if text else "media"
-                logger.info(
-                    f"Extracted {kind} attachment {filename} ({len(blob)} bytes, mime={mime})"
-                )
+                logger.info("Extracted %s attachment (%d bytes)", kind, len(blob))
             except Exception as e:
-                logger.error(
-                    f"Failed to download attachment {attachment.filename}: {e}"
-                )
+                logger.error("Failed to download attachment: %s", e)
         if proc_img:
             for source in iter_message_payloads(message):
                 for item in await self._extract_sticker_emoji_media(source, max_size):
@@ -322,26 +312,20 @@ class MediaMixin:
                         proc, timeout=60
                     )
                 except asyncio.TimeoutError as _exc:
-                    logger.warning(f"Video normalization timed out for {filename}")
+                    logger.warning("Video normalization timed out")
                     return None
                 if proc.returncode != 0 or not output_path.exists():
-                    logger.warning(
-                        f"Video normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
-                    )
+                    logger.warning("Video normalization failed (return code %s)", proc.returncode)
                     return None
                 normalized = await asyncio.to_thread(output_path.read_bytes)
                 if len(normalized) > max_size:
-                    logger.warning(
-                        f"Skipping normalized video {filename}: too large ({len(normalized)} bytes)"
-                    )
+                    logger.warning("Skipping normalized video: too large (%d bytes)", len(normalized))
                     return None
                 out_name = f"{Path(filename).stem}-normalized.mp4"
-                logger.info(
-                    f"Normalized video {filename} -> {out_name} ({len(blob)} -> {len(normalized)} bytes)"
-                )
+                logger.info("Normalized video (%d -> %d bytes)", len(blob), len(normalized))
                 return normalized, "video/mp4", out_name
         except Exception as e:
-            logger.warning(f"Failed to normalize video {filename}: {e}")
+            logger.warning("Failed to normalize video: %s", e)
             return None
 
     async def _extract_video_derivatives(
@@ -385,14 +369,9 @@ class MediaMixin:
                         stderr=asyncio.subprocess.PIPE,
                     )
                     try:
-                        _stdout, stderr = await communicate_process(
-                            proc, timeout=30
-                        )
-                    except asyncio.TimeoutError as _exc:
-                        logger.warning(
-                            f"Video frame extraction timed out for {filename}"
-                        )
-                        stderr = b"timeout"
+                        await communicate_process(proc, timeout=30)
+                    except asyncio.TimeoutError:
+                        logger.warning("Video frame extraction timed out")
                     if proc.returncode == 0:
                         for frame_path in sorted(tmp_path.glob("frame-*.jpg")):
                             frame_blob = await asyncio.to_thread(frame_path.read_bytes)
@@ -414,9 +393,7 @@ class MediaMixin:
                                 )
                             )
                     else:
-                        logger.warning(
-                            f"Video frame extraction failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
-                        )
+                        logger.warning("Video frame extraction failed (return code %s)", proc.returncode)
 
                 # Extract audio track only if process_audio (omni audio input) is enabled.
                 # This prevents sending audio to non-omni or when user disabled audio models.
@@ -440,12 +417,9 @@ class MediaMixin:
                         stderr=asyncio.subprocess.PIPE,
                     )
                     try:
-                        _stdout, stderr = await communicate_process(
-                            proc, timeout=30
-                        )
-                    except asyncio.TimeoutError as _exc:
-                        logger.info(f"Video audio extraction timed out for {filename}")
-                        stderr = b"timeout"
+                        await communicate_process(proc, timeout=30)
+                    except asyncio.TimeoutError:
+                        logger.info("Video audio extraction timed out")
                     if (
                         proc.returncode == 0
                         and audio_path.exists()
@@ -469,19 +443,15 @@ class MediaMixin:
                                 )
                             )
                     elif proc.returncode != 0:
-                        logger.info(
-                            f"No extractable audio track for {filename}: {stderr.decode(errors='replace')[-200:]}"
-                        )
+                        logger.info("No extractable audio track (return code %s)", proc.returncode)
         except Exception as e:
-            logger.warning(f"Failed to derive frames/audio from video {filename}: {e}")
+            logger.warning("Failed to derive frames/audio from video: %s", e)
         if results:
             frame_count = sum(1 for item in results if item.get("is_image"))
             audio_count = sum(
                 1 for item in results if item.get("mime_type") == "audio/wav"
             )
-            logger.info(
-                f"Derived {frame_count} frame(s) and {audio_count} audio track(s) from video {filename}"
-            )
+            logger.info("Derived %d frame(s) and %d audio track(s) from video", frame_count, audio_count)
         return results
 
     async def _normalize_gif(
@@ -512,26 +482,20 @@ class MediaMixin:
                         proc, timeout=30
                     )
                 except asyncio.TimeoutError as _exc:
-                    logger.warning(f"GIF normalization timed out for {filename}")
+                    logger.warning("GIF normalization timed out")
                     return None
                 if proc.returncode != 0 or not output_path.exists():
-                    logger.warning(
-                        f"GIF normalization failed for {filename}: {stderr.decode(errors='replace')[-300:]}"
-                    )
+                    logger.warning("GIF normalization failed (return code %s)", proc.returncode)
                     return None
                 normalized = await asyncio.to_thread(output_path.read_bytes)
                 if len(normalized) > max_size:
-                    logger.warning(
-                        f"Skipping normalized GIF {filename}: too large ({len(normalized)} bytes)"
-                    )
+                    logger.warning("Skipping normalized GIF: too large (%d bytes)", len(normalized))
                     return None
                 out_name = f"{Path(filename).stem}-gif-sheet.jpg"
-                logger.info(
-                    f"Normalized GIF {filename} -> {out_name} ({len(blob)} -> {len(normalized)} bytes)"
-                )
+                logger.info("Normalized GIF (%d -> %d bytes)", len(blob), len(normalized))
                 return normalized, "image/jpeg", out_name
         except Exception as e:
-            logger.warning(f"Failed to normalize GIF {filename}: {e}")
+            logger.warning("Failed to normalize GIF: %s", e)
             return None
 
     @staticmethod

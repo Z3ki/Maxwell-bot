@@ -88,7 +88,7 @@ class GuildEventsMixin:
         sync_guild(self, guild)
         self._dispatch_plugin_event("on_guild_join", guild)
         with contextlib.suppress(Exception):
-            logger.info("Joined guild: %s (id=%s)", guild.name, guild.id)
+            logger.info("Joined guild id=%s", guild.id)
         try:
             await self.inbox.add_notice(
                 kind="guild_join",
@@ -167,11 +167,8 @@ class GuildEventsMixin:
         kind = channel_watch.channel_kind(name)
         try:
             logger.info(
-                "Channel created in %s: #%s (id=%s, kind=%s)",
-                guild.name,
-                name,
-                getattr(channel, "id", ""),
-                kind,
+                "Channel created in guild=%s channel=%s kind=%s",
+                guild.id, getattr(channel, "id", ""), kind,
             )
         except Exception:  # noqa: S110 - the failing statement IS the logger
             pass

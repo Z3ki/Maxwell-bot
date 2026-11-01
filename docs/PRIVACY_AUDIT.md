@@ -117,6 +117,12 @@ before release; no fabricated address was added.
 | Inbox, threads, chess, other plugin caches/queued jobs | Scope, ownership and lifecycle vary; require operator/plugin-specific review when relevant. Full deletion does not claim these were erased. |
 | Host/proxy/container logs and backups | Outside repository-managed storage. Operator must set expiry/rotation, encryption and restore suppression; currently release-blocking. |
 
+Configured operational log handlers retain redacted, bounded messages and
+exception messages. Exception text can include external or user-supplied data;
+credential redaction is not a guarantee against every possible secret. Stack
+locations omit source lines. Protect logs and account for their operator-managed
+retention separately from the metadata-only trace store.
+
 At the audit snapshot, cleanup was documented as running on startup and roughly every ten minutes, outside the event loop.
 History migration scans owners once and removes blocked content in bulk rather
 than rescanning the entire transcript separately for every user. Errors are

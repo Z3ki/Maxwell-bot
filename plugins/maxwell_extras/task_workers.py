@@ -6,13 +6,13 @@ import asyncio
 import json
 import logging
 import re
-import traceback
 from contextvars import ContextVar
 from typing import ClassVar
 
 from maxwell_core.providers.errors import (
     ProviderAuthenticationError,
     ProviderEmptyResponseError,
+    ProviderError,
     ProviderUnavailableError,
 )
 from tools import Tool
@@ -220,13 +220,15 @@ def _report_error(exc: BaseException) -> str:
 
 
 def _log_failure(stage: str, exc: BaseException, secrets=()) -> None:
-    """Log type, message and traceback with credentials and URL details removed."""
-    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    """Log sanitized exception details and traceback without provider bodies."""
+    provider_error = isinstance(exc, ProviderError)
+    detail = "[provider response omitted]" if provider_error else _sanitize(str(exc), secrets)
+    summary = _error_summary(exc, secrets, limit=500, message=not provider_error)
     logger.error(
-        "Task worker %s failed: %s\n%s",
+        "Task worker %s failed: %s",
         stage,
-        _error_summary(exc, secrets, limit=500),
-        _sanitize(trace, secrets).rstrip(),
+        summary,
+        exc_info=(type(exc), Exception(detail), exc.__traceback__),
     )
 
 

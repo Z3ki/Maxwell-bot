@@ -1104,7 +1104,7 @@ async def _proxy_websocket(request, slug: str, target: str):
                 autoclose=False,
             )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-            logger.warning("site %s websocket upstream failed: %s", slug, e)
+            logger.warning("site websocket upstream failed (%s)", type(e).__name__)
             return _site_json({"error": "the site backend refused the websocket"}, 502)
 
         # Mirror whatever subprotocol the backend actually chose.
@@ -1119,9 +1119,7 @@ async def _proxy_websocket(request, slug: str, target: str):
         try:
             await client.prepare(request)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
-            logger.info(
-                "site %s websocket client hung up during handshake: %s", slug, e
-            )
+            logger.info("site websocket client hung up during handshake: %s", e)
             return client
 
         async def pump(src, dst, direction):
@@ -1134,14 +1132,12 @@ async def _proxy_websocket(request, slug: str, target: str):
                     elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING):
                         break
                     elif msg.type == aiohttp.WSMsgType.ERROR:
-                        logger.warning(
-                            "site %s ws %s error: %s", slug, direction, src.exception()
-                        )
+                        logger.warning("site ws %s error: %s", direction, src.exception())
                         break
             except Exception as e:
                 # Never silent: a bug in here used to look exactly like a browser
                 # closing the tab.
-                logger.warning("site %s ws %s pump failed: %r", slug, direction, e)
+                logger.warning("site ws %s pump failed: %r", direction, e)
             finally:
                 # One side hanging up ends the other; nothing is left half-open.
                 with contextlib.suppress(Exception):
@@ -1267,7 +1263,7 @@ async def _site_proxy_request(request, slug: str):
         await session.close()
         if upload_too_large:
             return _site_json({"error": "upload too large"}, 413)
-        logger.warning("site backend %s unreachable: %s", slug, e)
+        logger.warning("site backend unreachable (%s)", type(e).__name__)
         return _site_json({"error": "the site backend is not responding"}, 502)
     except BaseException:
         await session.close()
@@ -1298,7 +1294,7 @@ async def _site_proxy_request(request, slug: str):
         await out.write_eof()
         return out
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
-        logger.warning("site backend %s died mid-response: %s", slug, e)
+        logger.warning("site backend died mid-response (%s)", type(e).__name__)
         with contextlib.suppress(Exception):
             await out.write_eof()
         return out
@@ -2135,19 +2131,17 @@ async def _reliability_middleware(request, handler):
                 handler(request), timeout=_API_REQUEST_TIMEOUT
             )
     except asyncio.TimeoutError:
-        logger.warning("request timeout %s %s", request.method, request.path)
+        logger.warning("request timeout %s", request.method)
         return web.json_response({"error": "request timed out"}, status=504)
     except asyncio.CancelledError:
         raise
     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-        logger.info("client hung up %s %s", request.method, request.path)
+        logger.info("client hung up %s", request.method)
         raise
     except web.HTTPException:
         raise
     except Exception as e:
-        logger.exception(
-            "unhandled error on %s %s: %s", request.method, request.path, e
-        )
+        logger.exception("unhandled error on %s: %s", request.method, e)
         return web.json_response({"error": "internal error"}, status=500)
 
 
@@ -2224,8 +2218,8 @@ async def github_oauth_callback(request):
             login = str(user.get("login") or "")[:80]
         store = TokenStore(DATA_DIR / "plugins" / "github_projects" / "user_tokens.json")
         store.write(payload["uid"], token, login=login, scopes=payload.get("scopes"), source="oauth")
-    except Exception:
-        logger.exception("github oauth callback failed")
+    except Exception as exc:
+        logger.error("github oauth callback failed (%s)", type(exc).__name__)
         return _github_oauth_page("GitHub login failed", "Could not finish login.", ok=False, status=500)
     who = _html.escape(login or "GitHub")
     return _github_oauth_page("GitHub connected", f"Logged in as <strong>{who}</strong>. Maxwell can use this GitHub account for your Discord user now.")

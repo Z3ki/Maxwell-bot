@@ -87,12 +87,15 @@ See [`.env.example`](../.env.example) for the complete advanced environment refe
 
 `LOG_LEVEL` controls verbosity (default `info`). `LOG_FORMAT` selects `text`
 (default) or `json`. Logs through the configured root handlers go to stdout
-through warning and stderr for errors. Legacy INFO-and-higher message text is
-omitted because it may contain user data; explicitly safe instrumentation
-provides structured operational fields. Exception diagnostics include the
-exception type and stack locations, not exception messages or source lines.
-DEBUG messages are redacted and capped at 200 characters, but can still contain
-private non-secret information; enable DEBUG only in a protected environment.
+through warning and stderr for errors. Messages at INFO and above, including
+legacy messages, are credential-redacted and capped at 300 characters with an
+ellipsis when truncated. Exception diagnostics include the type, a similarly
+redacted and capped exception message, and stack locations without source lines.
+Call sites avoid logging message content, prompts and tool results at INFO and
+above, but exception messages may contain external or user-supplied text and
+redaction cannot recognize every secret. DEBUG messages are redacted and capped
+at 200 characters, but can still contain private non-secret information; keep
+all logs protected and enable DEBUG only when necessary.
 Handlers attached separately to individual loggers and direct writes to streams
 are not covered by this formatter.
 

@@ -155,6 +155,6 @@ class SitesMixin:
             encoding="text",
         )
         if isinstance(result, str) and result.startswith("Error"):
-            logger.warning(f"Auto-route create_site returned: {result}")
+            logger.warning("Auto-route create_site returned an error (%d characters)", len(result))
             return None
         return f"⚠️ I dropped the HTML straight into chat by mistake — saving it as a site instead.\n{result}"

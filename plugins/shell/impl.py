@@ -784,7 +784,7 @@ class ShellTool(Tool):
                 f"{state['mb']} MB allowed), so changes to it this session will not be saved. "
                 "Free space with the storage tool or the dashboard."
             )
-            logger.warning("storage restore failed for %s: %s", name, err.decode(errors="replace")[:200])
+            logger.warning("storage restore failed for %s (exit=%s stderr_bytes=%s)", name, code, len(err))
             return
         fingerprint = await self._storage_fingerprint(tenant)
         self._storage_state[name] = {
@@ -812,7 +812,7 @@ class ShellTool(Tool):
                 state["fingerprint"] = fingerprint
                 return "[storage] /storage is larger than its quota; changes were not saved."
             if code != 0:
-                logger.warning("storage export failed for %s: %s", name, err.decode(errors="replace")[:200])
+                logger.warning("storage export failed for %s (exit=%s stderr_bytes=%s)", name, code, len(err))
                 return "[storage] could not read /storage; changes were not saved this time."
             spool.seek(0)
             result = await asyncio.to_thread(
@@ -1378,7 +1378,7 @@ finally:
             message, rel_path, max_size=10 * 1024 * 1024
         )
         if blob is None or basename is None:
-            logger.info("Shell file export rejected (%s)", error or "unknown")
+            logger.info("Shell file export rejected")
             return None
         filename = _safe_attachment_filename(basename, default="file")
         self._signal_streaming(message)
