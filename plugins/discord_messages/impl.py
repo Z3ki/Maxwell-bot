@@ -485,9 +485,9 @@ class DeleteMessageTool(Tool):
 
     def get_description(self):
         return (
-            "Delete a message. Maxwell responses require request ownership or "
-            "manage_messages. Another user's message requires manage_messages "
-            "for both you and Maxwell in the target channel. Targets must be in "
+            "Delete one of Maxwell's own messages, or another user's message "
+            "if both you and Maxwell have manage_messages in the target channel. "
+            "Targets must be in "
             "this server. Params: message_id (required), channel_id (optional)."
         )
 
@@ -520,25 +520,7 @@ class DeleteMessageTool(Tool):
         try:
             msg = await channel.fetch_message(int(str(message_id).strip()))
             mine = self.bot.user and msg.author.id == self.bot.user.id
-            if mine:
-                journal = getattr(self.bot, "_request_journal", None)
-                owner = await journal.submit(journal.find_response, message_id) if journal is not None else None
-                requester_id = str(getattr(getattr(message, "author", None), "id", "") or "")
-                channel_matches = str(owner.get("channel_id") or "") == str(
-                    getattr(channel, "id", "") or ""
-                ) if owner else False
-                owns_response = bool(
-                    owner
-                    and channel_matches
-                    and str(owner.get("author_id") or "") == requester_id
-                )
-                if not owns_response:
-                    missing = _missing_cap(
-                        target_guild, "manage_messages", message, channel=channel
-                    )
-                    if missing:
-                        return "Error: response ownership is unknown; " + missing
-            else:
+            if not mine:
                 missing = _missing_cap(
                     target_guild, "manage_messages", message, channel=channel
                 )
@@ -551,7 +533,7 @@ class DeleteMessageTool(Tool):
                 getattr(target_guild, "id", ""),
                 getattr(channel, "id", ""),
                 str(message_id),
-                "request" if mine and owns_response else ("moderator" if mine else "authorized_other"),
+                "bot" if mine else "authorized_other",
             )
             who = "my" if mine else "that"
             return f"Deleted {who} message {message_id}"
