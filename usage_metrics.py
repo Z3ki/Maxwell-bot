@@ -85,10 +85,11 @@ def _dimension(key, value):
         return None
     if key == 'model':
         configured = {os.environ.get(name) for name in (
-            'AI_MODEL', 'AI_FALLBACK_MODEL', 'AI_VISION_MODEL', 'AI_PREMIUM_MODEL', 'OLLAMA_MODEL')}
+            'AI_MODEL', 'AI_FALLBACK_MODEL', 'AI_VISION_MODEL', 'AI_PREMIUM_MODEL',
+            'AI_WORKER_MODEL', 'AI_WORKER_FALLBACK_MODEL', 'OLLAMA_MODEL')}
         if value not in configured:
             return None
-    elif key == 'provider' and value not in {'primary', 'fallback', 'vision', 'searxng', 'tavily', 'ddgs', 'none'}:
+    elif key == 'provider' and value not in {'primary', 'fallback', 'vision', 'worker', 'searxng', 'tavily', 'ddgs', 'none'}:
         return None
     elif key == 'name' and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', value):
         return None

@@ -92,14 +92,20 @@ so concurrent requests never change a client's generation defaults. Model
 overrides apply to the primary slot; alternate providers use their own models.
 Personal BYOK clients bypass the funded router entirely.
 
-After an independently configured operator worker route is selected, its
-provider failure fallback may use `AI_FALLBACK_BASE_URL`, `AI_FALLBACK_MODEL`,
-and `AI_FALLBACK_API_KEY` first when all three are nonblank and the normalized
-endpoint/model pair differs from the worker. Otherwise it may use the primary
+After an independently configured operator worker route is selected, a dedicated
+`AI_WORKER_FALLBACK_MODEL` takes precedence as the provider-failure fallback.
+Its optional `AI_WORKER_FALLBACK_BASE_URL` inherits the worker endpoint when
+omitted. An omitted `AI_WORKER_FALLBACK_API_KEY` inherits the worker key only
+if the fallback endpoint is omitted or normalizes to the worker endpoint. For a
+different endpoint, provide its own key, or explicitly set it blank for a
+keyless endpoint. Without a dedicated fallback, the route may use
+`AI_FALLBACK_BASE_URL`, `AI_FALLBACK_MODEL`, and `AI_FALLBACK_API_KEY` when all
+three are nonblank and the normalized endpoint/model pair differs from the worker.
+If no eligible global fallback is configured, it may use the primary
 `AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY` when all three are nonblank and
 the normalized primary endpoint differs from the worker endpoint (even a
 different model on the same endpoint is not eligible). Each route uses its
-own key and reasoning settings; no key is inherited by a fallback destination.
+own reasoning settings; credentials are never inherited across endpoints.
 Personal worker and personal chat providers never fall back to operator routes.
 Without a separate operator worker model, workers use the existing chat provider.
 
@@ -187,6 +193,17 @@ key allows a keyless operator-controlled endpoint. Local HTTP endpoints are allo
 only for operator configuration; user BYOK keeps its public HTTPS restrictions.
 A base URL without a model refuses worker execution, leaving ordinary chat usable.
 
+`AI_WORKER_API_FORMAT` selects `auto` (default), `openai`, or `anthropic`.
+`auto` detects the `api.anthropic.com` host and otherwise uses OpenAI-compatible
+Chat Completions. Set `anthropic` explicitly for an Anthropic-compatible proxy.
+The worker fallback has an independent `AI_WORKER_FALLBACK_API_FORMAT` with the
+same values and default; this lets an Anthropic worker use an OpenAI-compatible
+fallback without sending one provider's credentials to the other.
+For Anthropic's API use `https://api.anthropic.com/v1` as the worker base URL;
+the client sends requests to `/messages`, streaming by default and using JSON
+when non-streaming is requested or during recovery. It does not send
+reasoning-specific options.
+
 Worker defaults: output 8192 tokens (16–131072), unspecified context (0), reasoning
 off, blank effort, request timeout 600 seconds (10–14400). Configure independently:
 `AI_WORKER_MAX_OUTPUT_TOKENS`, `AI_WORKER_CONTEXT_WINDOW` (0–2000000),
@@ -211,7 +228,7 @@ Corrupt or disabled saved credentials raise instead of falling through to
 another account, and failed selected keys never fall back to an operator
 account. A new client is closed after its children stop;
 a detached job opens its own personal client rather than borrowing the chat
-turn's client, so a finished chat cannot close a running worker connection. These routes support the
-existing OpenAI-compatible Chat Completions protocol; effort support depends on
-that provider/model. No claims about provider retention or training follow from
-choosing a model or disabling local history.
+turn's client, so a finished chat cannot close a running worker connection.
+Personal routes use the existing OpenAI-compatible Chat Completions protocol;
+effort support depends on the provider/model. No claims about provider retention
+or training follow from choosing a model or disabling local history.

@@ -246,6 +246,15 @@ class Config:
     if AI_WORKER_API_KEY is not None:
         AI_WORKER_API_KEY = AI_WORKER_API_KEY.strip()
     AI_WORKER_MODEL = os.getenv("AI_WORKER_MODEL", "").strip()
+    AI_WORKER_API_FORMAT = os.getenv("AI_WORKER_API_FORMAT", "auto").strip().lower()
+    AI_WORKER_FALLBACK_MODEL = os.getenv("AI_WORKER_FALLBACK_MODEL", "").strip()
+    AI_WORKER_FALLBACK_BASE_URL = os.getenv("AI_WORKER_FALLBACK_BASE_URL", "").strip()
+    AI_WORKER_FALLBACK_API_KEY = os.getenv("AI_WORKER_FALLBACK_API_KEY")
+    if AI_WORKER_FALLBACK_API_KEY is not None:
+        AI_WORKER_FALLBACK_API_KEY = AI_WORKER_FALLBACK_API_KEY.strip()
+    AI_WORKER_FALLBACK_API_FORMAT = os.getenv(
+        "AI_WORKER_FALLBACK_API_FORMAT", "auto"
+    ).strip().lower()
     AI_WORKER_MAX_OUTPUT_TOKENS = _int_env("AI_WORKER_MAX_OUTPUT_TOKENS", 8192, min_value=16, max_value=131072)
     AI_WORKER_CONTEXT_WINDOW = _int_env("AI_WORKER_CONTEXT_WINDOW", 0, min_value=0, max_value=2000000)
     AI_WORKER_DISABLE_REASONING = _bool_env("AI_WORKER_DISABLE_REASONING", True)

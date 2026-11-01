@@ -219,6 +219,9 @@ class OpenAICompatibleProvider(ChatProvider):
     Multi-endpoint constructor arguments and _last_* attributes are deprecated
     compatibility paths for integrations predating ProviderRouter.
     """
+    completion_path = "/chat/completions"
+    extra_retryable_statuses = frozenset()
+
 
     def __init__(
         self,
@@ -631,7 +634,11 @@ class OpenAICompatibleProvider(ChatProvider):
         constraint_key = (endpoint.name, effective_model)
         data = {
             "model": effective_model,
-            "messages": chat_messages,
+            "messages": [
+                {key: value for key, value in message.items() if key != "is_error"}
+                if message.get("role") == "tool" and "is_error" in message else message
+                for message in chat_messages
+            ],
             "stream": True,
         }
         # Always include max_tokens from config or override
@@ -1259,14 +1266,14 @@ class OpenAICompatibleProvider(ChatProvider):
                 headers = await self._auth_headers(endpoint)
                 credential_secrets = self._credential_secrets(headers)
                 async with session.post(
-                    f"{endpoint.base_url}/chat/completions",
+                    f"{endpoint.base_url}{self.completion_path}",
                     json=data,
                     timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
                     headers=headers,
                     allow_redirects=self.policy.allow_redirects,
                 ) as resp:
                     headers_ms = (time.perf_counter() - request_start) * 1000
-                    if resp.status == 503:
+                    if resp.status == 503 or resp.status in self.extra_retryable_statuses:
                         raw_error_text = await _read_response_text_limited(resp)
                         error_text = self._display_error(
                             raw_error_text, credential_secrets
@@ -1281,7 +1288,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         if await self._retry_after_attempt(
                             attempt,
                             endpoint,
-                            f"Provider {endpoint.name} 503",
+                            f"Provider {endpoint.name} {resp.status}",
                             max_attempts=max_attempts,
                             fast_fallback=fast_fallback,
                             has_media=has_media,

@@ -71,6 +71,19 @@ The runtime reads these names directly; legacy `OLLAMA_BASE_URL`, `OLLAMA_MODEL`
 
 All advanced generation, retry, fallback and vision controls use `AI_*`. Deprecated `OLLAMA_*` inputs remain supported; see [PROVIDERS.md](PROVIDERS.md).
 
+An independently configured operator worker may use Anthropic Messages via
+`AI_WORKER_API_FORMAT=anthropic`; `auto` (the default) detects the
+`api.anthropic.com` host and otherwise selects OpenAI-compatible Chat
+Completions. `AI_WORKER_FALLBACK_API_FORMAT` independently selects `auto`,
+`openai`, or `anthropic` for the worker's fallback. Set the format explicitly
+for proxies whose host does not identify their protocol. Set
+`AI_WORKER_FALLBACK_MODEL` for a dedicated fallback; its endpoint and key can
+inherit from the worker only at the same endpoint. A different endpoint requires
+its own key (or an explicitly blank key for a keyless endpoint). Personal BYOK
+does not fall back to operator credentials. See
+[worker configuration](PROVIDERS.md#independent-subagent-provider) for selection
+and fallback details.
+
 For an older install:
 
 ```bash

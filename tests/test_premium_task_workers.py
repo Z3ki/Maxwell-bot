@@ -220,6 +220,16 @@ def test_worker_cannot_bypass_new_tool_disable(tmp_path):
     shell.execute.assert_not_awaited()
 
 
+def test_worker_marks_failed_tool_results_for_provider(tmp_path):
+    bot, msg, shell, worker = setup(tmp_path)
+    shell.execute.return_value = "Error: unavailable"
+    result = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert result["completed"] == [{"tool": "shell", "status": "error"}]
+    messages = bot._generate_response.await_args_list[1].args[0]
+    tool_result = next(row for row in messages if row["role"] == "tool")
+    assert tool_result["is_error"] is True
+
+
 @pytest.mark.parametrize(
     "name,args",
     [

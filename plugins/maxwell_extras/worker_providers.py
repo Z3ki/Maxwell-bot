@@ -37,7 +37,31 @@ async def select_worker_provider(bot, user_id, inherited=None):
 
     worker_url = endpoint or getattr(config, "AI_BASE_URL", "")
     fallback = {}
+    fallback_model = (getattr(config, "AI_WORKER_FALLBACK_MODEL", "") or "").strip()
+    if fallback_model:
+        fallback_url = (
+            getattr(config, "AI_WORKER_FALLBACK_BASE_URL", "") or worker_url
+        ).strip()
+        fallback_key = getattr(config, "AI_WORKER_FALLBACK_API_KEY", None)
+        if fallback_key is None:
+            if normalize_base_url(fallback_url) != normalize_base_url(worker_url):
+                raise ValueError(
+                    "AI_WORKER_FALLBACK_API_KEY must be set for a different fallback endpoint"
+                )
+            fallback_key = key
+        if (normalize_base_url(fallback_url), fallback_model) == (
+            normalize_base_url(worker_url), model
+        ):
+            raise ValueError("Worker fallback must differ from the primary worker route")
+        fallback = {
+            "fallback_base_url": fallback_url,
+            "fallback_model": fallback_model,
+            "fallback_api_key": fallback_key,
+            "fallback_disable_reasoning": True,
+        }
     for prefix in ("AI_FALLBACK", "AI"):
+        if fallback:
+            break
         url = (getattr(config, f"{prefix}_BASE_URL", "") or "").strip()
         alternate_model = (getattr(config, f"{prefix}_MODEL", "") or "").strip()
         alternate_key = (getattr(config, f"{prefix}_API_KEY", "") or "").strip()
@@ -70,6 +94,8 @@ async def select_worker_provider(bot, user_id, inherited=None):
         base_url=worker_url,
         api_key=key,
         model=model,
+        api_format=getattr(config, "AI_WORKER_API_FORMAT", "auto"),
+        fallback_api_format=getattr(config, "AI_WORKER_FALLBACK_API_FORMAT", "auto"),
         max_tokens=output,
         context_window=getattr(config, "AI_WORKER_CONTEXT_WINDOW", 0) or None,
         disable_reasoning=getattr(config, "AI_WORKER_DISABLE_REASONING", True),

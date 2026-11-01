@@ -777,6 +777,7 @@ class DelegateTaskTool(Tool):
                                 "role": "tool",
                                 "tool_call_id": call.get("id", ""),
                                 "content": refusal,
+                                "is_error": True,
                             }
                         )
                         continue
@@ -870,6 +871,8 @@ class DelegateTaskTool(Tool):
                             text = text[: len(text) * keep // size]
                         text += note
                     row["content"] = text
+                    if failed:
+                        row["is_error"] = True
                     chunk.append(row)
                 chunks.append(chunk)
             return {

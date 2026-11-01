@@ -70,6 +70,24 @@ def test_rejects_untrusted_dimensions(tmp_path, monkeypatch):
     assert not result['model_p95_latency_ms_upper_bound']
 
 
+def test_worker_models_are_grouped_with_usage(tmp_path, monkeypatch):
+    monkeypatch.setenv('AI_WORKER_MODEL', 'claude-haiku-5-5')
+    monkeypatch.setenv('AI_WORKER_FALLBACK_MODEL', 'deepseek/flash')
+    metrics._record(tmp_path, 'model', {
+        'model': 'claude-haiku-5-5', 'provider': 'worker',
+        'tokens_in': 20, 'tokens_out': 3, 'duration_ms': 100, 'success': True,
+    })
+    metrics._record(tmp_path, 'model', {
+        'model': 'deepseek/flash', 'provider': 'fallback',
+        'tokens_in': 5, 'tokens_out': 2, 'duration_ms': 200, 'success': True,
+    })
+    report = metrics.stats(tmp_path)
+    models = {(row['model'], row['provider']) for row in report['models']}
+    assert models == {('claude-haiku-5-5', 'worker'), ('deepseek/flash', 'fallback')}
+    assert report['kinds']['model']['tokens_in']['total'] == 25
+    assert report['kinds']['model']['tokens_out']['total'] == 5
+
+
 def test_cli_json(tmp_path):
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'stats.py'
     import os

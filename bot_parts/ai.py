@@ -127,16 +127,21 @@ class AIMixin:
                 "outcome": "success" if error is None else "error",
                 "error_type": error_type,
             }
-            if provider is None:
+            if provider is None or not getattr(
+                getattr(selected_provider, "policy", None), "sensitive_credentials", False
+            ):
                 config = getattr(self, "config", None)
                 configured_models = (
                     getattr(config, key, None)
-                    for key in ("AI_MODEL", "AI_FALLBACK_MODEL", "AI_VISION_MODEL", "AI_PREMIUM_MODEL")
+                    for key in (
+                        "AI_MODEL", "AI_FALLBACK_MODEL", "AI_VISION_MODEL",
+                        "AI_PREMIUM_MODEL", "AI_WORKER_MODEL", "AI_WORKER_FALLBACK_MODEL",
+                    )
                 )
                 if isinstance(model, str) and model and model in configured_models:
                     fields["model"] = model
-                if provider_name in ("primary", "fallback", "vision"):
-                    fields["provider"] = provider_name
+                    if provider_name in ("primary", "fallback", "vision", "worker"):
+                        fields["provider"] = provider_name
             usage = getattr(result, "usage", None) or {}
             if isinstance(usage, dict):
                 for source, target in (("prompt_tokens", "tokens_in"), ("completion_tokens", "tokens_out")):

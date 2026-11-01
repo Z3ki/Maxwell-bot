@@ -4,10 +4,22 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from .base import ChatProvider
 from .models import GenerationDefaults, ProviderCapabilities, ProviderConfig
 from .routing import ProviderRouter
+
+
+def _provider_kind(api_format: str, base_url: str) -> str:
+    value = (api_format or "auto").strip().lower()
+    if value == "auto":
+        return "anthropic" if (urlsplit(base_url).hostname or "").lower() == "api.anthropic.com" else "openai_compat"
+    if value in {"openai", "openai_compat", "custom"}:
+        return "openai_compat"
+    if value == "anthropic":
+        return value
+    raise ValueError(f"unknown provider API format {api_format!r}")
 
 OPENAI_COMPAT_KINDS = frozenset({"openai_compat", "custom"})
 
@@ -16,8 +28,13 @@ def provider_from_config(config: ProviderConfig, **kwargs: Any) -> ChatProvider:
     from providers import OpenAICompatibleProvider
 
     kind = (config.kind or "openai_compat").strip().lower()
-    if kind not in OPENAI_COMPAT_KINDS:
+    if kind not in OPENAI_COMPAT_KINDS and kind != "anthropic":
         raise ValueError(f"unknown provider kind {config.kind!r}")
+    if kind == "anthropic":
+        from .anthropic import AnthropicMessagesProvider
+        provider_class = AnthropicMessagesProvider
+    else:
+        provider_class = OpenAICompatibleProvider
     defaults = config.generation
     options = dict(config.extras)
     options.update(
@@ -37,7 +54,7 @@ def provider_from_config(config: ProviderConfig, **kwargs: Any) -> ChatProvider:
         raise ValueError(
             "Construct alternate providers separately and use ProviderRouter"
         )
-    return OpenAICompatibleProvider(
+    return provider_class(
         base_url=config.base_url,
         api_key=config.api_key,
         model=config.model,
@@ -59,6 +76,8 @@ def openai_compat_provider(
     """Legacy keyword assembly facade; convert once to explicit configurations."""
     policy = kwargs.pop("policy", None)
     authentication = kwargs.pop("authentication", None)
+    api_format = kwargs.pop("api_format", "auto")
+    fallback_api_format = kwargs.pop("fallback_api_format", "auto")
     fallback_url = kwargs.pop("fallback_base_url", "")
     fallback_model = kwargs.pop("fallback_model", "")
     fallback_key = kwargs.pop("fallback_api_key", "")
@@ -88,6 +107,7 @@ def openai_compat_provider(
     )
     config = ProviderConfig(
         name=name,
+        kind=_provider_kind(api_format, base_url),
         base_url=base_url,
         api_key=api_key,
         model=model,
@@ -104,6 +124,7 @@ def openai_compat_provider(
             replace(
                 config,
                 name="fallback",
+                kind=_provider_kind(fallback_api_format, fallback_url),
                 base_url=fallback_url,
                 model=fallback_model,
                 api_key=fallback_key,
@@ -120,6 +141,7 @@ def openai_compat_provider(
             replace(
                 config,
                 name="vision",
+                kind=_provider_kind("auto" if vision_url else api_format, vision_url or base_url),
                 base_url=vision_url or base_url,
                 model=vision_model,
                 api_key=vision_key or api_key,
