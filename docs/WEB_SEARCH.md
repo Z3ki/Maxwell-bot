@@ -19,7 +19,7 @@ When the model requests a search, Maxwell tries:
 
 1. SearXNG, if `SEARXNG_URL` is configured.
 2. Tavily, if `TAVILY_API_KEY` is configured.
-3. Keyless ddgs engines, included in the core requirements.
+3. Keyless ddgs engines only if `WEB_SEARCH_SCRAPER_FALLBACK=true` and ddgs is installed.
 
 An empty, malformed, rate-limited, timed-out or failed provider falls back to
 the next configured provider within the overall search deadline. SearXNG has
@@ -28,6 +28,14 @@ seconds). When a fallback is configured, SearXNG gets at most half of the
 remaining overall budget, leaving time for fallback. Useful partial results
 return immediately instead of searching more
 engines to fill every slot. Brief provider cooldowns reduce repeated failures.
+
+The scraper fallback defaults to false; ddgs and primp are not imported for
+search when it is off. With no SearXNG or Tavily configured, automatic feature
+detection disables web search unless the scraper is explicitly enabled and
+ddgs is installed. `python3 doctor.py` reports the feature decision.
+If providers fail, the tool returns `Web search unavailable: <reason>`; if
+they return no usable hits, it returns `No results found for this query`.
+No results should be treated as verified current evidence.
 Searches use an HTTP connection pool and a separate bounded executor for ddgs;
 timed-out threads retain capacity until they actually finish. Distinct queued
 searches and cache entries have hard limits. Identical simultaneous queries

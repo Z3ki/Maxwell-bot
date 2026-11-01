@@ -18,6 +18,8 @@
 
 ## Unreleased
 
+- Disable the ddgs scraper fallback by default; opt in with `WEB_SEARCH_SCRAPER_FALLBACK=true`. Search uses configured SearXNG and Tavily providers and reports unavailable or empty results without scraping.
+
 - Audit current configuration, search, worker and deployment documentation against the code; distinguish shipped defaults from operator examples.
 - Correction to the 0.1.15 storage note: the current missing-user preference defaults to tracking on, and message tracking checks that preference without requiring a consent record. Explicit opt-outs and resets still disable tracking.
 

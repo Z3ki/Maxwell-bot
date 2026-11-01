@@ -91,14 +91,6 @@ class WebSearchTool(Tool):
         cfg = getattr(self.bot, "config", None)
         searxng_url = str(getattr(cfg, "SEARXNG_URL", "") or "")
         tavily_key = str(getattr(cfg, "TAVILY_API_KEY", "") or "")
-        if not _DDGS_AVAILABLE and not (searxng_url or tavily_key):
-            return (
-                "Error: web_search is not available in this install — the "
-                "`ddgs` Python package is missing. Run `pip install ddgs` "
-                "or set ENABLE_WEB_SEARCH=false in .env to silence this."
-            )
-        # HTTP providers also work when the keyless fallback is not installed.
-        ddgs_cls: Any = _DDGS if _DDGS_AVAILABLE else None
 
         time_range = str(time_range or "").strip().lower() or None
         freshness = str(freshness or "recent").strip().lower()
@@ -126,35 +118,21 @@ class WebSearchTool(Tool):
                 self._search_service = SearchService(
                     searxng_url=searxng_url, tavily_key=tavily_key,
                     searxng_timeout=getattr(cfg, "SEARXNG_TIMEOUT", 6.0),
+                    scraper_fallback=getattr(cfg, "WEB_SEARCH_SCRAPER_FALLBACK", False),
                     budget=getattr(cfg, "WEB_SEARCH_TIMEOUT", 12.0),
                     concurrency=getattr(cfg, "WEB_SEARCH_CONCURRENCY", 4),
                     max_pending=getattr(cfg, "WEB_SEARCH_MAX_PENDING", 32),
                     cache_size=getattr(cfg, "WEB_SEARCH_CACHE_SIZE", 256),
                 )
             result = await self._search_service.search(
-                query, limit, backends, ddgs_cls,
+                query, limit, backends,
                 time_range=time_range, freshness=freshness,
             )
             hits, errors = list(result.hits), result.errors
             if not hits:
-                if errors and all(
-                    re.search(r"429|rate.?limit|captcha|sorry", e, re.I)
-                    for e in errors
-                ):
-                    logger.warning(
-                        "Web search rate-limited across backends",
-                    )
-                    return (
-                        "Error searching: search engines rate-limited this "
-                        "query. Retry with a simpler query."
-                    )
                 if errors:
-                    return (
-                        "Error searching: current web evidence is unavailable ("
-                        + "; ".join(errors[:4])
-                        + "). Do not present model knowledge as verified current information."
-                    )
-                return f"No results found for '{query}'. Current facts remain unverified."
+                    return "Web search unavailable: search providers failed or are not configured"
+                return "No results found for this query"
 
             header = (
                 f"Web evidence: provider={result.provider}; retrieved_at={result.retrieved_at}; "
@@ -169,9 +147,9 @@ class WebSearchTool(Tool):
             # returning []. Treat that as empty, not a tool failure — otherwise
             # the circuit breaker opens and the model learns search is broken.
             if re.search(r"no results", err, re.I):
-                return f"No results found for '{query}'"
+                return "No results found for this query"
             logger.error("Web search error (%s)", type(e).__name__)
-            return f"Error searching: {type(e).__name__}. Current evidence is unavailable."
+            return f"Web search unavailable: {type(e).__name__}"
 
 class FetchUrlTool(Tool):
     """Fetch and extract text content from a URL"""

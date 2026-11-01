@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import bot as bot_module
@@ -127,7 +128,7 @@ def test_normalize_web_hit_accepts_url_and_excerpt():
 def _search_bot():
     return SimpleNamespace(
         mark_message_tainted=lambda *_a, **_k: None,
-        config=SimpleNamespace(),
+        config=SimpleNamespace(WEB_SEARCH_SCRAPER_FALLBACK=True),
         memory=None,
     )
 
@@ -146,8 +147,7 @@ def test_web_search_formats_url_keyed_hits(monkeypatch):
                 }
             ]
 
-    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
-    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
     tool = WebSearchTool(_search_bot())
     result = asyncio.run(tool.execute(SimpleNamespace(guild=None), query="mat dickie"))
     assert not result.lower().startswith("error")
@@ -164,12 +164,10 @@ def test_web_search_empty_ddgs_exception_is_not_an_error(monkeypatch):
         def text(self, query, **k):
             raise RuntimeError("No results found.")
 
-    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
-    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
     tool = WebSearchTool(_search_bot())
     result = asyncio.run(tool.execute(SimpleNamespace(guild=None), query="xyzzy"))
-    assert result.startswith("No results found")
-    assert not result.lower().startswith("error")
+    assert result == "No results found for this query"
 
 
 def test_web_search_default_backends_skip_brave_google():
@@ -198,8 +196,7 @@ def test_web_search_falls_back_when_primary_backend_fails(monkeypatch):
                 return [{"title": "B", "href": "https://ex.com/b", "body": "ok"}]
             return []
 
-    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
-    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
     tool = WebSearchTool(_search_bot())
     result = asyncio.run(tool.execute(SimpleNamespace(guild=None), query="mat dickie"))
     assert not result.lower().startswith("error")
@@ -218,8 +215,7 @@ def test_web_search_taints_the_turn(monkeypatch):
         def text(self, query, **k):
             return [{"title": "T", "href": "https://ex.com", "body": "b"}]
 
-    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
-    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
     bot = _search_bot()
     bot.mark_message_tainted = lambda msg: tainted.setdefault("ok", True)
     msg = SimpleNamespace(id=9, guild=None)
@@ -235,8 +231,7 @@ def test_real_search_result_drives_final_reply_references(monkeypatch):
         def text(self, query, **kwargs):
             return [{"title": "T", "href": "https://example.com/page", "body": "Evidence"}]
 
-    monkeypatch.setattr("bot_tools._DDGS", FakeDDGS)
-    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", True)
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
     token = begin_web_references()
     try:
         result = asyncio.run(WebSearchTool(_search_bot()).execute(None, query="facts"))

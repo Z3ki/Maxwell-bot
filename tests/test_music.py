@@ -403,11 +403,11 @@ def test_web_search_then_music_keeps_permissions_and_destructive_gate(tmp_path, 
                      'href': 'https://www.youtube.com/watch?v=abcdefghijk',
                      'body': 'Track metadata'}]
 
-    monkeypatch.setattr('bot_tools._DDGS', Search)
-    monkeypatch.setattr('bot_tools._DDGS_AVAILABLE', True)
+    import sys
+    monkeypatch.setitem(sys.modules, 'ddgs', SimpleNamespace(DDGS=Search))
     service, backend, msg, voice = fixture(tmp_path)
     bot = service.bot
-    bot.config = SimpleNamespace(DISABLE_TAINT_GATE=False)
+    bot.config = SimpleNamespace(DISABLE_TAINT_GATE=False, WEB_SEARCH_SCRAPER_FALLBACK=True)
     bot.memory = None
     bot._tool_breaker = ToolCircuitBreaker()
     bot.tool_concurrency = None

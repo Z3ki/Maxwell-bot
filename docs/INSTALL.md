@@ -36,8 +36,9 @@ untouched but no longer loaded or updated.
 Optional integrations use `auto` detection. Website tools need a nonblank
 `MAXWELL_PUBLIC_BASE_URL`; `ENABLE_CREATE_SITE=true` also allows local-only
 hosting. HD images need `GEMINI_IMAGE_MODEL` supported by your
-provider. Shell stays off until `--with-shell` prepares the backend. Features without
-setup, such as keyless web search and image generation, remain available.
+provider. Shell stays off until `--with-shell` prepares the backend. Image generation
+remains available without optional setup. Web search needs SearXNG or Tavily configured,
+or an explicitly enabled ddgs scraper fallback; see [web search](WEB_SEARCH.md).
 Autonomous background chatter and memory agents have been removed. Premium users
 can delegate work to background workers and create schedules; see
 [PREMIUM_TASKS.md](PREMIUM_TASKS.md). The `tts` tool sends voice messages using

@@ -149,10 +149,10 @@ Developer access is determined by configured Maxwell owner IDs. Diagnostics reda
 
 Maxwell can inspect its running revision, changelog, recent public GitHub commits, and changed-file summaries through `get_maxwell_updates`. The running revision is captured at startup; newer commits on `main` are not assumed to be deployed. GitHub failures fall back to the local snapshot.
 
-The model decides when to search for current information. Web tools now support
-optional SearXNG and Tavily providers with keyless ddgs fallback, bounded
-concurrency, shared searches and short caches. See [web search configuration](docs/WEB_SEARCH.md)
-for optional SearXNG hosting, freshness controls and verification.
+The model decides when to search for current information. Web search uses
+configured SearXNG and Tavily providers; the keyless ddgs scraper fallback is
+disabled by default. See [web search configuration](docs/WEB_SEARCH.md) for
+provider setup, bounded concurrency, freshness controls and verification.
 
 User-requested subagent jobs can use a separate worker model or personal
 connection; see [worker routing](docs/PROVIDERS.md#independent-subagent-provider).

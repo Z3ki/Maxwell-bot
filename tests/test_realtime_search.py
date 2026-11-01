@@ -73,7 +73,8 @@ def test_provider_fallback_after_empty_malformed_and_failed_results():
 
         calls = []
         service = ScriptedService(
-            searxng_url="http://searxng:8080", tavily_key="private-key"
+            searxng_url="http://searxng:8080", tavily_key="private-key",
+            scraper_fallback=True,
         )
         try:
             result = await service.search("devices", 5, ["duckduckgo", "bing"], object)
@@ -180,6 +181,7 @@ def test_compatibility_helper_uses_configured_providers(monkeypatch):
     monkeypatch.setattr(Config, "SEARXNG_URL", "http://searxng")
     monkeypatch.setattr(Config, "SEARXNG_TIMEOUT", 3.0)
     monkeypatch.setattr(Config, "TAVILY_API_KEY", "key")
+    monkeypatch.setattr(Config, "WEB_SEARCH_SCRAPER_FALLBACK", True)
     monkeypatch.setattr(web_search, "SearchService", Service)
     hits, errors = asyncio.run(_web_search_collect(None, "query", 1, []))
     assert hits == [HIT]
@@ -187,6 +189,7 @@ def test_compatibility_helper_uses_configured_providers(monkeypatch):
     assert captured["searxng_url"] == "http://searxng"
     assert captured["searxng_timeout"] == 3.0
     assert captured["tavily_key"] == "key"
+    assert captured["scraper_fallback"] is True
     assert captured["closed"]
 
 
@@ -364,7 +367,7 @@ def test_timeout_retains_ddgs_worker_capacity_until_thread_exits():
                 loop.call_soon_threadsafe(finished.set)
                 return [HIT]
 
-        service = SearchService(budget=0.04, concurrency=1)
+        service = SearchService(budget=0.04, concurrency=1, scraper_fallback=True)
         try:
             first = asyncio.create_task(
                 service.search("one", 1, ["duckduckgo"], SlowDDGS)
@@ -410,8 +413,6 @@ def test_deadline_includes_queueing_and_close_cancels_shared_work():
 def test_searxng_works_without_ddgs_and_does_not_persist_web_results(
     monkeypatch,
 ):
-    monkeypatch.setattr("bot_tools._DDGS_AVAILABLE", False)
-    monkeypatch.setattr("bot_tools._DDGS", None)
 
     async def scenario():
         stored = []
@@ -477,3 +478,171 @@ def test_model_search_instruction_preserves_generation_first_behavior():
     assert "supported" in WEB_REFERENCE_INSTRUCTION
     assert "factual follow-up" in WEB_REFERENCE_INSTRUCTION
     assert "web=off" in WEB_REFERENCE_INSTRUCTION
+
+
+@pytest.mark.parametrize("failure", ["empty", "exception", "timeout"])
+def test_disabled_scraper_never_runs_after_http_failure(failure):
+    async def scenario():
+        calls = []
+
+        class Service(SearchService):
+            async def _http(self, provider, *_args):
+                calls.append(provider)
+                if failure == "exception":
+                    raise RuntimeError("provider failed")
+                if failure == "timeout":
+                    await asyncio.sleep(1)
+                return []
+
+            async def _ddgs(self, *_args):
+                pytest.fail("disabled scraper must not run")
+
+        service = Service(searxng_url="http://search", tavily_key="key", budget=0.1)
+        try:
+            result = await service.search("query", 1, ["bing"], object)
+            assert not result.hits
+            assert calls == ["searxng", "tavily"]
+        finally:
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_helper_passes_scraper_setting(monkeypatch, fallback):
+    from config import Config
+    from tooling.helpers import _web_search_collect
+    import web_search
+
+    captured = {}
+
+    class Service:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def search(self, *args):
+            return web_search.SearchResult(hits=())
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(Config, "WEB_SEARCH_SCRAPER_FALLBACK", fallback)
+    monkeypatch.setattr(web_search, "SearchService", Service)
+    asyncio.run(_web_search_collect(None, "query", 1, []))
+    assert captured["scraper_fallback"] is fallback
+
+
+@pytest.mark.parametrize(
+    "hits,errors,expected",
+    [
+        ((), (), "No results found for this query"),
+        ((), ("HTTP 429",), "Web search unavailable: "),
+    ],
+)
+def test_plugin_empty_and_error_messages(hits, errors, expected):
+    from web_search import SearchResult
+
+    class Service:
+        async def search(self, *args, **kwargs):
+            return SearchResult(hits=hits, errors=errors)
+
+        async def close(self):
+            pass
+
+    async def scenario():
+        tool = WebSearchTool(SimpleNamespace(config=SimpleNamespace(SEARXNG_URL="http://search")))
+        tool._search_service = Service()
+        try:
+            result = await tool.execute(None, query="query")
+            if errors:
+                assert result.startswith(expected)
+                assert len(result) < 200
+            else:
+                assert result == expected
+        finally:
+            await tool.close()
+
+    asyncio.run(scenario())
+
+
+def test_disabled_plugin_does_not_import_scraper(monkeypatch):
+    import builtins
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name.split(".")[0] in {"ddgs", "primp"}:
+            pytest.fail(f"unexpected scraper import: {name}")
+        return original_import(name, *args, **kwargs)
+
+    async def scenario():
+        tool = WebSearchTool(SimpleNamespace(config=SimpleNamespace()))
+        try:
+            result = await tool.execute(None, query="query")
+            assert result.startswith("Web search unavailable: ")
+        finally:
+            await tool.close()
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "fallback,searx,tavily,installed,enabled",
+    [
+        ("", "", "", True, False),
+        ("false", "", "", True, False),
+        ("true", "", "", True, True),
+        ("true", "", "", False, False),
+        ("", "http://search", "", False, True),
+        ("", "", "key", False, True),
+    ],
+)
+def test_search_feature_detection(fallback, searx, tavily, installed, enabled):
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env.update(
+        MAXWELL_ENV_FILE="/tmp/nonexistent",
+        ENABLE_WEB_SEARCH="auto",
+        WEB_SEARCH_SCRAPER_FALLBACK=fallback,
+        SEARXNG_URL=searx,
+        TAVILY_API_KEY=tavily,
+    )
+    script = """
+import importlib.util
+original = importlib.util.find_spec
+def find_spec(name, *args, **kwargs):
+    if name == "ddgs":
+        return object() if {installed} else None
+    return original(name, *args, **kwargs)
+importlib.util.find_spec = find_spec
+from config import Config
+assert Config.WEB_SEARCH_SCRAPER_FALLBACK is {fallback}
+assert Config.ENABLE_WEB_SEARCH is {enabled}
+""".format(installed=repr(installed), fallback=repr(fallback == "true"), enabled=repr(enabled))
+    subprocess.run([sys.executable, "-c", script], env=env, check=True)
+
+
+def test_search_modules_do_not_eagerly_import_scrapers():
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env.update(MAXWELL_ENV_FILE="/tmp/nonexistent", WEB_SEARCH_SCRAPER_FALLBACK="false")
+    script = """
+import builtins
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name.split(".")[0] in {"ddgs", "primp"}:
+        raise AssertionError("unexpected import: " + name)
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+import web_search
+import tooling.helpers
+import bot_tools
+"""
+    subprocess.run([sys.executable, "-c", script], env=env, check=True)

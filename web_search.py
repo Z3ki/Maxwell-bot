@@ -121,6 +121,7 @@ class SearchService:
         searxng_url: str = "",
         searxng_timeout: float = 6.0,
         tavily_key: str = "",
+        scraper_fallback: bool = False,
         budget: float = 12.0,
         concurrency: int = 4,
         max_pending: int = 32,
@@ -132,6 +133,7 @@ class SearchService:
             if math.isfinite(float(searxng_timeout)) else 6.0
         )
         self.tavily_key = tavily_key.strip()
+        self.scraper_fallback = scraper_fallback
         self.budget = budget
         self.max_pending = max_pending
         self.cache_size = cache_size
@@ -226,7 +228,7 @@ class SearchService:
                         providers.append("searxng")
                     if self.tavily_key:
                         providers.append("tavily")
-                    if ddgs_cls is not None:
+                    if self.scraper_fallback:
                         providers.extend("ddgs:" + b for b in backends[:8])
                     for index, provider in enumerate(providers):
                         if self._cooldowns.get(provider, 0) > time.monotonic():
@@ -247,6 +249,10 @@ class SearchService:
                         try:
                             async with asyncio.timeout(timeout):
                                 if provider.startswith("ddgs:"):
+                                    if ddgs_cls is None:
+                                        from ddgs import DDGS
+
+                                        ddgs_cls = DDGS
                                     rows = await self._ddgs(
                                         ddgs_cls,
                                         query,

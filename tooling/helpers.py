@@ -85,14 +85,6 @@ except ModuleNotFoundError as _chess_err:  # pragma: no cover - missing optional
     _chess = None
     logger.warning("chess tools disabled: python-chess not importable (%s)", _chess_err)
 
-try:
-    from ddgs import DDGS as _DDGS
-
-    _DDGS_AVAILABLE = True
-except ImportError:
-    _DDGS = None
-    _DDGS_AVAILABLE = False
-
 # Owner IDs come from env var only — no hardcoded defaults to leak in open-source.
 # Load dotenv first so bare `python bot.py` sees MAXWELL_OWNER_IDS from .env
 # (config.py also loads dotenv; this avoids import-order freezing empty OWNER_IDS).
@@ -3854,6 +3846,7 @@ async def _web_search_collect(
         searxng_url=Config.SEARXNG_URL,
         searxng_timeout=Config.SEARXNG_TIMEOUT,
         tavily_key=Config.TAVILY_API_KEY,
+        scraper_fallback=Config.WEB_SEARCH_SCRAPER_FALLBACK,
         budget=Config.WEB_SEARCH_TIMEOUT,
         concurrency=Config.WEB_SEARCH_CONCURRENCY,
         max_pending=Config.WEB_SEARCH_MAX_PENDING,

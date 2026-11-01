@@ -345,6 +345,7 @@ class Config:
     SEARXNG_URL = os.getenv("SEARXNG_URL", "").strip()
     SEARXNG_TIMEOUT = _float_env("SEARXNG_TIMEOUT", 6.0, 0.5, 10.0)
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+    WEB_SEARCH_SCRAPER_FALLBACK = _bool_env("WEB_SEARCH_SCRAPER_FALLBACK", False)
     GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "").strip()
     WEB_SEARCH_MAX_PER_TURN = _int_env("WEB_SEARCH_MAX_PER_TURN", 5, 0, 10000)
     WEB_SEARCH_TIMEOUT = _float_env("WEB_SEARCH_TIMEOUT", 12.0, 2.0, 30.0)
@@ -354,8 +355,13 @@ class Config:
     WEB_FETCH_TIMEOUT = _float_env("WEB_FETCH_TIMEOUT", 12.0, 2.0, 30.0)
     ENABLE_WEB_SEARCH = _feature_env(
         "ENABLE_WEB_SEARCH",
-        lambda: _has_module("ddgs") or bool(os.getenv("SEARXNG_URL", "").strip() or os.getenv("TAVILY_API_KEY", "").strip()),
-        needs="ddgs or a configured SearXNG/Tavily provider",
+        lambda: bool(os.getenv("SEARXNG_URL", "").strip() or os.getenv("TAVILY_API_KEY", "").strip())
+        or (_bool_env("WEB_SEARCH_SCRAPER_FALLBACK", False) and _has_module("ddgs")),
+        needs=(
+            "a configured SearXNG/Tavily provider or installed ddgs"
+            if WEB_SEARCH_SCRAPER_FALLBACK
+            else "a configured SearXNG/Tavily provider (or enable WEB_SEARCH_SCRAPER_FALLBACK with ddgs installed)"
+        ),
     )
     # Optional Discord ID of this bot's user account. Empty on a fresh clone
     # so no one else's snowflake is inherited.
