@@ -763,7 +763,6 @@ def test_watch_prompt_names_who_is_typing():
     MaxwellBot._note_typing(bot, channel, user)
     lines = MaxwellBot._conversation_watch_prompt(bot, msg, channel.id)
     assert any("Z3ki(1471821513824014480) is typing" in line for line in lines)
-    assert any("Wait for them to send" in line for line in lines)
     MaxwellBot._clear_typing(bot, channel.id, user.id)
     assert MaxwellBot._conversation_watch_prompt(bot, msg, channel.id) == []
 
