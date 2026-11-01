@@ -151,10 +151,12 @@ def test_newest_tool_batch_is_kept_before_summarization(tmp_path):
     async def generate(messages, **kwargs):
         nonlocal rounds
         if not kwargs["tools"]:
-            seen.append(("checkpoint", "SECRET-LINE-A" in json.dumps(messages)))
-            return ProviderResult("Ran warmup, read-a, read-b.")
+            transcript = json.dumps(messages)
+            seen.append(("checkpoint", "SECRET-LINE-A" in transcript, "SECRET-LINE-B" in transcript))
+            return ProviderResult("Ran warmup.")
         rounds += 1
-        seen.append(("tools-round", rounds, "SECRET-LINE-A" in json.dumps(messages)))
+        tool_rows = {row["tool_call_id"]: row["content"] for row in messages if row["role"] == "tool"}
+        seen.append(("tools-round", rounds, tool_rows))
         if rounds == 1:
             return batch("warmup")
         if rounds == 2:
@@ -162,6 +164,45 @@ def test_newest_tool_batch_is_kept_before_summarization(tmp_path):
         return ProviderResult("done")
 
     bot._generate_response.side_effect = generate
-    asyncio.run(worker.run(msg, tasks=TASKS))
-    assert ("checkpoint", False) in seen
-    assert ("tools-round", 3, True) in seen
+    report = json.loads(asyncio.run(worker.run(msg, tasks=TASKS)))[0]
+    assert report["status"] == "reported"
+    assert ("checkpoint", False, False) in seen
+    final_rows = next(item[2] for item in seen if item[:2] == ("tools-round", 3))
+    assert "SECRET-LINE-A " in final_rows["c0"]
+    assert "SECRET-LINE-B " in final_rows["c1"]
+    assert "[output truncated]" in final_rows["c0"]
+    assert "[output truncated]" in final_rows["c1"]
+
+
+def test_compaction_truncates_oversized_newest_batch_without_summarizing_it(tmp_path):
+    bot, msg, _shell, worker = setup(tmp_path)
+    base = [{"role": "user", "content": "Read both sources"}]
+    newest = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "FIRST " + '雪\\"' * 10000},
+        {"role": "tool", "tool_call_id": "b", "content": "SECOND " + '雪\\"' * 10000},
+    ]
+    chunks = [[{"role": "user", "content": "Earlier work"}], newest]
+
+    async def generate(messages, **kwargs):
+        assert kwargs["tools"] == []
+        assert "FIRST" not in json.dumps(messages)
+        assert "SECOND" not in json.dumps(messages)
+        return ProviderResult("Earlier work completed.")
+
+    bot._generate_response.side_effect = generate
+    compacted = asyncio.run(worker._compact_context(msg, base, chunks, 8000, None, bot.ai_provider, 4096))
+    assert len(json.dumps(base + [row for chunk in compacted for row in chunk])) <= 8000
+    assert compacted[-1][0] == newest[0]
+    for row, original, prefix in zip(compacted[-1][1:], newest[1:], ("FIRST ", "SECOND ")):
+        assert row["tool_call_id"] == original["tool_call_id"]
+        assert row["content"].startswith(prefix)
+        assert row["content"].endswith("[... output truncated to fit the subagent context]")
+        assert len(row["content"]) < len(original["content"])
