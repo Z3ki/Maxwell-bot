@@ -260,7 +260,7 @@ def cleanup_data(root, preferences):
             blocked = [
                 uid
                 for uid in users
-                if uid.isdigit() and not preferences.content_allowed(uid)
+                if uid.isdigit() and preferences.explicitly_disallows_content(uid)
             ]
             with db:
                 db.execute(

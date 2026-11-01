@@ -382,11 +382,12 @@ GitHub Actions runs the repository's configured lint/test matrix. Live external-
 ### Privacy migration and public release
 
 Read [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) before upgrading to 0.1.15.
-The intended opt-in history behavior does not match the current implementation:
-missing user preferences default tracking to on, and `content_allowed` does not
-require affirmative storage consent. Existing explicit opt-outs are preserved.
-Startup cleanup removes opted-out content, retired facts and aged history, but
-does not establish consent for default-on users. Take a protected operational
+Missing user preferences default history tracking to off. Saved on values,
+including legacy ones without affirmative consent evidence, still allow storage;
+`content_allowed` does not require a separate consent record. Explicit opt-outs
+are preserved. Startup cleanup removes explicitly opted-out content, retired
+facts and aged history, but does not delete history solely for a missing choice.
+Take a protected operational
 backup first, apply its deletion/retention policy, and never restore deleted
 content without replaying suppression records.
 

@@ -97,7 +97,7 @@ These include deployment/architecture caveats and a source-level privacy discrep
 - Private-thread visibility intentionally fails closed when membership/cache information cannot establish access; live Discord cache/permission behavior still deserves operational validation.
 - External actions such as Discord sends cannot guarantee exactly-once effects across a crash that occurs after the external side effect but before local confirmation.
 - OpenAI-compatible providers differ in streaming/tool-call behavior; mocked unit tests cannot substitute for testing the actual configured endpoint/model.
-- The current preferences store defaults missing user choices to history tracking on, contrary to the opt-in claims in the historical privacy audit and parts of the privacy UI. See [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) before relying on those claims.
+- Saved history-on preferences can predate affirmative consent records; missing preferences now default off. See [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md).
 
 See [../SECURITY.md](../SECURITY.md) for security boundaries.
 

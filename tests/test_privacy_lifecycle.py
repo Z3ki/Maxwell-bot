@@ -44,7 +44,7 @@ def test_new_and_legacy_users_do_not_create_fake_storage_consent(tmp_path):
     store = UserPreferenceStore(path)
     assert store.get("1")["defaults"]["tracking"] == "on"
     assert store.get("2")["defaults"]["tracking"] == "off"
-    assert store.get("3")["defaults"]["tracking"] == "on"
+    assert store.get("3")["defaults"]["tracking"] == "off"
     assert store.consents.review("1") == []
     assert tracks_message_content(None, "1") is False
     store.reset_default("2", "tracking")
@@ -83,6 +83,21 @@ def test_consent_is_scoped_versioned_idempotent_and_durable(tmp_path):
     assert not restored.granted("1", "voice:a", "1", "voice_authorization")
     restored.delete("1")
     assert restored.review("1") == []
+
+
+@pytest.mark.parametrize(("choice", "stored"), [(None, False), ("on", True), ("off", False)])
+def test_history_requires_saved_on_choice(tmp_path, choice, stored):
+    async def scenario():
+        memory = ConversationMemoryManager(str(tmp_path))
+        if choice is not None:
+            memory.preferences.set_default("1", "tracking", choice)
+        await memory.add_to_channel_memory("20", {
+            "author_id": "1", "content": "message", "message_id": "100",
+        })
+        assert bool(memory._db.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]) is stored
+        await memory.flush()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("variant", ["user", "tool", "bot", "dm", "slash", "edited"])
@@ -182,8 +197,8 @@ def test_failed_write_does_not_activate_history(tmp_path, monkeypatch):
         lambda *args: (_ for _ in ()).throw(OSError("disk full")),
     )
     with pytest.raises(OSError):
-        store.set_default("1", "tracking", "off")
-    assert tracks_message_content(store, "1")
+        store.set_default("1", "tracking", "on")
+    assert not tracks_message_content(store, "1")
 
 
 def test_dashboard_sync_keeps_opt_out_on_unrelated_update(tmp_path):
@@ -305,7 +320,7 @@ def test_missing_permission_has_no_public_or_dm_fallback(tmp_path):
     asyncio.run(scenario())
 
 
-def test_cleanup_migrates_legacy_default_on_and_preserves_current_choice(tmp_path):
+def test_cleanup_deletes_explicit_opt_out_but_preserves_missing_choice(tmp_path):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
         store = memory.preferences
@@ -318,10 +333,14 @@ def test_cleanup_migrates_legacy_default_on_and_preserves_current_choice(tmp_pat
             "INSERT INTO vectors(id,kind,author_id,content,timestamp,created_at) VALUES ('legacy','message','1','erase','2026-01-01',?)",
             (time.time(),),
         )
+        memory._db.execute(
+            "INSERT INTO vectors(id,kind,author_id,content,timestamp,created_at) VALUES ('missing','message','3','historical','2026-01-01',?)",
+            (time.time(),),
+        )
         await asyncio.to_thread(cleanup_data, tmp_path, store)
-        assert [r[0] for r in memory._db.execute("SELECT content FROM vectors")] == [
-            "keep"
-        ]
+        assert {r[0] for r in memory._db.execute("SELECT content FROM vectors")} == {
+            "keep", "historical"
+        }
         await memory.flush()
 
     asyncio.run(scenario())

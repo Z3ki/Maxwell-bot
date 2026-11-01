@@ -22,7 +22,7 @@ _DEFAULTS: dict[str, Any] = {
     "language": "",
     "visibility": "public",
     # on: store this person's message content. off: do not store it.
-    "tracking": "on",
+    "tracking": "off",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800
@@ -234,6 +234,13 @@ class UserPreferenceStore:
                 return False
             row = root["users"].get(str(user_id), {})
             return float(started_at) > float(row.get("deleted_at") or 0)
+
+    def explicitly_disallows_content(self, user_id):
+        """Identify saved opt-outs without treating a missing choice as deletion."""
+        with _LOCK:
+            row = self._read()["users"].get(str(user_id))
+            defaults = row.get("defaults") if isinstance(row, dict) else None
+            return isinstance(defaults, dict) and defaults.get("tracking") == "off"
 
     def content_allowed(self, user_id, started_at=None):
         uid = str(user_id)

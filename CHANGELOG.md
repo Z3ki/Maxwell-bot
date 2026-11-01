@@ -21,7 +21,7 @@
 - Disable the ddgs scraper fallback by default; opt in with `WEB_SEARCH_SCRAPER_FALLBACK=true`. Search uses configured SearXNG and Tavily providers and reports unavailable or empty results without scraping.
 
 - Audit current configuration, search, worker and deployment documentation against the code; distinguish shipped defaults from operator examples.
-- Correction to the 0.1.15 storage note: the current missing-user preference defaults to tracking on, and message tracking checks that preference without requiring a consent record. Explicit opt-outs and resets still disable tracking.
+- Default message-content tracking to off when no preference is saved. Existing explicit opt-ins still permit tracking without a separate history-consent record; explicit opt-outs remain disabled. Missing preferences do not trigger deletion of existing content.
 
 - Bound SearXNG requests with configurable `SEARXNG_TIMEOUT` (default 6 seconds) so failed or timed-out searches can fall back to Tavily or keyless ddgs. Limit web searches per turn with `WEB_SEARCH_MAX_PER_TURN` (default 5; 0 is unlimited), and document the host-network SearXNG URL.
 

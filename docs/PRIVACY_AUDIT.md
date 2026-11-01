@@ -5,15 +5,11 @@ modularization PR #82 head `8f42b79`. This is engineering evidence, not a legal
 opinion or regulatory certification. Production credentials, provider accounts,
 server disks/backups and the Discord Developer Portal were not available here.
 
-> **Current source discrepancy:** The implementation no longer matches this
-> audit's saved-history opt-in claims. `plugins/maxwell_extras/user_preferences.py`
-> defaults `tracking` to `on` for a new or missing user row, and
-> `content_allowed` does not require an affirmative consent record. An unreadable
-> preferences file fails closed; a missing file uses the default. The Privacy
-> UI still describes On as an opt-in. Treat this as an unresolved privacy and
-> disclosure discrepancy, not evidence of affirmative consent. The findings,
-> migration statements and verification below describe the historical audit
-> snapshot, not current behavior.
+> **Current behavior:** Missing history preferences default to off. Saved
+> `tracking=on` choices still permit storage, including legacy rows without
+> consent evidence; `content_allowed` does not independently require a consent
+> record. An unreadable preferences file fails closed. This change does not
+> delete historical content merely because a preference is missing.
 
 ## Discord requirements and design decisions
 
@@ -102,7 +98,7 @@ before release; no fabricated address was added.
 
 | Category / location | Default lifecycle and deletion |
 | --- | --- |
-| `maxwell_rag.db` conversation/linked tool transcript | Current default is on for missing user choices, not opt-in; 30-day default absolute age, existing per-channel count bound, 12-hour inactive-channel cleanup. Off removes owner rows/replies/quotes; full deletion also invokes it. |
+| `maxwell_rag.db` conversation/linked tool transcript | Missing choices default off; saved on permits storage. 30-day default absolute age, existing per-channel count bound, 12-hour inactive-channel cleanup. Explicit off removes owner rows/replies/quotes; full deletion also invokes it. |
 | Legacy facts/vectors/user directory | No current live embeddings/fact creation. Cleanup removes retired facts/vectors and the old user directory. Archived modules remain offline compatibility fixtures, not live providers. |
 | Personal settings JSON | Until changed/deleted. Full deletion replaces the row with storage-off plus a suppression timestamp. This minimal privacy record intentionally remains. |
 | `privacy.sqlite3` | Active optional choices until withdrawal/deletion. Withdrawn choices: 365 days by default. Notice ID/version/time remains to avoid repeated unchanged notices, unless the user deletes it. |
@@ -135,15 +131,11 @@ copies; this is not a forensic erasure guarantee for WAL, disks or backups.
 
 ## Migration and deployment
 
-At the audit snapshot, historical `tracking=on` without affirmative evidence
-was intended to be interpreted as off, and users were to enable optional
-history deliberately. Current `UserPreferenceStore.get()` instead applies
-the `on` default and saved values without checking consent evidence. Explicit
-opt-outs remain off; reset sets tracking off.
-
-Current cleanup removes blocked users' content and retired facts; because missing
-user choices currently default to on, it does not remove all unverified old
-content.
+Missing choices now deny new storage and history access. Saved `tracking=on`
+continues to permit storage without requiring a separate consent record, so a
+legacy saved on value is not proof of affirmative consent. Explicit opt-outs
+remain off; reset sets tracking off. Cleanup targets explicit saved opt-outs,
+not missing preferences; existing retention and other cleanup still apply.
 Protect any operational backup, set its expiry, and retain the latest suppression
 records outside historical snapshots. When restoring, quiesce writers, restore
 only necessary data, replay the latest deletion/suppression records, run cleanup,

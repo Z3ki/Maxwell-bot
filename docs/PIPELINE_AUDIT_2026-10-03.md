@@ -10,8 +10,8 @@ the mailbox notices appended during prompt construction.
 > This is a historical audit of the cited commit. The findings, limits and
 > verification results below are not a test report for the current checkout.
 > In particular, history availability now depends on the current privacy
-> preferences; see [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) for the discrepancy
-> between its historical opt-in claims and today's tracking default.
+> preferences; see [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) for current behavior
+> and the limits of legacy consent evidence.
 
 ## Findings repaired
 
