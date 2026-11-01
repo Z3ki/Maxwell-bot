@@ -109,7 +109,7 @@ class ShellTool(Tool):
 
     @classmethod
     def _timeout_seconds(cls) -> int:
-        """Max wall-clock seconds for a shell command. Always > 0; capped at 1h."""
+        """Max wall-clock seconds for a shell command. Always > 0; capped at 15 min."""
         raw = os.environ.get("MAXWELL_SHELL_TIMEOUT", "").strip()
         if not raw:
             return 600  # 10 min default — was 30s, way too tight for real work

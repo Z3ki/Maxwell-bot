@@ -13,7 +13,7 @@ Pinned dependencies:
 
 References: [Lavalink changelog](https://lavalink.dev/changelog/v4), [Python client releases](https://github.com/Devoxin/Lavalink.py/releases), [YouTube plugin configuration](https://github.com/lavalink-devs/youtube-source/blob/2be8e542d3f6f178e048dca565892684c2e40177/README.md#plugin).
 
-For the Linux host-network Compose deployment, set a **strong random `LAVALINK_PASSWORD`** in `.env` and run:
+For the Linux host-network Compose deployment, set strong independent random `LAVALINK_PASSWORD` and `YOUTUBE_CIPHER_PASSWORD` values in `.env` and run:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.music.yml up -d --build
@@ -68,13 +68,13 @@ Listeners can request songs and remove their own queued songs. Ordinary pause/re
 
 For AI requests, `music_control(action="play", queries=[...], mode="queue")` loads one to ten selections atomically in the supplied order. Use `query` for one selection or `queries` for a batch, never both. `mode="next"` inserts the whole batch ahead of the existing queue without reversing it; `now` replaces the current song only on explicit request. `/music batch input:` accepts one title or YouTube link per line, with the same queue/next/now modes.
 
-Autoplay is **off by default**, scoped to the current session. Enable it with `/music autoplay enabled:true`, the Autoplay button, or `music_control(action="autoplay", value=true)`. While the last requested song is still playing, Maxwell resolves one related song from its real YouTube radio mix in the background. At the end it uses that prepared song rather than starting a fresh recommendation search. Requested songs and repeat modes take precedence. The last 50 played URLs are excluded to avoid immediate cycling; automatically chosen songs are labeled in the embed.
+Autoplay is **off by default**, scoped to the current session. Enable it with `/music autoplay enabled:true`, the Autoplay button, or `music_control(action="autoplay", value=true)`. While the last requested song is still playing, Maxwell tries to resolve one related song from its real YouTube radio mix in the background. At the end it awaits that task if present; if no task was admitted, it may search then, or leave playback idle if source loading is busy. Requested songs and repeat modes take precedence. The last 50 played URLs are excluded to avoid immediate cycling; automatically chosen songs are labeled in the embed.
 
 Autoplay does not continue in an empty voice channel or after a failed source with no queued successor. Exhausted/unavailable recommendations leave playback idle with an actionable notice, not an infinite retry loop. Disabling autoplay, enabling repeat, adding an explicit queue, stopping or leaving invalidates the prepared recommendation. Disabling autoplay does not interrupt the current song. Stop clears the queue, disables autoplay and prevents an earlier still-loading request from restarting playback. Leaving or restarting Maxwell discards session autoplay state.
 
 Queued tracks already contain resolved Lavalink track data. New song searches run outside the playback-state lock, so a slow request cannot hold up an already queued successor or Skip. Play requests retain their arrival order; permissions, current voice channel and queue allowances are checked again before committing the complete batch. Stop, Clear and Leave invalidate earlier pending additions.
 
-This removes recommendation-search and unrelated-search waits from the handoff, not all source startup time. Stock Lavalink does not offer next-track audio prebuffering: YouTube stream opening, signature decoding and Discord voice delivery can still delay audible playback. No fixed ten-second sleep is imposed; `trackStuckThresholdMs` is a failure threshold, not a transition delay.
+Background preparation can remove recommendation-search waits from the handoff when it completes in time; a pending task or a fallback search can still delay the transition. Queued tracks do not need another source lookup at handoff. Stock Lavalink does not offer next-track audio prebuffering: YouTube stream opening, signature decoding and Discord voice delivery can still delay audible playback. No fixed ten-second sleep is imposed; `trackStuckThresholdMs` is a failure threshold, not a transition delay.
 
 `/music configure` shows or edits:
 
@@ -195,7 +195,7 @@ audible Discord voice.
 
 ## TTS reference URLs
 
-`tts(text=..., reference_audio_url="https://example.com/voice.wav")` or a URL in `reference` downloads a public direct audio/video file without requiring it to be attached. The model can discover a permitted media reference online. Attachment filenames and `reference="attachment"` still work. HTTP(S) public hosts and safe redirects are accepted; private/loopback/metadata addresses, private DNS answers, credentials in URLs and non-HTTP schemes are rejected.
+`tts(text=..., reference_audio_url="https://example.com/voice.wav")` or a URL in `reference` downloads a public direct audio/video file without requiring it to be attached. Attachment filenames and `reference="attachment"` still work. Before using any reference, the requesting user must authorize its exact URL, including an attachment URL, through `/config` → Privacy → Authorize voice reference; a public URL alone is not proof of permission. HTTP(S) public hosts and safe redirects are accepted; private/loopback/metadata addresses, private DNS answers, credentials in URLs and non-HTTP schemes are rejected.
 
 There are **no local reference-byte, synthesized-audio-byte or sample-duration caps**. The complete reference is converted to mono MP3, base64-encoded and supplied to Mistral, which validates it. Network/process timeouts still prevent stuck operations. A page URL (including YouTube watch pages) is not a direct media file; HTML responses are rejected. Decoder protocol/format restrictions prevent downloaded media from opening additional network or local-file playlists. Reference clips are temporary and not kept as saved voices. Use voices you own or have permission to clone.
 

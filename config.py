@@ -2,21 +2,15 @@
 
 Design note — optional features
 -------------------------------
-Maxwell only *requires* two things: a Discord token and an OpenAI-compatible
-model endpoint. Everything else (YouTube, web search, video frames,
-generated sites) is optional and gated behind an ``ENABLE_*`` switch.
+Configuration validation requires a Discord bot token and a model name. The
+endpoint defaults to localhost; many optional features are controlled by
+``ENABLE_*`` switches, but other integrations have their own configuration.
 
-Those switches are tri-state:
-
-    true   -> force on  (you promise the dependency is installed)
-    false  -> force off (never register the tool / import the dep)
-    auto   -> DEFAULT. Turn the feature on only if its dependency is
-              actually present on this machine.
-
-"auto" is what makes a bare ``git clone`` + ``pip install -r
-requirements.txt`` work: features whose system package, Python package or
-API key is missing quietly stay off instead of erroring on first use, and
-``python3 doctor.py`` explains every decision.
+Feature switches accept true, false, or auto (also unset or unrecognized).
+True forces a feature on; false forces it off. Auto detects a dependency
+where a detector exists, otherwise it uses that feature's default (on for
+most switches, off for shell). Detection runs at import; restart after
+installing dependencies. ``python3 doctor.py`` reports the decisions.
 """
 
 import math
@@ -38,8 +32,8 @@ ENV_FILE = Path(os.getenv("MAXWELL_ENV_FILE") or APP_ROOT / ".env")
 load_dotenv(ENV_FILE, override=True)
 
 
-# Deprecated environment aliases. Presence (including blank) wins for AI_*
-# so credentials and optional routes can explicitly be cleared.
+# Most deprecated AI environment aliases are selected by presence (including
+# blank); AI_BASE_URL and AI_MODEL instead use the first non-empty alias.
 _AI_LEGACY_ENV = {
     "AI_BASE_URL": "OLLAMA_BASE_URL",
     "AI_API_KEY": "OLLAMA_API_KEY",
@@ -259,7 +253,7 @@ class Config:
     AI_WORKER_REQUEST_TIMEOUT_SECONDS = _int_env("AI_WORKER_REQUEST_TIMEOUT_SECONDS", 600, min_value=10, max_value=14400)
     AI_WORKER_TURN_TIMEOUT_SECONDS = _int_env("AI_WORKER_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=14400)
     # max_tokens = max *output* tokens per completion (not context window).
-    # minimax-m3 allows huge context but caps output ~131072; 8192 is a sane default.
+    # The default is 16384; the worker route defaults to 8192.
     AI_MAX_OUTPUT_TOKENS = _int_env(
         "AI_MAX_OUTPUT_TOKENS", 16384, min_value=1, max_value=131072
     )
@@ -320,10 +314,9 @@ class Config:
     # -------------------------------------------------------------------------
     # Optional features (true / false / auto — see the module docstring).
     #
-    # Unset means "auto": the feature turns itself on only when whatever it
-    # needs is actually installed. A bare clone with nothing but ffmpeg
-    # missing loses video frames, not the whole bot. Read once at import
-    # time; restart to re-detect.
+    # Unset means "auto": a detector checks availability when present;
+    # otherwise the feature-specific default applies. Missing ffmpeg disables
+    # video frames. Read once at import; restart to re-detect.
     # -------------------------------------------------------------------------
 
     # No external dependency — pure code paths, on by default.
@@ -515,9 +508,8 @@ class Config:
 
     @classmethod
     def validate(cls):
-        # The only two hard requirements. Anything else has a default or
-        # degrades to "feature off", which is the whole point of the
-        # ENABLE_*=auto design.
+        # Token and model are required; development mode also requires a guild ID.
+        # The endpoint has a localhost default and feature switches resolve at import.
         if not cls.DISCORD_BOT_TOKEN and not cls.DISCORD_TOKEN:
             raise ValueError(
                 "DISCORD_BOT_TOKEN is required (official Discord bot token from "

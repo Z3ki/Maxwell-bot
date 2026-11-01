@@ -28,9 +28,10 @@ advice):
 - [ ] For each provider account, confirm the legal entity behind the service,
       region, retention, and data-use/training settings before strengthening
       any claim about what providers do with content.
-- [ ] Confirm actual storage, backup, and deletion behaviour on the host (the
-      published policy states plainly that self-service deletion does **not**
-      exist yet and that deletion is handled via the `/contact/` page).
+- [ ] Confirm actual storage, backup, and deletion behaviour on the host. The
+      published policy describes self-service history controls and supported
+      full deletion, while workspaces, backups and external copies have
+      separate limitations and may require private support.
 - [ ] Whether a dedicated privacy contact or data-protection officer is
       required for the operator's jurisdiction.
 

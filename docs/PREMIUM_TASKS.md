@@ -5,9 +5,11 @@ Premium can be granted to any Discord user ID by a configured application owner:
 `free`. The modal and submission both verify the owner and active private panel.
 Grants persist in the quota database across restarts. Premium currently provides
 the 2,000-message allowance (when quota enforcement is enabled), optional
-`AI_PREMIUM_MODEL` routing and the `delegate_task` tool. An existing custom message
-limit still wins. Granting a plan does not take payment or start a subscription.
-Paid checkout remains disabled pending actual billing terms and operator review.
+`AI_PREMIUM_MODEL` routing, the `delegate_task` tool, persistent storage and
+public-folder publishing, schedules, and longer shell commands, subject to
+configuration and permissions. An existing custom message limit still wins.
+Granting a plan does not take payment or start a subscription. Paid checkout
+remains disabled pending actual billing terms and operator review.
 
 For Premium requests Maxwell acts as the coordinator: website creation/edits,
 code and shell work, research, repository tasks, media analysis and other

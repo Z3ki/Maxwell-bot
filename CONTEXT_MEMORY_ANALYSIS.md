@@ -1,5 +1,7 @@
 # Maxwell context and memory architecture
 
+> Historical snapshot: this analysis describes the implementation at the time it was written. Consult the current code and [docs/MEMORY_RELIABILITY.md](docs/MEMORY_RELIABILITY.md) for present behavior.
+
 ## Active storage and retrieval
 
 `conversation_memory.py` implements the runtime `ConversationMemory` backend. It opens the existing `maxwell_rag.db`, retains historical fact/vector rows, and stores scoped Discord transcripts. Ordinary prompts do not run embedding generation, vector scoring, graph recall, automatic fact extraction or consolidation.

@@ -137,9 +137,7 @@ DEFAULT_CONTROL = {
     "reaction_replies": False,
     "per_user_cooldown_seconds": 1.5,
     "process_images": True,
-    # Audio input to the model. Off for years because the "omni" audio
-    # models were not reachable; the Gemini models behind the current proxy
-    # transcribe audio fine (verified on 3.7-flash and 3-pro), so this is on.
+    # Dashboard switch for model audio input; ENABLE_AUDIO_INPUT is a hard off.
     "process_audio": True,
     "max_image_size_mb": 10,
     # When True, the `sleep` tool and `/sleep` command can put the bot
@@ -158,11 +156,8 @@ DEFAULT_CONTROL = {
     "night_fallback_start_hour": 22,
     "night_fallback_end_hour": 9,
     "ai_timeout_seconds": 3600,
-    # Context sizing. These match what the production deployment runs. The
-    # static system prompt alone is ~20k chars, so a 48k prompt budget left
-    # history ~3k chars (a handful of messages) on fresh installs.
-    # memory_context_budget is half of prompt_context_budget; keep that ratio
-    # when changing either.
+    # Context budgets are in characters. memory_context_budget is half of
+    # prompt_context_budget; keep that ratio when changing either.
     "memory_history_messages": 40,
     "memory_context_budget": 48000,
     "tool_history_messages": 8,

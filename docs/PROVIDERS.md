@@ -10,10 +10,11 @@ options, usage, model overrides, cancellation and bounded recovery. Configure a 
 Both templates and installers prefer `AI_*`. Existing `.env` files work without
 editing. `AI_BASE_URL` takes precedence over the older `AI_API_URL` and then
 `OLLAMA_BASE_URL` (the first non-empty endpoint wins). `AI_MODEL` similarly
-uses the first non-empty model. For credentials, optional routes and generation
-controls, a present `AI_*` value wins even when blank; blank keys clear stale
-credentials, and blank optional routes disable them. Invalid numeric values
-retain the existing default/clamping behavior.
+uses the first non-empty model. For most credentials, optional routes and
+generation controls, a present `AI_*` value wins even when blank. The primary
+key is an exception: a blank `AI_API_KEY` clears `OLLAMA_API_KEY` but still
+falls back to a nonblank `OPENAI_COMPAT_API_KEY`. Blank optional routes disable
+them. Invalid numeric values retain the existing default/clamping behavior.
 
 | Preferred name | Deprecated input |
 | --- | --- |
@@ -91,15 +92,16 @@ so concurrent requests never change a client's generation defaults. Model
 overrides apply to the primary slot; alternate providers use their own models.
 Personal BYOK clients bypass the funded router entirely.
 
-An independently configured operator worker route may fall back first to
-`AI_FALLBACK_BASE_URL`, `AI_FALLBACK_MODEL`, and `AI_FALLBACK_API_KEY` when
-all three are nonblank and the endpoint/model pair differs from the worker.
-Otherwise it may fall back to the distinct primary `AI_BASE_URL`, `AI_MODEL`,
-and `AI_API_KEY`, again only when all three are nonblank. Endpoint comparison
-uses normalized API roots. Each route uses its own key and reasoning settings;
-no key is inherited by a fallback destination. A personal worker or inherited
-personal chat provider never falls back to operator routes. Without a separate
-operator worker model, workers use the existing chat provider as before.
+After an independently configured operator worker route is selected, its
+provider failure fallback may use `AI_FALLBACK_BASE_URL`, `AI_FALLBACK_MODEL`,
+and `AI_FALLBACK_API_KEY` first when all three are nonblank and the normalized
+endpoint/model pair differs from the worker. Otherwise it may use the primary
+`AI_BASE_URL`, `AI_MODEL`, and `AI_API_KEY` when all three are nonblank and
+the normalized primary endpoint differs from the worker endpoint (even a
+different model on the same endpoint is not eligible). Each route uses its
+own key and reasoning settings; no key is inherited by a fallback destination.
+Personal worker and personal chat providers never fall back to operator routes.
+Without a separate operator worker model, workers use the existing chat provider.
 
 The concrete HTTP client remains in `providers.py`, alongside actively used
 stream parsing and model compatibility helpers. Its old multi-endpoint
@@ -154,9 +156,9 @@ service controls (`OLLAMA_ORIGINS` and the old embedding URL alias).
 
 ## Slow models, context and reasoning
 
-Set `AI_REQUEST_TIMEOUT_SECONDS` (10–14400) for each operator-provider call and
-`AI_TURN_TIMEOUT_SECONDS` (10–14400) for the whole request, including tools.
-A zero whole-task value preserves `live_turn_timeout_seconds` (900 by default).
+Set `AI_REQUEST_TIMEOUT_SECONDS` (default 3600, range 10–14400) for each
+operator-provider call and `AI_TURN_TIMEOUT_SECONDS` (0–14400) for the whole
+request, including tools. Zero preserves `live_turn_timeout_seconds` (900 by default).
 For example, use 600 and 1800 for a slow website-building model. A shorter
 whole-task deadline still cancels the call. `AI_CONTEXT_WINDOW` sets the model's
 context size in tokens (0 retains the normal prompt budget); output tokens and
@@ -177,9 +179,10 @@ See [PREMIUM_TASKS.md](PREMIUM_TASKS.md) for bounded task workers and manual gra
 ## Independent subagent provider
 
 Set `AI_WORKER_MODEL` to enable a separate operator-funded worker route. Model-only
-configuration reuses `AI_BASE_URL` and its key. When `AI_WORKER_BASE_URL` is explicit,
-`AI_WORKER_API_KEY` must be supplied separately if that endpoint requires one;
-an omitted key never copies the chat key to that destination. An explicitly blank
+configuration reuses `AI_BASE_URL` and, if `AI_WORKER_API_KEY` is unset, its
+key. When `AI_WORKER_BASE_URL` is explicit, `AI_WORKER_API_KEY` must be supplied
+separately if that endpoint requires one; an omitted key never copies the chat
+key to that destination. An explicitly blank
 key allows a keyless operator-controlled endpoint. Local HTTP endpoints are allowed
 only for operator configuration; user BYOK keeps its public HTTPS restrictions.
 A base URL without a model refuses worker execution, leaving ordinary chat usable.
@@ -197,12 +200,16 @@ its per-request timeout still applies to each model call. Detached jobs own thei
 chat retains its normal deadline and can continue while a job runs. Cancellation
 and step, context and tool-call limits remain effective.
 
-A dedicated user worker connection takes precedence, then the user's chat BYOK,
-then this env route, then the primary provider. Dedicated worker BYOK has its own
-model, endpoint, modalities, reasoning/effort, output/context and request/turn
-limits in `/config → More options → Subagent AI provider` and the dashboard.
-No extra consent/model calls are used for routing. Failed selected keys never
-fall back to an operator account. A new client is closed after its children stop;
+Initial selection prefers a dedicated user worker connection, then the user's
+chat BYOK (including an inherited chat client), then the configured operator
+worker route, then the primary provider. This selection order is distinct from
+the operator worker's provider-failure fallback described above. Dedicated
+worker BYOK has its own model, endpoint, modalities, reasoning/effort,
+output/context and request/turn limits in `/config → More options → Subagent AI
+provider` and the dashboard. No extra consent/model calls are used for routing.
+Corrupt or disabled saved credentials raise instead of falling through to
+another account, and failed selected keys never fall back to an operator
+account. A new client is closed after its children stop;
 a detached job opens its own personal client rather than borrowing the chat
 turn's client, so a finished chat cannot close a running worker connection. These routes support the
 existing OpenAI-compatible Chat Completions protocol; effort support depends on

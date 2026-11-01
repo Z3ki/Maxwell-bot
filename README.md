@@ -20,7 +20,7 @@ preserved when updating.
 Optional tools appear only after setup: set `MAXWELL_PUBLIC_BASE_URL` for
 websites and `GEMINI_IMAGE_MODEL` for HD images. Add `--with-shell` for the
 shell backend.
-Autonomous background activity is removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` accepts an attachment or a direct public HTTP(S) audio/video URL; `reference_audio_url` is an explicit URL alias. URLs need not be attached and can be found online. Use permitted voice samples. The full sample is sent without local byte/duration caps, and the provider validates it. References are never saved. REM, context fact extraction, automatic memory summaries, delegated workers and automatic code repair have been removed. Scoped recent conversation history remains available. Live RAG, embedding workers, entity/graph retrieval, request concurrency caps, and message quotas are removed.
+Autonomous personality/background activity is removed; user-configured schedules and requested jobs are available. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` accepts an attachment or a direct public HTTP(S) audio/video URL; `reference_audio_url` is an explicit URL alias. URLs need not be attached and can be found online. Use permitted voice samples. The full sample is sent without local byte/duration caps, and the provider validates it. References are never saved. REM, context fact extraction, automatic memory summaries and automatic code repair have been removed. Scoped recent conversation history and user-requested subagent jobs remain available. Live RAG, embedding workers, entity/graph retrieval and bot-wide request concurrency caps are removed. Message quotas are disabled by default but can be enabled by an operator.
 
 The default installs an unreleased `main` snapshot, pinned to the commit resolved at installation. For version `0.1.11`, select `--version v0.1.11`; see [versioned installation](docs/INSTALL.md#versioned-installation-and-releases) and [GitHub Releases](https://github.com/Z3ki/Maxwell-bot/releases). Add `--with-shell` on a Linux Docker host that should run the public shell sandbox.
 
@@ -52,7 +52,7 @@ MAXWELL_ADMIN_USER=admin
 MAXWELL_ADMIN_PASSWORD=change-me
 ```
 
-The runtime reads `AI_*` directly. Legacy `OLLAMA_*` variables and `AI_API_URL` remain supported. Friendly endpoint/model settings take precedence; an explicitly blank `AI_API_KEY` clears a legacy credential. Avoid conflicting settings.
+The runtime reads `AI_*` directly. Legacy `OLLAMA_*` variables and `AI_API_URL` remain supported. Friendly endpoint/model settings take precedence; an explicitly blank `AI_API_KEY` clears the legacy Ollama credential, but `OPENAI_COMPAT_API_KEY` is still used if set. Avoid conflicting settings.
 
 For an older `.env`, run:
 
@@ -137,7 +137,7 @@ For a published release, use `bash install.sh --dir "$PWD" --version vX.Y.Z` ins
 
 ## Discord app commands
 
-Maxwell uses Discord slash commands. `/help` browses commands by topic; `/config` opens a private settings menu with direct buttons for **Personality**, **Language**, and **Reply visibility**. **More options** contains web search, answer detail, channel context, response mode, and your own API key. Authorized members can switch to server controls, and configured application owners can access global controls and diagnostics.
+Maxwell uses Discord slash commands. `/help` browses commands by topic; `/config` opens a private settings menu for personality, language, replies and context, AI connections and privacy. Authorized members can switch to server controls, and configured application owners can access global controls and diagnostics.
 
 The personal-app `/maxwell` command and context-menu actions are available when user install is enabled. `/maxwell` and message actions answer with normal Discord text, briefly by default. Select Balanced or Deep when you want more explanation. Message → Apps → **Ask Maxwell** responds directly to the selected message without opening a form. **Rewrite / Translate** opens a form for your prompt, action, detail, visibility, and language; Summarize, Explain, and Fact-check remain quick actions. All entry points use your saved preferences. In DMs, the app includes observed participants, selected-message reply chains, attachments, buttons, embeds, forwarded messages, and live history when Discord permits access. Private DM requests can use this same-chat history; other DMs and server history are not borrowed. Fast app-command responses stay in the deferred interaction; if a command uses a tool or is still running after about 10 seconds, Maxwell leaves a stable `working on it…` status and sends the final answer as a follow-up.
 Private `/maxwell` replies, when selected, are sent only as ephemeral interaction follow-ups; `send_message` can answer privately, but cannot target another chat from a private request.
@@ -153,6 +153,11 @@ The model decides when to search for current information. Web tools now support
 optional SearXNG and Tavily providers with keyless ddgs fallback, bounded
 concurrency, shared searches and short caches. See [web search configuration](docs/WEB_SEARCH.md)
 for optional SearXNG hosting, freshness controls and verification.
+
+User-requested subagent jobs can use a separate worker model or personal
+connection; see [worker routing](docs/PROVIDERS.md#independent-subagent-provider).
+Conversation watch is off by default; operators can enable it for eligible
+follow-ups without another mention. See [runtime controls](docs/CONFIGURATION.md#runtime-controls).
 
 ## Advanced install
 

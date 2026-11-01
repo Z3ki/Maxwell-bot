@@ -17,7 +17,7 @@ The easy installer and `.env.simple.example` use provider-neutral names:
 | `AI_MODEL` | Primary chat model |
 | `AI_API_KEY` | Primary API key; blank is normal for local endpoints that do not require one |
 
-The runtime reads these names directly; legacy `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY` remain supported for existing installations. Non-empty `AI_BASE_URL` and `AI_MODEL` take precedence over legacy settings. An explicitly set `AI_API_KEY`, including a blank value for a local endpoint, takes precedence over a legacy key.
+The runtime reads these names directly; legacy `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_API_KEY` remain supported for existing installations. Non-empty `AI_BASE_URL` and `AI_MODEL` take precedence over legacy settings. An explicitly set `AI_API_KEY`, including a blank value, takes precedence over the legacy Ollama key; if the resolved key is blank, `OPENAI_COMPAT_API_KEY` is still used when set.
 
 All advanced generation, retry, fallback and vision controls use `AI_*`. Deprecated `OLLAMA_*` inputs remain supported; see [PROVIDERS.md](PROVIDERS.md).
 
@@ -35,8 +35,8 @@ Do not set conflicting values in both namespaces.
 |---|---:|---|
 | `DISCORD_BOT_TOKEN` | Yes | Official bot token from the Discord Developer Portal. User/self-bot tokens are not supported. |
 | `DISCORD_TOKEN` | Deprecated alias | Used only when the official bot-token setting is empty. |
-| `AI_BASE_URL` / legacy `OLLAMA_BASE_URL` | Yes | Primary OpenAI-compatible endpoint. |
-| `AI_MODEL` / legacy `OLLAMA_MODEL` | Yes | Primary chat model. |
+| `AI_BASE_URL` / legacy `OLLAMA_BASE_URL` | Optional | Primary OpenAI-compatible endpoint; defaults to `http://localhost:11434`. |
+| `AI_MODEL` / legacy `OLLAMA_MODEL` | Yes | Primary chat model; there is no default model. |
 | `AI_PREMIUM_MODEL` | Optional | Stronger chat model for an operator-granted premium plan. Blank keeps premium on `AI_MODEL`. |
 | `AI_API_KEY` / legacy `OLLAMA_API_KEY` | Sometimes | Provider key; blank can be valid for local endpoints. |
 | `MAXWELL_OWNER_IDS` | Strongly recommended | Comma-separated Discord IDs authorized for owner/admin features. |
@@ -159,7 +159,8 @@ Blank IDs do not grant implicit ownership.
   response mode, web research or recent-message settings as needed.
 - **AI connection**: optionally connect a personal provider with an API key;
   see [BYOK.md](BYOK.md) for setup and advanced controls.
-- **Privacy**: choose whether your message content is stored. Off stops new
+- **Privacy**: choose whether your message content is stored. Storage defaults
+  to on for a new user when preferences are available; turning it off stops new
   saves and deletes stored messages, replies to you, tool records from those turns, and facts already stored for your Discord account.
   A request you send is still answered and is still sent to the AI provider.
 
@@ -200,23 +201,6 @@ If tools are still missing, check the master `tools_enabled` switch,
 denials. A missing `python-chess` dependency prevents chess from loading at all;
 installing it in a shell sandbox does not change the bot's Python environment.
 
-### A loaded tool is missing in one server
-
-Plugin loading does not imply that a server's model can use its tools. A saved
-`guild_plugin_overrides["<guild_id>"]["chess"] = false` hides `chess_start`,
-`chess_move`, `chess_state` and `chess_resign` from that server's tool schemas
-and chess instructions even when startup logs say the chess plugin loaded.
-
-To restore chess, open `/config` → **Server settings** → **Extra tools** in
-the affected server and include **Chess** among the enabled plugins. Preserve
-the other selections. An operator can instead update that server's `chess`
-override to `true` through the authenticated control API, preserving other
-guilds and plugin overrides. Controls reload without a restart.
-
-If tools are still missing, check the master `tools_enabled` switch,
-`disabled_tools`, server tool-group restrictions and explicit per-user plugin
-denials. A missing `python-chess` dependency prevents chess from loading at all;
-installing it in a shell sandbox does not change the bot's Python environment.
 
 ## Runtime controls
 
@@ -255,11 +239,26 @@ Frequently used controls include:
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
 | `message_quota_limit` | Free messages per rolling window (default 150) |
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
-| `message_quota_enabled` | Forced off for unlimited request admission |
+| `message_quota_enabled` | Enforce message quota when enabled (default off) |
 | `store_memory` | Conversation-memory storage switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
+| `conversation_watch_enabled` | Allow eligible unmentioned follow-ups after a directed exchange or Maxwell's post (default false) |
+| `conversation_watch_seconds` | Base watch window in seconds (default 60; zero disables watch) |
+| `conversation_watch_debounce_seconds` | Baseline quiet interval for soft follow-ups (default 1 second) |
+| `conversation_watch_pressure` | Threshold for considering soft follow-ups (default 0.55; higher is stricter) |
 
-The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the authenticated operator API or `/maintenance` to editing `bot_control.json` while Maxwell is running. There is no browser admin frontend or Discord browser OAuth login.
+Watch windows and debounce intervals adapt to room activity; the model may still
+choose silence. Direct mentions and replies are not delayed by the soft-follow-up
+debounce. Directed requests cannot use `wait` before a visible response. The
+`wait` tool pauses a batch for up to 10 seconds (default 2), does not schedule
+another model turn, and cannot reopen a completed turn. Ambient waits remain
+available; a send ends the batch except for consecutive reply-burst sends.
+
+Task workers are enabled by default and `subagents_require_premium` defaults to
+false. Schedules and storage remain plan-gated. Worker selection and timeout
+settings are described in [PROVIDERS.md](PROVIDERS.md#independent-subagent-provider).
+
+The authoritative set and valid ranges are in `control_defaults.py` and `api.state._sanitize_control`. Prefer the authenticated operator API or `/maintenance` to editing `bot_control.json` while Maxwell is running. The optional user dashboard uses Discord OAuth; see [DASHBOARD.md](DASHBOARD.md).
 
 ## Prompt size and provider caching
 
@@ -269,7 +268,7 @@ Tool guidance is conditional on enabled plugins, available tools, and request sc
 
 Reusable instructions and authorized history precede volatile requester/time/retrieval context. This permits prefix-cache reuse when the provider supports it and the prefix remains byte-identical; changing model, tool access, or configuration can invalidate that prefix. Maxwell does not promise a cache hit or a provider-specific token saving.
 
-Prompt memory budget is allocated to recent history. REM, RAG, embedding workers, entity/graph retrieval, context extraction, automatic summaries, delegated workers, and automatic code repair are removed from the live runtime. Saved settings cannot reactivate them.
+Prompt memory budget is allocated to recent history. REM, RAG, embedding workers, entity/graph retrieval, context extraction, automatic summaries and automatic code repair are removed from the live runtime. Saved settings cannot reactivate them. User-requested subagent jobs are separate from those removed systems.
 
 
 ## Message reliability

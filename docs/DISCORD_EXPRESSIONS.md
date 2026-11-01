@@ -8,7 +8,7 @@ When Maxwell can read a channel but cannot send, a direct ping receives a mute r
 
 ## GIF replies
 
-`send_gif` is always available. The Discord message is the GIF file itself: no caption, embed, or attribution line. A reaction phrase such as hug, laugh, wave, or thumbs up uses the keyless [nekos.best](https://nekos.best/) catalog (200 requests per minute per category, no API key). Other short phrases use Giphy when `GIPHY_API_KEY` is set in `.env`. `index` selects another of the first ten results. Search stays at Giphy's PG-13 ceiling. API failures do not expose the key or claim a GIF was delivered.
+`send_gif` uses the keyless [nekos.best](https://nekos.best/) catalog for recognized reaction phrases such as hug, laugh, wave, or thumbs up (200 requests per minute per category, no API key). Other short phrases, or reaction searches with no result, use Giphy when `GIPHY_API_KEY` is set in `.env`. `index` selects another of the first ten results. Search stays at Giphy's PG-13 ceiling. When Discord permits attachments, the message contains the GIF file without a caption or attribution line; without Attach Files permission, Maxwell sends the GIF URL instead. API failures do not expose the key or claim a GIF was delivered.
 
 ```dotenv
 GIPHY_API_KEY=your_key
@@ -39,4 +39,4 @@ Official references:
 
 ## Verification
 
-The offline regression suite covers terminal reactions/GIFs, reaction and thread permissions, read-only pings, application emoji scoping, animated expressions, explicit sticker dispatch, normal sticker replies after progress (including chunked and sticker-only answers), progress retirement, sticker refusal propagation, periodic refresh/cancellation, keyless reaction GIFs, the Giphy fallback, file-only delivery, unsafe URLs, and API-key redaction. Live GIF delivery and native sticker availability still need a Discord test channel.
+The offline regression suite covers terminal reactions/GIFs, reaction and thread permissions, read-only pings, application emoji scoping, animated expressions, explicit sticker dispatch, normal sticker replies after progress (including chunked and sticker-only answers), progress retirement, sticker refusal propagation, periodic refresh/cancellation, keyless reaction GIFs, the Giphy fallback, unsafe URLs, and API-key redaction. Live GIF delivery and native sticker availability still need a Discord test channel.

@@ -30,10 +30,9 @@ return immediately instead of searching more
 engines to fill every slot. Brief provider cooldowns reduce repeated failures.
 Searches use an HTTP connection pool and a separate bounded executor for ddgs;
 timed-out threads retain capacity until they actually finish. Distinct queued
-searches, cache entries and optional memory-write tasks all have hard limits.
-Identical simultaneous queries share retrieval; cancellation of one requester
-does not cancel another's search. Retrieved hit dictionaries are copied before
-returning to callers, and memory persistence remains requester-scoped.
+searches and cache entries have hard limits. Identical simultaneous queries
+share retrieval; cancellation of one requester does not cancel another's
+search. Retrieved hit dictionaries are copied before returning to callers.
 
 The model can pass `freshness: live` to bypass completed-cache results,
 `recent` for at most two minutes (default), or `stable` for at most thirty minutes.
@@ -43,10 +42,10 @@ can be old while their supported-device list is current.
 
 Tool results report provider, original retrieval time and cache status, plus
 publication dates when supplied by a provider. Retrieval time does not certify
-the age or accuracy of a claim. Earlier RAG web results are labeled historical
-context. Source text remains untrusted, with the existing SSRF and tool-taint
-protections. URLs actually supporting the answer should be cited by the model;
-the host does not append every retrieved link to the answer.
+the age or accuracy of a claim. Source text remains untrusted, with the
+existing SSRF and tool-taint protections. URLs actually supporting the answer
+should be cited by the model; the host does not append every retrieved link to
+the answer.
 
 ## Optional self-hosted SearXNG
 
@@ -58,11 +57,24 @@ For the default Linux host-network Maxwell deployment:
 3. Run `docker compose -f docker-compose.search.yml up -d`.
 4. Rebuild/restart Maxwell to load the new settings.
 
-The supplied settings enable JSON, required by `/search?format=json`, and bind
-the published port to host loopback. This compose file is independent of the
-bot's compose file; it does not change the bot's networks or sandbox firewall.
-For Docker Desktop/bridge deployments, use an operator-controlled address
-reachable from the bot container instead of its own `127.0.0.1`.
+The supplied settings enable JSON, required by `/search?format=json`, disable
+the SearXNG limiter, and bind the published port to host loopback. The service
+is intended for operator-controlled access, not public exposure. The Compose
+file is independent of the bot's compose file; it does not change the bot's
+networks or sandbox firewall. For Docker Desktop/bridge deployments, use an
+operator-controlled address reachable from the bot container instead of its
+own `127.0.0.1`; the supplied loopback-only binding must also be adapted.
+
+Alternatively, use an independently installed host-level SearXNG instance:
+enable its JSON search API and set `SEARXNG_URL=http://127.0.0.1:8888` when
+it listens on that host address. The search Compose file is not required in
+that case.
+
+`SEARXNG_URL` is the instance base URL, not the `/search` URL: Maxwell appends
+`/search` and requests JSON without following redirects. The configured
+endpoint may be internal, but result URLs and `fetch_url` remain subject to
+public-address checks. SearXNG upstream requests use the supplied 3-second
+timeout (maximum 4 seconds); Maxwell's own timeout also bounds the request.
 
 SearXNG consumes VPS resources and upstream engines can block automated traffic.
 The optional Tavily key uses its account's available quota; configuring it does

@@ -26,7 +26,7 @@ Before enabling this feature, configure a separate 32-byte encryption key as
 environment file, never in Git or the SQLite database. If it is missing,
 setting a key is disabled and saved credentials cannot be decrypted.
 
-Credentials are stored in `${DATA_DIR}/byok.sqlite3`, encrypted with AES-GCM
+Credentials are stored in `${DATA_DIR}/plugins/maxwell_extras/byok.sqlite3`, encrypted with AES-GCM
 and authenticated against the Discord user ID and provider. The SQLite file is
 mode `0600`; its containing directory is mode `0700`. Keys are not passed to
 prompts, tools, shell containers, or logs. Each request creates a fresh client
@@ -46,16 +46,18 @@ use a separate per-user context.
 
 ## Rotate the encryption key
 
-Run rotation during a maintenance window with Maxwell stopped so no process
-continues using the old key:
+Run rotation during a maintenance window with the bot and API stopped so no
+process continues using the old key. Rotate both credential databases as
+described under [Separate subagent credentials](#separate-subagent-credentials).
 
-1. Back up the encrypted database and current key using the deployment's secret
-   manager.
-2. Stop Maxwell and run `python scripts/rotate_byok_key.py --database
+1. Back up both encrypted databases when present and the current key using the
+   deployment's secret manager.
+2. Stop the bot and API, then run `python scripts/rotate_byok_key.py --database
    "$DATA_DIR/plugins/maxwell_extras/byok.sqlite3"` with the current key in the environment.
 3. Enter and confirm the new 64-character key at the prompts.
-4. Replace `MAXWELL_BYOK_ENCRYPTION_KEY` in the secret manager, then restart
-   Maxwell and verify a credential status can be read.
+4. Rotate the worker database with the same old and new keys when present.
+   Replace `MAXWELL_BYOK_ENCRYPTION_KEY` in the secret manager only after both
+   rotations succeed, then restart the bot and API and verify credential status.
 5. Remove the old key and temporary backups according to the operator's backup
    retention policy.
 

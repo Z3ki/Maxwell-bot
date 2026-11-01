@@ -1,5 +1,11 @@
 # Public runtime hardening — development branch review
 
+> **Historical record:** Except for the explicit current generated-site note
+> below, the execution map, blockers, release instructions and verification
+> describe the reviewed 2026 branch, not the current checkout or deployment.
+> Current source also includes Premium worker jobs and speech output; historical
+> statements about retired capabilities are not a current feature inventory.
+
 This change is reviewed against `dev` at `93ba4be`. It is not a production
 release or a public stability claim. No stored plugin, game, site, or memory
 data is deleted.

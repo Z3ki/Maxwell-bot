@@ -1,7 +1,7 @@
 # Maintaining Maxwell's shared services
 
-Run the same dependency, lint, shell syntax, regression, and coverage checks used
-in CI:
+Run the dependency, lint, formatting, type, shell syntax, security audit, and
+coverage checks corresponding to the CI gates:
 
 ```bash
 python -m pip install -r requirements.txt -r requirements-dev.txt
@@ -10,10 +10,11 @@ make check
 
 For an isolated interpreter, use `make check PYTHON=.venv/bin/python`.
 `make test` runs the suite without coverage instrumentation. `make coverage`
-measures lines and branches in `maxwell_core`, `message_pipeline`, and
-`concurrency_safety` and requires at least 80% combined coverage. This is a
-shared-core gate, not a claim that every Discord or external-service integration
-is covered. Python 3.11 and 3.12 run the same checks in CI.
+measures repository-wide line and branch coverage with a 69% minimum, then
+requires 86% for `maxwell_core`, `message_pipeline`, and `concurrency_safety`
+combined. Neither gate claims every external integration is covered. CI runs
+the regression and coverage matrix on Python 3.11 and 3.12; lint, typecheck,
+and audit jobs use 3.12.
 
 ## Module ownership
 

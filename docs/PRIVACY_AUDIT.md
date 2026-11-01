@@ -5,6 +5,16 @@ modularization PR #82 head `8f42b79`. This is engineering evidence, not a legal
 opinion or regulatory certification. Production credentials, provider accounts,
 server disks/backups and the Discord Developer Portal were not available here.
 
+> **Current source discrepancy:** The implementation no longer matches this
+> audit's saved-history opt-in claims. `plugins/maxwell_extras/user_preferences.py`
+> defaults `tracking` to `on` for a new or missing user row, and
+> `content_allowed` does not require an affirmative consent record. An unreadable
+> preferences file fails closed; a missing file uses the default. The Privacy
+> UI still describes On as an opt-in. Treat this as an unresolved privacy and
+> disclosure discrepancy, not evidence of affirmative consent. The findings,
+> migration statements and verification below describe the historical audit
+> snapshot, not current behavior.
+
 ## Discord requirements and design decisions
 
 Official sources consulted:
@@ -52,15 +62,16 @@ and [California Attorney General guidance](https://oag.ca.gov/privacy/ccpa).
 
 ## Resulting user experience and implementation
 
-New accounts and historical unverified defaults start with optional history off.
+At the audit snapshot, new accounts and historical unverified defaults were described as starting with optional history off.
 Ordinary mentions and DMs continue normally. App commands receive a short private
 provider-processing disclosure once, after acknowledgment; concurrent interactions
 claim one receipt. Failed delivery has no public/DM fallback and can retry later.
 The receipt is not an agreement record. No AI request is used for privacy UX.
 
-`/config → Privacy` and the dashboard explain optional history, current provider
-processing and retired persistent facts/embeddings. On is an intentional choice;
-model-driven configuration cannot enable it for a user. Off stops new transcript
+`/config → Privacy` and the dashboard explain history, current provider
+processing and retired persistent facts/embeddings. The UI describes On as an
+intentional choice, but current missing-user defaults are on without a recorded
+choice. Model-driven configuration cannot enable it for a user. Off stops new transcript
 writes and removes stored conversation content. Reset stays off. Independent
 choices can be reviewed/withdrawn; voice authorization is bound to a hash of the
 exact reference and a distinct policy version. It is a user's permission
@@ -68,8 +79,8 @@ attestation, not identity verification or proof of a third party's authorization
 
 Consent storage uses minimal SQLite records (user ID, policy, version, kind,
 status, recorded and withdrawal times). JSON preferences use atomic replacement,
-a process lock and cross-process file locks. Tracking checks fail closed, and the
-history writer checks again after acquiring its SQLite write transaction. A
+a process lock and cross-process file locks. Unreadable preference state fails
+closed, and the history writer checks again after acquiring its SQLite write transaction. A
 suppression timestamp prevents old in-flight writes from reappearing after an
 intentional re-enable. Privacy state is independent of conversation history.
 
@@ -91,7 +102,7 @@ before release; no fabricated address was added.
 
 | Category / location | Default lifecycle and deletion |
 | --- | --- |
-| `maxwell_rag.db` conversation/linked tool transcript | Optional; 30-day absolute age, existing per-channel count bound, 12-hour inactive-channel cleanup. Off removes owner rows/replies/quotes; full deletion also invokes it. |
+| `maxwell_rag.db` conversation/linked tool transcript | Current default is on for missing user choices, not opt-in; 30-day default absolute age, existing per-channel count bound, 12-hour inactive-channel cleanup. Off removes owner rows/replies/quotes; full deletion also invokes it. |
 | Legacy facts/vectors/user directory | No current live embeddings/fact creation. Cleanup removes retired facts/vectors and the old user directory. Archived modules remain offline compatibility fixtures, not live providers. |
 | Personal settings JSON | Until changed/deleted. Full deletion replaces the row with storage-off plus a suppression timestamp. This minimal privacy record intentionally remains. |
 | `privacy.sqlite3` | Active optional choices until withdrawal/deletion. Withdrawn choices: 365 days by default. Notice ID/version/time remains to avoid repeated unchanged notices, unless the user deletes it. |
@@ -105,10 +116,11 @@ before release; no fabricated address was added.
 | Last.fm accounts/outbox | Existing explicit browser authorization and disconnect lifecycle. Live full deletion attempts disconnect; failures are reported. Dashboard/offline plugin copies require operator review. |
 | Generated attachments, TTS samples | Turn-scoped memory/temporary directories are cleared by tool lifecycle. Discord/provider copies are external. Explicitly hosted/published outputs need operator deletion. |
 | Sites/KV/backends, shell/GitHub workspaces | Separate user-requested artifacts; do not delete a mounted/running filesystem blindly. Lifecycle-aware operator deletion is disclosed in every full-deletion result. Existing site TTL applies; permanent sites need explicit review. |
+| Persistent user storage and schedules | Separate feature records added since the audit. Full deletion attempts to wipe the user's storage and handle, and remove owned schedules; failures are reported. Published copies and other external copies still require review. |
 | Inbox, threads, chess, other plugin caches/queued jobs | Scope, ownership and lifecycle vary; require operator/plugin-specific review when relevant. Full deletion does not claim these were erased. |
 | Host/proxy/container logs and backups | Outside repository-managed storage. Operator must set expiry/rotation, encryption and restore suppression; currently release-blocking. |
 
-Cleanup runs on startup and roughly every ten minutes, outside the event loop.
+At the audit snapshot, cleanup was documented as running on startup and roughly every ten minutes, outside the event loop.
 History migration scans owners once and removes blocked content in bulk rather
 than rescanning the entire transcript separately for every user. Errors are
 reported by subsystem/type without deleted message content. Healthy stores are
@@ -123,13 +135,15 @@ copies; this is not a forensic erasure guarantee for WAL, disks or backups.
 
 ## Migration and deployment
 
-Historical `tracking=on` without current affirmative evidence is interpreted as
-off, including values copied from old defaults. Explicit historical opt-outs stay
-off. Old on values cannot reliably distinguish a clicked choice from a dashboard
-snapshot, so users intentionally enable current optional history once rather than
-having agreement invented for them. The old consent system is not trusted.
+At the audit snapshot, historical `tracking=on` without affirmative evidence
+was intended to be interpreted as off, and users were to enable optional
+history deliberately. Current `UserPreferenceStore.get()` instead applies
+the `on` default and saved values without checking consent evidence. Explicit
+opt-outs remain off; reset sets tracking off.
 
-Startup cleanup intentionally removes unverified old content and retired facts.
+Current cleanup removes blocked users' content and retired facts; because missing
+user choices currently default to on, it does not remove all unverified old
+content.
 Protect any operational backup, set its expiry, and retain the latest suppression
 records outside historical snapshots. When restoring, quiesce writers, restore
 only necessary data, replay the latest deletion/suppression records, run cleanup,

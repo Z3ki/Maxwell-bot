@@ -1,5 +1,7 @@
 # Maxwell codebase audit — findings and fixes
 
+> Historical snapshot: findings, fixes, and verification results describe the reviewed branch at the time, not necessarily the current tree. Consult the current code and documentation before relying on them.
+
 Branch: `fix/codebase-audit`. Method: manual review of the priority modules plus a
 fan-out audit (19 module clusters, each candidate finding then attacked by two
 independent verifiers — a correctness reader and a reproduction attempt) across

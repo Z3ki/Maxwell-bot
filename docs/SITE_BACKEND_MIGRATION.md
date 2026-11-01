@@ -94,8 +94,9 @@ security project, not something this resource pool implements.
 Every new/restarted site uses `--runtime runsc`, uid/gid `10001:10001`,
 `cap_drop=ALL`, no-new-privileges and a read-only root filesystem. Only its own
 source (`/app`, read-only) and persistent state (`/data`, writable) are mounted.
-It listens on port 8000, published only on loopback ports 8800–8899. Public
-requests reach it at `/bot/<slug>/api/...`, with that prefix stripped. Outbound
+It listens on port 8000, published only on loopback ports 8800–8899 by default
+(the range is configurable with `MAXWELL_SITE_PORT_MIN` and the exclusive
+`MAXWELL_SITE_PORT_MAX`). Public requests reach it at `/bot/<slug>/api/...`, with that prefix stripped. Outbound
 network access remains allowed; this pool is a resource/isolation boundary,
 not an outbound egress allowlist. Site backend administrative/source operations
 are restricted to the site owner or Maxwell admin.

@@ -4,7 +4,7 @@ Maxwell is an official Discord bot powered by an OpenAI-compatible chat API. It 
 
 Maxwell expects an official bot token from the Discord Developer Portal. Enable the privileged gateway intents **Message Content**, **Server Members**, and **Presence**.
 
-Maxwell does not join voice channels, listen to calls, or generate speech. Audio attachments are model input; voice-state lookup and moderation of other members are separate server-management features.
+Optional music playback can join Discord voice channels through Lavalink; see [MUSIC.md](MUSIC.md). The `tts` tool generates Discord voice messages via Mistral when configured. Audio attachments are model input; voice-state lookup and moderation of other members are separate server-management features.
 
 ## High-level flow
 
@@ -51,7 +51,7 @@ Discord bot / app commands
 | `discord_threads.py` | Discord thread create/control tools and the brief injected into thread turns. |
 | `doctor.py` | Installation/configuration report; `--probe` calls the configured endpoints. |
 | `requirements.txt` | Core Python packages required to start Maxwell. |
-| `requirements-optional.txt` | Optional packages for web search. |
+| `requirements-optional.txt` | Optional dependency manifest; the keyless `ddgs` search fallback is in `requirements.txt`. |
 
 Historical host/PM2 files may remain for compatibility/migration, but Docker is the supported deployment model.
 
@@ -61,13 +61,13 @@ Historical host/PM2 files may remain for compatibility/migration, but Docker is 
 
 Plugins register tools through `maxwell_core`. Schemas are normalized in `tool_schemas.py`, and the host dispatches calls through the live registry. Multi-step work runs within the active user request. Premium accounts can also hand work to detached workers with `delegate_task` (`plugins/maxwell_extras/task_jobs.py`); files a worker reports are copied to `/storage/jobs/<id>/` so they outlive the sandbox's idle reset. Plugin timers handle ordinary maintenance such as reminder delivery and Premium schedules.
 
-Tools marked destructive are fail-closed when the current turn has been tainted by fetched/web content, with `shell` as the documented exception: it stays available so Maxwell can follow up on a fetched URL, but only inside the per-tenant gVisor sandbox. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action.
+Tools marked destructive, including `shell`, are blocked when the current turn has been tainted by fetched/web content unless the operator disables the taint gate. A new user turn starts clean; there is no manual confirmation command to override a tainted destructive action. Shell additionally requires the configured per-tenant sandbox.
 
 ## Memory
 
-The live `memory` service is `ConversationMemoryManager`. It reads only recent transcript rows authorized for the current guild/channel or DM and applies the existing prompt budget. History remains on disk between restarts without a global in-memory cache.
+The live `memory` service is `ConversationMemoryManager`. It reads transcript rows authorized for the current guild/channel or DM and applies the existing prompt budget. In addition to recent history, scoped keyword search may recall older matching transcript rows. History remains on disk between restarts without a global in-memory cache, subject to privacy preferences and retention.
 
-Live vector/RAG, entity/graph and shared-context retrieval, embedding generation, and embedding recovery are retired. Existing database records are preserved for export. Legacy `ENABLE_RAG` and saved retrieval controls cannot restore these services. NumPy is a development dependency for archived migration fixtures only.
+Live vector/RAG, entity/graph and shared-context retrieval, embedding generation, and embedding recovery are retired. Legacy `ENABLE_RAG` and saved retrieval controls cannot restore these services. Stored records remain subject to privacy migration, deletion and retention; see [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md). NumPy is a development dependency for archived migration fixtures only.
 
 ## Discord app surfaces
 

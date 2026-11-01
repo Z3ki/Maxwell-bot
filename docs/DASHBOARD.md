@@ -6,10 +6,12 @@ Both interfaces use the same personal preference file, encrypted BYOK vault and 
 
 ## Sign in from Discord (`/dashboard`)
 
-This is the default and needs no OAuth app. `/dashboard` replies privately
-with a link to `<MAXWELL_PUBLIC_BASE_URL>/dashboard/#t=<token>` (or
-`MAXWELL_DASHBOARD_URL` when set). The link works once and expires after 15
-minutes. Redeeming it starts a session of up to eight hours.
+This is the default and needs no OAuth app. When link mode is configured,
+`/dashboard` replies privately with a link to
+`<MAXWELL_PUBLIC_BASE_URL>/dashboard/#t=<token>`. The link works once and
+expires after 15 minutes. Redeeming it starts a session of up to eight hours.
+Setting `MAXWELL_DASHBOARD_URL` selects OAuth mode instead; `/dashboard` then
+links to the dashboard page, where the user must sign in with Discord.
 
 - The token rides in the URL fragment, so it never reaches server logs or a
   `Referer` header. The page removes it from the address bar after redeeming.
@@ -19,18 +21,22 @@ minutes. Redeeming it starts a session of up to eight hours.
 - Every write needs the dashboard's exact `Origin`. Server pages check the
   member's live permissions through the bot, and a Dev bot only lists the
   servers it is scoped to.
+- The link's server list comes from the bot's member cache when minted. Newly
+  available servers require a fresh `/dashboard` link; access is rechecked live.
 - The signing key is `MAXWELL_DASHBOARD_SECRET` when set, otherwise a key
-  generated at `data/dashboard/session.key`. `MAXWELL_DASHBOARD_LINKS=0`
+  generated at `$DATA_DIR/dashboard/session.key`. `MAXWELL_DASHBOARD_LINKS=0`
   turns link sign-in off.
 - Route `/dashboard`, `/dashboard/*` and `/api/dashboard/*` on the public host
   to the API. `/dashboard` redirects to `/dashboard/`.
 
 Views: **Overview** (plan, message allowance, storage, public address),
 **Reply settings**, **AI connection**, **Files** and **Schedules** (Premium),
-and **Servers**. Files covers browse, upload (25 MB per file), new folder,
-rename/move, text editing, delete, signed links and choosing the public
-handle. Schedules covers create, pause, resume, edit and delete, using the
-same limits as the `schedule` tool. Free accounts see both views locked.
+and **Servers**. Reply settings also includes privacy and saved-history controls.
+Files covers browse, upload (25 MiB per file), new folder, rename/move, text
+editing, delete, signed links and choosing the public handle. Schedules covers
+create, pause, resume, edit and delete, using the same limits as the `schedule`
+tool. Free accounts cannot use Files or create schedules, but can still view,
+pause and delete existing schedules after Premium is revoked.
 
 The OAuth mode below is still supported for a dedicated dashboard hostname.
 

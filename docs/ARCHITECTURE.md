@@ -23,7 +23,8 @@ not interrupt an accepted transaction, and shutdown drains accepted work.
 Cleanup uses a covering partial index and atomically removes transcripts from
 channels whose newest stored user message is older than 12 hours. Bot output
 does not extend that existing cutoff. Archived facts and Discord messages are
-not deleted by this sweep.
+not deleted by this sweep; separate privacy cleanup can delete local stored
+content under its own rules.
 
 Older transcript recall uses a contentless SQLite FTS5 index maintained by
 insert/edit/delete triggers. Queries require exact requester channel/guild

@@ -94,7 +94,8 @@ class WaitTool(Tool):
     """Pause before later actions in this batch, for at most 10 seconds.
 
     This does not schedule a model follow-up or reopen an ended turn.
-    send_message still ends the batch; put any wait before it.
+    send_message ends the batch. On directed requests requiring a visible
+    reply, wait is rejected until a visible reply has already been sent.
     sleep suspends the bot for minutes and ends dispatch.
     """
     tool_name = 'wait'

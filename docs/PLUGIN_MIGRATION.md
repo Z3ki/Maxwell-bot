@@ -1,7 +1,7 @@
 # Plugin migration status
 
-This branch migrates Maxwell from a hardcoded tool list in `bot.py` to a
-plugin host. Remaining work for a later session:
+Maxwell migrated from a hardcoded tool list in `bot.py` to a plugin host.
+The points below summarize the migration and remaining architectural work.
 
 ## Done
 
@@ -34,5 +34,6 @@ plugin host. Remaining work for a later session:
 - `conversation_memory.py` is the live SQLite history service; plugins should
   take it from `ctx.service("memory")`. Legacy RAG/graph modules are offline only.
 
-Do not re-audit the old `bot.py` `_setup_tools` list — it is gone. Start from
-`plugins/*/plugin.json` and `maxwell_core`.
+`bot.py` still has `_setup_tools`, but it loads the plugin host rather than
+maintaining the old hardcoded list. Start from `plugins/*/plugin.json` and
+`maxwell_core`.

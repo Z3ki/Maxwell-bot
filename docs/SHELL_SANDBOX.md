@@ -148,11 +148,16 @@ provision a host without the script.
   commands at once (hard ceiling eight).
 - Workspace and packages persist between calls in the same active container.
   Timeout, cancellation, idle expiry, and Maxwell restart destroy that user's
-  container, which kills all its descendants. The workspace and packages are
+  container, which kills all its descendants. `/workspace` and packages are
   ephemeral and are lost on that reset. Other users' containers are untouched.
-- Shell-generated files can be attached only from that user's active
-  `/workspace`, with traversal rejected and a bounded size. Shell exports are
-  not copied into shared static hosting or a shared exports directory.
+- Users with an eligible persistent-storage quota also have a quota-sized
+  `/storage` tmpfs, restored from and merged back to host storage. It is
+  intended to survive guest resets; files under `/storage/public/` are published.
+  Save and merge errors or concurrent edits can affect persistence, so do not
+  treat a guest reset as deletion of durable or published files.
+- Shell-generated files can be attached from the user's `/workspace` or
+  eligible `/storage`, with path and size checks. `/storage/public/` is a
+  separate intentional publishing path.
 - The Maxwell controller still has access to the Docker daemon and must be
   treated as host-root trusted. Untrusted shell code never receives that socket.
   gVisor and the external firewall reduce exposure; neither is an absolute

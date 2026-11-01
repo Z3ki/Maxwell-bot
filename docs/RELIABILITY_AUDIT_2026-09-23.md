@@ -1,5 +1,12 @@
 # Maxwell reliability audit — 2026-09-23
 
+> **Historical record:** The architecture, dispositions, release proposals,
+> commands and verification below describe the 2026-09-23 review, not the
+> current checkout. In particular, `autonomy.py`, `rem.py`, `jobs.py` and
+> `rag_memory.py` are no longer present at the cited paths; later Premium
+> detached workers are a separate implementation. See [AUDIT.md](AUDIT.md)
+> and [PREMIUM_TASKS.md](PREMIUM_TASKS.md) for later context.
+
 ## Scope and architecture
 
 This change is an incremental reliability repair. It does **not** certify

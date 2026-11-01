@@ -38,8 +38,14 @@ Optional integrations use `auto` detection. Website tools need a nonblank
 hosting. HD images need `GEMINI_IMAGE_MODEL` supported by your
 provider. Shell stays off until `--with-shell` prepares the backend. Features without
 setup, such as keyless web search and image generation, remain available.
-Autonomous background activity is removed; memory agents and delegated workers have been removed. The tts tool speaks with Mistral Voxtral when `MISTRAL_API_KEY` is set. `reference` clones one of the requester's own attached clips for a single line, is never saved, and refuses someone else's voice. Generated sites do not expire
-by default; set `site_ttl_hours` in owner controls if you want expiry.
+Autonomous background chatter and memory agents have been removed. Premium users
+can delegate work to background workers and create schedules; see
+[PREMIUM_TASKS.md](PREMIUM_TASKS.md). The `tts` tool sends voice messages using
+Mistral Voxtral when `MISTRAL_API_KEY` is set. A one-line voice reference can
+be an attachment or direct media URL; the requester must first authorize that
+exact URL in `/config` → Privacy and must have permission to use the voice.
+Generated sites do not expire by default; set `site_ttl_hours` in owner controls
+if you want expiry.
 
 Before starting, enable the privileged Discord gateway intents **Message Content**, **Server Members**, and **Presence**.
 
@@ -196,7 +202,7 @@ AI_MODEL=qwen3:8b
 AI_API_KEY=
 ```
 
-If RAG embeddings use local Ollama too, configure the embedding endpoint/model in the advanced config and pull that embedding model on the host.
+Live memory does not use RAG embeddings, so no embedding model is needed.
 
 ### Custom API endpoint
 
@@ -238,7 +244,7 @@ Maxwell does not run `web_search` before generation. It searches when the user a
 
 ## Docker behavior
 
-Linux uses `docker-compose.yml` with host networking. This keeps host-local Ollama, Discord voice UDP, generated-site backends, and the operator API reachable without extra port mapping.
+Linux uses `docker-compose.yml` with host networking. This keeps host-local Ollama, generated-site backends, and the operator API reachable without extra port mapping. Optional music playback uses a separate Lavalink setup; see [MUSIC.md](MUSIC.md).
 
 Docker Desktop uses `docker-compose.bridge.yml`. The installer rewrites local service addresses to `host.docker.internal` where appropriate and publishes the admin API on host loopback. For a manual bridge install, make sure `MAXWELL_API_HOST=0.0.0.0` is set inside the container configuration.
 
@@ -374,13 +380,14 @@ GitHub Actions runs the repository's configured lint/test matrix. Live external-
 
 ### Privacy migration and public release
 
-Read [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) before upgrading to 0.1.15. Conversation
-storage now defaults off, and historical default-on values are not valid opt-in
-evidence. Existing explicit opt-outs are preserved. Startup cleanup removes old
-unverified history, facts and reasoning traces; take a protected operational
+Read [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) before upgrading to 0.1.15.
+The intended opt-in history behavior does not match the current implementation:
+missing user preferences default tracking to on, and `content_allowed` does not
+require affirmative storage consent. Existing explicit opt-outs are preserved.
+Startup cleanup removes opted-out content, retired facts and aged history, but
+does not establish consent for default-on users. Take a protected operational
 backup first, apply its deletion/retention policy, and never restore deleted
-content without replaying suppression records. The migration is privacy-affecting
-and content deletion is intentional.
+content without replaying suppression records.
 
 Set your own HTTPS policy URLs and verify the corresponding fields in Discord's
 Developer Portal manually. Test `/help`, `/config → Privacy`, dashboard settings,

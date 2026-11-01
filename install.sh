@@ -51,22 +51,24 @@ Maxwell runs in Docker so host Python, ffmpeg, and package versions cannot
 fight it. Setup needs Git, curl, and Python 3; running needs Docker + Compose.
 
 Options:
-  --help              Show this help.
+  --help, -h          Show this help.
   --reconfigure       Run the configuration wizard even when .env exists.
-  --non-interactive   Read all answers from environment variables.
+  --non-interactive   Use environment values and defaults without prompts.
   --dir <path>        Install/update Maxwell in this directory.
   --local             Configure the current checkout instead of cloning.
-  --version <vX.Y.Z>   Install an exact published release (also accepts X.Y.Z).
-  --ref <commit>      Install an exact 40-character Git commit.
-                      Without either option, main is a development snapshot.
+  --version <vX.Y.Z>  Install an exact published release (also accepts X.Y.Z).
+  --ref <commit>      Install an exact lowercase 40-character Git commit.
+                      Without either, use MAXWELL_BRANCH (default: main), a
+                      development snapshot; --local does not switch commits.
   --configure-only    Prepare .env and run.sh without installing or starting Docker.
-  --with-shell        Also install gVisor, the shell firewall, and storage quotas.
-                      This restarts Docker. Skip it on hosts that should not run shell.
+  --with-shell        Enable shell and install gVisor, firewall, and storage quotas.
+                      Host setup restarts Docker and is skipped with --configure-only.
+  --no-extras         Ignored; extras ship in the Docker image.
 
 Useful environment variables:
   MAXWELL_INSTALL_DIR, MAXWELL_REPO_URL, MAXWELL_VERSION, MAXWELL_REF,
   MAXWELL_BRANCH (development snapshots only),
-  MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1,
+  MAXWELL_NONINTERACTIVE=1, MAXWELL_SKIP_SYSTEM_DEPS=1, MAXWELL_WITH_SHELL=1,
   DISCORD_BOT_TOKEN, AI_BASE_URL, AI_MODEL, AI_API_KEY (AI_API_URL alias accepted),
   OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_API_KEY,
   MAXWELL_OWNER_IDS, MAXWELL_ADMIN_PASSWORD,

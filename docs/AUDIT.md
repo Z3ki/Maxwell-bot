@@ -23,7 +23,7 @@ The current implementation and tests are authoritative for those features.
 - Provider reads preserve fragmented JSON and reject malformed/error/incomplete streams instead of accepting partial tool calls. Learned output and temperature constraints are isolated by endpoint/model; nonfinite usage fields do not corrupt accounting.
 - Versioned installers resolve tags/commits immutably and preserve persistent files. A local Git-remote smoke exercised both installers through annotated-tag installation and lightweight-tag upgrade. Missing/invalid/dirty/incomplete release boundaries are covered by installer regressions.
 - The public site now presents a product landing rather than a dashboard. The example Caddy configuration was exercised as a real local server: public landing/policies/sites available, public admin/API/data paths denied, operator dashboard available only on its separate origin. The existing hosted Caddy routing is not migrated by this example change; split the live admin/generated-page origins before treating that deployment as isolated.
-- Removed live voice transport and speech-output tools/configuration. Audio attachments still enter the configured model as input; moderation of other members remains available.
+- At that release-preparation snapshot, live voice transport and speech-output tools/configuration were removed. The current tree again contains a `tts_voice` plugin; do not use that historical removal as a current feature inventory.
 - Explicit zero memory-tier caps no longer act as unlimited ceilings; varied allocation smoke cases preserve caps and the total budget.
 - The authenticated status API recognizes its live Docker-supervised bot process as well as PM2. This is process health, not a Discord-gateway readiness check; PM2 log/restart endpoints remain PM2-specific.
 
@@ -89,7 +89,7 @@ Docker is now the supported runtime; old host/PM2 material is migration/compatib
 
 ## Remaining risks and unverified edge cases
 
-These are deployment/architecture caveats, not claims that an exploit or outage is currently present:
+These include deployment/architecture caveats and a source-level privacy discrepancy; they are not claims of a verified exploit or outage:
 
 - Browser probes execute generated pages and may follow page-directed network requests. Initial URL/path validation is not a browser network sandbox.
 - Mailbox replacement/UIDVALIDITY changes remain a specialized recovery case beyond ordinary fetch/persistence retries.
@@ -97,6 +97,7 @@ These are deployment/architecture caveats, not claims that an exploit or outage 
 - Private-thread visibility intentionally fails closed when membership/cache information cannot establish access; live Discord cache/permission behavior still deserves operational validation.
 - External actions such as Discord sends cannot guarantee exactly-once effects across a crash that occurs after the external side effect but before local confirmation.
 - OpenAI-compatible providers differ in streaming/tool-call behavior; mocked unit tests cannot substitute for testing the actual configured endpoint/model.
+- The current preferences store defaults missing user choices to history tracking on, contrary to the opt-in claims in the historical privacy audit and parts of the privacy UI. See [PRIVACY_AUDIT.md](PRIVACY_AUDIT.md) before relying on those claims.
 
 See [../SECURITY.md](../SECURITY.md) for security boundaries.
 
@@ -118,4 +119,4 @@ docker compose exec maxwell python3 doctor.py --probe
 docker compose logs -f maxwell
 ```
 
-External Discord, provider, browser, DNS, mail, OAuth, X, Telegram, and other integrations require the corresponding real service/configuration to be considered live-validated.
+External Discord, provider, browser, DNS, mail, OAuth, X, and other integrations require the corresponding real service/configuration to be considered live-validated.

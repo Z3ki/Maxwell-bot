@@ -1,5 +1,7 @@
 # Maxwell reliability research — historical snapshot and current status
 
+> Historical snapshot: even sections labeled “current” reflect the time of this refresh. In particular, the active conversation memory is now transcript/FTS-based, not the `rag_memory.py` vector-retrieval implementation described below; `shell` is also exempt from the tainted-turn destructive-tool gate. See [docs/MEMORY_RELIABILITY.md](docs/MEMORY_RELIABILITY.md) and [SECURITY.md](SECURITY.md) for current behavior.
+
 The original version of this file was a deep reliability review dated **2026-07-10**. It was useful at the time, but it described an older codebase as if it were still current. Several central claims in that review are now obsolete.
 
 This file is retained as a research entry point, not as a source of current architecture truth. For current deployment/runtime behavior, start with [README.md](README.md), [docs/OVERVIEW.md](docs/OVERVIEW.md), [docs/CONFIGURATION.md](docs/CONFIGURATION.md), and the newer [docs/AUDIT.md](docs/AUDIT.md).

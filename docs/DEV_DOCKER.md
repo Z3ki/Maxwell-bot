@@ -14,10 +14,10 @@ lazy backend starts on an allowed request.
 ## One Docker daemon, two controllers
 
 Both bots share one Docker daemon, so Dev sets `MAXWELL_CONTROLLER_ID=dev`
-(`docker-compose.dev.yml`). Every container Dev creates — shell sandboxes,
-site backends, GitHub workspaces — carries that controller identity in its
-name and labels, and startup cleanup only removes its own controller's
-containers. Production keeps the unlabeled default identity and adopts only
+(in `docker-compose.dev.yml`). Dev's shell and site guests use controller-scoped
+names and labels, and their startup cleanup only removes that controller's
+containers. GitHub workspace names also incorporate the controller identity.
+Production keeps the unlabeled default identity and adopts only
 legacy unlabeled guests. Aggregate shell/site resource limits remain
 host-wide: both controllers' guests join the shared `maxwell-shell.slice` /
 `maxwell-sites.slice` cgroups, and Dev's `MAXWELL_SHELL_MAX_CONCURRENCY`
@@ -95,10 +95,10 @@ LOCAL_AI=1 make stopdev
 ```
 
 This small model is for functional checks, not a production-quality claim.
-Alternatively, an existing host Ollama can be selected explicitly using
-`http://host.docker.internal:11434` if reachable from the Dev bridge; that shares
-inference capacity with the host, not Dev storage. No helper configures/exposes
-the host service automatically.
+Alternatively, an existing host Ollama can be selected explicitly using a
+host-reachable address (for example, `http://127.0.0.1:11434` for the
+host-networked bot). That shares inference capacity with the host, not Dev
+storage. No helper configures or exposes the host service automatically.
 
 ### Optional music
 
@@ -172,6 +172,11 @@ test container. Tests do not start Discord, Compose services or Production.
 Network-dependent live integrations must instead be checked explicitly in Dev.
 The linked worktree's `.git` is masked by disposable empty Git metadata, so
 installer subprocesses work without mounting production Git history/config.
+
+The test bind mounts the entire checkout read-only and masks only the exact
+`.env` and `.env.dev` paths. Other secret files, including environment backups,
+remain readable inside the test container; keep them outside the checkout before
+running tests. Read-only mounting does not prevent disclosure.
 
 For the existing dependency/lint/shell/coverage gates, install
 `requirements.txt` and `requirements-dev.txt` in an isolated Python environment

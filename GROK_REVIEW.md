@@ -1,5 +1,7 @@
 # Second-opinion review of `fix/codebase-audit`
 
+> Historical snapshot: this review and its verification results describe the named commits at the time, not necessarily the current tree. Consult the current code and documentation before relying on them.
+
 Scope: commit `bea09e2` ("Fix 50+ defects found in a full-codebase audit") plus
 `AUDIT_REPORT.md` (`4d81f51`), reviewed hunk by hunk against `origin/dev`, with
 spot checks of the surrounding code. My fixes are in the "Review fixes" commit on

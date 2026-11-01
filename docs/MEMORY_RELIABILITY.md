@@ -2,11 +2,16 @@
 
 ## Storage and retention
 
-The active `ConversationMemory` backend uses the existing `maxwell_rag.db`. Historical facts, vectors and unrelated rows remain stored; the active prompt path reads transcripts only. It does not require an embedding endpoint or run local vector inference, fact extraction, graph recall or consolidation.
+The active `ConversationMemory` backend uses `maxwell_rag.db` and reads transcripts only. It does not require an embedding endpoint or run local vector inference, fact extraction, graph recall or consolidation. Although the memory manager itself does not migrate legacy facts and vectors, `privacy_data.cleanup_data` deletes non-transcript rows and clears the retired user directory; do not assume those historical rows remain stored.
 
-There is no global channel-eviction limit. `MEMORY_MESSAGE_LIMIT` bounds transcripts per channel; retention removes only that channel's oldest transcript rows. The inactivity sweep atomically removes transcripts from channels whose newest stored user message is older than 12 hours. Bot output does not extend the cutoff. Neither operation deletes archived non-transcript rows or messages on Discord. No new aggregate storage quota is imposed.
+There is no global channel-eviction limit. `MEMORY_MESSAGE_LIMIT` bounds transcripts per channel; retention removes only that channel's oldest transcript rows. The inactivity sweep atomically removes transcripts from channels whose newest stored user message is older than 12 hours. Bot output does not extend the cutoff. Separate periodic privacy cleanup also applies an absolute age limit (`MAXWELL_HISTORY_RETENTION_DAYS`, default 30 days) and removes retired non-transcript rows. These operations do not delete messages on Discord. No new aggregate storage quota is imposed.
 
-All runtime SQLite reads/writes, row decoding, sanitization and cleanup run on one FIFO worker, off Discord's event loop. Whole writes and retention deletes stay in one transaction. Caller cancellation does not revoke accepted work; shutdown drains the worker before closing the connection. A covering partial index avoids the prior broad cleanup scan.
+History tracking currently defaults to on for users without a saved preference,
+not to affirmative opt-in. An explicit off choice suppresses writes and initiates
+content deletion; unreadable preferences fail closed. See the discrepancy in
+[PRIVACY_AUDIT.md](PRIVACY_AUDIT.md).
+
+The `ConversationMemory` manager runs its SQLite reads/writes, row decoding, sanitization and cleanup on one FIFO worker, off Discord's event loop. Whole writes and retention deletes stay in one transaction. Caller cancellation does not revoke accepted work; shutdown drains the worker before closing the connection. A covering partial index avoids the prior broad cleanup scan. Separate privacy cleanup uses its own SQLite connection on a background thread.
 
 ## Authorization and older recall
 

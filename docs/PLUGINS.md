@@ -6,8 +6,9 @@ or `control_defaults.py`.
 
 Python plugins run **in-process**. A manifest permission is an operator
 declaration and a runtime check, not a sandbox. Do not install untrusted
-Python from the network without reviewing it. Owner-only Discord and authenticated
-operator API controls are the only supported install/enable path.
+Python from the network without reviewing it. Installation and global controls
+are operator-only; users can change their own plugin availability with
+`manage_plugin`, and server managers can restrict optional plugins for a server.
 
 ## Layout
 
@@ -24,7 +25,8 @@ A new plugin:
 1. Create `plugins/<id>/` (`id` must be a Python identifier).
 2. Write `plugin.json` (validated before the Python is imported).
 3. Implement `setup(bot, ctx)` returning tools and/or calling `ctx.*`.
-4. Enable it (default comes from `enabled_by_default`, or `/plugins arguments:enable <name>`).
+4. Reload the plugin registry and enable it if needed (the initial global state
+   comes from `enabled_by_default`; an operator can use the API).
 5. Use the capability. Some host changes still need a process restart
    (`requires_restart` in the manifest).
 
@@ -34,7 +36,8 @@ A new plugin:
 
 | Field | Purpose |
 |---|---|
-| `id` / `name` | Unique identifier |
+| `id` | Unique Python-identifier plugin ID; falls back to `name` or directory name |
+| `display_name` / `title` | Display name; defaults to the plugin ID |
 | `version` | Plugin version |
 | `api_version` | Must be `1` |
 | `manifest_version` | Must be `1` when specified |
@@ -45,7 +48,7 @@ A new plugin:
 | `required_features` | Config flags that must be on before importing this plugin; missing/off flags omit it |
 | `permissions` | Declared capabilities (`network`, `shell`, …) |
 | `tools` | Tool names + contracts (`returns_result`, `ends_turn`, `is_destructive`) |
-| `prompt` | Optional prompt slice, included only when its tools are on the turn |
+| `prompt` | Optional prompt slice; defaults to requiring any declared tool, but `requires_tools` can override that (an empty list imposes no tool requirement) |
 | `enabled_by_default` | Used when `data/plugins.json` has no entry yet |
 | `protected` | Cannot be disabled globally |
 | `config_schema` / `default_config` | Plugin-owned settings |
@@ -95,15 +98,15 @@ compatibility parser, the runtime tool disable list, autonomy, and audit logs.
 
 ## Managing plugins
 
-- Discord: `/plugins arguments:list|enable|disable` (code reload/install/uninstall are not available from Discord)
-- Tool: `manage_plugin`
+- Discord: server managers can select optional tools in `/config`'s server plugin settings; code install, uninstall, and reload are not available there.
+- Tool: `manage_plugin` lists/statuses plugins and enables or disables them for the caller; admins may target another user or modify global status.
 - API: `GET /api/plugins`, `POST /api/plugins/install`,
   `POST /api/plugins/{name}/enable|disable|uninstall`,
   `POST /api/plugins/reload`, `PUT /api/plugins/{name}/config`
 
 Install copies a local directory or zip into `data/installed_plugins/` after
-validating `plugin.json`. Uninstall moves the code aside and keeps
-`data/plugins/<id>/`. Only independently installed plugins can be uninstalled;
+validating `plugin.json`; reload plugins to activate the installed code.
+Uninstall moves the code aside and keeps `data/plugins/<id>/`. Only independently installed plugins can be uninstalled;
 bundled plugins are disabled instead.
 
 Disabling a plugin removes its tools, events, prompts, jobs, and hooks from

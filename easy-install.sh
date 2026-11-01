@@ -25,7 +25,15 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --help|-h)
       printf '%s\n' "Usage: bash easy-install.sh [--version vX.Y.Z | --ref commit] [--dir path] [--non-interactive] [--configure-only] [--with-shell]" \
-        "Without a version, main is an unreleased development snapshot."
+        "  --help, -h          Show this help." \
+        "  --version vX.Y.Z    Install a release (X.Y.Z also accepted)." \
+        "  --ref commit        Install a full lowercase 40-character Git commit." \
+        "  --dir path          Install/update in this directory." \
+        "  --non-interactive   Use environment values and defaults without prompts." \
+        "  --configure-only    Prepare configuration without installing or starting Docker." \
+        "  --with-shell        Enable shell and set up gVisor, firewall, and quotas;" \
+        "                      host setup restarts Docker and is skipped with --configure-only." \
+        "Without a version or ref, MAXWELL_BRANCH (default: main) is a development snapshot."
       exit 0 ;;
     --version) shift; [ "$#" -gt 0 ] || fail "--version requires a release"; RELEASE_VERSION="$1" ;;
     --ref) shift; [ "$#" -gt 0 ] || fail "--ref requires a commit"; RELEASE_REF="$1" ;;
