@@ -5,6 +5,11 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import time
+import usage_metrics
+
 from tooling import helpers as _helpers
 from tools import Tool
 from discord_media import clean_media_url
@@ -124,10 +129,47 @@ class WebSearchTool(Tool):
                     max_pending=getattr(cfg, "WEB_SEARCH_MAX_PENDING", 32),
                     cache_size=getattr(cfg, "WEB_SEARCH_CACHE_SIZE", 256),
                 )
-            result = await self._search_service.search(
-                query, limit, backends,
-                time_range=time_range, freshness=freshness,
-            )
+            search_started = time.monotonic()
+            result = None
+            cancelled = False
+            try:
+                result = await self._search_service.search(
+                    query, limit, backends,
+                    time_range=time_range, freshness=freshness,
+                )
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                duration_ms = (time.monotonic() - search_started) * 1000
+                provider = result.provider if result is not None else ""
+                if provider.startswith("ddgs:"):
+                    provider = "ddgs"
+                elif provider not in {"searxng", "tavily"}:
+                    provider = "none"
+                count = len(result.hits) if result is not None else 0
+                success = result is not None and (bool(result.hits) or not result.errors)
+                outcome = ("cancelled" if cancelled else
+                           "success" if count else "empty" if success else "failed")
+                logger.info(
+                    "Web search completed",
+                    extra={"safe_log": True, "provider": provider,
+                           "duration_ms": duration_ms, "success": success,
+                           "queries": 1, "results": count},
+                )
+                data_dir = getattr(cfg, "DATA_DIR", None)
+                if data_dir:
+                    with contextlib.suppress(Exception):
+                        usage_metrics.record_event(
+                            data_dir, "search",
+                            user_id=getattr(getattr(message, "author", None), "id", None),
+                            guild_id=(getattr(getattr(message, "guild", None), "id", None)
+                                      or getattr(message, "guild_id", None)),
+                            channel_id=(getattr(getattr(message, "channel", None), "id", None)
+                                        or getattr(message, "channel_id", None)),
+                            provider=provider, queries=1, results=count,
+                            duration_ms=duration_ms, success=success, outcome=outcome,
+                        )
             hits, errors = list(result.hits), result.errors
             if not hits:
                 if errors:

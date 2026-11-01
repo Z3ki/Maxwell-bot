@@ -76,6 +76,8 @@ def delete_data(root, user_id, preferences, *, sessions=None):
             )
 
     run("consents", lambda: preferences.consents.delete(uid))
+    from usage_metrics import delete_user as delete_usage_metrics
+    run("usage_metrics", lambda: delete_usage_metrics(root, uid))
     agent_path = extra / "task_agents.sqlite3"
     if agent_path.is_file():
         from plugins.maxwell_extras.task_agents import TaskAgentStore

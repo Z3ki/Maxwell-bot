@@ -993,7 +993,7 @@ class _ConfigPanel(discord.ui.View):
         )
         return (
             "## Privacy\n"
-            "Saved messages are on unless you turn them off.\n\n"
+            "Saved messages are off unless you turn them on.\n\n"
             f"**Message storage:** {current}\n"
             "**Persistent learned memory:** unavailable; automatic facts/embeddings are retired.\n"
             "**AI processing:** current requests and necessary context still go to the selected provider, including fallbacks/BYOK. Provider retention is separate.\n\n"

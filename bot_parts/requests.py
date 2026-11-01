@@ -477,15 +477,46 @@ class RequestPipelineMixin:
         started = time.monotonic()
         request_provider = None
         user_install = is_user_install_message(message)
+        from diagnostics_safety import log_context
+        from uuid import uuid4
+        from usage_metrics import record_event
+        trigger = "interaction" if user_install else "message"
+        metadata = {
+            "trigger": trigger,
+            "user_id": str(getattr(getattr(message, "author", None), "id", "") or ""),
+            "guild_id": str(getattr(getattr(message, "guild", None), "id", "") or ""),
+            "channel_id": cid,
+        }
+        turn_counts = {"model_calls": 0, "tool_count": 0}
+        log_token = log_context.set({
+            **{k: v for k, v in metadata.items() if k != "user_id"},
+            "correlation_id": uuid4().hex,
+            "turn_counts": turn_counts,
+        })
+        turn_outcome = "completed"
+        turn_error = None
         cancelled = False
         try:
             row = await journal.submit(begin_turn) if journal is not None else {}
+            if not user_install:
+                channel = getattr(message, "channel", None)
+                if isinstance(channel, discord.DMChannel):
+                    trigger = "dm"
+                elif isinstance(channel, discord.GroupChannel):
+                    trigger = "group"
+                elif row:
+                    trigger = "directed" if row.get("directed") else "ambient"
+                metadata["trigger"] = trigger
+                log_context.set({**(log_context.get() or {}), "trigger": trigger})
             if row and row["status"] in _REQUEST_TERMINAL:
+                turn_outcome = row["status"]
                 return
             if row and row["effects_started"]:
+                turn_outcome = "failed"
                 await self._record_request_outcome(message, "failed", "interrupted_after_effect")
                 return
             if row and row["attempts"] >= max_attempts:
+                turn_outcome = "failed"
                 await self._request_failure(message, "retry_budget_exhausted")
                 return
             uid = str(getattr(message.author, "id", ""))
@@ -502,17 +533,22 @@ class RequestPipelineMixin:
                 if row:
                     reason = self._queued_request_policy_reason(message)
                     if reason:
+                        turn_outcome = "suppressed"
                         await self._record_request_outcome(message, "suppressed", reason)
                         return
                 await self._handle_message(message, content)
             row = (await self._request_state(message))
+            turn_outcome = row.get("status") or "completed"
             if row.get("status") == "delivered":
                 await self._mark_inbox_announced()
             if row and row["status"] not in _REQUEST_TERMINAL:
+                turn_outcome = "failed"
                 await self._request_failure(
                     message, "no_visible_output", retryable=True, normal_completion=True
                 )
         except asyncio.CancelledError:
+            turn_outcome = "cancelled"
+            turn_error = "CancelledError"
             cancelled = True
             row = (await self._request_state(message))
             # A /maxwell interaction is answered now (see finally), so it must
@@ -522,6 +558,8 @@ class RequestPipelineMixin:
             "cancelled_after_effect" if row.get("effects_started") else "cancelled",)
             raise
         except MessageQuotaExceeded as exc:
+            turn_outcome = "failed"
+            turn_error = type(exc).__name__
             try:
                 await self._mark_request_effect(message)
                 sent = await self._send_with_slowmode(
@@ -532,6 +570,13 @@ class RequestPipelineMixin:
                 logger.exception("Could not deliver message quota notice")
                 await self._record_request_outcome(message, "failed", "quota_notice_failed")
         except Exception as exc:
+            turn_outcome = "failed"
+            turn_error = type(exc).__name__
+            logger.warning(
+                "Turn failed",
+                extra={"safe_log": True, "error_type": turn_error},
+                exc_info=True,
+            )
             logger.warning(
                 "inbound mid=%s cid=%s stage=turn_error error=%s",
                 getattr(message, "id", ""),
@@ -581,6 +626,26 @@ class RequestPipelineMixin:
                 cid,
                 (time.monotonic() - started) * 1000,
             )
+            logger.info(
+                "Turn finished",
+                extra={"safe_log": True, "trigger": trigger, "channel_id": cid,
+                       "guild_id": metadata["guild_id"], "outcome": turn_outcome,
+                       "duration_ms": (time.monotonic() - started) * 1000,
+                       **turn_counts},
+            )
+            data_dir = getattr(getattr(self, "config", None), "DATA_DIR", None)
+            if data_dir is not None:
+                with contextlib.suppress(Exception):
+                    record_event(
+                        data_dir, "turn", **metadata,
+                        duration_ms=(time.monotonic() - started) * 1000,
+                        success=turn_outcome in {"completed", "delivered"},
+                        outcome=turn_outcome, error_type=turn_error,
+                    )
+                    if turn_error and turn_error != "CancelledError":
+                        record_event(data_dir, "error", **metadata,
+                                     error_type=turn_error, outcome="turn")
+            log_context.reset(log_token)
 
     def _queued_request_policy_reason(self, message) -> str:
         """Policy can change while an accepted request waits in the queue."""

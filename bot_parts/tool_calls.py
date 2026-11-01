@@ -4,6 +4,9 @@ Split out of bot.py; methods keep their original bodies.
 """
 
 import bot_common as _common
+import time as _metrics_time
+import usage_metrics
+
 
 # Mechanical split: the methods below were written against bot.py's
 # module globals. Bind every shared name so the bodies run unchanged.
@@ -115,6 +118,14 @@ class ToolCallsMixin:
         # Re-strip server-only _-keys AFTER extract so reasoning stays out too.
         params = {k: v for k, v in params.items() if not str(k).startswith("_")}
         params = _prepare_tool_params(name, params)
+        from diagnostics_safety import log_context
+        counts = (log_context.get() or {}).get("turn_counts")
+        if counts is not None:
+            counts["tool_count"] += 1
+        metrics_started = _metrics_time.monotonic()
+        metrics_invoked = False
+        metrics_exception = False
+        plugin_allowed = False
         result_text = ""
         try:
             plugin_manager = getattr(self, "plugin_manager", None)
@@ -240,6 +251,7 @@ class ToolCallsMixin:
                     logger.info("Executing tool %s", name)
                     # Unrelated requests never wait on a bot-wide tool budget.
                     # Resource-owning tools enforce their sandbox/worker bounds.
+                    metrics_invoked = True
                     raw = await MaxwellBot._invoke_request_tool(
                         self, message, name, tool, **params
                     )
@@ -258,6 +270,7 @@ class ToolCallsMixin:
                     )
                     head = result_text.lstrip().upper()
                     if head.startswith(("ERROR", "COULD NOT")):
+                        metrics_exception = True
                         if not is_permission_denied_result(result_text):
                             self._tool_breaker.record_failure(name)
                     else:
@@ -281,14 +294,33 @@ class ToolCallsMixin:
                             )
                         except Exception:
                             logger.exception("after_tool hook failed")
+        except asyncio.CancelledError:
+            data_dir = getattr(getattr(self, "config", None), "DATA_DIR", None)
+            if data_dir:
+                with contextlib.suppress(Exception):
+                    usage_metrics.record_event(
+                        data_dir, "tool",
+                        user_id=getattr(getattr(message, "author", None), "id", None),
+                        guild_id=(getattr(getattr(message, "guild", None), "id", None)
+                                  or getattr(message, "guild_id", None)),
+                        channel_id=(getattr(getattr(message, "channel", None), "id", None)
+                                    or getattr(message, "channel_id", None)),
+                        name=name if name in self.tools or plugin_allowed else "unknown",
+                        duration_ms=(_metrics_time.monotonic() - metrics_started) * 1000,
+                        success=False, outcome="cancelled",
+                    )
+            raise
         except (discord.Forbidden, PermissionError) as e:
+            metrics_exception = True
             # Expected access denials are scoped to this request/channel. They
             # must not disable a tool globally or generate owner crash alerts.
             logger.warning("Tool %s denied access (%s)", name, type(e).__name__)
             result_text = _tool_denial_text(name, e)
         except Exception as e:
+            metrics_exception = True
             logger.error(
-                f"Tool execution error for {name}: {e}\n{traceback.format_exc()}"
+                "Tool execution failed", exc_info=True,
+                extra={"safe_log": True},
             )
             self._tool_breaker.record_failure(name)
             # Exception text often contains paths, API responses, or credentials.
@@ -315,6 +347,30 @@ class ToolCallsMixin:
                         ),
                         name=f"owner-report-{name}",
                     )
+                )
+        metrics_failed = metrics_exception or not metrics_invoked
+        metrics_outcome = "failed" if metrics_failed else "returned"
+        metrics_duration = (_metrics_time.monotonic() - metrics_started) * 1000
+        metrics_name = name if name in self.tools or plugin_allowed else "unknown"
+        logger.info(
+            "Tool call completed",
+            extra={"safe_log": True, "tool_name": metrics_name,
+                   "duration_ms": metrics_duration, "outcome": metrics_outcome},
+        )
+        data_dir = getattr(getattr(self, "config", None), "DATA_DIR", None)
+        if data_dir:
+            with contextlib.suppress(Exception):
+                usage_metrics.record_event(
+                    data_dir, "tool",
+                    user_id=getattr(getattr(message, "author", None), "id", None),
+                    guild_id=(getattr(getattr(message, "guild", None), "id", None)
+                              or getattr(message, "guild_id", None)),
+                    channel_id=(getattr(getattr(message, "channel", None), "id", None)
+                                or getattr(message, "channel_id", None)),
+                    name=metrics_name,
+                    duration_ms=metrics_duration,
+                    success=False if metrics_failed else None,
+                    outcome=metrics_outcome,
                 )
         # Record the reasoning the model gave for THIS tool call, attached to the
         # real action and its result. Swallowed failures (see record_reasoning).

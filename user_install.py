@@ -1202,6 +1202,19 @@ async def _ephemeral(interaction: Any, text: str) -> None:
 
 async def handle_user_install_interaction(bot: Any, interaction: Any) -> bool:
     """Claim and start a user-install turn. True if this was ours."""
+    data = _interaction_data(interaction)
+    command_name = str(data.get("name") or "")
+    data_dir = getattr(getattr(bot, "config", None), "DATA_DIR", None)
+    if data_dir is not None and command_name in USER_INSTALL_NAMES:
+        try:
+            from usage_metrics import record_event
+            record_event(
+                data_dir, "command", name=command_name,
+                user_id=getattr(getattr(interaction, "user", None), "id", None),
+                guild_id=getattr(getattr(interaction, "guild", None), "id", None),
+            )
+        except Exception:
+            logger.warning("Could not record command metrics")
     for _prio, _name, handler in list(_INTERACTION_HANDLERS):
         try:
             claimed = handler(bot, interaction)

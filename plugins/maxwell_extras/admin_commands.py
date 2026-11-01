@@ -18,6 +18,7 @@ from identity import configured_admin_ids
 
 DIAGNOSTICS_COMMAND_NAME = "diagnostics"
 MAINTENANCE_COMMAND_NAME = "maintenance"
+STATS_COMMAND_NAME = "stats"
 _SENSITIVE_KEY_PARTS = (
     "api_key",
     "secret",
@@ -57,6 +58,14 @@ _ADMIN_COMMAND_META = {
     "integration_types": [0, 1],
     "contexts": [0, 1, 2],
 }
+STATS_COMMAND = {
+    "name": STATS_COMMAND_NAME,
+    "description": "View restricted aggregate usage statistics.",
+    **_ADMIN_COMMAND_META,
+    "options": [{"name": "days", "description": "Number of days (1–3650)", "type": 4,
+                 "required": False, "min_value": 1, "max_value": 3650}],
+}
+
 
 DIAGNOSTICS_COMMAND = {
     "name": DIAGNOSTICS_COMMAND_NAME,
@@ -458,7 +467,7 @@ async def _send(
 async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
     data = ui._interaction_data(interaction)
     name = str(data.get("name") or "")
-    if name not in {DIAGNOSTICS_COMMAND_NAME, MAINTENANCE_COMMAND_NAME}:
+    if name not in {DIAGNOSTICS_COMMAND_NAME, MAINTENANCE_COMMAND_NAME, STATS_COMMAND_NAME}:
         return False
 
     user = getattr(interaction, "user", None)
@@ -468,6 +477,19 @@ async def handle_admin_interaction(bot: Any, interaction: Any) -> bool:
         return True
 
     opts = _options(interaction)
+    if name == STATS_COMMAND_NAME:
+        from usage_metrics import format_summary, stats
+        try:
+            payload = await asyncio.to_thread(stats, bot.config.DATA_DIR, opts.get("days", 30))
+        except (ValueError, TypeError):
+            await _send(interaction, content="Days must be between 1 and 3650.")
+        except Exception:
+            await _send(interaction, content="Usage statistics are unavailable.")
+        else:
+            await _send(interaction, content=format_summary(payload),
+                        file=_json_file(payload, "maxwell-stats.json"))
+        return True
+
     if name == DIAGNOSTICS_COMMAND_NAME:
         section = str(opts.get("section") or "overview").strip().lower()
         if section not in {"overview", "runtime", "controls", "memory", "tools", "plugins", "data"}:
@@ -604,6 +626,8 @@ def install_admin_commands(bot: Any) -> None:
     ui.unregister_command(DIAGNOSTICS_COMMAND_NAME)
     ui.unregister_command(MAINTENANCE_COMMAND_NAME)
     ui.unregister_interaction_handler("admin_commands")
+    ui.register_command(STATS_COMMAND)
+    ui.register_interaction_handler(handle_admin_interaction, priority=5, name="admin_commands")
     bot._maxwell_admin_commands_installed = True
 
 

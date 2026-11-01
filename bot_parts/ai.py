@@ -103,18 +103,86 @@ class AIMixin:
         from plugins.maxwell_extras.task_job_store import active_job
         if active_job.get() is None:
             await typing_resume(self, getattr(message, "channel", None))
+        from diagnostics_safety import log_context
+        from maxwell_core.providers.routing import provider_attempt_observer
+        from usage_metrics import record_event
+
         started = time.monotonic()
-        try:
-            return await selected_provider.generate_response(messages, **kwargs)
-        finally:
-            if message is not None:
-                logger.info(
-                    "inbound mid=%s cid=%s stage=provider duration_ms=%d requested_model=%s",
-                    getattr(message, "id", ""),
-                    getattr(getattr(message, "channel", None), "id", ""),
-                    (time.monotonic() - started) * 1000,
-                    kwargs.get("model") or getattr(selected_provider, "model", ""),
+        attempts = 0
+
+        def record_attempt(provider_name, model, result, error, duration_ms):
+            nonlocal attempts
+            attempts += 1
+            counts = (log_context.get() or {}).get("turn_counts")
+            if counts is not None:
+                counts["model_calls"] += 1
+            error_type = type(error).__name__ if error is not None else None
+            fields = {
+                "trigger": (log_context.get() or {}).get("trigger"),
+                "user_id": str(getattr(author, "id", "") or ""),
+                "guild_id": str(getattr(getattr(message, "guild", None), "id", "") or ""),
+                "channel_id": str(getattr(getattr(message, "channel", None), "id", "") or ""),
+                "duration_ms": duration_ms,
+                "success": error is None,
+                "outcome": "success" if error is None else "error",
+                "error_type": error_type,
+            }
+            if provider is None:
+                config = getattr(self, "config", None)
+                configured_models = (
+                    getattr(config, key, None)
+                    for key in ("AI_MODEL", "AI_FALLBACK_MODEL", "AI_VISION_MODEL", "AI_PREMIUM_MODEL")
                 )
+                if isinstance(model, str) and model and model in configured_models:
+                    fields["model"] = model
+                if provider_name in ("primary", "fallback", "vision"):
+                    fields["provider"] = provider_name
+            usage = getattr(result, "usage", None) or {}
+            if isinstance(usage, dict):
+                for source, target in (("prompt_tokens", "tokens_in"), ("completion_tokens", "tokens_out")):
+                    count = usage.get(source)
+                    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                        fields[target] = count
+            data_dir = getattr(getattr(self, "config", None), "DATA_DIR", None)
+            if data_dir is not None:
+                with contextlib.suppress(Exception):
+                    record_event(data_dir, "model", **fields)
+                    if error is not None and not isinstance(error, asyncio.CancelledError):
+                        record_event(data_dir, "error", error_type=error_type, outcome="model",
+                                     user_id=fields["user_id"], guild_id=fields["guild_id"],
+                                     trigger=fields["trigger"])
+            safe_fields = {
+                key: fields[key]
+                for key in ("provider", "model", "tokens_in", "tokens_out")
+                if key in fields
+            }
+            if error is not None:
+                logger.warning(
+                    "Model call failed",
+                    extra={"safe_log": True, "error_type": error_type,
+                           "duration_ms": duration_ms, **safe_fields},
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            else:
+                logger.info(
+                    "Model call finished",
+                    extra={"safe_log": True, "duration_ms": duration_ms,
+                           "outcome": "success", **safe_fields},
+                )
+
+        observer_token = provider_attempt_observer.set(record_attempt)
+        try:
+            result = await selected_provider.generate_response(messages, **kwargs)
+            if not attempts:
+                record_attempt(getattr(result, "provider", None), getattr(result, "model", None),
+                               result, None, (time.monotonic() - started) * 1000)
+            return result
+        except BaseException as exc:
+            if not attempts:
+                record_attempt(None, None, None, exc, (time.monotonic() - started) * 1000)
+            raise
+        finally:
+            provider_attempt_observer.reset(observer_token)
 
 
     def _get_personality(self) -> str:

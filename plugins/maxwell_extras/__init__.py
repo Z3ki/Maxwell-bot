@@ -88,11 +88,12 @@ async def teardown(bot):
 
     ui.unwrap_session_send("maxwell_embed")
     ui.unwrap_session_send("interaction_progress")
-    from .admin_commands import DIAGNOSTICS_COMMAND_NAME, MAINTENANCE_COMMAND_NAME
+    from .admin_commands import DIAGNOSTICS_COMMAND_NAME, MAINTENANCE_COMMAND_NAME, STATS_COMMAND_NAME
     from .command_suite import uninstall_command_suite
 
     ui.unregister_command(DIAGNOSTICS_COMMAND_NAME)
     ui.unregister_command(MAINTENANCE_COMMAND_NAME)
+    ui.unregister_command(STATS_COMMAND_NAME)
     ui.unregister_interaction_handler("admin_commands")
     uninstall_command_suite(bot)
     ui.unregister_interaction_handler("interaction_progress")

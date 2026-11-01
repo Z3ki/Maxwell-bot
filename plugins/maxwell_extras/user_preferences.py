@@ -129,6 +129,9 @@ class UserPreferenceStore:
             row["defaults"] = defaults
             root["users"][uid] = row
             self._write(root)
+        if key == "tracking" and value == "off" and self.path.parent.name == "maxwell_extras" and self.path.parent.parent.name == "plugins":
+            from usage_metrics import delete_user
+            delete_user(self.path.parents[2], uid)
 
     def reset_default(self, user_id: Any, key: str) -> None:
         uid = str(user_id or "").strip()
@@ -216,6 +219,9 @@ class UserPreferenceStore:
             row.update(defaults=saved, personality=personality.strip())
             root["users"][uid] = row
             self._write(root)
+        if defaults.get("tracking") == "off" and self.path.parent.name == "maxwell_extras" and self.path.parent.parent.name == "plugins":
+            from usage_metrics import delete_user
+            delete_user(self.path.parents[2], uid)
 
     def delete_personal(self, user_id):
         uid = str(user_id)

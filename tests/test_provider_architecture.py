@@ -271,6 +271,26 @@ def test_router_preserves_primary_retry_schedule_and_fallback_model(monkeypatch)
     assert result.timing["endpoint"] == "fallback"
 
 
+def test_router_observes_failed_attempt_and_fallback():
+    from maxwell_core.providers.routing import provider_attempt_observer
+
+    router = _router([FakeErrorResponse(401, "private error")], [FakeResponse()], retry_attempts=1)
+    seen = []
+
+    async def run():
+        token = provider_attempt_observer.set(lambda *args: seen.append(args))
+        try:
+            return await router.generate_response([], fast_fallback=True)
+        finally:
+            provider_attempt_observer.reset(token)
+
+    assert asyncio.run(run()) == "ok"
+    assert [item[0] for item in seen] == ["primary", "fallback"]
+    assert seen[0][2] is None and isinstance(seen[0][3], ProviderAuthenticationError)
+    assert seen[1][2] is not None and seen[1][3] is None
+    assert all(item[4] >= 0 for item in seen)
+
+
 @pytest.mark.parametrize("status", [400, 401, 404, 429])
 def test_router_deterministic_rejection_or_cooldown_skips_failed_upstream(status):
     router = _router(

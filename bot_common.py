@@ -16,6 +16,7 @@ import inspect
 import io
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 import re
@@ -58,6 +59,7 @@ from message_quota import (
     enforced_window_seconds,
 )
 from usage_commands import install_usage_commands
+from diagnostics_safety import SafeLogFormatter
 
 import watch_policy  # noqa: E402
 import channel_watch  # noqa: E402
@@ -318,7 +320,7 @@ class _MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
-_log_format = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_log_format = SafeLogFormatter(json_format=os.getenv("LOG_FORMAT", "text").strip().lower() == "json")
 _stdout_handler = logging.StreamHandler(sys.stdout)
 _stdout_handler.setFormatter(_log_format)
 _stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
@@ -333,7 +335,42 @@ _stderr_handler.setLevel(logging.ERROR)
 _LOG_LEVEL = getattr(
     logging, os.getenv("LOG_LEVEL", "info").strip().upper(), logging.INFO
 )
-logging.basicConfig(level=_LOG_LEVEL, handlers=[_stdout_handler, _stderr_handler])
+_log_handlers: list[logging.Handler] = [_stdout_handler, _stderr_handler]
+_log_file = os.getenv("LOG_FILE", "").strip()
+if _log_file:
+    try:
+        # Never allow an unbounded file, even when configuration is malformed.
+        try:
+            _max_bytes = min(max(int(os.getenv("LOG_FILE_MAX_BYTES", "10485760")), 1024), 1073741824)
+            _backups = min(max(int(os.getenv("LOG_FILE_BACKUP_COUNT", "5")), 1), 100)
+        except ValueError:
+            _max_bytes, _backups = 10485760, 5
+        _fd = os.open(_log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.close(_fd)
+        _file_handler = RotatingFileHandler(
+            _log_file, maxBytes=_max_bytes, backupCount=_backups, encoding="utf-8"
+        )
+        _file_handler.setFormatter(_log_format)
+        _log_handlers.append(_file_handler)
+    except OSError:
+        # Startup must still work when optional logging storage is unavailable.
+        _file_error = logging.LogRecord(
+            "maxwell", logging.ERROR, __file__, 0,
+            "Optional log file unavailable", (), None,
+        )
+        _file_error.safe_log = True
+        _stderr_handler.handle(_file_error)
+_root_logger = logging.getLogger()
+if _root_logger.handlers:
+    # basicConfig is a no-op in embedded hosts and test runners. Protect their
+    # existing root handlers as well without removing capture handlers.
+    for _handler in _root_logger.handlers:
+        _handler.setFormatter(_log_format)
+    for _handler in _log_handlers:
+        _root_logger.addHandler(_handler)
+    _root_logger.setLevel(_LOG_LEVEL)
+else:
+    logging.basicConfig(level=_LOG_LEVEL, handlers=_log_handlers)
 
 # Third-party DEBUG is unusable noise: discord.gateway logs every heartbeat and
 # aiohttp/httpx log every socket. Pin them a notch above ours so LOG_LEVEL=debug

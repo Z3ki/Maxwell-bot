@@ -388,6 +388,8 @@ def test_dashboard_deletion_is_authenticated_and_revokes_sessions(
     tmp_path, monkeypatch
 ):
     from test_dashboard import setup as dashboard_setup
+    from datetime import date
+    import usage_metrics
 
     async def scenario():
         async with dashboard_setup(tmp_path, monkeypatch) as (
@@ -396,14 +398,19 @@ def test_dashboard_deletion_is_authenticated_and_revokes_sessions(
             headers,
         ):
             dashboard.preferences.set_default("100", "tracking", "on")
+            usage_metrics._record(tmp_path, "turn", {"user_id": "100"})
             assert (await client.delete("/api/dashboard/privacy")).status == 401
             before = await client.get("/api/dashboard/privacy", headers=headers)
-            assert (await before.json())["storage"] == "on"
+            exported = await before.json()
+            assert exported["storage"] == "on"
+            assert exported["usage_metrics"] == [{"day": date.today().isoformat(), "activity": "present"}]
             response = await client.delete("/api/dashboard/privacy", headers=headers)
             data = await response.json()
             assert response.status == 200
             assert data["complete"] is False and data["manual_required"]
             assert data["failed"] == []
+            assert data["deleted"]["usage_metrics"] == 1
+            assert usage_metrics.export_user(tmp_path, "100") == []
             assert dashboard.preferences.get("100")["defaults"]["tracking"] == "off"
             assert (
                 await client.get("/api/dashboard/personal", headers=headers)

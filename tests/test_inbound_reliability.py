@@ -848,7 +848,7 @@ def test_command_exception_after_effect_is_terminal_not_retried(tmp_path):
     assert row["effects_started"] is True
 
 
-def test_provider_call_receives_request_id_for_local_trace(tmp_path, caplog):
+def test_provider_call_receives_request_id_for_local_trace(tmp_path):
     bot = _bot(tmp_path)
     message = _message(bot)
     bot._night_fallback_kwargs = dict
@@ -863,10 +863,8 @@ def test_provider_call_receives_request_id_for_local_trace(tmp_path, caplog):
         finally:
             _current_inbound.reset(token)
 
-    with caplog.at_level("INFO"):
-        asyncio.run(run())
+    asyncio.run(run())
     bot.ai_provider.generate_response.assert_awaited_once_with([], timeout=3600, request_id="101")
-    assert "requested_model=configured-model" in caplog.text
 
 
 def test_completed_tool_then_empty_output_gets_ack_without_reexecuting(tmp_path):
@@ -1274,3 +1272,86 @@ def test_reliable_turn_adds_no_fallback_after_a_delivered_slash_answer(tmp_path)
     bot._handle_message = answer
     asyncio.run(bot._run_reliable_turn(message, "question"))
     assert followup.payloads == ["the answer"]
+
+
+def test_turn_metrics_capture_slash_failure_without_content(tmp_path, monkeypatch):
+    import usage_metrics
+    from diagnostics_safety import log_context
+
+    events = []
+    monkeypatch.setattr(usage_metrics, "record_event", lambda *args, **fields: events.append((args, fields)))
+    bot = _bot(tmp_path)
+    bot.config = SimpleNamespace(DATA_DIR=str(tmp_path))
+    message, _ = _slash_message(bot)
+    bot._handle_message = AsyncMock(side_effect=RuntimeError("private detail"))
+    asyncio.run(bot._run_reliable_turn(message, "private content"))
+    args, fields = next(event for event in events if event[0][1] == "turn")
+    assert args == (str(tmp_path), "turn")
+    assert fields["trigger"] == "interaction"
+    assert fields["outcome"] == "failed"
+    assert fields["error_type"] == "RuntimeError"
+    assert fields["duration_ms"] >= 0
+    assert "private" not in repr(fields)
+    assert not log_context.get()
+
+
+def test_model_metrics_capture_usage_and_byok_failure(tmp_path, monkeypatch):
+    import usage_metrics
+    import bot_parts.ai as ai
+
+    events = []
+    monkeypatch.setattr(usage_metrics, "record_event", lambda *args, **fields: events.append((args, fields)))
+    monkeypatch.setattr(ai, "typing_resume", AsyncMock())
+    bot = _bot(tmp_path)
+    bot.config = SimpleNamespace(DATA_DIR=str(tmp_path), AI_MODEL="trusted-model")
+    result = SimpleNamespace(usage={"prompt_tokens": 12, "completion_tokens": 3},
+                             model="trusted-model", provider="primary")
+    bot.ai_provider = SimpleNamespace(generate_response=AsyncMock(return_value=result))
+
+    async def exercise():
+        token = _current_inbound.set(_message(bot))
+        try:
+            assert await bot._generate_response([{"content": "private content"}]) is result
+            personal = SimpleNamespace(generate_response=AsyncMock(side_effect=RuntimeError("secret")))
+            with pytest.raises(RuntimeError):
+                await bot._generate_response([], provider=personal)
+        finally:
+            _current_inbound.reset(token)
+
+    asyncio.run(exercise())
+    success, failure = [fields for args, fields in events if args[1] == "model"]
+    assert success["tokens_in"] == 12 and success["tokens_out"] == 3
+    assert success["model"] == "trusted-model" and success["success"] is True
+    assert failure["error_type"] == "RuntimeError" and failure["success"] is False
+    assert "model" not in failure and "provider" not in failure
+    assert "private" not in repr(events) and "secret" not in repr(events)
+
+
+def test_turn_correlation_is_unique_inherited_and_reset(tmp_path, monkeypatch):
+    from diagnostics_safety import log_context
+    import usage_metrics
+
+    monkeypatch.setattr(usage_metrics, "record_event", lambda *args, **kwargs: None)
+    bot = _bot(tmp_path)
+    bot.config = SimpleNamespace(DATA_DIR=str(tmp_path))
+    seen = []
+
+    async def handle(_message, _content):
+        async def child():
+            return log_context.get().copy()
+        parent = log_context.get().copy()
+        inherited = await asyncio.create_task(child())
+        assert parent == inherited
+        seen.append(parent)
+
+    bot._handle_message = handle
+
+    async def run():
+        for mid in (101, 102):
+            message, _ = _slash_message(bot, mid)
+            await bot._run_reliable_turn(message, "private")
+            assert not log_context.get()
+
+    asyncio.run(run())
+    assert len({item["correlation_id"] for item in seen}) == 2
+    assert all(item["trigger"] == "interaction" and "user_id" not in item for item in seen)

@@ -1,8 +1,8 @@
 """Discovery commands for message usage.
 
-Usage is counted in messages over a rolling window. That is the only usage
-measure. These commands answer only when someone asks; they never start an AI
-turn and never send a DM.
+The message allowance is counted over a rolling window, independently of
+operational metrics. These commands answer only when someone asks; they never
+start an AI turn and never send a DM.
 """
 
 from __future__ import annotations

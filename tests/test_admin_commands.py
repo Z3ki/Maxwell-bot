@@ -121,5 +121,24 @@ def test_legacy_admin_commands_are_removed_from_sync_surface(monkeypatch):
     monkeypatch.setattr(ui, "_INTERACTION_HANDLERS", [])
     bot = SimpleNamespace()
     install_admin_commands(bot)
-    assert ui.USER_INSTALL_COMMANDS == []
-    assert not any(name == "admin_commands" for _priority, name, _fn in ui._INTERACTION_HANDLERS)
+    assert [command["name"] for command in ui.USER_INSTALL_COMMANDS] == ["stats"]
+    assert any(name == "admin_commands" for _priority, name, _fn in ui._INTERACTION_HANDLERS)
+
+
+def test_stats_requires_configured_owner(tmp_path):
+    from plugins.maxwell_extras.admin_commands import handle_admin_interaction
+
+    async def run():
+        sent = []
+        async def send_message(**kwargs):
+            sent.append(kwargs)
+        bot = SimpleNamespace(config=SimpleNamespace(MAXWELL_OWNER_IDS=("123",), DATA_DIR=tmp_path))
+        response = SimpleNamespace(send_message=send_message, is_done=lambda: False)
+        interaction = SimpleNamespace(data={"name": "stats"}, user=SimpleNamespace(id=456), response=response)
+        assert await handle_admin_interaction(bot, interaction)
+        assert "restricted" in sent[-1]["content"]
+        interaction.user.id = 123
+        assert await handle_admin_interaction(bot, interaction)
+        assert sent[-1]["ephemeral"]
+        assert sent[-1]["file"].filename == "maxwell-stats.json"
+    asyncio.run(run())

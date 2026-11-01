@@ -193,6 +193,42 @@ def test_compatibility_helper_uses_configured_providers(monkeypatch):
     assert captured["closed"]
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_search_metrics_exclude_query_and_preserve_cancellation(monkeypatch, tmp_path, cancelled):
+    import usage_metrics
+    from web_search import SearchResult
+
+    events = []
+    monkeypatch.setattr(usage_metrics, "record_event", lambda *args, **fields: events.append((args, fields)))
+
+    class Service:
+        async def search(self, *args, **kwargs):
+            if cancelled:
+                raise asyncio.CancelledError
+            return SearchResult(errors=("provider failed",))
+
+    bot = SimpleNamespace(config=SimpleNamespace(DATA_DIR=tmp_path))
+    tool = WebSearchTool(bot)
+    tool._search_service = Service()
+    message = SimpleNamespace(author=SimpleNamespace(id=123), guild=None, channel=None)
+
+    async def invoke():
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await tool.execute(message, query="private search content")
+        else:
+            await tool.execute(message, query="private search content")
+
+    asyncio.run(invoke())
+    assert len(events) == 1
+    args, fields = events[0]
+    assert args == (tmp_path, "search")
+    assert fields["outcome"] == ("cancelled" if cancelled else "failed")
+    assert fields["success"] is False
+    assert fields["queries"] == 1 and fields["results"] == 0
+    assert "private search content" not in repr(events)
+
+
 @pytest.mark.parametrize("kind", ["malformed", "oversized", "redirect"])
 def test_http_response_is_bounded_and_redirects_are_not_followed(kind):
     async def handler(_request):

@@ -493,6 +493,7 @@ class Dashboard:
     async def privacy(self, request, session):
         from privacy import policy_urls
         from privacy_data import delete_data
+        from usage_metrics import export_user as export_usage_metrics
         uid = session["user"]["id"]
         if request.method == "DELETE":
             result = await asyncio.to_thread(delete_data, self.data_dir(), uid, self.preferences, sessions=self.sessions)
@@ -501,7 +502,8 @@ class Dashboard:
             "storage": (await asyncio.to_thread(self.preferences.get, uid))["defaults"]["tracking"],
             "processing": "Requests and necessary context go to selected AI providers, including fallbacks and BYOK. Disabling history does not change provider processing or provider retention.",
             "support": policy_urls().get("contact", "Use /config → Privacy → Request private support in Discord."),
-            "persistent_memory": "Automatic facts and embeddings are retired."})
+            "persistent_memory": "Automatic facts and embeddings are retired.",
+            "usage_metrics": await asyncio.to_thread(export_usage_metrics, self.data_dir(), uid)})
 
     async def servers(self, request, session):
         if self.config.link_mode:

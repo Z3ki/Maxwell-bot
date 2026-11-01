@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from contextvars import ContextVar
 import logging
 import random
 import time
@@ -22,6 +23,7 @@ from .errors import (
 from .models import CompletionMessage, ProviderPolicy
 
 logger = logging.getLogger(__name__)
+provider_attempt_observer = ContextVar("provider_attempt_observer", default=None)
 
 # Dropped, reset or stalled connections that escape a client unwrapped are
 # transient: the same request can succeed on the next attempt.
@@ -208,9 +210,27 @@ class ProviderRouter(ChatProvider):
             attempt_messages.insert(insert_at, model_context)
             try:
                 try:
-                    result = await selected.generate_response(
-                        attempt_messages, **options
-                    )
+                    observer = provider_attempt_observer.get()
+                    attempt_started = time.monotonic()
+                    try:
+                        result = await selected.generate_response(
+                            attempt_messages, **options
+                        )
+                    except BaseException as exc:
+                        if observer is not None:
+                            try:
+                                observer(selected.name, effective_model, None, exc,
+                                         (time.monotonic() - attempt_started) * 1000)
+                            except Exception:
+                                pass
+                        raise
+                    else:
+                        if observer is not None:
+                            try:
+                                observer(selected.name, effective_model, result, None,
+                                         (time.monotonic() - attempt_started) * 1000)
+                            except Exception:
+                                pass
                 except _TRANSIENT_TRANSPORT_ERRORS as exc:
                     # Type only: transport messages can carry request URLs.
                     raise ProviderUnavailableError(
