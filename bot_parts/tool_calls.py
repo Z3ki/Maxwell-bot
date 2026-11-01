@@ -598,9 +598,8 @@ class ToolCallsMixin:
             social_done = False
             # A previous model round in this turn already posted. That post
             # owns the quote-reply; this round's sends go to the channel.
-            prior_delivery = bool(
-                ((await MaxwellBot._request_state(self, message)) or {}).get("response_id")
-            )
+            request_state = (await MaxwellBot._request_state(self, message)) or {}
+            prior_delivery = bool(request_state.get("response_id"))
             for call in calls:
                 if social_done:
                     line = f"Tool {call['name']}: Skipped — the reaction/GIF already ended the turn"
@@ -711,6 +710,20 @@ class ToolCallsMixin:
                         logger.warning(
                             f"Failed to record skipped terminal after no_response: {e}"
                         )
+                    continue
+                if (
+                    call["name"] == "wait"
+                    and request_state.get("directed")
+                    and not prior_delivery
+                    and request_state.get("status") != "delivered"
+                    and not send_message_seen
+                ):
+                    line = (
+                        "Tool wait: Error - wait is only for pacing after you have "
+                        "already sent a visible reply; send your reply first"
+                    )
+                    result_by_id[call["id"]] = line
+                    tool_results.append(line)
                     continue
                 # send_message, wait, any other terminal tool: run in
                 # declared order. Consecutive send_message calls are the one

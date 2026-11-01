@@ -823,7 +823,7 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         ["action"],
     ),
     "wait": _obj(
-        {"seconds": _num("Pause this tool batch (default 2, max 10)")},
+        {"seconds": _num("Pause this tool batch for pacing after a visible reply in a directed request; do not wait before replying (default 2, max 10). Ambient waits remain available.")},
     ),
     "sleep": _obj(
         {"duration_minutes": _int("Sleep window in minutes (1-60, default 30)")},

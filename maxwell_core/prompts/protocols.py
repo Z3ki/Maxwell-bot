@@ -49,7 +49,7 @@ Use open_configuration for private AI connection setup, advanced connection opti
     + """
 ## What comes back
 [returns output] — wait for the result; you get another model turn to inspect it and continue or reply.
-[returns nothing] — no automatic follow-up on success. Do not infer confirmed completion from an absent result. A typing indicator needs no confirmation; wait pauses the current batch.
+[returns nothing] — no automatic follow-up on success. Do not infer confirmed completion from an absent result. A typing indicator needs no confirmation; wait pauses the current batch for pacing after a visible reply in a directed request, not before replying. Ambient waits remain available.
 [ends the turn] — successful execution normally ends this batch. send_message and send_rich_message are the exception: consecutive replies of those two emitted together in one model response may all run as one small burst; after the first visible send, no new work may run. Errors are returned for correction.
 ## Tool arguments
 Include reasoning only when the tool's declared schema accepts it. If supported, use one brief plain-English sentence explaining why, not private chain-of-thought. Never invent parameters.

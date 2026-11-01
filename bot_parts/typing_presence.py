@@ -123,8 +123,9 @@ class TypingPresenceMixin:
         verb = "is" if len(people) == 1 else "are"
         return [
             f"{who} {verb} typing in this room right now. Wait for them to send "
-            "— don't talk over them. Prefer wait or no_response unless they "
-            "already asked you something that needs an immediate answer."
+            "— don't talk over them. For ambient conversation prefer wait or "
+            "no_response; for a directed request, reply before using wait to "
+            "pace any further messages."
         ]
 
     async def _user_label(self, uid: str, *, guild=None) -> str:
