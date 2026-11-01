@@ -1,6 +1,6 @@
 # Maxwell music
 
-Music is a bundled plugin, not a second bot. `music_info` reads live state/search/voice channels; `music_control` performs validated actions. `/music` and the Now Playing controls call the same `MusicService`. The static prompt describes capabilities without changing on each song. No microphone access, voice transcription or recurring AI polling is involved.
+Music is a bundled plugin, not a second bot. `music_info` reads live state/search/voice channels; `music_control` performs validated actions. Maxwell responds conversationally using these tools; the music plugin does not post or update music messages. No microphone access, voice transcription or recurring AI polling is involved.
 
 ## Audio backend and deployment
 
@@ -8,10 +8,12 @@ Pinned dependencies:
 
 - Lavalink server **4.2.2**: DAVE E2EE support, introduced in 4.2.0.
 - Java **21.0.12.1 LTS** (Temurin JRE, digest-pinned): correct cgroup v2 resource detection on newer Linux kernels.
-- Python `lavalink==5.11.0`: sends the mandatory DAVE `channelId` voice field.
+- Python `lavalink==5.11.1`: sends the mandatory DAVE `channelId` voice field.
 - YouTube Source plugin snapshot `2be8e54` (September 2026, after 1.18.2): iOS playback and the cipher fetch fix. 1.18.2 answers many videos with "requires login" and cannot extract the WEB signature on this host.
 
 References: [Lavalink changelog](https://lavalink.dev/changelog/v4), [Python client releases](https://github.com/Devoxin/Lavalink.py/releases), [YouTube plugin configuration](https://github.com/lavalink-devs/youtube-source/blob/2be8e542d3f6f178e048dca565892684c2e40177/README.md#plugin).
+
+PyNaCl and `davey` are not needed by the supported music path: Maxwell's custom `discord.VoiceProtocol` forwards gateway state to Lavalink, which handles Discord voice and DAVE. TTS generates audio with the provider and ffmpeg and uploads a voice-message attachment; it does not use a native Discord voice client. Microphone recording/voice receive is not supported. A discord.py warning about missing native voice dependencies therefore does not indicate that Lavalink music or TTS attachments are disabled; startup also logs this distinction. Native discord.py voice playback would require its own voice dependencies.
 
 For the Linux host-network Compose deployment, set strong independent random `LAVALINK_PASSWORD` and `YOUTUBE_CIPHER_PASSWORD` values in `.env` and run:
 
@@ -40,7 +42,7 @@ requests share the connection; cancelling one does not cancel the others.
 Shutdown wakes pending readiness waits. A timeout still reports the node
 unavailable; container health alone does not establish bot-side readiness.
 
-The bot must be server-installed, with the voice-state intent (already enabled) and View Channel, Connect and Speak permissions. Normal voice channels are supported; stage channels are deliberately rejected. Slash commands are registered by Maxwell's existing application-command sync on readiness. Audio processing remains on Lavalink rather than the AI process.
+The bot must be server-installed, with the voice-state intent (already enabled) and View Channel, Connect and Speak permissions. Normal voice channels are supported; stage channels are deliberately rejected. Audio processing remains on Lavalink rather than the AI process.
 
 ## Usage and permissions
 
@@ -60,15 +62,13 @@ Listeners can request songs and remove their own queued songs. Ordinary pause/re
 
 `music_control` remains available after web search or URL fetches, so Maxwell can identify a track and play it in the same turn. Music mutations are serialized side effects, not destructive tools for the fetched-content taint gate. Guild membership, voice-channel access, DJ/manager permissions and the YouTube-only source allowlist still apply; destructive tools remain blocked on a tainted turn, except `shell`, which stays available inside the sandbox so Maxwell can follow up on a URL.
 
-`/music` includes play/batch/autoplay/join/move/search/status/queue/pause/resume/skip/stop/leave/volume/seek/repeat/shuffle/clear/remove/configure. Playback and queue changes edit one persistent public Now Playing embed with artwork, linked track/artist, requester or autoplay origin, duration, voice channel, settings and the next three songs. The same controls remain active across songs and recheck current permissions. A new panel is posted only when the previous one is deleted/uneditable or the text channel changes; superseded and cross-server buttons cannot change playback. No-op updates do not edit, and transient Discord edit failures do not post duplicate panels. There is no periodic panel polling.
-
-`/music status` updates the existing panel in the invoking text channel when Maxwell can view, send and embed there, creating one only if needed; otherwise it returns a private status embed. Queue/search results and action/error feedback are private. Failed public publication does not turn a confirmed music operation into a failure.
+There are no music slash commands, panels, buttons, or queue embeds. Existing music buttons cease to work after the upgrade. Use conversation: `music_control` handles playback and settings, and `music_info` supplies status, queue, search and voice-channel information. The queue result is compact; Maxwell can describe the results in its own words.
 
 ### Multiple songs and autoplay
 
-For AI requests, `music_control(action="play", queries=[...], mode="queue")` loads one to ten selections atomically in the supplied order. Use `query` for one selection or `queries` for a batch, never both. `mode="next"` inserts the whole batch ahead of the existing queue without reversing it; `now` replaces the current song only on explicit request. `/music batch input:` accepts one title or YouTube link per line, with the same queue/next/now modes.
+For AI requests, `music_control(action="play", queries=[...], mode="queue")` loads one to ten selections atomically in the supplied order. Use `query` for one selection or `queries` for a batch, never both. `mode="next"` inserts the whole batch ahead of the existing queue without reversing it; `now` replaces the current song only on explicit request.
 
-Autoplay is **off by default**, scoped to the current session. Enable it with `/music autoplay enabled:true`, the Autoplay button, or `music_control(action="autoplay", value=true)`. While the last requested song is still playing, Maxwell tries to resolve one related song from its real YouTube radio mix in the background. At the end it awaits that task if present; if no task was admitted, it may search then, or leave playback idle if source loading is busy. Requested songs and repeat modes take precedence. The last 50 played URLs are excluded to avoid immediate cycling; automatically chosen songs are labeled in the embed.
+Autoplay is **off by default**, scoped to the current session. Enable it with `music_control(action="autoplay", value=true)`. While the last requested song is still playing, Maxwell tries to resolve one related song from its real YouTube radio mix in the background. At the end it awaits that task if present; if no task was admitted, it may search then, or leave playback idle if source loading is busy. Requested songs and repeat modes take precedence. The last 50 played URLs are excluded to avoid immediate cycling.
 
 Autoplay does not continue in an empty voice channel or after a failed source with no queued successor. Exhausted/unavailable recommendations leave playback idle with an actionable notice, not an infinite retry loop. Disabling autoplay, enabling repeat, adding an explicit queue, stopping or leaving invalidates the prepared recommendation. Disabling autoplay does not interrupt the current song. Stop clears the queue, disables autoplay and prevents an earlier still-loading request from restarting playback. Leaving or restarting Maxwell discards session autoplay state.
 
@@ -76,7 +76,7 @@ Queued tracks already contain resolved Lavalink track data. New song searches ru
 
 Background preparation can remove recommendation-search waits from the handoff when it completes in time; a pending task or a fallback search can still delay the transition. Queued tracks do not need another source lookup at handoff. Stock Lavalink does not offer next-track audio prebuffering: YouTube stream opening, signature decoding and Discord voice delivery can still delay audible playback. No fixed ten-second sleep is imposed; `trackStuckThresholdMs` is a failure threshold, not a transition delay.
 
-`/music configure` shows or edits:
+`music_control` with `action="configure"` shows or edits:
 
 | Setting | Default | Allowed |
 |---|---|---|
@@ -201,18 +201,18 @@ There are **no local reference-byte, synthesized-audio-byte or sample-duration c
 
 ## Verification
 
-Automated tests cover per-guild concurrency, queue/playlist transitions, repeat/autoplay precedence, recent-track exclusion, autoplay opt-out/exhaustion, atomic batches, permissions, admission, failed sources/nodes, disconnect cleanup, settings persistence, manual/AI consistency, public panel replacement, stale buttons and aggregate embed-message limits. A real Lavalink.py client is exercised against a local v4 REST/WebSocket fixture: authenticated connection, actual discord.py voice-state/server parser dispatch through VoiceProtocol, DAVE channelId voice handoff and same-session channel moves, TrackStart acknowledgment, next-track events and cleanup. URL TTS tests cover unattached references, redirects, private DNS/IPs, format errors, downloads/outputs exceeding the former 8 MiB cap, and full samples exceeding the former 20-second trim.
+Automated tests cover per-guild concurrency, queue/playlist transitions, repeat/autoplay precedence, recent-track exclusion, autoplay opt-out/exhaustion, atomic batches, permissions, admission, failed sources/nodes, disconnect cleanup, settings persistence, music tool results and the absence of automatic music messages. A real Lavalink.py client is exercised against a local v4 REST/WebSocket fixture: authenticated connection, actual discord.py voice-state/server parser dispatch through VoiceProtocol, DAVE channelId voice handoff and same-session channel moves, TrackStart acknowledgment, next-track events and cleanup.
 
 Live verification checklist for an operator with credentials:
 
 1. Start the audio node; check its authenticated health status and source-plugin logs.
-2. Join a VC and request a public YouTube song through conversation; verify audible playback and Now Playing.
-3. Queue, pause/resume, seek, skip, repeat, and leave through both AI and `/music`; test a second guild concurrently.
+2. Join a VC and request a public YouTube song through conversation; verify audible playback and ask what is playing.
+3. Queue, pause/resume, seek, skip, repeat, and leave through conversation; test a second guild concurrently.
 4. Test another requester outside the VC, a DJ, default-channel selection and channel permission revocation.
 5. Restart the audio node, test restored playback/queue, and let an empty session reach its idle timeout.
 6. Supply a permitted direct audio URL to TTS and verify Mistral generation and voice-message delivery.
 
-Local verification exercises live Lavalink title/radio resolution and music dispatch with simulated Discord voice transport. The Java runtime cutover additionally verifies authenticated node health, unchanged server/plugin versions, native buffered UDP sender startup, cgroup CPU/memory detection and quota-sized G1 workers. Embed payloads are checked against Discord limits and rendered in a desktop/mobile preview. These checks do not establish audible live Discord playback, elimination of reported mid-song dropouts, or exact Discord-client rendering; the operator checklist above covers those surfaces and live provider cloning. CI additionally validates the audio image, JVM resource detection and composed deployment on GitHub's Docker-enabled runner.
+Local verification exercises Lavalink title/radio resolution and music dispatch with simulated Discord voice transport. These checks do not establish audible live Discord playback or elimination of reported mid-song dropouts; the operator checklist above covers those surfaces and live provider cloning.
 
 Transition verification also exercises background radio preparation against the live source, consumes the prepared result with no new lookup at handoff, and checks queued transitions during a blocked new search, opt-out/cancellation, stale additions after Stop/Clear/Leave and bounded preparation across guilds. Simulated voice transport establishes service ordering and source lookup placement, not audible gap duration or multi-session audio capacity.
 

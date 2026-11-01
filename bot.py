@@ -1,5 +1,7 @@
 """Maxwell Bot - Main entry point"""
 
+from importlib.util import find_spec
+
 from bot_common import *  # noqa: F401,F403
 
 from bot_parts import (
@@ -81,6 +83,11 @@ class MaxwellBot(
 
 
 async def main():
+    if find_spec("nacl") is None or find_spec("davey") is None:
+        logger.info(
+            "Optional native Discord voice dependencies are missing; "
+            "Lavalink music and TTS voice-message attachments do not use them."
+        )
     loop = asyncio.get_running_loop()
     _owner_bot = {"bot": None}
 

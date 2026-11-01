@@ -7,6 +7,12 @@ Maxwell has two configuration layers:
 
 Keep `.env` and `data/` private.
 
+## Music
+
+Music uses the existing Lavalink connection settings; playback is controlled through conversation, not music panels or slash commands. No music UI environment variables are required. See [MUSIC.md](MUSIC.md) for setup and permissions.
+
+PyNaCl and `davey` are optional for native discord.py voice, which Maxwell does not use for its Lavalink music or TTS message attachments. Missing-native-voice warnings do not imply that those features are unavailable; see [MUSIC.md](MUSIC.md).
+
 ## Live webhook testing
 
 `LIVE_TEST_WEBHOOK_IDS` and `LIVE_TEST_CHANNEL_IDS` are comma-separated Discord

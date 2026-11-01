@@ -18,6 +18,10 @@
 
 ## Unreleased
 
+- Allow deletion of messages authored by Maxwell even when they were not attributed to a request, without changing permissions for other authors.
+- Remove music slash commands, public panels, queue embeds and persistent buttons; use conversational music tools for playback and status without automatic Discord music messages.
+- Clarify that missing native Discord voice dependencies do not disable Lavalink music or TTS voice-message attachments.
+
 - Add empty-by-default, paired webhook and channel allowlists for isolated live testing without enabling replies to other bots.
 - Restore bounded, redacted operational log and exception messages while avoiding direct content logging at INFO and above.
 
