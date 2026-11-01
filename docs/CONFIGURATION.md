@@ -6,6 +6,40 @@ Maxwell has two configuration layers:
 2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the authenticated operator API and restricted maintenance controls. The shared Maxwell persona is locked in code.
 
 Keep `.env` and `data/` private.
+## Usage metrics
+
+Operational metrics use `DATA_DIR/usage_metrics.sqlite3` (SQLite WAL). The
+`USAGE_METRICS_RETENTION_DAYS` setting defaults to 90 days (2–3650), and
+`USAGE_METRICS_ID_RETENTION_DAYS` defaults to 7 days (1–365, capped at one day
+less than aggregate retention). Invalid settings use the defaults. Pruning runs on writes, reads,
+and hourly while the metrics worker is active.
+
+Daily aggregates contain event counts, metadata dimensions, numeric totals and
+bounded latency histograms. Average latency uses recorded duration totals at
+microsecond resolution; overall, per-tool and per-model/provider p95 values are
+bucket upper bounds, not exact percentiles. Only configured environment model names are retained;
+dynamic/BYOK models and credential-like values are excluded. Daily 256-register
+cardinality sketches estimate active users and servers, including users without
+message storage enabled. Daily sketches can be merged for a period, but estimates
+have statistical error. They contain no per-user rows; an individual contribution
+cannot be subtracted and the sketches should not be described as mathematically
+anonymous, especially for small populations.
+
+The separate short-lived membership table contains salted hashes, not plaintext
+identifiers. User hashes rotate daily and are recorded only when optional message
+storage is explicitly enabled. Its opted-in distinct count is **user-days**, not
+unique people across a period. Server membership counts cover only the shorter
+membership retention window. Content, prompts and search queries are not metrics.
+Privacy deletion removes user membership, not aggregate totals or sketch
+contributions; the dashboard privacy response includes retained membership days.
+
+Application owners can use `/stats` with an optional `days` argument. Operators
+can also run `python scripts/stats.py --days 30` inside the container; `--json`
+emits the complete report, including grouped calls, successes, failures, latency,
+top commands, search counts, error types and token totals.
+Writes are best effort: the bounded queue drops events when full, and pending
+events can be lost on shutdown or storage failure.
+
 
 ## Primary AI settings
 
@@ -48,6 +82,26 @@ Do not set conflicting values in both namespaces.
 | `DISCORD_CLIENT_ID` | Optional | Discord application ID for bot invite URLs; falls back to the bot ID. Not a browser login setting. |
 
 See [`.env.example`](../.env.example) for the complete advanced environment reference.
+
+## Diagnostic logging
+
+`LOG_LEVEL` controls verbosity (default `info`). `LOG_FORMAT` selects `text`
+(default) or `json`. Logs through the configured root handlers go to stdout
+through warning and stderr for errors. Legacy INFO-and-higher message text is
+omitted because it may contain user data; explicitly safe instrumentation
+provides structured operational fields. Exception diagnostics include the
+exception type and stack locations, not exception messages or source lines.
+DEBUG messages are redacted and capped at 200 characters, but can still contain
+private non-secret information; enable DEBUG only in a protected environment.
+Handlers attached separately to individual loggers and direct writes to streams
+are not covered by this formatter.
+
+Set `LOG_FILE` to enable an additional rotating file. `LOG_FILE_MAX_BYTES`
+defaults to 10485760 and is clamped to 1024–1073741824;
+`LOG_FILE_BACKUP_COUNT` defaults to 5 and is clamped to 1–100. A newly created
+file is private to the process owner. The configured maximum applies per file,
+with the specified number of backups in addition to the active file. If the
+optional file cannot be opened, stream logging remains available.
 
 ## Generated-site custom backends
 
@@ -160,7 +214,7 @@ Blank IDs do not grant implicit ownership.
 - **AI connection**: optionally connect a personal provider with an API key;
   see [BYOK.md](BYOK.md) for setup and advanced controls.
 - **Privacy**: choose whether your message content is stored. Storage defaults
-  to on for a new user when preferences are available; turning it off stops new
+  to off when a user has no saved preference; turning it off stops new
   saves and deletes stored messages, replies to you, tool records from those turns, and facts already stored for your Discord account.
   A request you send is still answered and is still sent to the AI provider.
 
@@ -181,7 +235,7 @@ on every action; retired message-limit controls are no longer advertised.
 prefix commands and standalone personality/owner settings commands are retired.
 Maxwell's shared system prompt cannot be edited through `/config`.
 
-Usage is counted in messages over a rolling window, and that is the only usage measure. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, checkout, price, or token quota. When the quota is on, the free allowance defaults to 150 messages per five hours. An operator can grant premium, which raises that allowance to at least 500 messages (or the higher configured free limit) in the same window and uses `AI_PREMIUM_MODEL` when that variable is set.
+The message allowance is counted over a rolling window, separately from operational metrics. Fresh installs leave `message_quota_enabled` off, so self-hosted runtimes admit unlimited messages until an operator turns a quota on. There is no billing, checkout, price, or token quota. When the quota is on, the free allowance defaults to 150 messages per five hours. An operator can grant premium, which raises that allowance to at least 500 messages (or the higher configured free limit) in the same window and uses `AI_PREMIUM_MODEL` when that variable is set.
 
 ### A loaded tool is missing in one server
 

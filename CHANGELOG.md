@@ -18,6 +18,8 @@
 
 ## Unreleased
 
+- Add content-free daily usage aggregates, bounded latency histograms and owner-only `/stats` and CLI reporting. Short-lived daily user hashes require explicit storage opt-in and are included in privacy access/deletion.
+
 - Disable the ddgs scraper fallback by default; opt in with `WEB_SEARCH_SCRAPER_FALLBACK=true`. Search uses configured SearXNG and Tavily providers and reports unavailable or empty results without scraping.
 
 - Audit current configuration, search, worker and deployment documentation against the code; distinguish shipped defaults from operator examples.

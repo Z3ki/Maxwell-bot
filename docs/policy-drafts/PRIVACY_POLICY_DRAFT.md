@@ -1,5 +1,7 @@
 # Privacy policy — superseded note
 
+Last updated: 2026-11-01
+
 **Before launch, the operator must fill in their identity and contact details.**
 The published privacy policy contains neutral placeholders exactly because this
 checkout must never invent a company name, address, jurisdiction, or
@@ -21,6 +23,10 @@ saved on choices permit storage, including legacy choices without separate
 consent evidence. Changing the default does not itself delete old history.
 Existing retention and explicit deletion controls still apply. Provider
 processing of live requests is separate from optional local history.
+
+The published policy also describes operational diagnostics, aggregate metrics,
+estimated activity, short-lived opt-in membership hashes, retention and the
+limits of deletion from aggregates and external logs.
 
 What the operator still has to decide or verify (nothing below is legal
 advice):

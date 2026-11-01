@@ -147,6 +147,8 @@ The public website includes `/guide/`, `/contact/`, `/terms/`, and `/privacy/` w
 
 Developer access is determined by configured Maxwell owner IDs. Diagnostics redact secret-like values, and maintenance refuses to edit secret controls.
 
+Operational logs and usage metrics are described in [configuration](docs/CONFIGURATION.md#diagnostic-logging) and the [privacy audit](docs/PRIVACY_AUDIT.md). Configured application owners can use `/stats`; operators can run `python scripts/stats.py --days 7` or add `--json` from the container. Metrics are best-effort aggregates, not a message-content archive.
+
 Maxwell can inspect its running revision, changelog, recent public GitHub commits, and changed-file summaries through `get_maxwell_updates`. The running revision is captured at startup; newer commits on `main` are not assumed to be deployed. GitHub failures fall back to the local snapshot.
 
 The model decides when to search for current information. Web search uses

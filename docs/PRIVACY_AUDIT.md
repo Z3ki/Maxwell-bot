@@ -65,9 +65,9 @@ claim one receipt. Failed delivery has no public/DM fallback and can retry later
 The receipt is not an agreement record. No AI request is used for privacy UX.
 
 `/config → Privacy` and the dashboard explain history, current provider
-processing and retired persistent facts/embeddings. The UI describes On as an
-intentional choice, but current missing-user defaults are on without a recorded
-choice. Model-driven configuration cannot enable it for a user. Off stops new transcript
+processing and retired persistent facts/embeddings. Missing-user preferences
+default to off; an existing saved On choice remains effective. Model-driven
+configuration cannot enable it for a user. Off stops new transcript
 writes and removes stored conversation content. Reset stays off. Independent
 choices can be reviewed/withdrawn; voice authorization is bound to a hash of the
 exact reference and a distinct policy version. It is a user's permission
@@ -104,6 +104,7 @@ before release; no fabricated address was added.
 | `privacy.sqlite3` | Active optional choices until withdrawal/deletion. Withdrawn choices: 365 days by default. Notice ID/version/time remains to avoid repeated unchanged notices, unless the user deletes it. |
 | `llm_traces.json` | Metadata only; seven days / 300 rows. Legacy raw reasoning payloads are scrubbed. Full deletion removes matching user rows. |
 | `inbound_requests.sqlite3`, quota DB | Seven days by default; no message bodies. Short-lived usage/security metadata may remain after personal-data deletion to prevent quota abuse. Existing quota/window pruning also applies. Manual plan/limit grants last until revoked or full deletion. |
+| `usage_metrics.sqlite3` | WAL daily counters, latency histograms and mergeable estimated-activity sketches: 90 days by default. Short-lived daily salted user membership hashes are recorded only with explicit history On, default seven days, and are included in privacy access/deletion. Sketches include all users and cannot subtract a person's contribution; aggregate totals and sketches remain after individual deletion. Both retention limits are configurable. |
 | Dashboard flows/sessions | Five-minute flows, at most eight-hour sessions; prune during auth and periodic cleanup. User sessions are revoked on full deletion when the session key/store is available; failures are reported. |
 | `task_agents.sqlite3` custom profiles | Explicitly saved instructions/scopes/tool permissions; ten per user, 90 days since last edit by default, periodic pruning and full deletion with stale-write suppression. Worker transcripts remain in memory only. |
 | Encrypted BYOK credentials | Until explicit removal/full deletion; encrypted using the operator's configured master key. No key value is returned to a user/model. |

@@ -1,5 +1,7 @@
 # Terms of service — superseded note
 
+Last updated: 2026-11-01
+
 **Before launch, the operator must fill in their identity and contact details.**
 The published terms do not identify a specific operator or select a governing
 jurisdiction. Do not treat these release-candidate terms as final.
@@ -12,6 +14,9 @@ This file used to hold a working draft with an open review checklist. It has
 been retired so there is only one version of the truth: the published page
 above. If the published terms and any old copy of this draft disagree, the
 published page wins.
+
+The published terms link to the privacy policy for operational logging,
+aggregate usage measurement, retention, export and deletion details.
 
 What the operator still has to decide or fill in (nothing below is legal
 advice):
