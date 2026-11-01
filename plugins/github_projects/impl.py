@@ -333,8 +333,7 @@ class GitHubProjectService:
         if env: return env
         return self.user_tokens.peek(uid)
 
-    async def _api(self, uid: str, policy: dict[str, Any], method: str, path: str, *, json_body: Any=None, accept: str="application/vnd.github+json") -> tuple[int,str,Any]:
-        identity = str(policy.get("identity") or "user")
+    def _require_identity_access(self, uid: str, identity: str) -> None:
         if identity == "bot":
             # The shared operator token can see private/org repos that the
             # caller cannot. Check live admin status on every call, not only
@@ -348,6 +347,10 @@ class GitHubProjectService:
                 raise PermissionError(
                     "the shared bot GitHub identity is available to Maxwell admins only"
                 )
+
+    async def _api(self, uid: str, policy: dict[str, Any], method: str, path: str, *, json_body: Any=None, accept: str="application/vnd.github+json") -> tuple[int,str,Any]:
+        identity = str(policy.get("identity") or "user")
+        self._require_identity_access(uid, identity)
         token = self.token(uid, identity)
         if not token:
             if identity=="bot":
@@ -515,8 +518,11 @@ class GitHubProjectService:
     ) -> ExecResult:
         """Execute only trusted Git with a private snapshot and stdin credential."""
         validate_git_commands(commands)
+        identity = str(policy.get("identity") or "user")
+        self._require_identity_access(uid, identity)
         await self._ensure_image()
-        token = self.token(uid, str(policy.get("identity") or "user"))
+        self._require_identity_access(uid, identity)
+        token = self.token(uid, identity)
         if not token:
             raise PermissionError("GitHub credential is not configured")
         target = self.repo_root(uid, repo)

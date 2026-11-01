@@ -192,6 +192,43 @@ def test_docker_credential_transport_is_not_argv_or_workspace_environment(tmp_pa
     asyncio.run(scenario())
 
 
+def test_revoked_admin_cannot_use_existing_bot_identity_for_git(tmp_path, monkeypatch):
+    admins = {"1"}
+    service = GitHubProjectService(
+        SimpleNamespace(_is_admin=lambda uid: uid in admins),
+        SimpleNamespace(data_dir=tmp_path),
+    )
+    calls = []
+
+    async def image():
+        calls.append("image")
+
+    async def process(*args, **kwargs):
+        calls.append("process")
+        return ExecResult(0, "", "")
+
+    monkeypatch.setattr(service, "_ensure_image", image)
+    monkeypatch.setattr(service, "_proc", process)
+    monkeypatch.setattr(service, "token", lambda *_args: TOKEN)
+    policy = {"identity": "bot", "allow_security_testing": True}
+
+    async def scenario():
+        await service.policy.set("1", "acme/app", policy)
+        service.repo_root("1", "acme/app").mkdir(parents=True)
+        await service.git("1", "acme/app", policy, [["push", "origin", "HEAD"]])
+        assert calls == ["image", "process"]
+        admins.clear()
+        with pytest.raises(PermissionError, match="Maxwell admins only"):
+            await service.git("1", "acme/app", policy, [["push", "origin", "HEAD"]])
+        with pytest.raises(PermissionError, match="Maxwell admins only"):
+            await service._trusted_git("1", "acme/app", policy, [["fetch", "--prune", "origin"]], checkout=True)
+        with pytest.raises(PermissionError, match="Maxwell admins only"):
+            await service._api("1", policy, "GET", "/user")
+        assert calls == ["image", "process"]
+
+    asyncio.run(scenario())
+
+
 @contextmanager
 def smart_http_remote(root: Path):
     """A real Git smart-HTTP backend, with only synthetic authentication."""
