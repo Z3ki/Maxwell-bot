@@ -191,6 +191,37 @@ def test_gate_returns_have_terminal_reason(tmp_path, control, reason):
     assert (row["status"], row["reason"]) == ("suppressed", reason)
 
 
+@pytest.mark.parametrize(
+    ("webhooks", "channels", "webhook_id", "channel_id", "responds"),
+    [
+        ("", "", 77, 22, False),
+        ("77", "", 77, 22, False),
+        ("", "22", 77, 22, False),
+        ("77", "22", 78, 22, False),
+        ("77", "22", None, 22, False),
+        ("77", "22", 77, 23, False),
+        ("77", "22", 77, 22, True),
+    ],
+)
+def test_live_test_webhook_requires_both_allowlists(
+    tmp_path, monkeypatch, webhooks, channels, webhook_id, channel_id, responds
+):
+    monkeypatch.setenv("LIVE_TEST_WEBHOOK_IDS", webhooks)
+    monkeypatch.setenv("LIVE_TEST_CHANNEL_IDS", channels)
+    bot = _bot(tmp_path)
+    bot._control["reply_to_bots"] = False
+    message = _message(bot, cid=channel_id)
+    message.author.bot = True
+    message.webhook_id = webhook_id
+
+    async def run():
+        await bot.on_message(message)
+        await _drain(bot)
+
+    asyncio.run(run())
+    assert bool(message.channel.sent) is responds
+
+
 def test_same_user_followup_stops_generation_and_answers_only_latest(tmp_path):
     bot = _bot(tmp_path)
     first, second, third = (_message(bot, mid) for mid in (101, 102, 103))

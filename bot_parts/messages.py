@@ -19,6 +19,15 @@ from bot_parts._compat import (  # noqa: F401
 )
 from response_guard import strip_internal_context
 
+def _live_test_webhook(message):
+    """Admit only explicitly configured webhook/channel pairs for live tests."""
+    webhook_id = str(getattr(message, "webhook_id", None) or "")
+    channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
+    webhooks = {value.strip() for value in os.getenv("LIVE_TEST_WEBHOOK_IDS", "").split(",") if value.strip()}
+    channels = {value.strip() for value in os.getenv("LIVE_TEST_CHANNEL_IDS", "").split(",") if value.strip()}
+    return bool(webhook_id and channel_id and webhook_id in webhooks and channel_id in channels)
+
+
 
 class MessagesMixin:
 
@@ -484,7 +493,7 @@ class MessagesMixin:
                 logger.warning(f"Background media cache failed: {type(e).__name__}")
 
         if message.author.bot:
-            if not self._control.get("reply_to_bots", True):
+            if not self._control.get("reply_to_bots", True) and not _live_test_webhook(message):
                 return "bot_author"
 
         # Every human line updates the room's pace and engagement, even

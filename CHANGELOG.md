@@ -18,6 +18,7 @@
 
 ## Unreleased
 
+- Add empty-by-default, paired webhook and channel allowlists for isolated live testing without enabling replies to other bots.
 - Restore bounded, redacted operational log and exception messages while avoiding direct content logging at INFO and above.
 
 - Add content-free daily usage aggregates, bounded latency histograms and owner-only `/stats` and CLI reporting. Short-lived daily user hashes require explicit storage opt-in and are included in privacy access/deletion.

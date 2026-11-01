@@ -6,6 +6,16 @@ Maxwell has two configuration layers:
 2. Runtime controls in `DATA_DIR/bot_control.json`, editable through the authenticated operator API and restricted maintenance controls. The shared Maxwell persona is locked in code.
 
 Keep `.env` and `data/` private.
+
+## Live webhook testing
+
+`LIVE_TEST_WEBHOOK_IDS` and `LIVE_TEST_CHANNEL_IDS` are comma-separated Discord
+IDs, both empty by default. When both contain a message's webhook ID and channel
+ID, respectively, that webhook may receive replies even when `reply_to_bots` is
+off. Other bot and webhook policy is unchanged. These are independent sets,
+so each listed webhook is allowed in every listed channel. Use only temporarily
+in an isolated test bot and remove both settings after testing.
+
 ## Usage metrics
 
 Operational metrics use `DATA_DIR/usage_metrics.sqlite3` (SQLite WAL). The
