@@ -21,8 +21,12 @@ When the model requests a search, Maxwell tries:
 2. Tavily, if `TAVILY_API_KEY` is configured.
 3. Keyless ddgs engines, included in the core requirements.
 
-An empty, malformed, rate-limited or failed provider falls back within the same
-deadline. Useful partial results return immediately instead of searching more
+An empty, malformed, rate-limited, timed-out or failed provider falls back to
+the next configured provider within the overall search deadline. SearXNG has
+its own `SEARXNG_TIMEOUT` deadline (6 seconds by default, clamped to 0.5–10
+seconds). When a fallback is configured, SearXNG gets at most half of the
+remaining overall budget, leaving time for fallback. Useful partial results
+return immediately instead of searching more
 engines to fill every slot. Brief provider cooldowns reduce repeated failures.
 Searches use an HTTP connection pool and a separate bounded executor for ddgs;
 timed-out threads retain capacity until they actually finish. Distinct queued
@@ -67,9 +71,12 @@ automatic parameter upgrades. No paid provider is used without its key.
 
 ## Tuning and verification
 
-Defaults: `WEB_SEARCH_TIMEOUT=12`, `WEB_SEARCH_CONCURRENCY=4`,
+Defaults: `WEB_SEARCH_TIMEOUT=12`, `SEARXNG_TIMEOUT=6`,
+`WEB_SEARCH_MAX_PER_TURN=5`, `WEB_SEARCH_CONCURRENCY=4`,
 `WEB_SEARCH_MAX_PENDING=32`, `WEB_SEARCH_CACHE_SIZE=256`,
-`WEB_FETCH_TIMEOUT=12`. The source-page deadline covers redirects and Jina
+`WEB_FETCH_TIMEOUT=12`. The per-turn limit caps web searches; set
+`WEB_SEARCH_MAX_PER_TURN=0` for unlimited searches per turn. The source-page
+deadline covers redirects and Jina
 fallback. Oversized pages and HTTP 403/429 can use the existing Jina Reader
 fallback; private/internal URLs remain refused. Authorization headers are
 removed on cross-origin redirects.

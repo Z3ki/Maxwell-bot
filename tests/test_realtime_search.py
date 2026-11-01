@@ -88,6 +88,108 @@ def test_provider_fallback_after_empty_malformed_and_failed_results():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("failure", ["empty", "invalid_hits", "exception", "timeout"])
+def test_searxng_falls_back_for_all_failure_modes(failure, caplog):
+    async def scenario():
+        calls = []
+
+        class Service(SearchService):
+            async def _http(self, provider, query, limit, timeout, time_range):
+                calls.append((provider, timeout))
+                if provider == "tavily":
+                    return [HIT]
+                if failure == "timeout":
+                    await asyncio.sleep(1)
+                if failure == "exception":
+                    raise RuntimeError("secret-query secret-key")
+                if failure == "invalid_hits":
+                    return [{"url": "http://127.0.0.1/", "content": "private"}]
+                return []
+
+        service = Service(
+            searxng_url="http://secret-endpoint",
+            searxng_timeout=10,
+            tavily_key="secret-key",
+            budget=0.12,
+        )
+        try:
+            result = await service.search("secret-query", 1, [], freshness="live")
+            assert result.provider == "tavily"
+            assert [name for name, _ in calls] == ["searxng", "tavily"]
+            assert 0 < calls[0][1] <= 0.06
+            assert calls[1][1] > 0
+        finally:
+            await service.close()
+
+    import logging
+    with caplog.at_level(logging.INFO, logger="web_search"):
+        asyncio.run(scenario())
+    assert "provider=searxng" in caplog.text
+    assert "provider=tavily" in caplog.text
+    assert "latency_ms=" in caplog.text
+    assert "secret-query" not in caplog.text
+    assert "secret-key" not in caplog.text
+    assert "secret-endpoint" not in caplog.text
+
+
+def test_searxng_primary_and_timeout_clamping():
+    async def scenario():
+        calls = []
+
+        class Service(SearchService):
+            async def _http(self, provider, query, limit, timeout, time_range):
+                calls.append((provider, timeout))
+                return [HIT]
+
+        service = Service(
+            searxng_url="http://searxng", searxng_timeout=100,
+            tavily_key="key", budget=30,
+        )
+        try:
+            result = await service.search("query", 1, ["bing"], object)
+            assert result.provider == "searxng"
+            assert calls == [("searxng", 10.0)]
+            low_timeout = SearchService(searxng_timeout=0.01)
+            try:
+                assert low_timeout.searxng_timeout == 0.5
+            finally:
+                await low_timeout.close()
+        finally:
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_compatibility_helper_uses_configured_providers(monkeypatch):
+    from config import Config
+    from tooling.helpers import _web_search_collect
+    import web_search
+
+    captured = {}
+
+    class Service:
+        def __init__(self, **settings):
+            captured.update(settings)
+
+        async def search(self, *args):
+            return web_search.SearchResult(hits=(HIT,))
+
+        async def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(Config, "SEARXNG_URL", "http://searxng")
+    monkeypatch.setattr(Config, "SEARXNG_TIMEOUT", 3.0)
+    monkeypatch.setattr(Config, "TAVILY_API_KEY", "key")
+    monkeypatch.setattr(web_search, "SearchService", Service)
+    hits, errors = asyncio.run(_web_search_collect(None, "query", 1, []))
+    assert hits == [HIT]
+    assert not errors
+    assert captured["searxng_url"] == "http://searxng"
+    assert captured["searxng_timeout"] == 3.0
+    assert captured["tavily_key"] == "key"
+    assert captured["closed"]
+
+
 @pytest.mark.parametrize("kind", ["malformed", "oversized", "redirect"])
 def test_http_response_is_bounded_and_redirects_are_not_followed(kind):
     async def handler(_request):
@@ -151,7 +253,7 @@ def test_tavily_uses_fixed_endpoint_basic_search_and_header_credentials():
     asyncio.run(scenario())
 
 
-def test_cache_copies_hits_and_live_bypasses_completed_cache():
+def test_cache_copies_hits_and_live_bypasses_completed_cache(caplog):
     async def scenario():
         calls = []
 
@@ -178,10 +280,14 @@ def test_cache_copies_hits_and_live_bypasses_completed_cache():
         finally:
             await service.close()
 
-    asyncio.run(scenario())
+    import logging
+    with caplog.at_level(logging.INFO, logger="web_search"):
+        asyncio.run(scenario())
+    assert "search caller provider=searxng source=cache latency_ms=" in caplog.text
+    assert "devices" not in caplog.text
 
 
-def test_same_query_is_coalesced_and_one_cancellation_does_not_cancel_others():
+def test_same_query_is_coalesced_and_one_cancellation_does_not_cancel_others(caplog):
     async def scenario():
         started, release = asyncio.Event(), asyncio.Event()
         calls = []
@@ -208,7 +314,11 @@ def test_same_query_is_coalesced_and_one_cancellation_does_not_cancel_others():
         finally:
             await service.close()
 
-    asyncio.run(scenario())
+    import logging
+    with caplog.at_level(logging.INFO, logger="web_search"):
+        asyncio.run(scenario())
+    assert "search caller provider=searxng source=shared latency_ms=" in caplog.text
+    assert "devices" not in caplog.text
 
 
 def test_distinct_pending_queries_are_bounded_but_duplicates_can_join():
@@ -318,7 +428,8 @@ def test_searxng_works_without_ddgs_and_does_not_persist_web_results(
         async with TestServer(app) as server:
             bot = SimpleNamespace(
                 config=SimpleNamespace(
-                    SEARXNG_URL=str(server.make_url("/")).rstrip("/")
+                    SEARXNG_URL=str(server.make_url("/")).rstrip("/"),
+                    SEARXNG_TIMEOUT=2.75,
                 ),
                 memory=Memory(),
             )
@@ -329,6 +440,7 @@ def test_searxng_works_without_ddgs_and_does_not_persist_web_results(
                 )
                 assert "https://example.org/devices" in result
                 assert "retrieved_at=" in result
+                assert tool._search_service.searxng_timeout == 2.75
                 assert stored == []
             finally:
                 await tool.close()

@@ -18,6 +18,8 @@
 
 ## Unreleased
 
+- Bound SearXNG requests with configurable `SEARXNG_TIMEOUT` (default 6 seconds) so failed or timed-out searches can fall back to Tavily or keyless ddgs. Limit web searches per turn with `WEB_SEARCH_MAX_PER_TURN` (default 5; 0 is unlimited), and document the host-network SearXNG URL.
+
 - Reject `wait` before a visible reply in directed requests without delaying or stopping the tool loop. Keep post-reply pacing and ambient waits unchanged.
 
 - Disable conversation watch by default, including when its control setting is missing.

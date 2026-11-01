@@ -53,7 +53,8 @@ class ToolCallsMixin:
             logger.warning(f"Failed to force reasoning trace: {e}")
 
     async def _execute_tool_by_name(
-        self, message, name: str, params: dict, *, disabled: set, compatible: set
+        self, message, name: str, params: dict, *, disabled: set, compatible: set,
+        web_search_budget: list[int] | None = None,
     ) -> str:
         """Run a single tool and return the result text (including Tool name: prefix).
 
@@ -226,6 +227,15 @@ class ToolCallsMixin:
                             hook_result.get("error")
                             or "refused: a before_tool hook blocked this call"
                         )
+                if not result_text and name == "web_search" and web_search_budget is not None:
+                    limit, used = web_search_budget
+                    if limit and used >= limit:
+                        result_text = (
+                            "Search limit reached for this turn. Use the results already "
+                            "available to answer, or ask the user for a follow-up."
+                        )
+                    else:
+                        web_search_budget[1] += 1
                 if not result_text:
                     logger.info("Executing tool %s", name)
                     # Unrelated requests never wait on a bot-wide tool budget.
@@ -441,6 +451,7 @@ class ToolCallsMixin:
         raw_tool_calls: list,
         include_images: bool = False,
         existing_progress=None,
+        web_search_budget: list[int] | None = None,
     ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
         """Execute OpenAI-style native tool_calls from the provider."""
         tool_results: list[str] = []
@@ -541,6 +552,7 @@ class ToolCallsMixin:
                 params,
                 disabled=disabled,
                 compatible=compatible,
+                web_search_budget=web_search_budget,
             )
             result_by_id[call["id"]] = line
             # A memory-write failure must NOT abort the tool batch: asyncio.gather
@@ -889,6 +901,7 @@ class ToolCallsMixin:
         native_tool_calls: list | None = None,
         include_images: bool = False,
         existing_progress=None,
+        web_search_budget: list[int] | None = None,
     ) -> tuple[str, list[str]] | tuple[str, list[str], list[str]]:
         """Native tool_calls only. The XML text-tag dispatch is gone — Maxwell
         is native function-calling only now. If the model didn't emit native
@@ -914,6 +927,7 @@ class ToolCallsMixin:
                 native_tool_calls,
                 include_images=include_images,
                 existing_progress=existing_progress,
+                web_search_budget=web_search_budget,
             )
             # Co-emitted assistant prose next to native tool_calls is not a
             # second user-facing answer. The tool (or its follow-up) owns

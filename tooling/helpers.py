@@ -3793,7 +3793,6 @@ _WEB_SEARCH_BACKENDS = (
     "yahoo",
     "wikipedia",
 )
-_WEB_SEARCH_BUDGET_SEC = 12.0
 
 
 def _sanitize_web_query(query: str | None) -> str:
@@ -3848,9 +3847,18 @@ async def _web_search_collect(
     ddgs_cls: Any, query: str, limit: int, backends: list[str]
 ) -> tuple[list[dict[str, str]], list[str]]:
     """Compatibility entry point; runtime tools reuse their SearchService."""
+    from config import Config
     from web_search import SearchService
 
-    service = SearchService(budget=_WEB_SEARCH_BUDGET_SEC)
+    service = SearchService(
+        searxng_url=Config.SEARXNG_URL,
+        searxng_timeout=Config.SEARXNG_TIMEOUT,
+        tavily_key=Config.TAVILY_API_KEY,
+        budget=Config.WEB_SEARCH_TIMEOUT,
+        concurrency=Config.WEB_SEARCH_CONCURRENCY,
+        max_pending=Config.WEB_SEARCH_MAX_PENDING,
+        cache_size=Config.WEB_SEARCH_CACHE_SIZE,
+    )
     try:
         result = await service.search(query, limit, backends, ddgs_cls)
         return list(result.hits), list(result.errors)

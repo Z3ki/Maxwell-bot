@@ -125,6 +125,7 @@ class WebSearchTool(Tool):
             if self._search_service is None:
                 self._search_service = SearchService(
                     searxng_url=searxng_url, tavily_key=tavily_key,
+                    searxng_timeout=getattr(cfg, "SEARXNG_TIMEOUT", 6.0),
                     budget=getattr(cfg, "WEB_SEARCH_TIMEOUT", 12.0),
                     concurrency=getattr(cfg, "WEB_SEARCH_CONCURRENCY", 4),
                     max_pending=getattr(cfg, "WEB_SEARCH_MAX_PENDING", 32),

@@ -350,8 +350,10 @@ class Config:
         "ENABLE_VIDEO_INPUT", lambda: _has_binary("ffmpeg"), needs="ffmpeg"
     )
     SEARXNG_URL = os.getenv("SEARXNG_URL", "").strip()
+    SEARXNG_TIMEOUT = _float_env("SEARXNG_TIMEOUT", 6.0, 0.5, 10.0)
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
     GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "").strip()
+    WEB_SEARCH_MAX_PER_TURN = _int_env("WEB_SEARCH_MAX_PER_TURN", 5, 0, 10000)
     WEB_SEARCH_TIMEOUT = _float_env("WEB_SEARCH_TIMEOUT", 12.0, 2.0, 30.0)
     WEB_SEARCH_CONCURRENCY = _int_env("WEB_SEARCH_CONCURRENCY", 4, 1, 16)
     WEB_SEARCH_MAX_PENDING = _int_env("WEB_SEARCH_MAX_PENDING", 32, 1, 256)

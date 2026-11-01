@@ -11,6 +11,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import math
 import re
 import time
 from collections import OrderedDict
@@ -101,11 +102,24 @@ class SearchResult:
         return replace(self, hits=tuple(dict(row) for row in self.hits), cached=cached)
 
 
+def _log_search_call(result: SearchResult, started: float, source: str) -> None:
+    provider = result.provider
+    if provider.startswith("ddgs:"):
+        provider = "ddgs"
+    elif provider not in {"searxng", "tavily"}:
+        provider = "none"
+    logger.info(
+        "search caller provider=%s source=%s latency_ms=%.1f",
+        provider, source, (time.monotonic() - started) * 1000,
+    )
+
+
 class SearchService:
     def __init__(
         self,
         *,
         searxng_url: str = "",
+        searxng_timeout: float = 6.0,
         tavily_key: str = "",
         budget: float = 12.0,
         concurrency: int = 4,
@@ -113,6 +127,10 @@ class SearchService:
         cache_size: int = 256,
     ):
         self.searxng_url = searxng_url.strip().rstrip("/")
+        self.searxng_timeout = (
+            max(0.5, min(float(searxng_timeout), 10.0))
+            if math.isfinite(float(searxng_timeout)) else 6.0
+        )
         self.tavily_key = tavily_key.strip()
         self.budget = budget
         self.max_pending = max_pending
@@ -138,8 +156,11 @@ class SearchService:
         freshness: str = "recent",
         time_range: str | None = None,
     ) -> SearchResult:
+        started = time.monotonic()
         if self._closed:
-            return SearchResult(errors=("search service is closed",))
+            result = SearchResult(errors=("search service is closed",))
+            _log_search_call(result, started, "closed")
+            return result
         ttl = _CACHE_SECONDS.get(freshness, _CACHE_SECONDS["recent"])
         time_range = time_range if time_range in _TIME_RANGES else None
         # The model chooses freshness, including live (no completed cache).
@@ -150,14 +171,19 @@ class SearchService:
             created, result = entry
             if ttl and now - created < ttl:
                 self._cache.move_to_end(key)
-                return result.copy(cached=True)
+                result = result.copy(cached=True)
+                _log_search_call(result, started, "cache")
+                return result
             self._cache.pop(key, None)
         task = self._inflight.get(key)
+        source = "shared" if task is not None else "provider"
         if task is None:
             if len(self._inflight) >= self.max_pending:
-                return SearchResult(
+                result = SearchResult(
                     errors=("search capacity is busy; try again shortly",)
                 )
+                _log_search_call(result, started, "busy")
+                return result
             task = asyncio.create_task(
                 self._search(query, limit, backends, ddgs_cls, time_range)
             )
@@ -182,17 +208,19 @@ class SearchService:
         # One user's cancellation must not cancel another user's identical
         # search. The shared task still has its own deadline and capacity cap.
         result = await asyncio.shield(task)
+        _log_search_call(result, started, source)
         return result.copy()
 
     async def _search(
         self, query, limit, backends, ddgs_cls, time_range
     ) -> SearchResult:
         errors: list[str] = []
+        deadline = time.monotonic() + self.budget
         try:
             # Includes admission time, HTTP providers and every fallback.
             async with asyncio.timeout(self.budget):
                 async with self._slots:
-                    deadline = time.monotonic() + self.budget
+                    # Admission consumes the same budget as provider requests.
                     providers = []
                     if self.searxng_url:
                         providers.append("searxng")
@@ -200,28 +228,46 @@ class SearchService:
                         providers.append("tavily")
                     if ddgs_cls is not None:
                         providers.extend("ddgs:" + b for b in backends[:8])
-                    for provider in providers:
+                    for index, provider in enumerate(providers):
                         if self._cooldowns.get(provider, 0) > time.monotonic():
                             errors.append(provider + ": temporarily cooling down")
                             continue
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             break
-                        timeout = min(4.0, remaining)
+                        if provider == "searxng":
+                            # Leave time for a configured fallback, even when
+                            # admission has already consumed part of the budget.
+                            allowance = remaining / 2 if index + 1 < len(providers) else remaining
+                            timeout = min(self.searxng_timeout, allowance)
+                        else:
+                            timeout = min(4.0, remaining)
+                        started = time.monotonic()
+                        outcome = "failed"
                         try:
-                            if provider.startswith("ddgs:"):
-                                rows = await self._ddgs(
-                                    ddgs_cls,
-                                    query,
-                                    limit,
-                                    provider[5:],
-                                    timeout,
-                                    time_range,
-                                )
-                            else:
-                                rows = await self._http(
-                                    provider, query, limit, timeout, time_range
-                                )
+                            async with asyncio.timeout(timeout):
+                                if provider.startswith("ddgs:"):
+                                    rows = await self._ddgs(
+                                        ddgs_cls,
+                                        query,
+                                        limit,
+                                        provider[5:],
+                                        timeout,
+                                        time_range,
+                                    )
+                                else:
+                                    rows = await self._http(
+                                        provider, query, limit, timeout, time_range
+                                    )
+                                hits, seen = [], set()
+                                for raw in rows[:50]:
+                                    hit = normalize_hit(raw)
+                                    if hit is not None and hit["href"] not in seen:
+                                        seen.add(hit["href"])
+                                        hits.append(hit)
+                                    if len(hits) >= limit:
+                                        break
+                                outcome = "success" if hits else "empty"
                         except Exception as exc:
                             if re.search(r"no results", str(exc), re.I):
                                 continue
@@ -233,21 +279,19 @@ class SearchService:
                                 else type(exc).__name__
                             )
                             errors.append(provider + ": " + detail)
-                            logger.info(
-                                "search provider %s failed (%s)", provider, detail
-                            )
+                            # Diagnostics never include the query, endpoint,
+                            # credentials, response or exception text in logs.
                             self._cooldowns[provider] = time.monotonic() + 20.0
                             while len(self._cooldowns) > 64:
                                 self._cooldowns.popitem(last=False)
                             continue
-                        hits, seen = [], set()
-                        for raw in rows[:50]:
-                            hit = normalize_hit(raw)
-                            if hit is not None and hit["href"] not in seen:
-                                seen.add(hit["href"])
-                                hits.append(hit)
-                            if len(hits) >= limit:
-                                break
+                        finally:
+                            logger.info(
+                                "search provider=%s outcome=%s latency_ms=%.1f",
+                                "ddgs" if provider.startswith("ddgs:") else provider,
+                                outcome,
+                                (time.monotonic() - started) * 1000,
+                            )
                         if hits:
                             # A useful partial response is enough. Do not
                             # query six more engines just to fill five slots.
