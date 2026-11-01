@@ -108,10 +108,10 @@ def test_real_client_voice_handshake_trackstart_and_next(tmp_path, monkeypatch):
             await service.execute(msg, 'play', query='second')
             session_state = service.sessions[10]
             advanced = asyncio.Event()
-            async def panel(s):
-                if s.current and s.current.title == 'second':
+            def observe(s, event):
+                if event == 'start' and s.current and s.current.title == 'second':
                     advanced.set()
-            service.panel_update = panel
+            service.playback_observer = observe
             await sockets[-1].send_json({'op': 'event', 'type': 'TrackEndEvent', 'guildId': '10',
                                         'reason': 'finished', 'track': audio_track()})
             async with asyncio.timeout(3):

@@ -68,7 +68,6 @@ class ManagedPlayer(lavalink.DefaultPlayer):
                         self.current, self._next = None, None
                     await super().change_node(node)
                     session.error = None
-                    await service.publish(session)
         else:
             await super().change_node(node)
 

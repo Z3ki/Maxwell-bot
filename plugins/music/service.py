@@ -102,9 +102,6 @@ class Session:
     recent_uris: deque[str] = field(default_factory=lambda: deque(maxlen=50))
     last_active: float = field(default_factory=time.monotonic)
     empty_since: float | None = None
-    panel: object | None = None
-    _panel_fingerprint: tuple | None = field(default=None, repr=False)
-    text_channel: object | None = None
     error: str | None = None
     inflight: int = 0
     autoplay_seed: str | None = None
@@ -129,7 +126,6 @@ class MusicService:
         self.settings_lock = asyncio.Lock()
         self.rates = OrderedDict()
         self._closed = False
-        self.panel_update = None
         self.playback_observer = None
         backend.service = self
 
@@ -256,8 +252,10 @@ class MusicService:
                 'paused': session.paused, 'volume': session.volume, 'repeat': session.repeat,
                 'autoplay': session.autoplay,
                 'position_seconds': self.backend.position(session.guild.id) // 1000 if session.current else 0,
-                'queue_length': len(session.queue), 'queue': [t.public() for t in session.queue[:25]],
-                'queue_note': 'Use queue with offset to view more.', 'error': session.error,
+                'queue_length': len(session.queue), 'queue': [t.public() for t in session.queue[:10]],
+                'queue_remaining': max(0, len(session.queue) - 10),
+                'queue_note': f"+ {max(0, len(session.queue) - 10)} more" if len(session.queue) > 10 else None,
+                'error': session.error,
                 'audio_available': self.backend.available}
 
     async def execute(self, message, action, *, query=None, queries=None, channel=None,
@@ -293,10 +291,11 @@ class MusicService:
             if action == 'queue':
                 if type(offset) is not int or not 0 <= offset <= 1000:
                     raise MusicError('Queue offset must be between 0 and 1000.')
-                return {'queue': [], 'offset': offset, 'total': 0}
+                return {'queue': [], 'offset': offset, 'total': 0, 'queue_remaining': 0, 'queue_note': None}
             return {'connected': False, 'voice_channel': None, 'current': None,
                     'paused': False, 'volume': 50, 'repeat': 'off', 'autoplay': False, 'position_seconds': 0,
-                    'queue_length': 0, 'queue': [], 'audio_available': self.backend.available}
+                    'queue_length': 0, 'queue': [], 'queue_remaining': 0, 'queue_note': None,
+                    'audio_available': self.backend.available}
         if session is None:
             if action not in {'play', 'join'}:
                 raise MusicError('There is no music session here. Ask me to join or play a song.')
@@ -346,8 +345,11 @@ class MusicService:
                         if action == 'queue':
                             if type(offset) is not int or not 0 <= offset <= 1000:
                                 raise MusicError('Queue offset must be between 0 and 1000.')
-                            return {'queue': [t.public() for t in session.queue[offset:offset + 25]],
-                                    'offset': offset, 'total': len(session.queue)}
+                            remaining = max(0, len(session.queue) - offset - 10)
+                            return {'queue': [t.public() for t in session.queue[offset:offset + 10]],
+                                    'offset': offset, 'total': len(session.queue),
+                                    'queue_remaining': remaining,
+                                    'queue_note': f'+ {remaining} more' if remaining else None}
                         return self.snapshot(session)
                     self.authorize(session, member, action)
                     if action == 'play':
@@ -366,7 +368,6 @@ class MusicService:
                             raise MusicError('You have reached your queued-song allowance.')
                         # Nothing is queued or moved until all loading and policy checks succeed.
                         await self._join(session, target)
-                        session.text_channel = getattr(message, 'channel', None) or session.text_channel
                         if session.current is None or mode == 'now':
                             await self._start(session, tracks[0])
                             session.queue[0:0] = tracks[1:]
@@ -382,7 +383,6 @@ class MusicService:
                         if session.channel and target.id != session.channel.id and not self.privileged(guild, member):
                             raise MusicError('Moving an active session requires a DJ or server manager.')
                         await self._join(session, target)
-                        session.text_channel = getattr(message, 'channel', None) or session.text_channel
                         result = {'joined': {'id': str(target.id), 'name': target.name}}
                     elif action == 'leave':
                         await self._leave(session)
@@ -447,7 +447,6 @@ class MusicService:
                     if action != 'skip':
                         session.error = None
                     self._prepare_autoplay(session)
-                    await self.publish(session)
                     return {**result, 'state': self.snapshot(session)}
         finally:
             if play_admitted:
@@ -477,7 +476,6 @@ class MusicService:
             session.current, session.paused = None, False
             session.last_active = time.monotonic()
             session.error = 'Playback could not be confirmed. The queue has been preserved.'
-            await self.publish(session)
             raise
         session.current, session.paused, session.error = track, False, None
         self._cancel_autoplay(session)
@@ -598,7 +596,6 @@ class MusicService:
                 session.error = 'Audio is unavailable; the queue has been preserved. Try skip after recovery.'
                 session.last_active = time.monotonic()
             self._prepare_autoplay(session)
-            await self.publish(session)
 
     async def disconnected(self, gid):
         session = self.sessions.get(gid)
@@ -613,7 +610,6 @@ class MusicService:
                 session.queue.clear()
                 session.channel = None
                 self.sessions.pop(gid, None)
-                await self.publish(session)
 
     async def tick(self):
         now = time.monotonic()
@@ -644,7 +640,6 @@ class MusicService:
         session.channel, session.current = None, None
         session.queue.clear()
         self.sessions.pop(session.guild.id, None)
-        await self.publish(session)
 
     async def configure(self, guild, member, changes):
         if not (member.guild_permissions.manage_guild or member.guild_permissions.administrator or member.id == guild.owner_id):
@@ -677,13 +672,6 @@ class MusicService:
             self.settings = updated
         return {'saved': True, 'settings': self.config(guild.id)}
 
-    async def publish(self, session):
-        if self.panel_update:
-            try:
-                async with asyncio.timeout(3):
-                    await self.panel_update(session)
-            except Exception as exc:
-                log.warning('Music panel update failed guild=%s type=%s', session.guild.id, type(exc).__name__)
 
     async def close(self):
         self._closed = True

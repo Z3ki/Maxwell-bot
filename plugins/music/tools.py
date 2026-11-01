@@ -1,4 +1,4 @@
-"""Self-describing AI music tools calling the same service as Discord UI."""
+"""Self-describing AI tools for the music service."""
 import json
 import logging
 
@@ -65,7 +65,6 @@ class MusicControlTool(Tool):
                 'Requested songs and repeat take priority over autoplay; it does not run in empty voice channels. '
                 'configure reads/updates server music settings (server managers only). '
                 'Never claim success unless the result confirms it; started means an actual TrackStart was received. '
-                'Successful changes refresh the public Now Playing embed when channel permissions allow. '
                 'If no voice channel is known, ask the user; do not hijack another session. '
                 'Music controls work after web research. Read music_info for live state/channels; no guild/user overrides or arbitrary audio URLs.')
 
@@ -86,8 +85,8 @@ class MusicInfoTool(MusicControlTool):
             'query': PARAMETERS['properties']['query'], 'offset': PARAMETERS['properties']['offset']}, 'required': ['action']}
 
     def get_description(self):
-        return ('Read on-demand music state for this Discord server: status shows current song, connected voice channel, volume, repeat, autoplay and next 25 songs; '
-                'queue(offset) paginates 25 songs with stable removal IDs; channels lists visible voice channels and requester voice channel; '
+        return ('Read on-demand music state for this Discord server: status shows current song, position, connected voice channel, volume, repeat, autoplay and the first 10 queued songs plus the remaining count; '
+                'queue(offset) paginates 10 songs with stable removal IDs and a remaining count; channels lists visible voice channels and requester voice channel; '
                 'search(query) finds up to five YouTube songs without joining or playing. '
                 'Use normal reasoning to choose tracks for moods/similar songs, then music_control play with the chosen title/URL. '
                 'Live state is not present in the static system prompt. Never infer current playback from an earlier turn.')

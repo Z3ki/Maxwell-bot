@@ -8,7 +8,6 @@ async def setup(bot, ctx):
     from .backend import LavalinkBackend
     from .service import MusicService
     from .tools import MusicControlTool, MusicInfoTool
-    from .ui import install
 
     service = MusicService(bot, LavalinkBackend(bot), ctx.store_path('settings.json'))
     ctx.register_service('music', service)
@@ -20,12 +19,11 @@ async def setup(bot, ctx):
               'Play normally queues behind the current track; use now only for an explicit replacement, next for an explicit play-next request. '
               'For multiple songs, select titles or YouTube URLs and send one play call with queries (up to ten) in the intended order; do not issue separate calls. '
               'Autoplay is opt-in: use music_control autoplay value=true only when asked to keep related music going; requested queue and repeat take precedence. '
-              'Use value=false to disable it; stop also disables autoplay. Successful changes publish fresh public music embeds where permitted. '
+              'Use value=false to disable it; stop also disables autoplay. '
               'Web research can identify a song and music_control can play it in the same turn. '
               'Default voice selection follows the requester. If no usable voice channel exists, ask which channel to join. '
               'Only announce playback or changes when the tool confirms success. Do not claim every YouTube song is playable. '
               'Music has no microphone access. Retrieve live playback state on demand; never invent it.')))
-    install(bot, service)
 
     async def ready():
         if os.getenv('LAVALINK_PASSWORD'):
@@ -38,8 +36,6 @@ async def setup(bot, ctx):
 
 
 async def teardown(bot, ctx):
-    from .ui import uninstall
-    uninstall()
     service = ctx.service('music')
     if service:
         await service.close()

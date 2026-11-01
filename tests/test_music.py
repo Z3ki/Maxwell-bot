@@ -1,4 +1,4 @@
-"""Shared-service tests: permissions, ordering, failures, guild isolation and UI."""
+"""Shared-service tests: permissions, ordering, failures and guild isolation."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -10,7 +10,6 @@ from jsonschema import validate, ValidationError
 
 from plugins.music.service import MusicError, MusicService, Track, identifier
 from plugins.music.tools import MusicControlTool, MusicInfoTool, perform
-from plugins.music.ui import install, uninstall, update_panel, command_definition
 
 
 class Backend:
@@ -527,40 +526,6 @@ def test_resource_admission_and_disconnect(tmp_path):
     asyncio.run(journey())
 
 
-def test_manual_and_ai_share_state_with_panel_validation(tmp_path):
-    import user_install as ui
-    service, backend, msg, _ = fixture(tmp_path)
-    async def journey():
-        install(service.bot, service)
-        try:
-            handler = next(h for _, name, h in ui._INTERACTION_HANDLERS if name == 'music')
-            interaction = SimpleNamespace(guild=msg.guild, user=msg.author, channel=msg.channel,
-                response=SimpleNamespace(defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock()),
-                data={'name': 'music', 'options': [{'name': 'play', 'options': [{'name': 'query', 'value': 'manual song'}]}]})
-            assert await handler(service.bot, interaction)
-            interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-            assert json.loads(await MusicInfoTool(service.bot, service).execute(msg, action='status'))['current']['title'] == 'manual song'
-            session = service.sessions[10]
-            panel = session.panel
-            await update_panel(session)
-            assert session.panel is panel and msg.channel.send.await_count == 1
-            await MusicControlTool(service.bot, service).execute(msg, action='play', query='AI next')
-            interaction.data = {'custom_id': 'maxwell_music:10:skip'}
-            interaction.message = panel
-            assert await handler(service.bot, interaction)
-            assert session.current.title == 'AI next'
-            interaction.data = {'custom_id': 'maxwell_music:20:stop'}
-            assert await handler(service.bot, interaction)
-            assert session.current.title == 'AI next'
-            interaction.message = SimpleNamespace(id=999)
-            interaction.data = {'custom_id': 'maxwell_music:10:skip'}
-            assert await handler(service.bot, interaction)
-            assert session.current.title == 'AI next'
-        finally:
-            uninstall()
-    asyncio.run(journey())
-    assert sum(c[0] == 'play' for c in backend.calls) == 2
-    assert command_definition()['integration_types'] == [0]
 
 
 def test_repeat_generates_distinct_playback_ids_and_ignores_duplicate_end(tmp_path):
