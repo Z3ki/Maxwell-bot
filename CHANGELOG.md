@@ -23,6 +23,7 @@
 - Audit current configuration, search, worker and deployment documentation against the code; distinguish shipped defaults from operator examples.
 - Default message-content tracking to off when no preference is saved. Existing explicit opt-ins still permit tracking without a separate history-consent record; explicit opt-outs remain disabled. Missing preferences do not trigger deletion of existing content.
 - Recheck current administrator status for bot-identity Git actions, as for GitHub API calls, including before obtaining the token.
+- Limit test-image build inputs and mask common environment, backup and credential files throughout the checkout in the disposable test container.
 
 - Bound SearXNG requests with configurable `SEARXNG_TIMEOUT` (default 6 seconds) so failed or timed-out searches can fall back to Tavily or keyless ddgs. Limit web searches per turn with `WEB_SEARCH_MAX_PER_TURN` (default 5; 0 is unlimited), and document the host-network SearXNG URL.
 

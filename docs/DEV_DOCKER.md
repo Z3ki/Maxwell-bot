@@ -161,22 +161,23 @@ make testdev PYTEST_ARGS='tests/test_config_tools.py -q'
 bash scripts/dev.sh test -k music -q       # explicit pytest arguments
 ```
 
-The helper builds the runtime with its test dependencies, then runs pytest in a
-separate disposable container: no network, no persistent data volumes, no env
+The helper builds the runtime from a temporary context containing only its
+Dockerfile, entrypoint and requirements files, then runs pytest in a separate
+disposable container: no network, no persistent data volumes, no env
 file passed, read-only checkout/root filesystem, writable executable `/tmp`
 tmpfs for test fixtures, nonexistent temporary `MAXWELL_ENV_FILE`, and pytest's
 cache provider disabled. Executable scratch space is limited to this offline
 test container, not added to the live bot.
-Existing checkout `.env`/`.env.dev` files are masked with `/dev/null` inside the
-test container. Tests do not start Discord, Compose services or Production.
+Matching checkout secret files are masked with `/dev/null` inside the test
+container; sensitive symlink paths are rejected.
 Network-dependent live integrations must instead be checked explicitly in Dev.
 The linked worktree's `.git` is masked by disposable empty Git metadata, so
 installer subprocesses work without mounting production Git history/config.
 
-The test bind mounts the entire checkout read-only and masks only the exact
-`.env` and `.env.dev` paths. Other secret files, including environment backups,
-remain readable inside the test container; keep them outside the checkout before
-running tests. Read-only mounting does not prevent disclosure.
+The mask covers `.env*` except the two example filenames, backups containing
+`.bak`, auth/credential/token and service-account JSON, `secrets.*`, `local.env`,
+and PEM/key files at any depth. It is filename-based, not a guarantee against
+unusually named secrets; keep other sensitive files outside the checkout.
 
 For the existing dependency/lint/shell/coverage gates, install
 `requirements.txt` and `requirements-dev.txt` in an isolated Python environment

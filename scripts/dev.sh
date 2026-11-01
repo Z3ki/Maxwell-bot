@@ -17,22 +17,37 @@ case "$COMMAND" in up|restart|test|status|logs|stop|youtube-auth) ;; *) fail 'Us
 
 if [[ "$COMMAND" == test ]]; then
     # No Compose envfile, network, persistent volumes or inherited provider keys.
-    docker build -f docker/maxwell.Dockerfile -t maxwell:dev-test-runtime .
+    # Build from only the runtime inputs; never send the checkout's secrets as
+    # build context, even if their names are not covered by .dockerignore.
+    test_context=$(mktemp -d)
+    trap 'rm -rf -- "$test_context"' EXIT
+    mkdir -p "$test_context/docker"
+    cp docker/maxwell.Dockerfile docker/entrypoint.sh "$test_context/docker/"
+    cp requirements.txt requirements-optional.txt requirements-dev.txt "$test_context/"
+    docker build -f "$test_context/docker/maxwell.Dockerfile" -t maxwell:dev-test-runtime "$test_context"
     # Repository inspection tests need the same real rg binary as CI.
     docker build -t maxwell:dev-test-local - <<'DOCKERFILE'
 FROM maxwell:dev-test-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
     masks=()
-    for secret in .env .env.dev; do
-        if [[ -f "$ROOT/$secret" ]]; then
-            masks+=(--mount "type=bind,src=/dev/null,dst=/app/$secret,readonly")
-        fi
-    done
+    # Mask matching files at every depth, including ignored/untracked files.
+    # A symlink cannot safely be a bind-mount destination: fail closed instead.
+    while IFS= read -r -d '' secret; do
+        [[ ! -L "$secret" ]] || fail "Remove or relocate sensitive symlink before testing: ${secret#"$ROOT/"}"
+        [[ "$secret" != *,* ]] || fail 'Cannot safely mask a sensitive path containing a comma.'
+        masks+=(--mount "type=bind,src=/dev/null,dst=/app/${secret#"$ROOT/"},readonly")
+    done < <(find "$ROOT" -name .git -prune -o \
+        \( -type f -o -type l \) \( \
+            \( -name '.env*' ! -name .env.example ! -name .env.simple.example \) -o \
+            -iname '*.bak*' -o -iname '*auth*.json' -o -iname '*credential*.json' -o \
+            -iname '*token*.json' -o -iname '*service-account*.json' -o \
+            -iname '*service_account*.json' -o -iname 'secrets.*' -o \
+            -iname '*.pem' -o -iname '*.key' -o -iname 'local.env' \
+        \) -print0)
     # A linked worktree's real .git points outside this mount. Supply empty,
     # disposable metadata instead of exposing production Git history/config.
-    git_pointer=$(mktemp)
-    trap 'rm -f -- "$git_pointer"' EXIT
+    git_pointer="$test_context/git-pointer"
     printf 'gitdir: /tmp/maxwell-test-git\n' > "$git_pointer"
     docker run --rm --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges:true --no-healthcheck \
