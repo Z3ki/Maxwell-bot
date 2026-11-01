@@ -19,6 +19,8 @@
 
 ## Unreleased
 
+- Fix gated type checking for the Anthropic worker provider.
+
 - Allow deletion of messages authored by Maxwell even when they were not attributed to a request, without changing permissions for other authors.
 - Remove music slash commands, public panels, queue embeds and persistent buttons; use conversational music tools for playback and status without automatic Discord music messages.
 - Clarify that missing native Discord voice dependencies do not disable Lavalink music or TTS voice-message attachments.

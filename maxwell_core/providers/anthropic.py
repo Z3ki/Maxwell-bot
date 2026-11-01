@@ -2,6 +2,7 @@
 
 import json
 import time
+from typing import Any
 from urllib.parse import urlsplit
 
 from providers import OpenAICompatibleProvider
@@ -50,7 +51,7 @@ def _content_blocks(content):
 def translate_messages(messages):
     """Translate OpenAI conversation history, preserving tool call/result IDs."""
     system = []
-    translated = []
+    translated: list[dict[str, Any]] = []
     for message in messages:
         role = message.get("role")
         content = message.get("content")
@@ -107,7 +108,7 @@ def translate_anthropic_response(result):
                 raise ProviderProtocolError("Provider returned invalid tool call")
             calls.append({"id": block["id"], "type": "function", "function": {
                 "name": block["name"], "arguments": json.dumps(block["input"], ensure_ascii=False)}})
-    message = {"role": "assistant", "content": "".join(texts)}
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(texts)}
     if calls:
         message["tool_calls"] = calls
     usage = result.get("usage") or {}
@@ -121,16 +122,19 @@ def translate_anthropic_response(result):
                            ("cache_creation_input_tokens", "cache_write_tokens")):
         if source in usage:
             normalized[target] = _coerce_token_count(usage[source])
-    finish = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length",
-              "tool_use": "tool_calls"}.get(result.get("stop_reason"), result.get("stop_reason"))
+    finish_reasons: dict[str | None, str] = {
+        "end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length",
+        "tool_use": "tool_calls",
+    }
+    finish = finish_reasons.get(result.get("stop_reason"), result.get("stop_reason"))
     return {"choices": [{"message": message, "finish_reason": finish}], "usage": normalized}
 
 
 async def _read_anthropic_stream(resp, *, max_bytes, callbacks):
     """Assemble Messages SSE blocks without exposing thinking or partial JSON."""
-    blocks = {}
-    arguments = {}
-    usage = {}
+    blocks: dict[int, dict[str, Any]] = {}
+    arguments: dict[int, list[str]] = {}
+    usage: dict[str, Any] = {}
     stop_reason = None
     completed = False
     first_token = last_token = None
