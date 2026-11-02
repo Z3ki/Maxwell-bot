@@ -1,23 +1,8 @@
 # Changelog
 
-## 0.1.15 — 2026-10-17 (release candidate; operator review required)
-
-- Support Anthropic Messages for independently configured operator workers, including an OpenAI-compatible fallback with its own credentials; personal provider routes remain isolated.
-- Detach Premium workers from chat turns: launch returns a job ID immediately, Maxwell can keep chatting in the same channel, and jobs own their provider/deadline, lifecycle and completion delivery. Add conversational status/cancel and private `/tasks`; preserve visibility after token expiry, avoid duplicate notifications, include jobs in deletion/drain/shutdown and never replay interrupted jobs. Persist metadata only; reports remain in bounded RAM.
-- Make Premium substantial work coordinator-led: delegate sites, code, shell, research, repository work and scoped analysis to bounded workers, with independent `AI_WORKER_*` defaults and separate encrypted user worker BYOK/settings in Discord and the dashboard. Preserve live permissions, shared tool budgets, cancellation and honest deletion across both credential stores.
-- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium background task workers, custom profiles and model-selected tool permissions within caller authorization.
-
-- Remove hosted-provider presets and vendor-specific key links; use explicit endpoint/model/key connections, migrating encrypted historical records safely.
-- Optional conversation storage now requires an affirmative choice. Historical defaults do not imply consent; resets preserve privacy opt-outs.
-- Versioned optional consent and one-time private interaction disclosures; no legal DMs, public consent messages or blanket agreement gate.
-- Privacy controls now review/withdraw choices, authorize an exact voice reference, request private operator support, and report deletion failures and manual/external limitations accurately. Discord and dashboard share settings.
-- History, trace, usage and authentication retention cleanup; retired facts and legacy reasoning payloads are removed. Automatic error reports no longer copy the requesting message.
-- Restrict server listings and voice presence to authorized context; close site metadata/KV ownership gaps; fix private backend reads, subpath KV guides and production GitHub workspace names. Fixes #74, #75, #76, #79, #80, #81.
-- Integrate the modular bot split (#82), restore its missing core module, and preserve dev quota behavior. Remove the unused autonomous activity engine, routing and operator endpoints.
-- Rewrite Terms, Privacy and Contact without invented jurisdiction/operator facts or blanket compliance claims. Publication is gated by `release-readiness.json` and reviewed deployment evidence. Premium sales remain subject to operator review.
-
-
 ## Unreleased
+
+## 0.1.15 — 2026-11-01
 
 - Accept empty streamed Anthropic tool arguments for zero-argument worker tools.
 - Fix gated type checking for the Anthropic worker provider.
@@ -83,6 +68,20 @@
 - Keep a schedule's next fire strictly in the future during the autumn DST repeated hour, so a create, edit, resume, or finished run in that hour cannot refire every tick. Fixes #128.
 - Treat a storage path that steps through a file as missing. Reads and public `/u/` requests 404, and writes say the name is a file, not a folder. Fixes #129.
 - Document the message quota window default as 18000 seconds (five hours). Fixes #130.
+
+- Support Anthropic Messages for independently configured operator workers, including an OpenAI-compatible fallback with its own credentials; personal provider routes remain isolated.
+- Detach Premium workers from chat turns: launch returns a job ID immediately, Maxwell can keep chatting in the same channel, and jobs own their provider/deadline, lifecycle and completion delivery. Add conversational status/cancel and private `/tasks`; preserve visibility after token expiry, avoid duplicate notifications, include jobs in deletion/drain/shutdown and never replay interrupted jobs. Persist metadata only; reports remain in bounded RAM.
+- Make Premium substantial work coordinator-led: delegate sites, code, shell, research, repository work and scoped analysis to bounded workers, with independent `AI_WORKER_*` defaults and separate encrypted user worker BYOK/settings in Discord and the dashboard. Preserve live permissions, shared tool budgets, cancellation and honest deletion across both credential stores.
+- Add configurable LLM/whole-task deadlines, context budgets and reasoning effort controls, plus owner-granted Premium background task workers, custom profiles and model-selected tool permissions within caller authorization.
+
+- Remove hosted-provider presets and vendor-specific key links; use explicit endpoint/model/key connections, migrating encrypted historical records safely.
+- Optional conversation storage now requires an affirmative choice. Historical defaults do not imply consent; resets preserve privacy opt-outs.
+- Versioned optional consent and one-time private interaction disclosures; no legal DMs, public consent messages or blanket agreement gate.
+- Privacy controls now review/withdraw choices, authorize an exact voice reference, request private operator support, and report deletion failures and manual/external limitations accurately. Discord and dashboard share settings.
+- History, trace, usage and authentication retention cleanup; retired facts and legacy reasoning payloads are removed. Automatic error reports no longer copy the requesting message.
+- Restrict server listings and voice presence to authorized context; close site metadata/KV ownership gaps; fix private backend reads, subpath KV guides and production GitHub workspace names. Fixes #74, #75, #76, #79, #80, #81.
+- Integrate the modular bot split (#82), restore its missing core module, and preserve dev quota behavior. Remove the unused autonomous activity engine, routing and operator endpoints.
+- Rewrite Terms, Privacy and Contact without invented jurisdiction/operator facts or blanket compliance claims. Publication is gated by `release-readiness.json` and reviewed deployment evidence. Premium sales remain subject to operator review.
 
 ## 0.1.14 — 2026-10-14
 
