@@ -6,6 +6,31 @@ Split out of bot.py; methods keep their original bodies.
 import bot_common as _common
 import time as _metrics_time
 import usage_metrics
+from contextvars import ContextVar
+
+_loaded_native_tools: ContextVar[set[str] | None] = ContextVar(
+    "loaded_native_tools", default=None
+)
+
+_NATIVE_CORE = frozenset({
+    "send_message", "no_response", "react", "web_search", "fetch_url",
+    "delegate_task", "manage_tasks",
+})
+
+
+def _lazy_native_enabled(bot) -> bool:
+    from plugins.maxwell_extras.task_workers import _inside_worker
+
+    return MaxwellBot._native_tools_enabled(bot) and not _inside_worker.get()
+
+
+class _LoadTools:
+    def __init__(self, description: str):
+        self.description = description
+
+    def get_description(self):
+        return self.description
+
 
 
 # Mechanical split: the methods below were written against bot.py's
@@ -183,6 +208,13 @@ class ToolCallsMixin:
                 # Same view as the hidden catalog: say which side lacks the
                 # perm instead of letting the model guess or retry.
                 result_text = mod_refusal
+            elif (
+                _lazy_native_enabled(self)
+                and name not in MaxwellBot._turn_tool_names(
+                    self, MaxwellBot._message_tool_platform(self, message), message
+                )
+            ):
+                result_text = "Error - tool is not available for this request"
             elif name not in compatible and not plugin_allowed:
                 result_text = "Error - tool is not available on this platform"
             elif name not in self.tools and not plugin_allowed:
@@ -525,6 +557,7 @@ class ToolCallsMixin:
         compatible = MaxwellBot._compatible_tool_names(
             self, MaxwellBot._message_tool_platform(self, message)
         )
+        lazy = _lazy_native_enabled(self)
         calls = normalize_native_tool_calls(raw_tool_calls)
         if not calls:
             return (cleaned, [], []) if include_images else (cleaned, [])
@@ -595,6 +628,24 @@ class ToolCallsMixin:
         async def run_one(call: dict) -> str:
             name = call["name"]
             params = dict(call.get("arguments") or {})
+            if lazy and name == "load_tools":
+                allowed = MaxwellBot._turn_tool_names(
+                    self, MaxwellBot._message_tool_platform(self, message), message
+                )
+                names = params.get("names")
+                if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+                    line = "Tool load_tools: Error - names must be a list of tool names"
+                else:
+                    loaded = _loaded_native_tools.get()
+                    selected = set(names) & allowed
+                    if loaded is not None:
+                        loaded.update(selected)
+                    unavailable = sorted(set(names) - allowed)
+                    line = "Tool load_tools: Loaded " + (", ".join(sorted(selected)) or "none")
+                    if unavailable:
+                        line += "; unavailable: " + ", ".join(unavailable)
+                result_by_id[call["id"]] = line
+                return line
             if progress is not None:
                 import contextlib
 
@@ -1349,7 +1400,38 @@ class ToolCallsMixin:
         if not tools or not self._native_tools_enabled():
             return []
         allowed = MaxwellBot._turn_tool_names(self, platform, message, content)
-        schemas = build_openai_tools(tools, allowed_names=allowed)
+        if _lazy_native_enabled(self):
+            loaded = _loaded_native_tools.get() or set()
+            visible = allowed & (_NATIVE_CORE | loaded)
+            hidden = sorted(allowed - _NATIVE_CORE)
+            if hidden:
+                descriptions = []
+                for name in hidden:
+                    tool = tools.get(name)
+                    if tool is None:
+                        continue
+                    try:
+                        description = str(tool.get_description() or "").strip().split("\n")[0]
+                    except Exception:
+                        description = ""
+                    descriptions.append(f"{name}: {description[:120]}")
+                tools["load_tools"] = _LoadTools(
+                    "Load exact names for this turn before using their full schemas. Available tools: "
+                    + "; ".join(descriptions)
+                )
+                visible.add("load_tools")
+            schemas = build_openai_tools(tools, allowed_names=visible)
+            if hidden:
+                for schema in schemas:
+                    if schema["function"]["name"] == "load_tools":
+                        schema["function"]["description"] = tools["load_tools"].get_description() + result_contract("load_tools")
+            schemas.sort(key=lambda item: (
+                0 if item["function"]["name"] in _NATIVE_CORE else
+                1 if item["function"]["name"] == "load_tools" else 2,
+                item["function"]["name"],
+            ))
+        else:
+            schemas = build_openai_tools(tools, allowed_names=allowed)
         if "delegate_task" in allowed:
             from plugins.maxwell_extras.task_workers import GITHUB_ACCOUNT_ACTIONS, _inside_worker
             if not _inside_worker.get():
@@ -1392,14 +1474,14 @@ class ToolCallsMixin:
         )
         native = bool(self._control.get("native_tool_calls", True))
         if native:
-            # Native tools= already carries each tool's get_description().
             header = (
                 "## Tools\n"
-                "Use the provider's native function/tool calling API. "
-                "A call written into the reply text is not a call — never "
-                "hand-write tool markup, tags, or argument JSON.\n"
-                + catalog
+                "Use native function calls, not tool markup or argument JSON in reply text."
             )
+            if _lazy_native_enabled(self):
+                header += " Use load_tools to load tools from its catalog when needed."
+            else:
+                header += "\n" + catalog
         else:
             # Dispatch is native-or-JSON; the old <tool:name> XML path is
             # stripped as a leak and never executed. Keep the name: description
@@ -1436,12 +1518,21 @@ class ToolCallsMixin:
         else:
             from premium_access import premium_withheld_note
             requester = getattr(getattr(message, "author", None), "id", None)
-            header += premium_withheld_note(self, names, requester)
+            note = premium_withheld_note(self, names, requester)
+            if note:
+                if dynamic_parts is not None:
+                    dynamic_parts.append(note.strip())
+                else:
+                    header += note
         jobs = getattr(self, "_task_jobs", None)
         if jobs is not None and message is not None:
             summary = jobs.summary(message)
             if summary:
-                header += "\n\nYour worker jobs in this conversation (status only; use manage_tasks for results): " + summary
+                note = "Your worker jobs in this conversation (status only; use manage_tasks for results): " + summary
+                if dynamic_parts is not None:
+                    dynamic_parts.append(note)
+                else:
+                    header += "\n\n" + note
         extra = ""
         prompts = getattr(self, "prompts", None)
         if prompts is not None:
@@ -1476,13 +1567,14 @@ class ToolCallsMixin:
                 "enabled_plugins": (*plugin_ids, "core"),
                 "exclude_ids": ("core.identity", "core.protocol"),
             }
-            collected = prompts.collect(
-                request, rendered=False if dynamic_parts is not None else None, **kwargs
-            )
             if dynamic_parts is not None:
-                dynamic_parts.extend(prompts.collect(request, rendered=True, **kwargs))
-            if collected:
-                extra = "\n\n" + "\n\n".join(collected)
+                # Even static plugin text can depend on per-user plugin or tool
+                # eligibility. Keep all eligible components in the turn suffix.
+                dynamic_parts.extend(prompts.collect(request, **kwargs))
+            else:
+                collected = prompts.collect(request, **kwargs)
+                if collected:
+                    extra = "\n\n" + "\n\n".join(collected)
         if platform == "user_install":
             header += (
                 "\n\nThis turn is a /maxwell app command. Delivery tools post "

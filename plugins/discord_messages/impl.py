@@ -719,18 +719,15 @@ class SendMessageTool(Tool):
 
     def get_description(self):
         return (
-            "Send a message to the current chat. reply defaults to true. Usually send one complete message, "
-            "but you may emit 2-3 send_message calls in the same model response when a short conversational burst reads more naturally. "
-            "The first delivered message in a turn may quote-reply. Later calls in that turn, including a later model round, are posted in the channel with no quote-reply. "
-            "Do not split a normal informational answer just to create more messages. "
-            "Content supports Discord markdown: **bold**, *italic*, `code`, ```code blocks```, > quotes, bullet lists. "
-            "Current-server/application emojis support animation without Nitro. "
-            "Use [STICKER (name)] or [STICKER (id)] for a listed current-server/official sticker; PNG, APNG, GIF and Lottie are supported as native stickers. "
-            "Params: content (required), reply (optional bool, default true — Discord "
-            "quote-reply is on; pass false only for a standalone line with no quote), "
-            "reply_to (optional short quote or who said it, like nah or alice — not an id). "
-            "channel_id/user_id to another channel or server is not available from DMs. "
-            "From a server, that is admin-only — everyone else must reply in this chat."
+            "Send to this chat. Usually send one complete message; 2-3 calls in one response "
+            "may form a natural short burst, but do not split normal informational answers. "
+            "Only the first delivered message in a turn may quote-reply, even across model rounds. "
+            "reply defaults true; set false for a standalone line. reply_to is a short quote or "
+            "speaker, not an ID. Content supports Discord markdown and animated current-server/"
+            "application emojis. Use [STICKER (name)] or [STICKER (id)] for listed current-server "
+            "or official PNG, APNG, GIF, or Lottie native stickers. "
+            "Sending to another channel or server via channel_id/user_id is not available from DMs "
+            "and admin-only from a server; everyone else must reply here."
         )
 
     @staticmethod
@@ -1475,15 +1472,12 @@ class SearchMessagesTool(Tool):
 
     def get_description(self):
         return (
-            "Look up a message by ID in this channel, by a Discord message link "
-            "in this server, or by the current request's reply reference. "
-            "Otherwise search this channel's history, including older messages. Filter "
-            "with query (substring), author (display name, username, or user ID), "
-            "and before/after (ISO-8601 time or unix seconds). A filtered search "
-            "reads up to 400 messages in that window. Only channels both you and "
-            "Maxwell can view and read are available. Results include the real "
-            "ID, author, channel, timestamp, and a short content preview. "
-            "Params: message_id, message_link, reply_reference, query, author, "
+            "Look up a message by ID in this channel, Discord link in this server, or the current "
+            "request's reply reference; otherwise search this channel's history, including older messages. "
+            "Filters: query substring, author display name/username/ID, before/after ISO-8601 or unix "
+            "seconds. A filtered search reads up to 400 messages in the window. Only channels both you "
+            "and Maxwell can view and read are available. Returns real ID, author, channel, timestamp "
+            "and short preview. Params: message_id, message_link, reply_reference, query, author, "
             "before, after, limit (1-10)."
         )
 

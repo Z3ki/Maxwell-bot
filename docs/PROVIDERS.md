@@ -58,6 +58,12 @@ limits remain exact. Edits, deletions and changes in authorized tools still
 change the prompt; correctness and permissions take precedence over cache reuse.
 Large per-turn context can also reduce history to fit the model budget.
 
+Native chat requests send a stable, sorted core of schemas and a lightweight
+catalog of other tools allowed for the request. `load_tools` adds requested
+schemas for the rest of that turn; a new turn starts with the core again.
+Catalog and dispatch use the same access gates. Workers keep their own full
+schemas, and the custom JSON protocol remains available.
+
 `/debug` and the debug tool show provider-reported cached input tokens and their
 share of input, plus cache writes when supplied. Request-local `usage` and
 `timing` retain `cached_tokens` and `cache_write_tokens`. Compatible nested
@@ -65,6 +71,11 @@ share of input, plus cache writes when supplied. Request-local `usage` and
 `prompt_cache_hit_tokens` are accepted. Missing or inconsistent cache metrics
 remain unknown; a reported zero is a measured miss. Cache counts are subsets
 of input and are not added again to total usage.
+`scripts/stats.py` reports cache reads, writes, and hit ratios overall and by
+model, provider, and route (also available with `--json`). A hit ratio is the
+sum of reported cache reads divided by input tokens from the same calls with
+both values available, not all calls. Missing cache values remain unknown;
+sample counts in JSON distinguish unreported values from measured zeros.
 
 Stable prefixes improve reuse opportunities but do not guarantee cache hits.
 Provider/model support, routing, retention and any required cache breakpoints

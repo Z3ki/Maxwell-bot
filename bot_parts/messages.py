@@ -18,6 +18,7 @@ from bot_parts._compat import (  # noqa: F401
     _read_response_limited,
 )
 from response_guard import strip_internal_context
+from bot_parts.tool_calls import _loaded_native_tools
 
 def _live_test_webhook(message):
     """Admit only explicitly configured webhook/channel pairs for live tests."""
@@ -1198,6 +1199,13 @@ class MessagesMixin:
         return response, reply_delivered
 
     async def _handle_message(self, message, content: str | None = None):
+        token = _loaded_native_tools.set(set())
+        try:
+            return await MaxwellBot._handle_message_with_tools(self, message, content)
+        finally:
+            _loaded_native_tools.reset(token)
+
+    async def _handle_message_with_tools(self, message, content: str | None = None):
         content = content or message.content
         channel_id = str(message.channel.id)
         if await MaxwellBot._acknowledge_read_only_channel(self, message):
@@ -1728,7 +1736,6 @@ class MessagesMixin:
             # #maxwell-the-bot 2026-08-02 with "Mat Dickie" / "you a fan"
             # — see PM2 out.log 01:25:17→28 for the canonical reproduction.
             followup_turn_ran = False
-            tools_expanded = False
             promise_followups = 0
             site_loop_strikes = 0
             tool_results: list[str] = []
@@ -1750,33 +1757,6 @@ class MessagesMixin:
                 )
                 first_dispatch_progress = None
                 pending_native = None
-                # more_tools sets _tools_expanded on the message. Rebuild the
-                # payload once so the follow-up turn actually carries the full
-                # catalog instead of the lean set this turn started with.
-                if getattr(message, "_tools_expanded", False) and not tools_expanded:
-                    tools_expanded = True
-                    openai_tools = self._build_openai_tools(
-                        platform, message=message, content=content
-                    )
-                    custom_tool_calls, provider_tools = self._select_tool_protocol(
-                        openai_tools
-                    )
-                    max_out_tokens = min(
-                        getattr(self.config, "AI_MAX_OUTPUT_TOKENS", 16384) or 16384,
-                        max(256, _safe_int(self._control.get("live_max_output_tokens", 4096), 4096)),
-                    )
-                    byok_provider = _current_request_provider.get()
-                    byok_tokens = (
-                        getattr(byok_provider, "max_tokens", None)
-                        if byok_provider is not None
-                        else None
-                    )
-                    if isinstance(byok_tokens, int) and byok_tokens > 0:
-                        max_out_tokens = max(16, min(byok_tokens, 16384))
-                    logger.info(
-                        "more_tools: reattached %d tools for follow-up",
-                        len(openai_tools or []),
-                    )
                 native_followup = list(
                     getattr(self, "_last_native_followup_messages", None) or []
                 )

@@ -1,9 +1,4 @@
-"""Same-function token cuts: live tool packs, short turns, emoji grid, embeds.
-
-The full tool catalog ships on every turn. lean/gated catalogs hid tools
-(like hd_image) behind more_tools and made photo requests look like a
-different generator.
-"""
+"""Tool catalog, short-turn and prompt behavior."""
 
 import asyncio
 from types import SimpleNamespace
@@ -110,26 +105,19 @@ def _tool_names(bot, message, content, platform="discord"):
 
 
 @pytest.mark.parametrize("operator", [False, True])
-def test_every_turn_offers_every_authorized_registered_tool(operator):
+def test_native_turn_offers_small_core_and_authorized_catalog(operator):
     bot = _live_bot()
     bot._is_admin = lambda _uid: operator
-    expected = set(bot.tools) - {"more_tools"}
-    if not operator:
-        expected -= {"inbox_list", "inbox_act"}
-    for content in (
-        "wyd",
-        "Can you run a debugger on YOUR machine?",
-        "look",
-        "can you check that",
-        "whatts up",
-        "so anyway " * 40,
-    ):
-        names = _tool_names(bot, _msg(content, mentions=[bot.user]), content)
-        assert names == expected, content
-        assert "more_tools" not in names
-        assert "shell" in names
-        assert "hd_image" in names
-        assert "image_generator" in names
+    for content in ("wyd", "Can you run a debugger?", "so anyway " * 40):
+        message = _msg(content, mentions=[bot.user])
+        payload = MaxwellBot._build_openai_tools(bot, message=message, content=content)
+        names = {item["function"]["name"] for item in payload}
+        assert {"send_message", "web_search", "load_tools"} <= names
+        assert not {"shell", "hd_image", "more_tools"} & names
+        catalog = next(item["function"]["description"] for item in payload
+                       if item["function"]["name"] == "load_tools")
+        assert "shell:" in catalog and "hd_image:" in catalog
+        assert ("inbox_list:" in catalog) is operator
 
 
 def test_lean_chat_turn_is_gone():
@@ -139,16 +127,12 @@ def test_lean_chat_turn_is_gone():
     assert MaxwellBot._lean_chat_turn(bot, _msg("wyd"), "wyd") is False
 
 
-def test_tool_prompt_lists_full_catalog_on_chat_turn():
+def test_native_tool_prompt_points_to_catalog():
     bot = _live_bot()
     chat = MaxwellBot._tool_system_prompt(
         bot, "discord", message=_msg("wyd"), content="wyd"
     )
-    full = MaxwellBot._tool_system_prompt(bot, "discord")
-    assert "web_search" in chat
-    assert "shell" in chat
-    assert "hd_image" in chat
-    assert chat == full
+    assert "load_tools" in chat
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -184,31 +168,100 @@ def test_disabled_tools_still_hidden():
     assert "inbox_list" not in catalog
 
 
-def test_dms_hide_mod_tools_and_keep_shell_and_site():
-    bot = _live_bot(
-        extra_tools={
-            "kick_member": FakeTool(),
-            "ban_member": FakeTool(),
-            "purge_messages": FakeTool(),
-            "forward_message": FakeTool(),
-            "create_channel": FakeTool(),
-            "site_server": FakeTool(),
-        }
-    )
-    names = _tool_names(bot, _msg("hi", dm=True), "hi")
-    assert "kick_member" not in names
-    assert "ban_member" not in names
-    assert "purge_messages" not in names
-    assert "forward_message" not in names
-    assert "create_channel" not in names
-    assert "shell" in names
-    assert "create_site" in names
-    assert "list_sites" in names
-    assert "site_server" in names
-    assert "send_message" in names
-    guild_names = _tool_names(bot, _msg("hi"), "hi")
-    assert "kick_member" in guild_names
-    assert "shell" in guild_names
+def test_catalog_respects_dm_and_guild_permissions():
+    bot = _live_bot(extra_tools={
+        "kick_member": FakeTool(), "ban_member": FakeTool(),
+        "create_channel": FakeTool(), "site_server": FakeTool(),
+    })
+    def catalog(message):
+        payload = MaxwellBot._build_openai_tools(bot, message=message)
+        return next(item["function"]["description"] for item in payload
+                    if item["function"]["name"] == "load_tools")
+    dm = catalog(_msg("hi", dm=True))
+    assert "kick_member:" not in dm and "ban_member:" not in dm
+    assert "shell:" in dm and "create_site:" in dm
+    guild = catalog(_msg("hi"))
+    assert "kick_member:" in guild and "shell:" in guild
+
+
+def test_load_tools_is_turn_local_and_rechecks_authorization(monkeypatch):
+    import json
+    from bot_parts.tool_calls import _loaded_native_tools
+
+    bot = _live_bot()
+    bot._control["disabled_tools"] = ["inbox_list"]
+    message = _msg("run a command", dm=True)
+    message.id = 7
+    monkeypatch.setattr(MaxwellBot, "_request_state", AsyncMock(return_value={}))
+
+    async def turn():
+        token = _loaded_native_tools.set(set())
+        try:
+            call = {"id": "load", "type": "function", "function": {
+                "name": "load_tools",
+                "arguments": json.dumps({"names": ["shell", "inbox_list"]}),
+            }}
+            _, results = await MaxwellBot._process_native_tool_calls(bot, message, "", [call])
+            assert "Loaded shell" in results[0]
+            assert "unavailable: inbox_list" in results[0]
+            names = _tool_names(bot, message, message.content)
+            assert "shell" in names and "inbox_list" not in names
+            bot._control["disabled_tools"].append("shell")
+            assert "shell" not in _tool_names(bot, message, message.content)
+        finally:
+            _loaded_native_tools.reset(token)
+
+    asyncio.run(turn())
+    bot._control["disabled_tools"].remove("shell")
+    assert "shell" not in _tool_names(bot, message, message.content)
+
+
+def test_unloaded_direct_call_is_allowed_but_disabled_call_is_denied(monkeypatch):
+    bot = _live_bot()
+    bot.config = SimpleNamespace(DISABLE_TAINT_GATE=False)
+    bot.is_message_tainted = lambda message: False
+    invoke = AsyncMock(return_value="ok")
+    monkeypatch.setattr(MaxwellBot, "_invoke_request_tool", invoke)
+    message = _msg("run a command", dm=True)
+    message.id = 7
+
+    async def run():
+        allowed = await MaxwellBot._execute_tool_by_name(
+            bot, message, "shell", {}, disabled=set(), compatible=set(bot.tools)
+        )
+        assert allowed == "Tool shell: ok"
+        bot._control["disabled_tools"] = ["shell"]
+        denied = await MaxwellBot._execute_tool_by_name(
+            bot, message, "shell", {}, disabled={"shell"}, compatible=set(bot.tools)
+        )
+        assert "disabled" in denied
+        assert invoke.await_count == 1
+
+    asyncio.run(run())
+
+
+def test_loaded_schema_prefix_is_stable_and_workers_keep_full_catalog():
+    from bot_parts.tool_calls import _loaded_native_tools
+    from plugins.maxwell_extras.task_workers import _inside_worker
+
+    bot = _live_bot()
+    message = _msg("hi")
+    token = _loaded_native_tools.set(set())
+    try:
+        before = MaxwellBot._build_openai_tools(bot, message=message)
+        _loaded_native_tools.get().add("shell")
+        after = MaxwellBot._build_openai_tools(bot, message=message)
+        assert after[:len(before)] == before
+        assert after[-1]["function"]["name"] == "shell"
+        worker_token = _inside_worker.set(True)
+        try:
+            worker = MaxwellBot._build_openai_tools(bot, message=message)
+            names = {item["function"]["name"] for item in worker}
+            assert "shell" in names and "load_tools" not in names
+        finally:
+            _inside_worker.reset(worker_token)
+    finally:
+        _loaded_native_tools.reset(token)
 
 
 def test_short_live_turn_for_watch_followup_not_hard_ping():

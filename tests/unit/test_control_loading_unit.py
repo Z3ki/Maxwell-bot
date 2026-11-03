@@ -48,7 +48,7 @@ def test_missing_file_loads_exact_defaults(tmp_path):
     bot._load_control()
     for key, value in DEFAULT_CONTROL.items():
         assert bot._control[key] == value, key
-    assert bot._control_mtime == 0
+    assert bot._control_mtime == (tmp_path / "bot_control.json").stat().st_mtime
 
 
 def test_saved_values_override_defaults_and_unknown_keys_are_kept(tmp_path):
@@ -58,6 +58,72 @@ def test_saved_values_override_defaults_and_unknown_keys_are_kept(tmp_path):
     assert bot._control["error_replies"] is False
     assert bot._control["max_tool_iterations"] == 7
     assert bot._control["x_extra"] == 1
+
+
+@pytest.mark.parametrize("value", [0, 25, 39, 41, 50, "40", 40.0])
+def test_history_migration_preserves_non_exact_overrides(tmp_path, value):
+    path = _write(tmp_path, {"memory_history_messages": value})
+    bot = _bot(tmp_path)
+    bot._load_control()
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["memory_history_messages"] == value
+    assert saved["_history_default_50_migration"]["changes"] == []
+
+
+def test_history_migration_is_atomic_audited_and_only_once(tmp_path):
+    path = _write(tmp_path, {"memory_history_messages": 40, "other": "unchanged"})
+    bot = _bot(tmp_path)
+    bot._load_control()
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert (
+        saved["memory_history_messages"]
+        == bot._control["memory_history_messages"]
+        == 50
+    )
+    assert saved["other"] == "unchanged"
+    assert saved["_history_default_50_migration"]["changes"] == [
+        {"key": "memory_history_messages", "from": 40, "to": 50}
+    ]
+    saved["memory_history_messages"] = 40
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    bot._load_control(force=True)
+    assert bot._control["memory_history_messages"] == 40
+
+
+def test_fresh_install_marks_migration_before_later_override(tmp_path):
+    bot = _bot(tmp_path)
+    bot._load_control()
+    path = tmp_path / "bot_control.json"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    saved["memory_history_messages"] = 40
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    bot._load_control(force=True)
+    assert bot._control["memory_history_messages"] == 40
+
+
+def test_control_api_reset_preserves_migration_and_later_40(tmp_path, monkeypatch):
+    from api import api_server
+
+    monkeypatch.setattr(api_server, "DATA_DIR", tmp_path)
+    path = _write(tmp_path, {"memory_history_messages": 40})
+    result = api_server._write_control_update({}, reset=True)
+    assert "_history_default_50_migration" not in result
+    audit = json.loads(path.read_text(encoding="utf-8"))[
+        "_history_default_50_migration"
+    ]
+    assert audit["changes"] == [
+        {"key": "memory_history_messages", "from": 40, "to": 50}
+    ]
+    result = api_server._write_control_update({"memory_history_messages": 40})
+    assert result["memory_history_messages"] == 40
+    assert "_history_default_50_migration" not in result
+    assert (
+        json.loads(path.read_text(encoding="utf-8"))["_history_default_50_migration"]
+        == audit
+    )
+    bot = _bot(tmp_path)
+    bot._load_control()
+    assert bot._control["memory_history_messages"] == 40
 
 
 def test_persisted_personality_is_ignored(tmp_path):
@@ -117,32 +183,35 @@ def test_unchanged_mtime_skips_reload_unless_forced(tmp_path):
     bot = _bot(tmp_path)
     bot._load_control()
     assert bot._control["error_replies"] is False
+    initial_mtime = bot._control_mtime
 
     path.write_text(json.dumps({"error_replies": True}), encoding="utf-8")
-    os.utime(path, (1_700_000_000, 1_700_000_000))
+    os.utime(path, (initial_mtime, initial_mtime))
     bot._load_control()
     assert bot._control["error_replies"] is False  # cached by mtime
     bot._load_control(force=True)
     assert bot._control["error_replies"] is True
 
 
-def test_non_object_json_falls_back_to_defaults(tmp_path):
-    _write(tmp_path, [1, 2, 3])
+def test_non_object_json_keeps_previous_settings(tmp_path):
+    path = _write(tmp_path, [1, 2, 3])
     bot = _bot(tmp_path)
+    bot._control = {"tools_enabled": False}
     bot._load_control()
-    assert bot._control["tools_enabled"] is True
-    assert bot._control["max_response_chars"] == DEFAULT_CONTROL["max_response_chars"]
+    assert bot._control == {"tools_enabled": False}
+    assert json.loads(path.read_text(encoding="utf-8")) == [1, 2, 3]
 
 
 def test_corrupt_json_keeps_the_previous_settings(tmp_path):
     _write(tmp_path, {"error_replies": False}, mtime=1_700_000_000)
     bot = _bot(tmp_path)
     bot._load_control()
+    initial_mtime = bot._control_mtime
     _write(tmp_path, "{not json", mtime=1_700_000_100)
     bot._load_control()
     assert bot._control["error_replies"] is False
     # The failed read must not be remembered as loaded, so it retries.
-    assert bot._control_mtime == 1_700_000_000
+    assert bot._control_mtime == initial_mtime
 
 
 def test_load_syncs_provider_audio_flag(tmp_path):

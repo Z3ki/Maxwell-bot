@@ -63,6 +63,8 @@ _API_GLOBAL_LIMITER = _site_backend_for_api.RateLimiter(
 from control_defaults import (  # noqa: E402
     DEFAULT_CONTROL,
     KNOWN_TOOLS,
+    HISTORY_DEFAULT_MIGRATION,
+    migrate_history_default,
 )
 from utils import (  # noqa: E402 - fd-safe atomic writes
     FileLock,
@@ -205,6 +207,8 @@ async def data_file(request):
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, ValueError):
         return _json_response({"error": "read failed"}, 500)
+    if file == "bot_control.json" and isinstance(data, dict):
+        data.pop(HISTORY_DEFAULT_MIGRATION, None)
     if isinstance(data, list):
         return _json_response(data[:500])
     return _json_response(data)
@@ -1311,7 +1315,29 @@ async def control_get(request):
     Persisted files contain only overrides; merging defaults reflects the
     controls the bot is actually running with.
     """
-    return _json_response({"ok": True, "control": _load_control()})
+    control = _load_control()
+    control.pop(HISTORY_DEFAULT_MIGRATION, None)
+    return _json_response({"ok": True, "control": control})
+
+
+def _write_control_update(body, *, reset=False):
+    path = _control_path()
+    with FileLock(path, timeout=5):
+        loaded = _load_for_write(path, dict, {})
+        if migrate_history_default(loaded):
+            for change in loaded[HISTORY_DEFAULT_MIGRATION]["changes"]:
+                logger.info("Migrated history override %s: %s -> %s",
+                            change["key"], change["from"], change["to"])
+        marker = loaded[HISTORY_DEFAULT_MIGRATION]
+        current = dict(DEFAULT_CONTROL)
+        if not reset:
+            current.update(loaded)
+            current.update({k: v for k, v in body.items() if k in DEFAULT_CONTROL})
+        current[HISTORY_DEFAULT_MIGRATION] = marker
+        control = _sanitize_control(current)
+        _atomic_json_write_sync(path, control)
+        control.pop(HISTORY_DEFAULT_MIGRATION, None)
+        return control
 
 
 async def control_put(request):
@@ -1323,20 +1349,19 @@ async def control_put(request):
         return _json_response({"error": "invalid control"}, 400)
     async with _file_lock:
         try:
-            current = dict(DEFAULT_CONTROL)
-            current.update(_load_for_write(_control_path(), dict, {}))
+            control = await asyncio.to_thread(_write_control_update, body)
         except ValueError as exc:
             return _json_response({"error": str(exc)}, 409)
-        current.update({k: v for k, v in body.items() if k in DEFAULT_CONTROL})
-        control = _sanitize_control(current)
-        await atomic_json_write(_control_path(), control)
     return _json_response({"ok": True, "control": control})
 
 
 async def control_reset(request):
     async with _file_lock:
-        await atomic_json_write(_control_path(), DEFAULT_CONTROL)
-    return _json_response({"ok": True, "control": dict(DEFAULT_CONTROL)})
+        try:
+            control = await asyncio.to_thread(_write_control_update, {}, reset=True)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
+    return _json_response({"ok": True, "control": control})
 
 
 async def llm_traces(request):

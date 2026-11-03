@@ -403,16 +403,12 @@ class ManageRoleTool(Tool):
 
     def get_description(self):
         return (
-            "Create/edit/delete roles, reorder role hierarchy, or add/remove them on "
-            "members. Requires manage_roles. Params: action "
-            "(list|create|edit|delete|add|remove|move), guild_id (optional), name, "
-            "role_id, user_id, color (hex), hoist, mentionable, permissions "
-            "(comma perm names), confirm_name (required to delete), position "
-            "(absolute hierarchy index; higher = higher in Server Settings > Roles), "
-            "above (role name/id to place this role immediately above), below "
-            "(role name/id to place this role immediately below). "
-            "Use action=move with above=/below=/position= instead of asking anyone "
-            "to drag roles in Server Settings."
+            "List/create/edit/delete roles, reorder hierarchy or add/remove member roles; requires "
+            "manage_roles. action=list|create|edit|delete|add|remove|move; optional guild_id, name, "
+            "role_id, user_id, color (hex), hoist, mentionable, permissions (comma-separated names). "
+            "Delete requires confirm_name. For move, use position (absolute hierarchy index; higher is "
+            "higher in Server Settings > Roles), or above/below (role name/ID, placed immediately "
+            "above/below), rather than asking users to drag roles."
         )
 
     async def execute(

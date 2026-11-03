@@ -175,3 +175,54 @@ def test_grouped_latency_and_summary(tmp_path, monkeypatch):
     assert 'Tool lookup' in summary
     assert 'Model example / provider primary' in summary
     assert 'Tokens:' in summary
+
+
+def test_cache_aggregation_keeps_unknown_separate_and_weights_known_inputs(tmp_path, monkeypatch):
+    monkeypatch.setenv('AI_MODEL', 'example')
+    common = {'model': 'example', 'provider': 'primary', 'route': 'primary'}
+    for fields in (
+        {'tokens_in': 100, 'cached_tokens': 80, 'cache_write_tokens': 20},
+        {'tokens_in': 300, 'cached_tokens': 0, 'cache_write_tokens': 0},
+        {'tokens_in': 600},
+        {'cached_tokens': 10},
+        {'tokens_in': 10, 'cached_tokens': True, 'cache_write_tokens': -1},
+    ):
+        metrics._record(tmp_path, 'model', {**common, **fields})
+    metrics._record(tmp_path, 'model', {
+        **common, 'route': 'fallback', 'tokens_in': 50,
+    })
+    report = metrics.stats(tmp_path)
+    rows = {row['route']: row for row in report['models']}
+    primary, fallback = rows['primary'], rows['fallback']
+    assert primary['cached_tokens'] == 90
+    assert primary['cache_write_tokens'] == 20
+    assert primary['cached_tokens_samples'] == 3
+    assert primary['cache_write_tokens_samples'] == 2
+    assert primary['cache_hit_ratio'] == 0.2
+    assert fallback['cached_tokens'] is None
+    assert fallback['cache_write_tokens'] is None
+    assert fallback['cache_hit_ratio'] is None
+    assert report['tokens']['cached_tokens'] == 90
+    assert report['tokens']['cache_hit_ratio'] == 0.2
+    summary = metrics.format_summary(report)
+    assert 'cache reads 90, writes 20, hit ratio 20.0%' in summary
+    assert 'cache reads unknown, writes unknown, hit ratio unknown' in summary
+
+
+def test_cache_zero_is_reported_and_cli_outputs_cache(tmp_path, monkeypatch):
+    import os
+    monkeypatch.setenv('AI_MODEL', 'example')
+    metrics._record(tmp_path, 'model', {
+        'model': 'example', 'route': 'primary', 'tokens_in': 100,
+        'cached_tokens': 0, 'cache_write_tokens': 0,
+    })
+    script = Path(__file__).resolve().parents[1] / 'scripts' / 'stats.py'
+    env = {**os.environ, 'DATA_DIR': str(tmp_path)}
+    command = [sys.executable, str(script)]
+    output = subprocess.run(command, env=env, capture_output=True, text=True, check=True).stdout
+    assert 'cache reads 0, writes 0, hit ratio 0.0%' in output
+    output = subprocess.run(command + ['--json'], env=env, capture_output=True, text=True, check=True).stdout
+    report = json.loads(output)
+    assert report['models'][0]['cached_tokens'] == 0
+    assert report['models'][0]['cache_write_tokens'] == 0
+    assert report['models'][0]['cache_hit_ratio'] == 0

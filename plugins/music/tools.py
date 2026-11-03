@@ -56,17 +56,18 @@ class MusicControlTool(Tool):
                 'action': {'type': 'string', 'enum': [a for a in ACTIONS if a not in READ_ACTIONS]}}}
 
     def get_description(self):
-        return ('Control music in the requesting Discord server. play(query OR queries) automatically joins their voice channel. '
-                'For several songs, use queries=[title or YouTube URL, ...] (1-10) in one call; selections load atomically in the supplied order. '
-                'mode=queue adds without interruption, next inserts the whole batch ahead of upcoming songs, now replaces the current song only when asked. '
-                'join/move optionally take channel name/ID. pause/resume/skip/shuffle; stop clears queue and disables autoplay; leave disconnects. '
-                'volume value=0..100, seek value=seconds, repeat value=off/track/queue, remove track_id from music_info queue, clear queue. '
-                'autoplay value=true/false opts this session into related YouTube songs after the requested queue ends; default off. '
-                'Requested songs and repeat take priority over autoplay; it does not run in empty voice channels. '
-                'configure reads/updates server music settings (server managers only). '
-                'Never claim success unless the result confirms it; started means an actual TrackStart was received. '
-                'If no voice channel is known, ask the user; do not hijack another session. '
-                'Music controls work after web research. Read music_info for live state/channels; no guild/user overrides or arbitrary audio URLs.')
+        return ('Control music in the requesting server. play(query OR queries) joins their voice channel; '
+                'queries=[title or YouTube URL, ...] takes 1-10 songs atomically in order. '
+                'mode=queue adds without interrupting, next inserts the batch before upcoming songs, '
+                'now replaces the current song only when asked. join/move accept channel name/ID; '
+                'pause/resume/skip/shuffle; stop clears queue and autoplay; leave disconnects. '
+                'volume=0..100, seek=seconds, repeat=off/track/queue, remove track_id from music_info '
+                'queue, clear queue. autoplay=true/false opts this session into related YouTube songs '
+                'after the queue; default off, requested songs/repeat take priority, and it never runs '
+                'in empty voice channels. configure reads/updates settings for server managers only. '
+                'Claim success only if the result confirms it; started requires actual TrackStart. '
+                'If voice channel is unknown, ask; never hijack another session. Controls work after '
+                'web research. Use music_info for state/channels; no guild/user overrides or arbitrary audio URLs.')
 
     async def execute(self, message, action, **kwargs):
         if action in READ_ACTIONS:

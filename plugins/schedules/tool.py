@@ -98,16 +98,14 @@ class ScheduleTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Premium wake-ups: Maxwell runs a prompt on a schedule as a background job and posts the "
-            "result to the user (here or in DMs). Use for recurring checks, digests, site updates and "
-            "one-time follow-ups. create needs prompt plus cron (repeating) or at (one time); pass the "
-            "user's timezone (ask if unknown, default UTC). The prompt runs later without this chat, so "
-            "make it self-contained: say exactly what to do and what to report. list shows ids, next "
-            "runs and last results; edit/pause/resume/delete take id. "
-            f"Limits: {max_per_user()} schedules per user, at most once every {min_interval_minutes()} "
-            f"minutes, {daily_run_limit()} runs a day. Wake-ups use background worker tools "
-            "(shell, web, sites, storage, GitHub), not chat tools. Results contain Discord <t:...> "
-            "timestamps; pass them through unchanged."
+            "Premium scheduled background prompts post results here or in DMs: recurring checks, "
+            "digests, site updates or one-time follow-ups. create needs a prompt plus cron (repeat) "
+            "or at (once); pass the user's timezone (ask if unknown; default UTC). The later run has "
+            "no chat context, so specify exactly what to do and report. list shows IDs, next runs and "
+            "last results; edit/pause/resume/delete take id. "
+            f"Limits: {max_per_user()} per user, at most once per {min_interval_minutes()} minutes, "
+            f"{daily_run_limit()} runs/day. Runs use worker tools (shell, web, sites, storage, GitHub), "
+            "not chat tools. Pass Discord <t:...> timestamps in results through unchanged."
         )
 
     async def execute(self, message, action: str = "list", id: str | None = None, name: str | None = None,

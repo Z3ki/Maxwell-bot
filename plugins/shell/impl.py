@@ -200,37 +200,31 @@ class ShellTool(Tool):
         if idle:
             persist_note = (
                 f"Sandbox, /workspace (512 MB) and /tmp (256 MB) are wiped after {idle}s idle, "
-                "on timeout or cancel, and on bot restart; exported env vars never carry over "
-                "between calls."
+                "timeout, cancel or bot restart; exported env vars never carry across calls."
             )
         else:
             persist_note = "Container persists across calls."
         storage_note = (
-            "Users with persistent storage (Premium) also get /storage: it survives every wipe, "
-            "is saved after each command, and its quota is the tmpfs size. Save deliverables "
-            "and anything worth keeping there, never caches or node_modules. Files in "
-            "/storage/public/ are published at the user's /u/<handle>/ address. "
+            "Premium persistent /storage survives wipes, saves after each command and has a tmpfs-sized "
+            "quota. Save deliverables and anything worth keeping there, never caches or node_modules. "
+            "/storage/public/ is published at the user's /u/<handle>/ address. "
         )
         limits_note = (
-            "Command text and captured stdout/stderr have no application size cap. "
-            f"Channel progress shows status only. Timeout {to}s ({premium_to}s for Premium). "
-            "2 GB RAM, 1 CPU, 256 PIDs. Outbound internet works, but the sandbox cannot connect "
-            "to this bot's own public host; use fetch_url or site_server to test published sites. "
-            f"{persist_note} {storage_note}"
+            "Command text and captured stdout/stderr have no application size cap; channel progress "
+            f"shows status only. Timeout {to}s ({premium_to}s Premium), 2 GB RAM, 1 CPU, 256 PIDs. "
+            "Outbound internet works, but the sandbox cannot reach this bot's public host; use fetch_url "
+            f"or site_server to test published sites. {persist_note} {storage_note}"
         )
         how = (
-            "To write a file, put the redirect on the opener line: "
-            "`cat << 'EOF' > path/file.py` then the body then a line containing "
-            "only EOF. `cmd` is an alias for `command`. Do not prefix `$ ` or "
-            "wrap the command in a markdown fence. Attach outputs with files= "
-            "(comma-separated paths under /workspace or /storage)."
+            "Write files with the redirect on the opener: `cat << 'EOF' > path/file.py`, body, "
+            "then a line containing only EOF. `cmd` aliases `command`. No `$ ` prefix or markdown "
+            "fence. Attach outputs with files= (comma-separated paths under /workspace or /storage)."
         )
         return (
-            "Run bash -lc as root inside this user's gVisor sandbox (workdir "
-            "/workspace). Root is confined by runsc; it has no host capabilities "
-            "and receives only a small in-guest capability set. Params: command (required), files "
-            "(optional paths under /workspace or /storage to attach privately or publicly "
-            "according to this request's visibility). Max 10 MB per file. "
+            "Run bash -lc as root in the user's gVisor sandbox, workdir /workspace. runsc confines "
+            "root: no host capabilities, only a small in-guest capability set. command is required; "
+            "optional files under /workspace or /storage attach privately or publicly per request "
+            "visibility, max 10 MB per file. "
             f"{how} {limits_note}"
         )
 

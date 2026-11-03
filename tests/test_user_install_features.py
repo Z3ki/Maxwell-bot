@@ -69,7 +69,7 @@ def test_context_limit_is_user_selectable_and_sanitized():
     good = _interaction(options=[{"name": "context", "value": 50}])
     assert mod._context_limit(good) == 50
     bad = _interaction(options=[{"name": "context", "value": 999}])
-    assert mod._context_limit(bad) == 25
+    assert mod._context_limit(bad) == 50
 
 
 def test_enhanced_slash_turn_keeps_core_attachments():

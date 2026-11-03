@@ -662,6 +662,7 @@ def test_model_configuration_snapshot_names_worker_model_without_keys_or_endpoin
 
 def test_coordinator_github_schema_keeps_account_actions_only(tmp_path):
     from plugins.github_projects.impl import GitHubRepoTool
+    from bot_parts.tool_calls import _loaded_native_tools
 
     bot, msg, _, tool = setup(tmp_path)
     github = SimpleNamespace(
@@ -672,6 +673,7 @@ def test_coordinator_github_schema_keeps_account_actions_only(tmp_path):
     bot.tools.update({"github_repo": github, "delegate_task": tool})
     bot._native_tools_enabled = lambda: True
     token = current_plan.set(("123", "premium"))
+    loaded_token = _loaded_native_tools.set({"github_repo"})
     try:
         schemas = MaxwellBot._build_openai_tools(bot, message=msg)
         params = next(
@@ -691,4 +693,5 @@ def test_coordinator_github_schema_keeps_account_actions_only(tmp_path):
         )
         assert "run" in GitHubRepoTool.parameters["properties"]["action"]["enum"]
     finally:
+        _loaded_native_tools.reset(loaded_token)
         current_plan.reset(token)

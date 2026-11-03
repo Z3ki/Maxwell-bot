@@ -18,7 +18,7 @@ _DEFAULTS: dict[str, Any] = {
     "mode": "ask",
     "web": "auto",
     "detail": "quick",
-    "context": 25,
+    "context": 50,
     "language": "",
     "visibility": "public",
     # on: store this person's message content. off: do not store it.

@@ -177,7 +177,7 @@ def _context_limit(interaction: Any, *, options: dict[str, Any] | None = None) -
     if options is None and "context" not in opts and _USER_PREFERENCE_STORE is not None:
         user_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
         try:
-            opts["context"] = _USER_PREFERENCE_STORE.get(user_id)["defaults"].get("context", 25)
+            opts["context"] = _USER_PREFERENCE_STORE.get(user_id)["defaults"].get("context", ui.USER_INSTALL_HISTORY_LIMIT)
         except Exception:
             opts["context"] = 0
     return ui.normalize_context_limit(opts.get("context", ui.USER_INSTALL_HISTORY_LIMIT))

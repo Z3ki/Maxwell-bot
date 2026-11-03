@@ -192,6 +192,17 @@ def _record(root, kind, fields):
                     value = fields.get(key)
                     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000000000:
                         _increment(db, day, kind, 'group_' + key, group, value)
+                for key in ('cached_tokens', 'cache_write_tokens'):
+                    value = fields.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 1000000000:
+                        for prefix, label in (('', 'total'), ('group_', group)):
+                            _increment(db, day, kind, prefix + key, label, value)
+                            _increment(db, day, kind, prefix + key + '_samples', label)
+                        tokens_in = fields.get('tokens_in')
+                        if key == 'cached_tokens' and isinstance(tokens_in, int) and not isinstance(tokens_in, bool) and 0 <= tokens_in <= 1000000000:
+                            for prefix, label in (('', 'total'), ('group_', group)):
+                                _increment(db, day, kind, prefix + 'cache_ratio_read_tokens', label, value)
+                                _increment(db, day, kind, prefix + 'cache_ratio_input_tokens', label, tokens_in)
         duration = fields.get('duration_ms')
         if isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration) and 0 <= duration <= 1000000000:
             micros = round(duration * 1000)
@@ -261,7 +272,7 @@ def record_event(data_dir, kind, **fields):
     if kind not in _KINDS or data_dir is None:
         return
     # Whitelist before queueing: message text and other unexpected fields never persist.
-    allowed = set(_DIMENSIONS + _NUMBERS + ('duration_ms', 'user_id', 'guild_id'))
+    allowed = set(_DIMENSIONS + _NUMBERS + ('cached_tokens', 'cache_write_tokens', 'duration_ms', 'user_id', 'guild_id'))
     try:
         with _worker_lock:
             if _worker is None or not _worker.is_alive():
@@ -303,6 +314,12 @@ def stats(root, days=30):
     if days < 1 or days > 3650:
         raise ValueError('days must be between 1 and 3650')
     result = {'days': days, 'from': (date.today() - timedelta(days=days-1)).isoformat(), 'kinds': {}, 'estimated_active_users': 0, 'estimated_active_servers': 0, 'opted_in_distinct_user_days': 0, 'distinct_servers': 0, 'distinct_retention_days': min(max(2, _days('USAGE_METRICS_RETENTION_DAYS', 90, 3650)) - 1, _days('USAGE_METRICS_ID_RETENTION_DAYS', 7, 365))}
+    result['tokens'] = {
+        'tokens_in': 0, 'tokens_out': 0,
+        'cached_tokens': None, 'cache_write_tokens': None,
+        'cached_tokens_samples': 0, 'cache_write_tokens_samples': 0,
+        'cache_hit_ratio': None,
+    }
     if not _existing(root):
         return result
     with _connect(root) as db:
@@ -346,6 +363,21 @@ def stats(root, days=30):
                 if cumulative >= threshold:
                     metrics['p95_latency_ms_upper_bound'] = int(bucket) if bucket != 'overflow' else None
                     break
+    def cache_metrics(metrics, prefix, label):
+        def count(key):
+            return metrics.get(prefix + key, {}).get(label, 0)
+
+        reads = count('cached_tokens_samples')
+        writes = count('cache_write_tokens_samples')
+        inputs = count('cache_ratio_input_tokens')
+        return {
+            'cached_tokens': count('cached_tokens') if reads else None,
+            'cache_write_tokens': count('cache_write_tokens') if writes else None,
+            'cached_tokens_samples': reads,
+            'cache_write_tokens_samples': writes,
+            'cache_hit_ratio': count('cache_ratio_read_tokens') / inputs if inputs else None,
+        }
+
     for kind, output in (('tool', 'tools'), ('model', 'models')):
         metrics = result['kinds'].get(kind, {})
         histograms = {}
@@ -372,6 +404,7 @@ def stats(root, days=30):
                     row['route'] = 'legacy'
                 row['tokens_in'] = metrics.get('group_tokens_in', {}).get(group, 0)
                 row['tokens_out'] = metrics.get('group_tokens_out', {}).get(group, 0)
+                row.update(cache_metrics(metrics, 'group_', group))
             result[output].append(row)
         result[output].sort(key=lambda item: (-item['calls'], item.get('name', item.get('model', '')), item.get('provider', ''), item.get('route', '')))
     result['top_commands'] = sorted(result['kinds'].get('command', {}).get('name', {}).items(), key=lambda item: (-item[1], item[0]))
@@ -388,6 +421,7 @@ def stats(root, days=30):
     }
     result['errors'] = result['kinds'].get('error', {}).get('error_type', {})
     result['tokens'] = {key: result['kinds'].get('model', {}).get(key, {}).get('total', 0) for key in ('tokens_in', 'tokens_out')}
+    result['tokens'].update(cache_metrics(result['kinds'].get('model', {}), '', 'total'))
     return result
 
 
@@ -399,6 +433,15 @@ def format_summary(report):
         return f"avg {avg:.1f}ms" if avg is not None and p95 is None else (
             f"avg {avg:.1f}ms, p95 ≤{p95}ms" if avg is not None else "latency unavailable")
 
+    def cache(row):
+        reads = row.get('cached_tokens')
+        writes = row.get('cache_write_tokens')
+        ratio = row.get('cache_hit_ratio')
+        read_text = str(reads) if reads is not None else 'unknown'
+        write_text = str(writes) if writes is not None else 'unknown'
+        ratio_text = f'{ratio:.1%}' if ratio is not None else 'unknown'
+        return f"cache reads {read_text}, writes {write_text}, hit ratio {ratio_text}"
+
     kinds = report.get('kinds', {})
     lines = [
         f"Usage over {report['days']} days · estimated active users {report['estimated_active_users']}, servers {report['estimated_active_servers']}",
@@ -407,7 +450,7 @@ def format_summary(report):
         row = kinds.get(kind, {})
         lines.append(f"{kind.title()}: {row.get('events', {}).get('total', 0)} calls, {latency(row)}")
     lines.extend(
-        f"Model {row['model']} / provider {row['provider']} / route {row.get('route', 'legacy')}: {row['calls']} calls, {row['failures']} failed, {latency(row)}"
+        f"Model {row['model']} / provider {row['provider']} / route {row.get('route', 'legacy')}: {row['calls']} calls, {row['failures']} failed, {latency(row)}, {cache(row)}"
         for row in report.get('models', [])[:3]
     )
     lines.extend(
@@ -422,4 +465,5 @@ def format_summary(report):
     lines.append("Errors: " + (", ".join(f"{name} {count}" for name, count in errors) or "none"))
     tokens = report.get('tokens', {})
     lines.append(f"Tokens: {tokens.get('tokens_in', 0)} in / {tokens.get('tokens_out', 0)} out")
+    lines.append(f"Cache: {cache(tokens)}")
     return "\n".join(lines)

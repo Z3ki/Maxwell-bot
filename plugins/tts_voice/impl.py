@@ -622,19 +622,15 @@ class TtsTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Speak in this channel as a Discord voice message. "
-            "Text length is unlimited. "
-            "voice= paul, oliver, jane, or marie. "
-            "emotion= applies to those presets only. "
-            "reference= attachment filename, attachment, or a public direct HTTP(S) audio/video URL; "
-            "reference_audio_url= is an explicit URL alias. No attachment is needed for links; "
-            "you may find a suitable permitted reference online with web search. "
-            "Ordinary webpage/YouTube watch links are not direct media files. "
-            "The complete clip is prepared for this line with no local size/duration cap; the API validates it. Never saved. "
-            "Only clone voices the requester owns or has permission to use; do not impersonate deceptively. "
-            "A success returns nothing; do not call it again in the same turn. "
-            "An error is returned so you can fix the voice or emotion and retry once. "
-            "On a cooldown error, wait. Do not retry in this turn."
+            "Speak in this channel as a Discord voice message; text length is unlimited. "
+            "voice=paul/oliver/jane/marie; emotion applies only to those presets. reference=attachment "
+            "filename, attachment or public direct HTTP(S) audio/video URL; reference_audio_url is a URL "
+            "alias. Links need no attachment; web search may find a permitted reference, but ordinary "
+            "webpages/YouTube watch links are not direct media. The full clip is prepared without a local "
+            "size/duration cap, validated by the API, and never saved. Clone only voices the requester "
+            "owns or has permission to use; never impersonate deceptively. Success returns nothing: do "
+            "not call again this turn. On error fix voice/emotion and retry once; on cooldown wait and "
+            "do not retry this turn."
         )
 
     async def execute(

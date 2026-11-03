@@ -277,15 +277,15 @@ class DelegateTaskTool(Tool):
             else "Hand substantial work to a subagent."
         )
         return (
-            opening + " Delegate one or two focused tasks. Each task is the concrete work to do, with the requirements and context that job needs. "
-            "The subagent uses the caller's existing tools. It uses a dedicated personal worker connection, chat BYOK, the operator worker model, or the default AI, in that order, with bounded "
-            "steps and time (120 minutes by default; set timeout_minutes up to 240 for very large builds). Returns a background job ID immediately; keep chatting while it runs. "
-            "Do not poll or wait in this turn. Completion returns to the originating context. "
-            "Use manage_tasks for status or requested cancellation. Do not launch duplicate work or change the same files while a job runs. "
-            "Workers cannot send chat messages or delegate recursively. Files a worker reports are attached when the job "
-            "finishes and, when the user has persistent storage, copied to /storage/jobs/<job id>/ so they survive sandbox "
-            "resets. Reports can describe partial work; do not claim success "
-            "without checking results. Include all necessary task context explicitly."
+            opening + " Delegate one or two focused tasks with all necessary requirements and context. "
+            "Workers use the caller's tools and a dedicated personal worker connection, chat BYOK, operator "
+            "worker model, or default AI in that order. Steps and time are bounded: default 120 "
+            "minutes, timeout_minutes up to 240. A background job ID returns immediately; keep "
+            "chatting, never poll or wait this turn. Completion returns to this context; use "
+            "manage_tasks for status or requested cancellation. Do not duplicate work or change "
+            "the same files while a job runs. Workers cannot message chat or delegate recursively. "
+            "Reported files attach on completion and, with persistent storage, survive sandbox resets "
+            "in /storage/jobs/<job id>/. Reports may be partial; check results before claiming success."
         )
 
     async def _eligible(self, message):

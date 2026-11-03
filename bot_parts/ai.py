@@ -174,6 +174,10 @@ class AIMixin:
                     count = usage.get(source)
                     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
                         fields[target] = count
+                for key in ("cached_tokens", "cache_write_tokens"):
+                    count = usage.get(key)
+                    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                        fields[key] = count
             data_dir = getattr(getattr(self, "config", None), "DATA_DIR", None)
             if data_dir is not None:
                 with contextlib.suppress(Exception):

@@ -82,7 +82,7 @@ USER_INSTALL_NAMES = frozenset(
 # Discord: 1 original interaction response + 5 follow-ups when the app is
 # only user-installed (not also in that server).
 USER_INSTALL_MESSAGE_CAP = 6
-USER_INSTALL_HISTORY_LIMIT = 25
+USER_INSTALL_HISTORY_LIMIT = 50
 USER_INSTALL_HISTORY_TIMEOUT = 10.0
 USER_INSTALL_CONTEXT_COUNTS = (0, 10, 25, 50, 100, 250, 500, 1000)
 

@@ -760,6 +760,11 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
             )
         }
     ),
+    "load_tools": _obj(
+        {"names": {"type": "array", "items": _str("Tool name"), "description": "Exact tool names to load for this turn."}},
+        ["names"],
+        additional=False,
+    ),
     "send_file": _obj(
         {
             "filename": _str("File name with extension"),
@@ -972,6 +977,7 @@ RESULT_TOOL_NAMES: frozenset[str] = frozenset(
         "set_activity",
         # more_tools hands the full catalog back and must get a turn to use it.
         "more_tools",
+        "load_tools",
         # chess + usage return data the model needs a follow-up turn to react to.
         "chess_start",
         "chess_move",

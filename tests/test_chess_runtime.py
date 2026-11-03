@@ -19,6 +19,7 @@ from plugins.chess import impl
 def runtime(tmp_path, monkeypatch):
     manager = chess_game.ChessManager(store_path=str(tmp_path / "games.json"))
     monkeypatch.setattr(impl, "_chess_get_manager", lambda: manager)
+    monkeypatch.setattr(chess_game, "get_manager", lambda: manager)
     bot = SimpleNamespace(
         _control={},
         config=SimpleNamespace(DATA_DIR=str(tmp_path), DISABLE_TAINT_GATE=False),
@@ -31,6 +32,8 @@ def runtime(tmp_path, monkeypatch):
     tools = setup(bot)
     bot.tools = {tool.name: tool for tool in tools}
     bot.plugin_manager = SimpleNamespace(
+        all_plugin_tools={name: ("chess", tool) for name, tool in bot.tools.items()},
+        is_plugin_enabled_for_user=lambda *_args: True,
         get_tool=lambda name: bot.tools.get(name),
         get_available_tools=lambda **_kw: bot.tools,
     )

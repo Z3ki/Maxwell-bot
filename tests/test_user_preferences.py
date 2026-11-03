@@ -6,6 +6,14 @@ import pytest
 from plugins.maxwell_extras import user_preferences as mod
 
 
+def test_context_default_is_50_but_saved_choices_are_preserved(tmp_path):
+    store = mod.UserPreferenceStore(tmp_path / "prefs.json")
+    assert store.get("1")["defaults"]["context"] == 50
+    store.set_default("1", "context", 25)
+    assert store.get("1")["defaults"]["context"] == 25
+    assert store.get("2")["defaults"]["context"] == 50
+
+
 def test_unchanged_reads_reuse_cache_without_exposing_mutable_state(tmp_path, monkeypatch):
     store = mod.UserPreferenceStore(tmp_path / "prefs.json")
     store.set_default("1", "mode", "research")

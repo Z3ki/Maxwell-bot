@@ -160,7 +160,7 @@ class ConversationPromptBuilder:
         char_limit = _safe_int(
             host._control.get("max_response_chars", 1000) or 1000, 1000
         )
-        system_parts.append(
+        dynamic_parts.append(
             f"Core personality (style only): {personality}\n"
             f"Reply limit: {char_limit} chars total. Discord delivery splits "
             "long content into messages of at most 2000 characters."
@@ -558,20 +558,17 @@ class ConversationPromptBuilder:
             if app_history_limit is not None:
                 # Explicit app context choices must survive the ordinary chat
                 # count limit; character/model budgets still bound the prompt.
-                count = max(0, min(_safe_int(app_history_limit, 25), 1000))
+                count = max(0, min(_safe_int(app_history_limit, 50), 1000))
             current_message_id = getattr(message, "id", None)
-            # Slide the history window in BLOCKS, not one message per turn.
-            # `memory[-count:]` drops exactly one old turn every time a new
-            # message arrives, so the transcript starts at different bytes on
-            # every single request and no provider-side prefix cache can ever
-            # hit once a channel has filled the window. Snapping the cut to a
-            # fixed boundary keeps the same start for a block of turns; the
-            # window overshoots `count` by at most one block, which the char
-            # budget below still bounds.
-            block = 1 if app_history_limit is not None else max(1, min(16, count // 8))
+            # Round the oldest retained position up to a fixed chunk boundary.
+            # At the default 50 this keeps 41–50 rows and the same oldest row
+            # for ten additions, rather than exceeding the configured limit.
+            # Explicit app context counts remain exact.
+            block = 1 if app_history_limit is not None else max(1, min(10, count // 5))
             chat_rows = [row for row in memory if not row.get("is_tool")]
             start = max(0, len(chat_rows) - count)
-            recent_memory = chat_rows[start - (start % block) :] if count else []
+            start = ((start + block - 1) // block) * block
+            recent_memory = chat_rows[start:] if count else []
             default_tools = DEFAULT_CONTROL["tool_history_messages"]
             tool_limit = max(
                 0,

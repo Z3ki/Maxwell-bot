@@ -149,6 +149,12 @@ Developer access is determined by configured Maxwell owner IDs. Diagnostics reda
 
 Operational logs and usage metrics are described in [configuration](docs/CONFIGURATION.md#diagnostic-logging) and the [privacy audit](docs/PRIVACY_AUDIT.md). Configured application owners can use `/stats`; operators can run `python scripts/stats.py --days 7` or add `--json` from the container. Metrics are best-effort aggregates, not a message-content archive.
 
+Native tool calls start with a compact set and an authorized catalog. Maxwell can
+load additional tool schemas during a turn; permissions and plugin availability
+still apply. Worker jobs retain their own full tool schemas. Normal conversation
+history defaults to 50 messages and may be shortened in chunks to fit the budget.
+Cache statistics distinguish missing provider reports from measured cache misses.
+
 Maxwell can inspect its running revision, changelog, recent public GitHub commits, and changed-file summaries through `get_maxwell_updates`. The running revision is captured at startup; newer commits on `main` are not assumed to be deployed. GitHub failures fall back to the local snapshot.
 
 The model decides when to search for current information. Web search uses

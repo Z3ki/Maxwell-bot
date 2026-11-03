@@ -350,14 +350,11 @@ class SendRichMessageTool(Tool):
 
     def get_description(self) -> str:
         return (
-            "Reply with a Discord embed card. Use it as the reply in place of send_message "
-            "when the answer has structure: a comparison or specs (fields replace tables, "
-            "inline fields sit side by side), steps or a ranked list, a status or results "
-            "summary, a link you built or hosted (link buttons), or an image to show "
-            "(image_url). Keep chat, jokes and short answers in send_message. It can share "
-            "a batch with send_message, e.g. a short line plus the card. Title or description "
-            "is required; description takes Discord markdown. Falls back to plain text when "
-            "embeds are not allowed."
+            "Reply with a Discord embed instead of send_message for structured comparisons/specs "
+            "(fields replace tables; inline fields sit side by side), steps, rankings, status/results, "
+            "hosted links (buttons) or images (image_url). Use send_message for chat, jokes and short "
+            "answers; a batch may contain both, e.g. a short line and card. Title or description is "
+            "required; description supports Discord markdown. Falls back to plain text if embeds are forbidden."
         )
 
     def get_parameters(self) -> dict:

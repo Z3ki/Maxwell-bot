@@ -54,3 +54,46 @@ def test_model_attribution(tmp_path, monkeypatch, name, sensitive, model, expect
     assert "/private" not in stored
     if sensitive:
         assert "deepseek.com" not in stored
+
+
+def test_provider_cache_usage_reaches_aggregates(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_MODEL", "example")
+
+    async def resume(*args):
+        pass
+
+    monkeypatch.setattr(ai, "typing_resume", resume)
+
+    class Provider:
+        name = "primary"
+        model = "example"
+        base_url = "https://api.example.com"
+        policy = ProviderPolicy()
+
+        def __init__(self):
+            self.usages = iter([
+                {"prompt_tokens": 100, "cached_tokens": 80, "cache_write_tokens": 20},
+                {"prompt_tokens": 100, "cached_tokens": 0, "cache_write_tokens": 0},
+                {"prompt_tokens": 500},
+            ])
+
+        async def generate_response(self, messages, **kwargs):
+            return ProviderResult("ok", usage=next(self.usages), model="example", provider="primary")
+
+    provider = Provider()
+    bot = SimpleNamespace(
+        ai_provider=provider, config=SimpleNamespace(DATA_DIR=tmp_path, AI_MODEL="example"), _control={},
+    )
+
+    async def generate():
+        for _ in range(3):
+            await ai.AIMixin._generate_response(bot, [], provider=provider)
+
+    asyncio.run(generate())
+    usage_metrics._queue.join()
+    row = usage_metrics.stats(tmp_path)["models"][0]
+    assert row["cached_tokens"] == 80
+    assert row["cache_write_tokens"] == 20
+    assert row["cached_tokens_samples"] == 2
+    assert row["cache_write_tokens_samples"] == 2
+    assert row["cache_hit_ratio"] == 0.4

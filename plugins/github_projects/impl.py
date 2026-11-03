@@ -601,17 +601,14 @@ class GitHubRepoTool(Tool):
     def __init__(self,bot,service): super().__init__(bot); self.service=service
     def get_description(self):
         return (
-            "Per-user isolated GitHub workspace. action=auth generates a GitHub "
-            "login link with selectable scopes (default repo). Other actions: "
-            "auth_clear, policy_get/set, list, checkout/sync/status/run/diff/verify/"
-            "commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/"
-            "reply, knowledge. Repo policy controls write/admin. "
-            "Custom run/verify commands and Git checkout/sync/PR checkout/commit/"
-            "push require explicit allow_security_testing=true for this user "
-            "and repository. Service Git ignores repository hooks and configuration. "
-            "Built-in status/diff/verify inspection remains available without the "
-            "opt-in. Normal shell commands never receive GitHub tokens. "
-            "action=commit requires commit_message; review/issue_reply use body."
+            "Isolated per-user GitHub workspace. auth generates a login link with selectable scopes "
+            "(default repo); actions include auth_clear, policy_get/set, list, checkout/sync/status/run/"
+            "diff/verify/commit/push, pr_create/get/diff/pr_checkout/review/merge, issue_get/reply, "
+            "knowledge. Repo policy governs write/admin. Custom run/verify and Git checkout/sync/"
+            "pr_checkout/commit/push require explicit allow_security_testing=true for this user and "
+            "repository; built-in status/diff/verify inspection does not. Service Git ignores repo "
+            "hooks/config; normal shell commands never receive GitHub tokens. commit requires "
+            "commit_message; review/issue_reply use body."
         )
 
     async def execute(self,message:Any,action:str|None=None,repo:str|None=None,**kw:Any)->str:

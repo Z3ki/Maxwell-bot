@@ -421,6 +421,7 @@ def test_web_search_then_music_keeps_permissions_and_destructive_gate(tmp_path, 
     bot.tools = {'web_search': WebSearchTool(bot),
                  'music_control': MusicControlTool(bot, service), 'shell': shell}
     bot.plugin_manager = SimpleNamespace(
+        all_plugin_tools={name: ("test", tool) for name, tool in bot.tools.items()},
         get_tool=lambda name: bot.tools.get(name),
         get_available_tools=lambda **kwargs: bot.tools,
         is_plugin_enabled_for_user=lambda *args, **kwargs: True)

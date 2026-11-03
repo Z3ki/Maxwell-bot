@@ -143,18 +143,13 @@ class CreateSiteTool(Tool):
 
     def get_description(self):
         return (
-            f"Publish a site at {self.base_url}/<name>/. "
-            "Full visual freedom: invent a new design each time; no house style unless asked. "
-            "Ship it finished — real content, working controls, no placeholders. "
-            "No lorem ipsum; a Loading shell has shipped nothing. "
-            "Params: name, title, body (complete HTML for index.html) OR url "
-            "(fetch existing HTML and host it), "
-            'files (extra files {"path":"content"}), '
-            "backend (optional, default false), encoding, permanent. "
-            "Static HTML/CSS/JS is first-class. backend=true enables only the "
-            "simple site KV API, which anyone with the URL can write to: no "
-            "secrets or personal data in it. Use site_server (SQLite in /data) "
-            "for private or per-user data and any full custom backend."
+            f"Publish at {self.base_url}/<name>/. Create a fresh design unless asked for a house style; "
+            "ship finished content and working controls, not placeholders, lorem ipsum or a loading shell. "
+            "Params: name, title, body (complete index.html) OR url (fetch HTML), files "
+            '({"path":"content"}), backend (default false), encoding, permanent. '
+            "Static HTML/CSS/JS is first-class. backend=true only enables the simple KV API: "
+            "anyone with the URL can write it, so never store secrets or personal data there. "
+            "Use site_server (SQLite in /data) for private/per-user data or custom backends."
         )
 
     async def _fetch_site_html(self, url: str) -> str:
@@ -582,21 +577,13 @@ class EditSiteTool(_SiteOwnedTool):
 
     def get_description(self):
         return (
-            "Edit a site you already published, at its existing URL. Use this "
-            "to keep working on the frontend (HTML/CSS/JS) — do not recreate "
-            "the site. "
-            "action=list (files + sizes; notes a Python backend if one is running), "
-            "read (complete file; optional start_line= skips preceding lines; "
-            "do not re-read a file you already have), "
-            "write (replace or add a file — path defaults to index.html; or pass "
-            "files={...} to write several at once), "
-            "replace (swap `find` with `replace` in one file; all=true for every "
-            "occurrence), delete (remove a file), rename, backend (on/off/status/"
-            "clear the KV store — not the Python server), extend. "
-            "Python backend code is site_server (write/replace/read), not this. "
-            "Params: name, action, path, content, files, find, replace, all, "
-            "title, encoding, backend, permanent, start_line. "
-            "Prefer this over re-running create_site for a tweak."
+            "Edit your published site's frontend HTML/CSS/JS at its existing URL, not by recreating it. "
+            "Actions: list (files, sizes and running Python backend); read (complete file, optional "
+            "start_line skips earlier lines; don't reread files already obtained); write (replace/add, "
+            "default path index.html, or files={...} for several); replace (find/replace; all=true "
+            "replaces every occurrence); delete; rename; backend (on/off/status/clear KV, not Python); "
+            "extend. Python backend code uses site_server write/replace/read. Params: name, action, "
+            "path, content, files, find, replace, all, title, encoding, backend, permanent, start_line."
         )
 
     async def execute(
@@ -955,36 +942,24 @@ class SiteServerTool(_SiteOwnedTool):
     def get_description(self):
         api_mount = f"{urlparse(self.base_url).path}/<name>/api/"
         return (
-            "Run and edit a real backend server for one of your sites — your own "
-            "Python, routes, database, and secrets, in a sandboxed container at "
-            f"{api_mount}... "
-            "Use this when the site needs server-side logic: accounts, WebSockets, "
-            "a hidden API key, anything a static page cannot enforce. "
-            "Keep working on a live backend with these actions instead of recreating it: "
-            "list (source files), read (complete file; optional start_line= skips "
-            "preceding lines; do not re-read a file you already "
-            "have), write (merge files — helpers stay; "
-            "pass path+content for one file or files={...} for several), replace "
-            "(exact-text patch in one file, like edit_site), deploy (full snapshot, "
-            "missing files disappear), start, stop, restart, status, logs, env, "
-            "request (call your deployed API: path=local endpoint, method=GET by "
-            "default or POST/PUT/PATCH/DELETE/HEAD/OPTIONS, body=native JSON or JSON "
-            "text; returns HTTP status and bounded response body without redirects), "
-            "rm (delete a helper file, not app.py), delete (tear the server down). "
-            "Use request to verify API writes; shell cannot reach the public host. "
-            "New apps use Python 3.12, FastAPI and Uvicorn with one worker and no "
-            "reload; app.py listens on 0.0.0.0:$PORT. Python-chess is baked in: "
-            "import chess for legal moves and game rules; do not hand-roll them. Use SQLite at /data/app.db. "
-            "Only /data is writable and persists. Existing Flask apps remain supported. "
-            "Frontend calls resolve endpoint names against the same-origin mount "
-            f"{api_mount}. Define Python routes without that public prefix. "
-            f"Use new URL('{api_mount}', location.origin) as apiBase, then "
-            "fetch(new URL('notes', apiBase)); this works on nested pages too. "
-            "Secrets belong in env, never frontend files. "
-            "Normalize input (strip, lowercase) before validating it, so a "
-            "whitespace-only field can't slip past a min-length check. "
-            "Backend source, secrets, and lifecycle are owner/admin-only. "
-            "Frontend pages: edit_site. This tool is the server."
+            f"Run/edit your site's sandboxed Python backend at {api_mount}, for server-side logic, "
+            "accounts, WebSockets, hidden keys or anything static pages cannot enforce. Keep the live "
+            "backend: list source; read a complete file (start_line skips earlier lines; don't reread "
+            "known files); write merges path+content or files={...}, preserving helpers; replace is an "
+            "exact-text patch; deploy replaces the full snapshot, removing missing files. Also start, "
+            "stop, restart, status, logs, env, rm (helper only, not app.py), delete (tear down). "
+            "request calls the deployed API: path is local endpoint, method defaults GET (also POST, "
+            "PUT, PATCH, DELETE, HEAD, OPTIONS), body is native JSON or JSON text; returns status and "
+            "bounded body without redirects. Use request to verify writes: shell cannot reach the public host. "
+            "New apps use Python 3.12, FastAPI/Uvicorn, one worker, no reload; app.py listens on "
+            "0.0.0.0:$PORT. Python-chess is installed: import chess for legal moves/rules, never "
+            "hand-roll them. SQLite: /data/app.db; only /data is writable and persistent. Existing Flask "
+            f"apps still work. Frontend endpoints resolve against same-origin {api_mount}; define Python "
+            "routes without that prefix. Use "
+            f"new URL('{api_mount}', location.origin) as apiBase and fetch(new URL('notes', apiBase)) "
+            "for nested pages too. Secrets belong in env, never frontend files. Strip and lowercase input "
+            "before validation so whitespace-only fields cannot pass min-length checks. Backend source, "
+            "secrets and lifecycle are owner/admin-only; edit frontend pages with edit_site."
         )
 
     async def execute(

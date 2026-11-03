@@ -4,6 +4,21 @@ Single source of truth for DEFAULT_CONTROL, KNOWN_TOOLS, and parse_bool.
 Both bot.py and api_server.py import from here so config ranges never drift.
 """
 
+HISTORY_DEFAULT_MIGRATION = "_history_default_50_migration"
+
+
+def migrate_history_default(control: dict) -> bool:
+    """Record the one-time migration and return whether a write is needed."""
+    if HISTORY_DEFAULT_MIGRATION in control:
+        return False
+    changes = []
+    if type(control.get("memory_history_messages")) is int and control["memory_history_messages"] == 40:
+        control["memory_history_messages"] = 50
+        changes.append({"key": "memory_history_messages", "from": 40, "to": 50})
+    control[HISTORY_DEFAULT_MIGRATION] = {"changes": changes}
+    return True
+
+
 def parse_bool(value, default: bool = False) -> bool:
     """Parse persisted/env booleans. bool("false") is True because Python is an asshole."""
     if isinstance(value, bool):
@@ -158,7 +173,7 @@ DEFAULT_CONTROL = {
     "ai_timeout_seconds": 3600,
     # Context budgets are in characters. memory_context_budget is half of
     # prompt_context_budget; keep that ratio when changing either.
-    "memory_history_messages": 40,
+    "memory_history_messages": 50,
     "memory_context_budget": 48000,
     "tool_history_messages": 8,
     "prompt_context_budget": 96000,
@@ -183,9 +198,8 @@ DEFAULT_CONTROL = {
     # the page was written to do. Turn on if your static host sets no CSP for
     # generated sites.
     "site_inject_csp": False,
-    # Unused: the full tool catalog is attached on every turn. Gating hid
-    # hd_image behind more_tools and made photo requests look like a
-    # from-scratch generate. Kept so existing control.json files still load.
+    # Legacy control retained for existing settings; native tool schemas use
+    # per-turn loading independently of this flag.
     "lean_chat_tools": False,
     # Unused for posting: ticket greetings are configured per server via slash commands.
     # Kept so existing control.json files still load.

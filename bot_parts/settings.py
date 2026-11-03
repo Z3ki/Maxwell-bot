@@ -4,6 +4,8 @@ Split out of bot.py; methods keep their original bodies.
 """
 
 import bot_common as _common
+from utils import FileLock
+from control_defaults import HISTORY_DEFAULT_MIGRATION, migrate_history_default
 
 # Mechanical split: the methods below were written against bot.py's
 # module globals. Bind every shared name so the bodies run unchanged.
@@ -222,12 +224,22 @@ class SettingsMixin:
             mtime = path.stat().st_mtime if path.exists() else 0
             if not force and mtime == self._control_mtime:
                 return
-            loaded = {}
-            if path.exists():
-                with open(path, encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if not isinstance(loaded, dict):
-                    loaded = {}
+            # The marker and migrated value are committed together under the
+            # same lock as dashboard writes. Even fresh installs need a marker
+            # so a later intentional setting of 40 is not mistaken for legacy.
+            with FileLock(path, timeout=5):
+                loaded = {}
+                if path.exists():
+                    with open(path, encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if not isinstance(loaded, dict):
+                        raise ValueError("Control settings must be an object")
+                if migrate_history_default(loaded):
+                    _atomic_json_write_sync(path, loaded)
+                    for change in loaded[HISTORY_DEFAULT_MIGRATION]["changes"]:
+                        logger.info("Migrated history override %s: %s -> %s",
+                                    change["key"], change["from"], change["to"])
+                mtime = path.stat().st_mtime
             control = dict(DEFAULT_CONTROL)
             control.update(loaded)
             # The shared Maxwell persona is code-owned. Ignore values written by

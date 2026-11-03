@@ -326,7 +326,7 @@ Frequently used controls include:
 | `tool_iteration_timeout_seconds` | Tool-loop timeout |
 | `prompt_context_budget` | Approximate prompt/context budget in chars (default 96000) |
 | `memory_context_budget` | Most chars of channel history per turn (default 48000) |
-| `memory_history_messages` | Most recent channel messages per turn (default 40) |
+| `memory_history_messages` | Channel history window in messages (default 50; ordinary eviction is chunked) |
 | `live_max_output_tokens` | Maximum output tokens for a live text response (default 4096) |
 | `message_quota_limit` | Free messages per rolling window (default 150) |
 | `message_quota_window_seconds` | Rolling window length (default 18000, five hours) |
@@ -354,6 +354,19 @@ The authoritative set and valid ranges are in `control_defaults.py` and `api.sta
 ## Prompt size and provider caching
 
 `prompt_context_budget` and `memory_context_budget` are character budgets, not exact model-token counts. History gets what is left of `prompt_context_budget` after the output reserve (a quarter of the budget), the ~20k-char system prompt and a per-turn tail reserve (an eighth of the budget, at least 8000), capped by `memory_context_budget`. Below roughly 96000 the system prompt crowds history out and the bot logs `History squeezed`; keep `memory_context_budget` near half of `prompt_context_budget`. The final prompt limit is soft: complete historical transcript blocks may be removed, but authorization/system instructions, live input, and native tool-call/result records are preserved rather than clipped mid-rule.
+
+On loading older saved controls, the former default `memory_history_messages`
+value of 40 is migrated to 50 once; other saved values are preserved. The
+internal `_history_default_50_migration` marker records the migration and its
+changes, so a later intentional choice of 40 is not migrated again. The
+personal-app default is also 50; explicitly saved personal choices remain exact.
+With sufficient character budget, ordinary history retains 41–50 recent chat
+messages, dropping ten-row chunks; tool records, pinned replies and optional
+recall are budgeted separately. Character limits can reduce history further;
+the live request is retained.
+Native tool calls begin with a compact core and an authorized catalog. The model
+can call `load_tools` for additional schemas during that turn; availability and
+execution remain subject to the normal permission and plugin gates.
 
 Tool guidance is conditional on enabled plugins, available tools, and request scope. Component `token_budget` values are advisory; they never truncate an instruction.
 
