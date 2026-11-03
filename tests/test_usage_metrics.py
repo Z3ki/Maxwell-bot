@@ -62,7 +62,7 @@ def test_retention_and_daily_unlinkability(tmp_path, monkeypatch):
 
 def test_rejects_untrusted_dimensions(tmp_path, monkeypatch):
     monkeypatch.setenv('AI_MODEL', 'sk-secret')
-    metrics._record(tmp_path, 'model', {'model': 'sk-secret', 'provider': 'user-provider', 'name': 'sk-abcdef', 'duration_ms': 2})
+    metrics._record(tmp_path, 'model', {'model': 'sk-secret', 'provider': 'https://user-provider/path', 'name': 'sk-abcdef', 'duration_ms': 2})
     result = metrics.stats(tmp_path)['kinds']['model']
     assert 'model' not in result
     assert 'provider' not in result
@@ -86,6 +86,57 @@ def test_worker_models_are_grouped_with_usage(tmp_path, monkeypatch):
     assert models == {('claude-haiku-5-5', 'worker'), ('deepseek/flash', 'fallback')}
     assert report['kinds']['model']['tokens_in']['total'] == 25
     assert report['kinds']['model']['tokens_out']['total'] == 5
+
+
+def test_model_groups_distinguish_routes_and_preserve_legacy(tmp_path, monkeypatch):
+    monkeypatch.setenv('AI_MODEL', 'example')
+    for route, duration, success, tokens in (
+        ('primary', 10, True, 7),
+        ('fallback', 80, False, 3),
+    ):
+        metrics._record(tmp_path, 'model', {
+            'model': 'example', 'provider': 'api.example.com', 'route': route,
+            'duration_ms': duration, 'success': success, 'tokens_in': tokens,
+        })
+    with metrics._connect(tmp_path) as db:
+        day = date.today().isoformat()
+        for dimension, value, count in (
+            ('group_events', 'example|primary', 2),
+            ('group_success', 'example|primary', 1),
+            ('group_failure', 'example|primary', 1),
+            ('group_tokens_out', 'example|primary', 4),
+            ('group_duration_us', 'example|primary', 40000),
+            ('group_duration_samples', 'example|primary', 2),
+            ('group_latency_ms', 'example|primary|25', 2),
+        ):
+            metrics._increment(db, day, 'model', dimension, value, count)
+    report = metrics.stats(tmp_path)
+    rows = {(row['provider'], row['route']): row for row in report['models']}
+    assert rows[('api.example.com', 'primary')]['tokens_in'] == 7
+    assert rows[('api.example.com', 'primary')]['p95_latency_ms_upper_bound'] == 10
+    assert rows[('api.example.com', 'fallback')]['failures'] == 1
+    assert rows[('api.example.com', 'fallback')]['average_latency_ms'] == 80
+    legacy = rows[('unknown', 'primary')]
+    assert (legacy['calls'], legacy['successes'], legacy['failures']) == (2, 1, 1)
+    assert legacy['tokens_out'] == 4
+    assert legacy['average_latency_ms'] == 20
+    assert legacy['p95_latency_ms_upper_bound'] == 25
+    assert report['tokens']['tokens_in'] == 10
+    summary = metrics.format_summary(report)
+    assert 'Model example / provider api.example.com / route primary' in summary
+    assert 'Model example / provider api.example.com / route fallback' in summary
+    assert 'Model example / provider unknown / route primary' in summary
+
+
+def test_model_dimensions_accept_redacted_labels_and_reject_private_values(tmp_path):
+    metrics._record(tmp_path, 'model', {'model': 'byok', 'provider': 'byok', 'route': 'byok'})
+    metrics._record(tmp_path, 'model', {'model': 'other', 'provider': 'worker', 'route': 'worker'})
+    metrics._record(tmp_path, 'model', {
+        'model': 'private-model', 'provider': 'https://private.example/path',
+        'route': 'private-route',
+    })
+    rows = {(row['model'], row['provider'], row['route']) for row in metrics.stats(tmp_path)['models']}
+    assert rows == {('byok', 'byok', 'byok'), ('other', 'worker', 'worker'), ('unknown', 'unknown', 'unknown')}
 
 
 def test_cli_json(tmp_path):
@@ -122,5 +173,5 @@ def test_grouped_latency_and_summary(tmp_path, monkeypatch):
     assert report['errors']['ValueError'] == 1
     summary = metrics.format_summary(report)
     assert 'Tool lookup' in summary
-    assert 'Model example / primary' in summary
+    assert 'Model example / provider primary' in summary
     assert 'Tokens:' in summary

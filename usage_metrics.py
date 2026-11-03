@@ -24,7 +24,7 @@ from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
 _KINDS = frozenset({'turn', 'model', 'tool', 'search', 'command', 'error'})
-_DIMENSIONS = ('trigger', 'model', 'provider', 'name', 'error_type', 'outcome', 'success')
+_DIMENSIONS = ('trigger', 'model', 'provider', 'route', 'name', 'error_type', 'outcome', 'success')
 _NUMBERS = ('queries', 'results', 'tokens_in', 'tokens_out')
 _BUCKETS = (10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 600000)
 _queue = queue.Queue(maxsize=10000)
@@ -79,7 +79,9 @@ def _increment(db, day, kind, dimension, value, amount=1):
 def _dimension(key, value):
     if isinstance(value, bool):
         value = str(value).lower()
-    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_.:/-]{1,80}', value):
+    if not isinstance(value, str) or not re.fullmatch(
+        r'[A-Za-z0-9_.:/-]{1,253}' if key == 'provider' else r'[A-Za-z0-9_.:/-]{1,80}', value
+    ):
         return None
     if re.search(r'(?i)(?:sk-|api[_-]?key|bearer|token|secret|password)', value):
         return None
@@ -87,9 +89,16 @@ def _dimension(key, value):
         configured = {os.environ.get(name) for name in (
             'AI_MODEL', 'AI_FALLBACK_MODEL', 'AI_VISION_MODEL', 'AI_PREMIUM_MODEL',
             'AI_WORKER_MODEL', 'AI_WORKER_FALLBACK_MODEL', 'OLLAMA_MODEL')}
-        if value not in configured:
+        if value not in configured and value not in {'byok', 'other'}:
             return None
-    elif key == 'provider' and value not in {'primary', 'fallback', 'vision', 'worker', 'searxng', 'tavily', 'ddgs', 'none'}:
+    elif key == 'provider':
+        import ipaddress
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            if not re.fullmatch(r'[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.?', value):
+                return None
+    elif key == 'route' and value not in {'primary', 'fallback', 'vision', 'worker', 'byok'}:
         return None
     elif key == 'name' and not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', value):
         return None
@@ -161,6 +170,7 @@ def _record(root, kind, fields):
         name = _dimension('name', fields.get('name'))
         model = _dimension('model', fields.get('model'))
         provider = _dimension('provider', fields.get('provider'))
+        route = _dimension('route', fields.get('route'))
         if kind == 'search':
             backend = provider or 'unknown'
             _increment(db, day, kind, 'backend_calls', backend)
@@ -172,7 +182,7 @@ def _record(root, kind, fields):
         if kind == 'tool' and name:
             group = name
         elif kind == 'model':
-            group = (model or 'unknown') + '|' + (provider or 'unknown')
+            group = (model or 'unknown') + '|' + (provider or 'unknown') + '|' + (route or 'unknown')
         if group is not None:
             _increment(db, day, kind, 'group_events', group)
             if isinstance(fields.get('success'), bool):
@@ -352,11 +362,18 @@ def stats(root, days=30):
             if kind == 'tool':
                 row['name'] = group
             else:
-                row['model'], row['provider'] = group.split('|', 1)
+                parts = group.split('|', 2)
+                row['model'], row['provider'] = parts[:2]
+                if len(parts) == 3:
+                    row['route'] = parts[2]
+                elif row['provider'] in {'primary', 'fallback', 'vision', 'worker'}:
+                    row['route'], row['provider'] = row['provider'], 'unknown'
+                else:
+                    row['route'] = 'legacy'
                 row['tokens_in'] = metrics.get('group_tokens_in', {}).get(group, 0)
                 row['tokens_out'] = metrics.get('group_tokens_out', {}).get(group, 0)
             result[output].append(row)
-        result[output].sort(key=lambda item: (-item['calls'], item.get('name', item.get('model', '')), item.get('provider', '')))
+        result[output].sort(key=lambda item: (-item['calls'], item.get('name', item.get('model', '')), item.get('provider', ''), item.get('route', '')))
     result['top_commands'] = sorted(result['kinds'].get('command', {}).get('name', {}).items(), key=lambda item: (-item[1], item[0]))
     result['search'] = {key: result['kinds'].get('search', {}).get(key, {}).get('total', 0) for key in ('queries', 'results')}
     result['search']['calls'] = result['kinds'].get('search', {}).get('events', {}).get('total', 0)
@@ -390,7 +407,7 @@ def format_summary(report):
         row = kinds.get(kind, {})
         lines.append(f"{kind.title()}: {row.get('events', {}).get('total', 0)} calls, {latency(row)}")
     lines.extend(
-        f"Model {row['model']} / {row['provider']}: {row['calls']} calls, {row['failures']} failed, {latency(row)}"
+        f"Model {row['model']} / provider {row['provider']} / route {row.get('route', 'legacy')}: {row['calls']} calls, {row['failures']} failed, {latency(row)}"
         for row in report.get('models', [])[:3]
     )
     lines.extend(

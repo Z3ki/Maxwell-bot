@@ -1343,7 +1343,10 @@ def test_model_metrics_capture_usage_and_byok_failure(tmp_path, monkeypatch):
         token = _current_inbound.set(_message(bot))
         try:
             assert await bot._generate_response([{"content": "private content"}]) is result
-            personal = SimpleNamespace(generate_response=AsyncMock(side_effect=RuntimeError("secret")))
+            personal = SimpleNamespace(
+                policy=SimpleNamespace(sensitive_credentials=True),
+                generate_response=AsyncMock(side_effect=RuntimeError("secret")),
+            )
             with pytest.raises(RuntimeError):
                 await bot._generate_response([], provider=personal)
         finally:
@@ -1354,7 +1357,7 @@ def test_model_metrics_capture_usage_and_byok_failure(tmp_path, monkeypatch):
     assert success["tokens_in"] == 12 and success["tokens_out"] == 3
     assert success["model"] == "trusted-model" and success["success"] is True
     assert failure["error_type"] == "RuntimeError" and failure["success"] is False
-    assert "model" not in failure and "provider" not in failure
+    assert (failure["model"], failure["provider"], failure["route"]) == ("byok", "byok", "byok")
     assert "private" not in repr(events) and "secret" not in repr(events)
 
 

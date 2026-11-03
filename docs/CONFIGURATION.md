@@ -32,11 +32,16 @@ and hourly while the metrics worker is active.
 
 Daily aggregates contain event counts, metadata dimensions, numeric totals and
 bounded latency histograms. Average latency uses recorded duration totals at
-microsecond resolution; overall, per-tool and per-model/provider p95 values are
-bucket upper bounds, not exact percentiles. Only configured environment model names are retained;
-dynamic/BYOK models and credential-like values are excluded. Daily 256-register
-cardinality sketches estimate active users and servers, including users without
-message storage enabled. Daily sketches can be merged for a period, but estimates
+microsecond resolution; overall, per-tool and per-model/provider/route p95 values
+are bucket upper bounds, not exact percentiles. Model reports identify the
+configured model, the lowercase endpoint hostname as provider, and the routing
+role (`primary`, `fallback`, `vision`, or `worker`) separately. If the hostname
+is unavailable, the provider falls back to the role. Unconfigured model names
+are recorded as `other`; personal BYOK models, hosts and endpoints are never
+recorded and use `byok` for all three labels. Older model/provider groups remain
+in reports. Daily 256-register cardinality sketches estimate active users and
+servers, including users without message storage enabled. Daily sketches can be
+merged for a period, but estimates
 have statistical error. They contain no per-user rows; an individual contribution
 cannot be subtracted and the sketches should not be described as mathematically
 anonymous, especially for small populations.

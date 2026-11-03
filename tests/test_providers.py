@@ -209,6 +209,51 @@ def test_request_id_correlates_actual_fallback_without_changing_payload(caplog):
     assert all("request_id" not in payload for payload in session.payloads)
 
 
+@pytest.mark.parametrize(
+    ("name", "sensitive", "expected"),
+    [
+        ("primary", False, "primary"),
+        ("worker", False, "worker"),
+        ("fallback", False, "fallback"),
+        ("vision", False, "vision"),
+        ("byok:private-provider", True, "byok"),
+    ],
+)
+def test_provider_timing_logs_client_role_without_changing_routing(
+    caplog, name, sensitive, expected
+):
+    from maxwell_core.providers.factory import openai_compat_provider
+
+    provider = openai_compat_provider(
+        name=name,
+        base_url="https://private-endpoint.test/v1",
+        model="private-model" if sensitive else "test-model",
+        api_key="private-api-key",
+        max_tokens=10,
+        policy=ProviderPolicy(sensitive_credentials=sensitive),
+    )
+    provider.available = True
+    session = FakeSession()
+    provider._session = session
+    with caplog.at_level(logging.INFO, logger="providers"):
+        result = asyncio.run(
+            provider.generate_chat_completion(
+                [{"role": "user", "content": "hello"}], request_id="timing-test"
+            )
+        )
+    assert result["content"] == "ok"
+    assert session.urls == ["https://private-endpoint.test/v1/chat/completions"]
+    assert session.payloads[0]["model"] == ("private-model" if sensitive else "test-model")
+    timing_logs = [r.getMessage() for r in caplog.records if "Provider timing" in r.getMessage()]
+    assert len(timing_logs) == 2
+    assert all(f"endpoint={expected} " in message for message in timing_logs)
+    assert "private-api-key" not in caplog.text
+    if sensitive:
+        assert "private-provider" not in caplog.text
+        assert "private-endpoint.test" not in caplog.text
+        assert "private-model" not in caplog.text
+
+
 def test_opencode_go_headers_include_session_id(monkeypatch):
     monkeypatch.setenv("OPENCODE_SESSION", "maxwell-discord")
     provider = OpenAICompatibleProvider(

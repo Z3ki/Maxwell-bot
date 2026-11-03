@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report configured provider hostnames separately from routing roles in usage metrics; label personal BYOK calls and unconfigured models without recording their private identities. Correct worker and BYOK timing route labels.
+
 ## 0.1.15 — 2026-11-01
 
 - Accept empty streamed Anthropic tool arguments for zero-argument worker tools.

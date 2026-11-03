@@ -895,6 +895,14 @@ class OpenAICompatibleProvider(ChatProvider):
             result = self._redact_provider_payload(result, credential_secrets)
         return CompletionResponse(result, ended_at, first_token_s, last_token_s)
 
+    def _timing_endpoint_label(self, endpoint: ProviderEndpoint) -> str:
+        """Identify the route in timing logs without exposing BYOK details."""
+        if self.policy.sensitive_credentials:
+            return "byok"
+        if endpoint.name == "primary" and self.name in {"worker", "fallback", "vision"}:
+            return self.name
+        return endpoint.name
+
     def _completion_result(
         self,
         message: dict,
@@ -946,8 +954,8 @@ class OpenAICompatibleProvider(ChatProvider):
         logger.info(
             "Provider timing done request_id=%s endpoint=%s model=%s status=%s headers_ms=%.1f ttft_ms=%.1f total_ms=%.1f tps=%s content_chars=%s tool_calls=%s tokens=%s cached_tokens=%s cache_write_tokens=%s",
             request_id,
-            endpoint.name,
-            model,
+            self._timing_endpoint_label(endpoint),
+            "byok" if self.policy.sensitive_credentials else model,
             status,
             headers_ms,
             timing["ttft_ms"],
@@ -1246,8 +1254,8 @@ class OpenAICompatibleProvider(ChatProvider):
             logger.info(
                 "Provider timing start request_id=%s endpoint=%s model=%s attempt=%s/%s messages=%s media_parts=%s timeout=%s max_tokens=%s reasoning_disabled=%s tools=%s",
                 request_id,
-                endpoint.name,
-                data.get("model"),
+                self._timing_endpoint_label(endpoint),
+                "byok" if byok_request else data.get("model"),
                 attempt,
                 max_attempts,
                 len(chat_messages),
@@ -1280,7 +1288,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
-                            endpoint.name,
+                            self._timing_endpoint_label(endpoint),
                             resp.status,
                             headers_ms,
                             len(error_text),
@@ -1305,7 +1313,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s",
-                            endpoint.name,
+                            self._timing_endpoint_label(endpoint),
                             resp.status,
                             headers_ms,
                             len(error_text),
@@ -1348,7 +1356,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         )
                         logger.warning(
                             "Provider timing status endpoint=%s status=%s headers_ms=%.1f body_chars=%s body=%s",
-                            endpoint.name,
+                            self._timing_endpoint_label(endpoint),
                             resp.status,
                             headers_ms,
                             len(error_text),
@@ -1804,7 +1812,7 @@ class OpenAICompatibleProvider(ChatProvider):
                 logger.warning(
                     "Provider timing timeout request_id=%s endpoint=%s elapsed_ms=%.1f timeout=%s",
                     request_id,
-                    endpoint.name,
+                    self._timing_endpoint_label(endpoint),
                     (time.perf_counter() - request_start) * 1000,
                     timeout,
                 )
