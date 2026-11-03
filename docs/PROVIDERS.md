@@ -201,8 +201,9 @@ same values and default; this lets an Anthropic worker use an OpenAI-compatible
 fallback without sending one provider's credentials to the other.
 For Anthropic's API use `https://api.anthropic.com/v1` as the worker base URL;
 the client sends requests to `/messages`, streaming by default and using JSON
-when non-streaming is requested or during recovery. It does not send
-reasoning-specific options.
+when non-streaming is requested or during recovery. Configured reasoning effort
+is sent as `output_config.effort`; unsupported values remain provider errors.
+Disabling reasoning is not currently supported by the Anthropic transport.
 
 Worker defaults: output 8192 tokens (16–131072), unspecified context (0), reasoning
 off, blank effort, request timeout 600 seconds (10–14400). Configure independently:

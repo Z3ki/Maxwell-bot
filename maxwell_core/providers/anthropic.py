@@ -240,6 +240,8 @@ class AnthropicMessagesProvider(OpenAICompatibleProvider):
         system, messages = translate_messages(chat_messages)
         data = {"model": base["model"], "max_tokens": base["max_tokens"],
                 "messages": messages, "stream": True}
+        if base.get("reasoning_effort") and base["reasoning_effort"] != "none":
+            data["output_config"] = {"effort": base["reasoning_effort"]}
         if system:
             data["system"] = system
         if tools:

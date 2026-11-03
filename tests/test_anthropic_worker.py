@@ -106,6 +106,26 @@ def test_anthropic_system_tools_parallel_calls_and_tool_results():
     asyncio.run(run())
 
 
+def test_anthropic_worker_sends_configured_effort():
+    async def run():
+        requests = []
+
+        async def handle(request):
+            requests.append(await request.json())
+            return web.json_response(anthropic_response([{'type': 'text', 'text': 'done'}]))
+
+        async with server(handle) as base:
+            provider = make_provider(base, reasoning_effort='low', disable_reasoning=False)
+            provider.available = True
+            try:
+                await provider.generate_response([{'role': 'user', 'content': 'work'}], stream=False)
+                assert requests[0]['output_config'] == {'effort': 'low'}
+            finally:
+                await provider.close()
+
+    asyncio.run(run())
+
+
 def test_anthropic_usage_includes_cache_reads_and_writes():
     async def run():
         async def handle(request):
