@@ -21,6 +21,11 @@ _NATIVE_CORE = frozenset({
 def _lazy_native_enabled(bot) -> bool:
     from plugins.maxwell_extras.task_workers import _inside_worker
 
+    # MAXWELL_LAZY_TOOLS=false sends every authorized schema each call. Use it
+    # when the provider only caches prompts above a size the lazy payload no
+    # longer reaches (observed with Gemini via Antigravity).
+    if not getattr(getattr(bot, "config", None), "LAZY_TOOL_LOADING", True):
+        return False
     return MaxwellBot._native_tools_enabled(bot) and not _inside_worker.get()
 
 
@@ -1567,14 +1572,17 @@ class ToolCallsMixin:
                 "enabled_plugins": (*plugin_ids, "core"),
                 "exclude_ids": ("core.identity", "core.protocol"),
             }
+            # Static components depend only on the plugin/tool/admin
+            # eligibility that already shapes the tools payload, so they stay
+            # in the cached prefix. Rendered (per-turn) components go to the
+            # turn suffix when the caller provides one.
+            collected = prompts.collect(
+                request, rendered=False if dynamic_parts is not None else None, **kwargs
+            )
             if dynamic_parts is not None:
-                # Even static plugin text can depend on per-user plugin or tool
-                # eligibility. Keep all eligible components in the turn suffix.
-                dynamic_parts.extend(prompts.collect(request, **kwargs))
-            else:
-                collected = prompts.collect(request, **kwargs)
-                if collected:
-                    extra = "\n\n" + "\n\n".join(collected)
+                dynamic_parts.extend(prompts.collect(request, rendered=True, **kwargs))
+            if collected:
+                extra = "\n\n" + "\n\n".join(collected)
         if platform == "user_install":
             header += (
                 "\n\nThis turn is a /maxwell app command. Delivery tools post "

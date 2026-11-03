@@ -5,6 +5,10 @@
 - Reduce chat prompt overhead with a stable fixed prefix, compact guidance and a
   permission-filtered native tool catalog. Load additional schemas per turn with
   `load_tools`; workers and the custom tool protocol retain their tool access.
+  `MAXWELL_LAZY_TOOLS=false` restores full schemas for providers that only cache
+  larger prompts. Keep the per-turn block out of the leading system message
+  when a chat has no stored history, and keep static plugin guidance in the
+  cached prefix.
 - Default recent history to 50 messages, migrate saved former defaults, and trim
   ordinary history in chunks to improve cache reuse.
 - Aggregate provider-reported cache reads and writes in model/route usage stats;

@@ -367,6 +367,13 @@ the live request is retained.
 Native tool calls begin with a compact core and an authorized catalog. The model
 can call `load_tools` for additional schemas during that turn; availability and
 execution remain subject to the normal permission and plugin gates.
+`MAXWELL_LAZY_TOOLS=false` (default `true`) sends every authorized schema on
+each call instead. Some providers only cache prompts above a minimum size: in
+testing, Gemini through Antigravity reported no cached tokens for ~10k-token
+lazy prompts but cached ~18k of ~20.6k tokens with full schemas.
+When a chat has no stored history, a fixed "no earlier messages" user
+message separates the fixed system message from the per-turn block, so gateways
+that merge leading system messages do not fold the timestamp into the prefix.
 
 Tool guidance is conditional on enabled plugins, available tools, and request scope. Component `token_budget` values are advisory; they never truncate an instruction.
 

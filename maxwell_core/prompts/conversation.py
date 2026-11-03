@@ -423,6 +423,16 @@ class ConversationPromptBuilder:
         # turn. It also lands closer to the live message, which is the
         # stronger position for the time/user line.
         if dynamic_parts:
+            if len(messages) == 1:
+                # No transcript rows (storage off, empty channel). Without a
+                # separator the per-turn block would be a second LEADING system
+                # message, and gateways that merge leading system messages into
+                # one system instruction (Gemini/Antigravity) would fold the
+                # changing timestamp into the cached prefix on every turn.
+                messages.append({
+                    "role": "user",
+                    "content": "(No earlier messages in this conversation.)",
+                })
             messages.append({
                 "role": "system",
                 "content": (

@@ -700,3 +700,19 @@ def test_optional_recall_is_dropped_before_recent_history_under_prompt_pressure(
     result = MaxwellBot._apply_prompt_budget(bot, [instructions, recent, recalled, live])
     assert recalled not in result
     assert result == [instructions, recent, live]
+
+
+def test_empty_history_keeps_turn_block_out_of_leading_system_messages():
+    async def run():
+        bot = _bot(FakeMemory())
+        return (
+            await MaxwellBot._build_messages(bot, _message(), "first"),
+            await MaxwellBot._build_messages(bot, _message(), "second"),
+        )
+
+    first, second = asyncio.run(run())
+    # Gateways merge every LEADING system message into one instruction, so the
+    # per-turn block must follow a non-system message even with no history.
+    assert first[0]["role"] == "system" and first[1]["role"] == "user"
+    assert first[:2] == second[:2]
+    assert "Memory scope:" not in first[0]["content"]

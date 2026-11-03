@@ -419,6 +419,10 @@ class Config:
     # ~12% of stream time vs ~88% for native. OFF by default to keep native
     # behavior; turn on with MAXWELL_CUSTOM_TOOL_CALLS=true in .env.
     CUSTOM_TOOL_CALLS = _bool_env("MAXWELL_CUSTOM_TOOL_CALLS", False)
+    # Native chat turns send a compact core plus a `load_tools` catalog. Set
+    # false to send every authorized schema on each call instead (larger
+    # prompts that some providers cache more reliably).
+    LAZY_TOOL_LOADING = _bool_env("MAXWELL_LAZY_TOOLS", True)
 
     NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
     # tts speaks with Mistral Voxtral. Emotion is a preset voice, not a text tag.

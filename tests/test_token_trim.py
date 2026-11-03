@@ -287,3 +287,14 @@ def test_emoji_grid_skipped_unless_asked():
 
     asyncio.run(run())
 
+
+
+def test_lazy_tool_loading_can_be_disabled():
+    bot = _live_bot()
+    bot.config = SimpleNamespace(LAZY_TOOL_LOADING=False)
+    message = _msg("wyd", mentions=[bot.user])
+    names = _tool_names(bot, message, "wyd")
+    assert "load_tools" not in names
+    assert {"send_message", "web_search", "shell"} <= names
+    chat = MaxwellBot._tool_system_prompt(bot, "discord", message=message, content="wyd")
+    assert "load_tools" not in chat
