@@ -41,7 +41,9 @@ primary plugins, media handlers, APIs or background workers. The default mode is
   absent capabilities, and last-known-good config timestamp. It cannot report
   primary health or imply automatic failover. Primary awareness is opt-in via
   `MAXWELL_STANDBY_CONFIGURED=true`, after actual standby provisioning; it explicitly
-  says manual-only and does not claim the standby is active.
+  says manual-only and does not claim the standby is active. Use
+  `MAXWELL_STANDBY_CONFIGURED=staged` while installation/verification is incomplete;
+  it explicitly states NOT operationally ready and promises no outage coverage.
 
 ## Passive installation
 
@@ -95,7 +97,7 @@ root**, never a bot-accessible upload route:
 `python -m standby.sync import --input /secure/incoming.json --output /etc/maxwell-standby/chat-config.json`
 
 Imports enforce schema/type/size/ID/checksum validation, reject unexpected control
-keys, future timestamps, older snapshots and same-version conflicts. Validated
+keys, noncanonical/zero Discord IDs, future timestamps, older snapshots and same-version conflicts. Validated
 snapshots are replaced atomically with file/directory fsync; invalid input keeps
 last-known-good intact. `standby.sync status --input ...` reports revision,
 export time and checksum, without secret/history data.

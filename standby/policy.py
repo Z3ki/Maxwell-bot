@@ -123,7 +123,17 @@ def activation_record(path: Path) -> dict[str, Any]:
 
 def primary_context() -> str:
     """Opt-in factual awareness; default primary persona remains unchanged."""
-    if os.getenv("MAXWELL_STANDBY_CONFIGURED", "false") != "true":
+    status = os.getenv("MAXWELL_STANDBY_CONFIGURED", "false")
+    if status == "staged":
+        return (
+            "\nDeployment status: you are the primary Maxwell runtime. A separate "
+            "limited text-only standby is staged but NOT operationally ready. "
+            "Automatic failover is NOT enabled; do not promise outage coverage or "
+            "claim takeover is available. Pending installation and verification "
+            "gates must be resolved first. Standby has no sandbox, tools, files, "
+            "attachments, music or primary conversation history."
+        )
+    if status != "true":
         return ""
     return (
         "\nDeployment status: you are the primary Maxwell runtime. A separate limited "

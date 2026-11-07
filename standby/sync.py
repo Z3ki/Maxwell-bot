@@ -24,6 +24,8 @@ def snowflake(value: Any) -> str:
     text = str(value)
     if not text.isascii() or not text.isdecimal() or not 1 <= len(text) <= 22:
         raise PolicyDenied("Invalid Discord ID")
+    if text != str(int(text)) or int(text) <= 0:
+        raise PolicyDenied("Discord IDs must be positive canonical decimal strings")
     return text
 
 

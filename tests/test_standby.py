@@ -572,3 +572,28 @@ def test_provider_stream_reads_all_chunks_and_enforces_bound():
     assert asyncio.run(runtime.read_bounded(Chunks([b'{"a":', b"1}"]))) == b'{"a":1}'
     with pytest.raises(policy.PolicyDenied):
         asyncio.run(runtime.read_bounded(Chunks([b"abc", b"def"]), limit=5))
+
+
+@pytest.mark.parametrize(
+    "value", ["0012", "0010", "007", "0", "00", " 12", "+12", "-12"]
+)
+def test_noncanonical_restriction_ids_are_rejected_not_silently_ignored(value):
+    for key in ("ignore_users", "blocked_channels", "allowed_channels"):
+        with pytest.raises(policy.PolicyDenied):
+            sync.export_snapshot(full_controls({key: [value]}), revision="bad-id")
+    with pytest.raises(policy.PolicyDenied):
+        sync.export_snapshot(
+            full_controls({"guild_solo_channel": {value: "10"}}), revision="bad-id"
+        )
+    with pytest.raises(policy.PolicyDenied):
+        sync.export_snapshot(
+            full_controls({"guild_solo_channel": {"7": value}}), revision="bad-id"
+        )
+
+
+def test_staged_primary_awareness_never_claims_ready(monkeypatch):
+    monkeypatch.setenv("MAXWELL_STANDBY_CONFIGURED", "staged")
+    context = policy.primary_context()
+    assert "NOT operationally ready" in context
+    assert "do not promise outage coverage" in context
+    assert "Automatic failover is NOT enabled" in context
