@@ -52,13 +52,28 @@ def translate_messages(messages):
     """Translate OpenAI conversation history, preserving tool call/result IDs."""
     system = []
     translated: list[dict[str, Any]] = []
+    seen_turn = False
     for message in messages:
         role = message.get("role")
         content = message.get("content")
+        if role not in {"system", "developer"}:
+            seen_turn = True
         if role in {"system", "developer"}:
-            system.extend(_content_blocks(content))
-            continue
-        if role == "tool":
+            if not seen_turn:
+                # Only the leading system turns form the cache-stable prefix.
+                system.extend(_content_blocks(content))
+                continue
+            # Later system turns (worker budget notes, per-turn private
+            # context) stay in position as a marked user text block so they
+            # neither rewrite the cached prefix nor lose end-of-prompt placement.
+            blocks = _content_blocks(content)
+            if any(block.get("type") != "text" for block in blocks):
+                raise ProviderProtocolError("Invalid system content")
+            blocks = [
+                {"type": "text", "text": f"[System note]\n{block['text']}"} for block in blocks
+            ]
+            role = "user"
+        elif role == "tool":
             blocks = [{"type": "tool_result", "tool_use_id": message.get("tool_call_id", ""),
                        "content": _content_blocks(content)}]
             if message.get("is_error"):
