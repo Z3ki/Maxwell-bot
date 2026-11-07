@@ -1,5 +1,13 @@
 """Maxwell Bot - Main entry point"""
 
+# Select isolation BEFORE importing the primary plugin/media/API dependency graph.
+if __name__ == "__main__":
+    from standby.policy import deployment_mode
+    if deployment_mode() == "standby":
+        from standby.runtime import main as standby_main
+        standby_main()
+        raise SystemExit(0)
+
 from importlib.util import find_spec
 
 from bot_common import *  # noqa: F401,F403
@@ -83,6 +91,8 @@ class MaxwellBot(
 
 
 async def main():
+    from standby.policy import assert_primary_unfenced
+    assert_primary_unfenced(Config.DATA_DIR)
     if find_spec("nacl") is None or find_spec("davey") is None:
         logger.info(
             "Optional native Discord voice dependencies are missing; "

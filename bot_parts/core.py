@@ -56,7 +56,8 @@ class CoreMixin:
         ident = identity_values(self.config)
         self._identity = ident
         self.command_prefix = ident["command_prefix"] or self.config.COMMAND_PREFIX
-        self._base_knowledge = fill_identity(MAXWELL_BASE_KNOWLEDGE, ident)
+        from standby.policy import primary_context
+        self._base_knowledge = fill_identity(MAXWELL_BASE_KNOWLEDGE, ident) + primary_context()
         self._discord_chat_protocol = fill_identity(DISCORD_CHAT_PROTOCOL, ident)
         self._BIRTHDAY = parse_birthday(getattr(self.config, "BOT_BIRTHDAY", None))
         self.config.validate()
