@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — limited standby candidate
+
+- Add isolated, manually fenced text-only emergency runtime, immutable no-tool/file boundaries, bounded resources, scoped atomic config snapshots and truthful role context. Automatic failover is not implemented; review and explicit activation approval required. See `docs/STANDBY.md`.
+
 ## Unreleased
 
 - Reduce chat prompt overhead with a stable fixed prefix, compact guidance and a

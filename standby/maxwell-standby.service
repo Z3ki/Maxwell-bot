@@ -1,0 +1,49 @@
+[Unit]
+Description=Maxwell manually fenced text-only standby
+After=network.target
+ConditionPathExists=/run/maxwell-standby/activation.json
+ConditionPathExists=/etc/maxwell-standby/discord-token
+ConditionPathExists=/etc/maxwell-standby/chat-config.json
+
+[Service]
+Type=simple
+User=maxwell-standby
+Group=maxwell-standby
+WorkingDirectory=/opt/maxwell-standby/app
+Environment=MAXWELL_DEPLOYMENT_MODE=standby
+EnvironmentFile=-/etc/maxwell-standby/audience.env
+LoadCredential=provider:/etc/maxwell-standby/provider.json
+LoadCredential=discord-token:/etc/maxwell-standby/discord-token
+LoadCredential=chat-config:/etc/maxwell-standby/chat-config.json
+LoadCredential=activation:/run/maxwell-standby/activation.json
+ExecStartPre=+/opt/maxwell-standby/venv/bin/python -m standby.consume
+ExecStart=/opt/maxwell-standby/venv/bin/python -m standby.runtime
+# A stopped gateway must not silently reactivate during failback.
+Restart=no
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=-/run/maxwell-standby
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=512M
+MemorySwapMax=128M
+CPUQuota=75%
+TasksMax=64
+LimitNOFILE=256
+TemporaryFileSystem=/tmp:size=16M,mode=1777
+TemporaryFileSystem=/var/tmp:size=16M,mode=1777
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
+
+# Intentionally static: no Install/WantedBy and no automatic boot activation.
