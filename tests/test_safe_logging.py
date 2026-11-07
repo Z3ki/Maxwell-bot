@@ -87,9 +87,32 @@ def test_discord_webhooks_and_tokens_are_redacted():
     assert token not in result
 
 
-def test_short_and_generic_environment_secrets_are_redacted(monkeypatch):
-    monkeypatch.setenv("CUSTOM_KEY", "xy")
+def test_generic_environment_secrets_are_redacted(monkeypatch):
+    monkeypatch.setenv("CUSTOM_KEY", "xyzw")
     monkeypatch.setenv("AUDIT_WEBHOOK", "webhook-secret-value")
-    text = redact_diagnostics("xy webhook-secret-value")
-    assert "xy" not in text
+    monkeypatch.setenv("DISCORD_TOKEN", "abc123def456ghi789")
+    text = redact_diagnostics(
+        "xyzw webhook-secret-value token=abc123def456ghi789; (abc123def456ghi789)"
+    )
+    assert "xyzw" not in text
     assert "webhook-secret-value" not in text
+    assert "abc123def456ghi789" not in text
+    assert text.count("[redacted]") == 4
+
+
+def test_non_secret_settings_do_not_scrub_logs(monkeypatch):
+    # Issue #136: counts and flags whose names contain "token"/"key".
+    monkeypatch.setenv("AI_MAX_OUTPUT_TOKENS", "2048")
+    monkeypatch.setenv("AI_WORKER_MAX_OUTPUT_TOKENS", "32768")
+    monkeypatch.setenv("LIVE_TEST_WEBHOOK_IDS", "1204812345,99")
+    monkeypatch.setenv("SAND_BOX_PERSISTENT_KEYRING", "1")
+    monkeypatch.setenv("SESSION_ENABLED", "true")
+    monkeypatch.setenv("CUSTOM_KEY", "xy")
+    text = "Requested max_tokens=2048; channel 1204812345; image 2048x1536; id 123 xy"
+    assert redact_diagnostics(text) == text
+
+
+def test_env_secret_is_redacted_only_at_token_boundaries(monkeypatch):
+    monkeypatch.setenv("CUSTOM_SECRET", "s3cr3tv4lue")
+    text = redact_diagnostics("x s3cr3tv4lue id 9s3cr3tv4lue9")
+    assert text == "x [redacted] id 9s3cr3tv4lue9"

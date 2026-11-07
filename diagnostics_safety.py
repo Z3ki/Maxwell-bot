@@ -43,15 +43,41 @@ _MAX_LOG_MESSAGE = 300
 _MAX_DEBUG_MESSAGE = 200
 
 
+# Settings whose names contain "token"/"key" but hold counts, IDs or flags,
+# e.g. AI_MAX_OUTPUT_TOKENS=2048, LIVE_TEST_WEBHOOK_IDS, *_KEYRING=1.
+_ENV_CONFIG_NAME_RE = re.compile(r"(?i)(?:^|_)(?:MAX|MIN)_|_TOKENS$|_IDS$|_KEYRING$")
+_ENV_PLAIN_VALUE_RE = re.compile(
+    r"(?i)[\d\s.,_:+-]+|true|false|yes|no|on|off|none|null|enabled|disabled"
+)
+_MIN_ENV_SECRET_LENGTH = 4
+
+
+def _env_secret_values() -> list[str]:
+    """Configured credential values worth redacting, longest first."""
+    values = set()
+    for key, value in os.environ.items():
+        if not value or not (_SECRET_KEY_RE.match(key) or _ENV_SECRET_KEY_RE.search(key)):
+            continue
+        stripped = value.strip()
+        if (
+            len(stripped) < _MIN_ENV_SECRET_LENGTH
+            or _ENV_CONFIG_NAME_RE.search(key)
+            or _ENV_PLAIN_VALUE_RE.fullmatch(stripped)
+        ):
+            continue
+        values.add(value)
+    return sorted(values, key=len, reverse=True)
+
+
 def redact_diagnostics(text: str) -> str:
     """Keep configured credentials out of model prompts and public crash reports."""
-    secrets = sorted(
-        (value for key, value in os.environ.items()
-         if value and (_SECRET_KEY_RE.match(key) or _ENV_SECRET_KEY_RE.search(key))),
-        key=len, reverse=True,
-    )
-    for value in secrets:
-        text = text.replace(value, "[redacted]")
+    for value in _env_secret_values():
+        # Whole tokens only: a value must not blank part of an unrelated ID.
+        text = re.sub(
+            r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])",
+            "[redacted]",
+            text,
+        )
     text = _WEBHOOK_RE.sub("[redacted webhook]", text)
     text = _DISCORD_CREDENTIAL_RE.sub("[redacted]", text)
     return _SECRET_VALUE_RE.sub("[redacted]", text)
