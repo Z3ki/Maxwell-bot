@@ -32,7 +32,9 @@ def public_url(handle: str | None, path: str) -> str:
     if not root:
         return ""
     inner = rel[len(PUBLIC_DIR):].lstrip("/")
-    if inner.endswith("index.html"):
+    # Only a final path segment named exactly index.html is a directory index;
+    # "myindex.html" is an ordinary file.
+    if inner == "index.html" or inner.endswith("/index.html"):
         inner = inner[: -len("index.html")]
     return root + _quoted(inner) + ("/" if inner.endswith("/") else "")
 

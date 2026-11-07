@@ -209,6 +209,21 @@ def test_public_urls(monkeypatch):
     assert public_url("cat", "notes.txt") == ""
 
 
+def test_public_url_keeps_files_that_merely_end_in_index_html(monkeypatch):
+    # Issue #137: only a segment named exactly index.html is a directory index.
+    monkeypatch.setenv("MAXWELL_PUBLIC_BASE_URL", "https://example.com")
+    assert public_url("alice", "public/index.html") == "https://example.com/u/alice/"
+    assert (
+        public_url("alice", "public/foo/index.html")
+        == "https://example.com/u/alice/foo/"
+    )
+    for name in ("myindex.html", "pageindex.html", "notindex.html", "foo/myindex.html"):
+        assert (
+            public_url("alice", f"public/{name}")
+            == f"https://example.com/u/alice/{name}"
+        )
+
+
 def _message(uid=PREMIUM, name="tester"):
     return SimpleNamespace(author=SimpleNamespace(id=int(uid), name=name))
 
