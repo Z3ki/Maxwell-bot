@@ -637,3 +637,29 @@ def test_post_replace_durability_failure_is_not_reported_as_unchanged(
     with pytest.raises(sync.ConfigDurabilityError):
         sync.atomic_import(snap, path, now=1001)
     assert json.loads(path.read_text())["revision"] == "new"
+
+
+def test_primary_fence_parent_is_synced_before_stop(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    fake = FakeOperator()
+    with patch(
+        "standby.takeover.uuid.uuid4", return_value=SimpleNamespace(hex=fake.nonce)
+    ):
+        takeover.activate(fake, "a" * 40, approve_primary_stop=True)
+    command = fake.calls[2][1]
+    assert command.startswith("set -e\n")
+    script = command.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    script = script.replace("/root/maxwell/data", str(tmp_path))
+    kinds = []
+    original = os.fsync
+
+    def fsync(fd):
+        kinds.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        original(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    exec(compile(script, "<offline-fence>", "exec"), {})
+    assert kinds == [False, True]
+    assert (tmp_path / "standby-primary-fence.json").exists()

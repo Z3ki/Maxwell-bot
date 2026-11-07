@@ -105,7 +105,9 @@ def activate(
         "fd=os.open('/root/maxwell/data/standby-primary-fence.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
         "with os.fdopen(fd,'w') as f:\n f.write("
         + repr(json.dumps(marker))
-        + ");f.flush();os.fsync(f.fileno())\nPY\n"
+        + ");f.flush();os.fsync(f.fileno())\n"
+        "directory=os.open('/root/maxwell/data',os.O_RDONLY|os.O_DIRECTORY)\n"
+        "try: os.fsync(directory)\nfinally: os.close(directory)\nPY\n"
         "docker update --restart=no maxwell >/dev/null && docker stop --time 30 maxwell >/dev/null"
     )
     proof = json.loads(
@@ -162,7 +164,7 @@ def failback(operator: Operator, *, approve_primary_start: bool = False) -> None
     if previous not in {"no", "always", "unless-stopped"}:
         raise PolicyDenied("Recovery receipt missing original restart policy")
     operator.main(
-        "python3 - <<'PY'\nimport json,subprocess\nfrom pathlib import Path\n"
+        "python3 - <<'PY'\nimport os,json,subprocess\nfrom pathlib import Path\n"
         "p=Path('/root/maxwell/data/standby-primary-fence.json')\n"
         "assert subprocess.check_output(['git','-C','/root/maxwell','rev-parse','HEAD'],text=True).strip()=="
         + repr(reviewed)
@@ -172,6 +174,8 @@ def failback(operator: Operator, *, approve_primary_start: bool = False) -> None
         " m=json.loads(p.read_text());assert m['fence_id']==" + repr(fence_id) + "\n"
         " assert not d['State']['Running'] and d['State']['Pid']==0\n"
         " p.unlink()\n"
+        " directory=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY)\n"
+        " try: os.fsync(directory)\n finally: os.close(directory)\n"
         "subprocess.run(['docker','update','--restart='+"
         + repr(previous)
         + ",'maxwell'],check=True,stdout=subprocess.DEVNULL)\n"
