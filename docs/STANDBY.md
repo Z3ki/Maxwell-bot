@@ -98,7 +98,9 @@ root**, never a bot-accessible upload route:
 
 Imports enforce schema/type/size/ID/checksum validation, reject unexpected control
 keys, noncanonical/zero Discord IDs, future timestamps, older snapshots and same-version conflicts. Validated
-snapshots are replaced atomically with file/directory fsync; invalid input keeps
+snapshots use a shared nonblocking cross-process lock across validation/comparison
+and atomic replacement, plus file/directory fsync. Post-replacement durability
+errors are distinguished from pre-commit rejection; invalid input keeps
 last-known-good intact. `standby.sync status --input ...` reports revision,
 export time and checksum, without secret/history data.
 

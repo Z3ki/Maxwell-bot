@@ -597,3 +597,43 @@ def test_staged_primary_awareness_never_claims_ready(monkeypatch):
     assert "NOT operationally ready" in context
     assert "do not promise outage coverage" in context
     assert "Automatic failover is NOT enabled" in context
+
+
+def test_concurrent_snapshot_writer_is_rejected_before_compare_replace(tmp_path):
+    import fcntl
+
+    path = tmp_path / "chat.json"
+    old = sync.export_snapshot(full_controls(), revision="old", now=1000)
+    new = sync.export_snapshot(
+        full_controls({"bot_enabled": False}), revision="new", now=1001
+    )
+    sync.atomic_import(old, path, now=1002)
+    with (tmp_path / "chat.json.lock").open("r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError):
+            sync.atomic_import(new, path, now=1002)
+    assert json.loads(path.read_text())["revision"] == "old"
+    sync.atomic_import(new, path, now=1002)
+    with pytest.raises(policy.PolicyDenied):
+        sync.atomic_import(old, path, now=1002)
+    assert json.loads(path.read_text())["revision"] == "new"
+
+
+def test_post_replace_durability_failure_is_not_reported_as_unchanged(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "chat.json"
+    snap = sync.export_snapshot(full_controls(), revision="new", now=1000)
+    original = sync.os.fsync
+    calls = []
+
+    def fsync(fd):
+        calls.append(fd)
+        if len(calls) == 2:
+            raise OSError("test directory durability failure")
+        return original(fd)
+
+    monkeypatch.setattr(sync.os, "fsync", fsync)
+    with pytest.raises(sync.ConfigDurabilityError):
+        sync.atomic_import(snap, path, now=1001)
+    assert json.loads(path.read_text())["revision"] == "new"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -107,33 +109,61 @@ def validate_snapshot(
     return {**data, "controls": controls}
 
 
+class ConfigDurabilityError(OSError):
+    """A validated snapshot was replaced but its durable commit is uncertain."""
+
+
 def atomic_import(
     data: dict[str, Any], target: Path, *, now: float | None = None
 ) -> None:
     data = validate_snapshot(data, now=now)
-    if target.exists():
-        previous = validate_snapshot(json.loads(target.read_text()), now=now)
-        if data["exported_at"] < previous["exported_at"]:
-            raise PolicyDenied("Refusing older configuration")
-        if (
-            data["exported_at"] == previous["exported_at"]
-            and data["sha256"] != previous["sha256"]
-        ):
-            raise PolicyDenied("Conflicting configuration version")
-    fd, name = tempfile.mkstemp(prefix=".chat-config-", dir=target.parent)
+    lock = os.open(
+        target.with_name(target.name + ".lock"),
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
+    )
     try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(data, stream, sort_keys=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, target)
+        # Compare and replace share one cross-process lock for CLI and receivers.
+        # Nonblocking acquisition bounds request time; the next refresh may retry.
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if target.exists():
+            previous = validate_snapshot(json.loads(target.read_text()), now=now)
+            if data["exported_at"] < previous["exported_at"]:
+                raise PolicyDenied("Refusing older configuration")
+            if (
+                data["exported_at"] == previous["exported_at"]
+                and data["sha256"] != previous["sha256"]
+            ):
+                raise PolicyDenied("Conflicting configuration version")
+        # Open the parent before replacement, so an open failure is pre-commit.
         directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        name = None
+        published = False
         try:
+            fd, name = tempfile.mkstemp(prefix=".chat-config-", dir=target.parent)
+            with os.fdopen(fd, "w") as stream:
+                json.dump(data, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, target)
+            published = True
             os.fsync(directory)
+        except Exception as error:
+            if published:
+                raise ConfigDurabilityError(
+                    "Validated snapshot replaced; durability unconfirmed"
+                ) from error
+            raise
         finally:
-            os.close(directory)
+            with contextlib.suppress(OSError):
+                os.close(directory)
+            if name is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    Path(name).unlink()
     finally:
-        Path(name).unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
 
 
 def chat_allowed(
