@@ -4,7 +4,8 @@ Premium can be granted to any Discord user ID by a configured application owner:
 `/config → Bot controls → Grant / revoke Premium`. Enter the ID and `premium` or
 `free`. The modal and submission both verify the owner and active private panel.
 Grants persist in the quota database across restarts. Premium currently provides
-the 2,000-message allowance (when quota enforcement is enabled), optional
+at least 500 messages per five-hour window, or the configured free limit if
+that is higher (when quota enforcement is enabled), optional
 `AI_PREMIUM_MODEL` routing, the `delegate_task` tool, persistent storage and
 public-folder publishing, schedules, and longer shell commands, subject to
 configuration and permissions. An existing custom message limit still wins.
