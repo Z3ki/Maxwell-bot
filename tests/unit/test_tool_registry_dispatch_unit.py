@@ -354,7 +354,12 @@ def test_global_registry_is_lazy_and_replaceable(monkeypatch):
 
 def test_live_contracts_reach_schema_prompt_groups_and_followup_policy(monkeypatch):
     from maxwell_core.tools.results import _tool_results_need_followup
-    from tool_schemas import build_openai_tools, contract_groups, ends_turn, result_contract
+    from tool_schemas import (
+        build_openai_tools,
+        contract_groups,
+        ends_turn,
+        result_contract,
+    )
 
     registry = ToolRegistry()
     monkeypatch.setattr(registry_mod, "_GLOBAL", registry)

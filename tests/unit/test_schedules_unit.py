@@ -66,11 +66,11 @@ def test_cron_daylight_saving_edges():
     ]
 
 
-
 def test_spring_forward_compression_is_below_the_interval_floor():
     now = datetime(2026, 1, 15, 12, tzinfo=UTC)
     with pytest.raises(CronError, match="once every"):
         plan_cron("0,50 1,3 * * *", "America/New_York", now)
+
 
 def test_fall_back_second_pass_stays_in_the_future():
     # 2026-11-01 06:10 UTC is 01:10 EST, the second pass of the repeated hour.
@@ -96,10 +96,18 @@ def test_fall_back_second_pass_stays_in_the_future():
 
 
 @pytest.mark.parametrize(
-    "bad", [
-        "* * *", "60 * * * *", "5-1 * * * *", "@reboot", "a b c d e",
-        "*/0 * * * *", "*/ * * * *", "5/ * * * *", "0 9 1-5/ * *",
-    ]
+    "bad",
+    [
+        "* * *",
+        "60 * * * *",
+        "5-1 * * * *",
+        "@reboot",
+        "a b c d e",
+        "*/0 * * * *",
+        "*/ * * * *",
+        "5/ * * * *",
+        "0 9 1-5/ * *",
+    ],
 )
 def test_cron_rejects_garbage(bad):
     with pytest.raises(CronError):
@@ -527,10 +535,14 @@ def test_two_runners_cannot_submit_the_same_firing(tmp_path, monkeypatch):
                 return result
 
         jobs = BlockingJobs()
-        first = asyncio.create_task(ScheduleRunner(_bot(jobs=jobs), store).fire(row, now))
+        first = asyncio.create_task(
+            ScheduleRunner(_bot(jobs=jobs), store).fire(row, now)
+        )
         await asyncio.wait_for(entered.wait(), timeout=5)
         try:
-            await ScheduleRunner(_bot(jobs=jobs), ScheduleStore(store.path)).fire(row, now)
+            await ScheduleRunner(_bot(jobs=jobs), ScheduleStore(store.path)).fire(
+                row, now
+            )
         finally:
             release.set()
             await first
@@ -580,7 +592,9 @@ def test_retry_cannot_stomp_a_concurrent_reschedule(tmp_path, monkeypatch):
     assert saved["last_status"] == "rescheduled"
 
 
-def test_accepted_job_is_counted_without_overwriting_mid_submit_edits(tmp_path, monkeypatch):
+def test_accepted_job_is_counted_without_overwriting_mid_submit_edits(
+    tmp_path, monkeypatch
+):
     now = NOW.timestamp()
     monkeypatch.setattr(time, "time", lambda: now)
     store = _store(tmp_path)
@@ -607,7 +621,9 @@ def test_channel_retry_preserves_grace_across_runner_restart(tmp_path, monkeypat
     bot = _bot()
     runner = ScheduleRunner(bot, store)
     monkeypatch.setattr(
-        runner, "_message", AsyncMock(side_effect=Unavailable("temporary", permanent=False))
+        runner,
+        "_message",
+        AsyncMock(side_effect=Unavailable("temporary", permanent=False)),
     )
     asyncio.run(runner.tick())
     saved = store.get(UID, row["id"])
@@ -629,7 +645,9 @@ def test_private_thread_requires_current_access(tmp_path, monkeypatch, access):
     store = _store(tmp_path)
     row = _add(store, dm=False, channel_id="77", guild_id="5")
     member = SimpleNamespace(id=int(UID))
-    permissions = SimpleNamespace(view_channel=True, manage_threads=access == "moderator")
+    permissions = SimpleNamespace(
+        view_channel=True, manage_threads=access == "moderator"
+    )
 
     class PrivateThread:
         id = 77
@@ -637,8 +655,11 @@ def test_private_thread_requires_current_access(tmp_path, monkeypatch, access):
         fetch_member = AsyncMock(
             return_value=SimpleNamespace(id=int(UID)),
             side_effect=(
-                discord.NotFound(SimpleNamespace(status=404, reason="missing"), "missing")
-                if access == "removed" else None
+                discord.NotFound(
+                    SimpleNamespace(status=404, reason="missing"), "missing"
+                )
+                if access == "removed"
+                else None
             ),
         )
 
@@ -679,7 +700,9 @@ def test_tool_handles_schedule_deleted_during_edit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store, "update", delete_then_update)
     result = asyncio.run(
-        ScheduleTool(_bot(), store).execute(_message(), action="edit", id=row["id"], name="new")
+        ScheduleTool(_bot(), store).execute(
+            _message(), action="edit", id=row["id"], name="new"
+        )
     )
     assert result == "Error: no schedule with that id"
 
@@ -704,7 +727,19 @@ def test_store_migrates_existing_schedule_database(tmp_path, monkeypatch):
             db.execute(
                 "INSERT INTO schedules(id, user_id, name, kind, spec, tz, prompt, dm, next_run, "
                 "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                ("01234567", UID, "legacy", "cron", "@daily", "UTC", "original", 1, now - 5, now, now),
+                (
+                    "01234567",
+                    UID,
+                    "legacy",
+                    "cron",
+                    "@daily",
+                    "UTC",
+                    "original",
+                    1,
+                    now - 5,
+                    now,
+                    now,
+                ),
             )
     finally:
         db.close()
@@ -742,10 +777,19 @@ def test_prompt_edit_during_submit_still_advances_the_firing(tmp_path):
     row = _add(store, next_run=now - 5, kind="once", spec="2026-10-21T09:00:00+00:00")
     claimed = store.claim(row, now, 60)
     assert claimed is not None
-    assert store.update(UID, row["id"], prompt="edited prompt")["prompt"] == "edited prompt"
+    assert (
+        store.update(UID, row["id"], prompt="edited prompt")["prompt"]
+        == "edited prompt"
+    )
     assert store.record(
-        row["id"], status="started job abc", next_run=None, enabled=False,
-        ran=True, job="abc", expected_next=row["next_run"], claim_token=claimed["claim_token"],
+        row["id"],
+        status="started job abc",
+        next_run=None,
+        enabled=False,
+        ran=True,
+        job="abc",
+        expected_next=row["next_run"],
+        claim_token=claimed["claim_token"],
     )
     saved = store.get(UID, row["id"])
     assert saved["runs"] == 1

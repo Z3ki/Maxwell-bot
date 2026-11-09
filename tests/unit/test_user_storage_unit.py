@@ -165,6 +165,7 @@ def test_import_keeps_host_edits_made_meanwhile(storage):
     assert storage.read(PREMIUM, "from-dashboard.txt") == b"host"
     assert storage.read(PREMIUM, "from-shell.txt") == b"guest"
 
+
 @pytest.mark.parametrize("initial", [{}, {"old.txt": b"old"}])
 @pytest.mark.parametrize("write_after_wipe", [False, True])
 def test_import_cannot_resurrect_a_wiped_snapshot(storage, initial, write_after_wipe):
@@ -177,8 +178,10 @@ def test_import_cannot_resurrect_a_wiped_snapshot(storage, initial, write_after_
         storage.write(PREMIUM, "new.txt", b"new")
     before = storage.manifest(PREMIUM)
     result = storage.import_tar(
-        PREMIUM, io.BytesIO(tar_bytes({"resurrected.txt": b"old guest"})),
-        base, base_generation=generation,
+        PREMIUM,
+        io.BytesIO(tar_bytes({"resurrected.txt": b"old guest"})),
+        base,
+        base_generation=generation,
     )
     assert "deleted while the job was running" in result.error
     assert storage.manifest(PREMIUM) == before
@@ -188,8 +191,10 @@ def test_import_cannot_resurrect_a_wiped_snapshot(storage, initial, write_after_
     spool, base, generation = reopened.export_tar(PREMIUM)
     spool.close()
     result = reopened.import_tar(
-        PREMIUM, io.BytesIO(tar_bytes({"fresh.txt": b"fresh"})),
-        base, base_generation=generation,
+        PREMIUM,
+        io.BytesIO(tar_bytes({"fresh.txt": b"fresh"})),
+        base,
+        base_generation=generation,
     )
     assert not result.error
     assert reopened.read(PREMIUM, "fresh.txt") == b"fresh"
@@ -208,7 +213,10 @@ def test_import_replaces_files_and_directories(storage, initial, incoming):
     spool, base, generation = storage.export_tar(PREMIUM)
     spool.close()
     result = storage.import_tar(
-        PREMIUM, io.BytesIO(tar_bytes(incoming)), base, base_generation=generation,
+        PREMIUM,
+        io.BytesIO(tar_bytes(incoming)),
+        base,
+        base_generation=generation,
     )
     assert result.clean and not result.error and not result.skipped
     assert storage.usage(PREMIUM) == (3, 1)
@@ -224,8 +232,10 @@ def test_import_type_conflict_preserves_all_host_children(storage):
     storage.write(PREMIUM, "node/added.txt", b"host")
     before = storage.manifest(PREMIUM)
     result = storage.import_tar(
-        PREMIUM, io.BytesIO(tar_bytes({"node": b"replacement"})),
-        base, base_generation=generation,
+        PREMIUM,
+        io.BytesIO(tar_bytes({"node": b"replacement"})),
+        base,
+        base_generation=generation,
     )
     assert "changed on the host" in result.error
     assert storage.manifest(PREMIUM) == before
@@ -239,8 +249,10 @@ def test_import_type_conflict_keeps_a_host_deleted_sibling(storage):
     storage.delete(PREMIUM, "dir/gone.txt")
     before = storage.manifest(PREMIUM)
     result = storage.import_tar(
-        PREMIUM, io.BytesIO(tar_bytes({"dir": b"file"})),
-        base, base_generation=generation,
+        PREMIUM,
+        io.BytesIO(tar_bytes({"dir": b"file"})),
+        base,
+        base_generation=generation,
     )
     assert "changed on the host" in result.error
     assert storage.manifest(PREMIUM) == before
@@ -256,7 +268,6 @@ def test_directory_only_tar_counts_toward_the_file_cap(storage, monkeypatch):
     assert storage.usage(PREMIUM) == (0, 0)
 
 
-
 def test_import_refuses_over_quota(storage, monkeypatch):
     monkeypatch.setenv("MAXWELL_STORAGE_PREMIUM_MB", "1")
     spool, base, generation = storage.export_tar(PREMIUM)
@@ -267,7 +278,9 @@ def test_import_refuses_over_quota(storage, monkeypatch):
     assert storage.usage(PREMIUM) == (0, 0)
 
 
-def test_import_enforces_file_count_after_concurrent_host_additions(storage, monkeypatch):
+def test_import_enforces_file_count_after_concurrent_host_additions(
+    storage, monkeypatch
+):
     monkeypatch.setenv("MAXWELL_STORAGE_MAX_FILES", "10")
     storage.write(PREMIUM, "original", b"old")
     spool, base, generation = storage.export_tar(PREMIUM)
@@ -275,9 +288,15 @@ def test_import_enforces_file_count_after_concurrent_host_additions(storage, mon
     for index in range(8):
         storage.write(PREMIUM, f"host-{index}", b"")
     before = storage.manifest(PREMIUM)
-    archive = io.BytesIO(tar_bytes({
-        "original": b"old", "guest-1": b"", "guest-2": b"",
-    }))
+    archive = io.BytesIO(
+        tar_bytes(
+            {
+                "original": b"old",
+                "guest-1": b"",
+                "guest-2": b"",
+            }
+        )
+    )
 
     result = storage.import_tar(PREMIUM, archive, base, base_generation=generation)
 
@@ -323,7 +342,9 @@ def test_wipe_removes_files_and_handle(storage):
     assert storage.generation(PREMIUM) > generation
 
 
-def test_wipe_reports_filesystem_failure_without_claiming_deletion(storage, monkeypatch):
+def test_wipe_reports_filesystem_failure_without_claiming_deletion(
+    storage, monkeypatch
+):
     import plugins.user_storage.store as store_module
 
     storage.write(PREMIUM, "private.txt", b"not deleted")

@@ -9,7 +9,9 @@ import asyncio
 from types import SimpleNamespace
 
 from context_hydration import (
-    hydrate_turn_context, hydration_value, requester_can_read_history,
+    hydrate_turn_context,
+    hydration_value,
+    requester_can_read_history,
 )
 
 
@@ -102,8 +104,15 @@ def test_pointer_reply_with_missing_target_does_not_fall_back_to_channel_history
 def test_rehydrating_an_edited_message_clears_object_and_slotted_cache_targets():
     class SlottedMessage:
         __slots__ = (
-            "id", "content", "author", "channel", "reference",
-            "attachments", "embeds", "stickers", "mentions",
+            "id",
+            "content",
+            "author",
+            "channel",
+            "reference",
+            "attachments",
+            "embeds",
+            "stickers",
+            "mentions",
         )
 
     for slotted in (False, True):
@@ -133,7 +142,9 @@ def test_guild_pointer_hydration_requires_requester_view_and_history_permissions
         live.guild = SimpleNamespace(id=99)
 
         class Channel(_Channel):
-            def permissions_for(self, requester, author=live.author, view=view, read=read):
+            def permissions_for(
+                self, requester, author=live.author, view=view, read=read
+            ):
                 assert requester is author
                 return SimpleNamespace(view_channel=view, read_message_history=read)
 
@@ -161,9 +172,10 @@ def test_resolved_reply_target_is_not_hydrated_when_requester_lacks_history():
     live = _msg(9, "^", author_id=4)
     live.guild = SimpleNamespace(id=99)
     live.channel = SimpleNamespace(
-        id=42, permissions_for=lambda _requester: SimpleNamespace(
+        id=42,
+        permissions_for=lambda _requester: SimpleNamespace(
             view_channel=True, read_message_history=False
-        )
+        ),
     )
     live.reference = SimpleNamespace(message_id=8, resolved=_msg(8, "OLD_SECRET"))
     bot = _bot()
@@ -201,26 +213,32 @@ def test_history_permission_lookup_fails_closed_and_allows_authorized_requester(
 def test_history_permissions_support_raw_and_wrapped_uncached_guild_interactions():
     for wrapped in (False, True):
         source = SimpleNamespace(
-            id=42, permissions_for=lambda _requester: SimpleNamespace(
+            id=42,
+            permissions_for=lambda _requester: SimpleNamespace(
                 view_channel=True, read_message_history=True
-            )
+            ),
         )
         interaction = SimpleNamespace(
-            channel=source, channel_id=42, guild=None, guild_id=99,
+            channel=source,
+            channel_id=42,
+            guild=None,
+            guild_id=99,
             user=_author("Sam", 4),
             permissions=SimpleNamespace(view_channel=True, read_message_history=False),
         )
         message = (
             SimpleNamespace(interaction=interaction, channel=source, guild=None)
-            if wrapped else interaction
+            if wrapped
+            else interaction
         )
         assert requester_can_read_history(message) is False
         interaction.permissions.read_message_history = True
         assert requester_can_read_history(message) is True
         other = SimpleNamespace(
-            id=43, permissions_for=lambda _requester: SimpleNamespace(
+            id=43,
+            permissions_for=lambda _requester: SimpleNamespace(
                 view_channel=True, read_message_history=False
-            )
+            ),
         )
         assert requester_can_read_history(message, other) is False
         interaction.channel = None

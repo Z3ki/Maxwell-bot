@@ -80,9 +80,15 @@ def test_cancelling_proc_cleans_guest_and_reaps_client(monkeypatch):
     async def scenario():
         nonlocal started
         started = asyncio.Event()
-        task = asyncio.create_task(GitHubProjectService._proc(
-            SimpleNamespace(), "docker", "exec", "fixture", on_timeout=cleanup,
-        ))
+        task = asyncio.create_task(
+            GitHubProjectService._proc(
+                SimpleNamespace(),
+                "docker",
+                "exec",
+                "fixture",
+                on_timeout=cleanup,
+            )
+        )
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -115,9 +121,14 @@ def test_timeout_racing_client_exit_preserves_timeout_error(monkeypatch):
 @pytest.mark.parametrize("operation", ["inspect", "git"])
 @pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
 def test_interrupted_sidecar_removes_only_its_unique_container(
-    tmp_path, monkeypatch, operation, interrupt,
+    tmp_path,
+    monkeypatch,
+    operation,
+    interrupt,
 ):
-    service = GitHubProjectService(SimpleNamespace(), SimpleNamespace(data_dir=tmp_path))
+    service = GitHubProjectService(
+        SimpleNamespace(), SimpleNamespace(data_dir=tmp_path)
+    )
     service.repo_root("1", "acme/app").mkdir()
     calls = []
     events = []
@@ -163,7 +174,10 @@ def test_interrupted_sidecar_removes_only_its_unique_container(
             pending = service.inspect_repository("1", "acme/app", "status")
         else:
             pending = service._trusted_git(
-                "1", "acme/app", {}, [["status", "--short", "--branch"]],
+                "1",
+                "acme/app",
+                {},
+                [["status", "--short", "--branch"]],
             )
         task = asyncio.create_task(pending)
         if interrupt == "cancel":
@@ -184,7 +198,9 @@ def test_interrupted_sidecar_removes_only_its_unique_container(
 
 
 def test_workspace_timeout_kills_the_captured_container(tmp_path, monkeypatch):
-    service = GitHubProjectService(SimpleNamespace(), SimpleNamespace(data_dir=tmp_path))
+    service = GitHubProjectService(
+        SimpleNamespace(), SimpleNamespace(data_dir=tmp_path)
+    )
     service.repo_root("1", "acme/app").mkdir()
     calls = []
     killed = []

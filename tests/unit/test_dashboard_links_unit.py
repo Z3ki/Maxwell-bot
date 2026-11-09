@@ -536,7 +536,9 @@ def test_web_dashboard_plugin_registers_and_removes_the_command(tmp_path, monkey
     assert "dashboard" not in {cmd["name"] for cmd in ui.USER_INSTALL_COMMANDS}
 
 
-def test_redeem_cannot_recreate_session_after_concurrent_deletion(tmp_path, monkeypatch):
+def test_redeem_cannot_recreate_session_after_concurrent_deletion(
+    tmp_path, monkeypatch
+):
     import api.dashboard_auth as auth
 
     async def run():
@@ -556,7 +558,9 @@ def test_redeem_cannot_recreate_session_after_concurrent_deletion(tmp_path, monk
             monkeypatch.setattr(dashboard.sessions, "create", delete_then_create)
             monkeypatch.setattr(auth.time, "time", lambda: 300.0)
             response = await client.post(
-                "/api/dashboard/redeem", json={"token": token}, headers={"Origin": LINK.origin}
+                "/api/dashboard/redeem",
+                json={"token": token},
+                headers={"Origin": LINK.origin},
             )
             assert response.status == 400
             assert "deleted" in (await response.json())["error"]
@@ -564,7 +568,9 @@ def test_redeem_cannot_recreate_session_after_concurrent_deletion(tmp_path, monk
                 assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
             monkeypatch.setattr(dashboard.sessions, "create", create)
             # A genuinely new user action is allowed after deletion.
-            assert (await sign_in(dashboard, client))["Authorization"].startswith("Bearer ")
+            assert (await sign_in(dashboard, client))["Authorization"].startswith(
+                "Bearer "
+            )
 
     asyncio.run(run())
 
