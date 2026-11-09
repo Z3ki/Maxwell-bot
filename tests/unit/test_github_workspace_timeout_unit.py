@@ -258,4 +258,3 @@ def test_workspace_exec_does_not_fall_back_to_container_name(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match="could not identify user workspace"):
         asyncio.run(scenario())
     assert all(args[:2] != ("docker", "exec") for args in calls)
-

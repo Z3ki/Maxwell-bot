@@ -90,7 +90,7 @@ class MessagesMixin:
                     return
                 if self._reply_queue.contains(channel_id, message_id):
                     return
-                if self._author_is_ignored(message):
+                if MessagesMixin._author_is_ignored(self, message):
                     await MaxwellBot._record_request_outcome(
                         self, message, "suppressed", "ignored_author"
                     )
@@ -130,7 +130,7 @@ class MessagesMixin:
                     return
             elif not self._inbound_dedup.check_and_add(message_id):
                 return
-            if journal is None and self._author_is_ignored(message):
+            if journal is None and MessagesMixin._author_is_ignored(self, message):
                 return
 
             # Journal first. Keep an outage cursor frozen while newer live
@@ -249,9 +249,8 @@ class MessagesMixin:
             )
 
         # Admins bypass so they can manage the blacklist.
-        if self._author_is_ignored(message):
+        if MessagesMixin._author_is_ignored(self, message):
             return "ignored_author"
-
 
         # DMs are off unless reply_dms is on. When on, anyone can DM; the
         # turn still hides Discord mod/server tools (see DM_BLOCKED_TOOLS).
