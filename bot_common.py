@@ -171,7 +171,7 @@ from maxwell_core.tools.results import (
     _PROMISE_RE as _PROMISE_RE,
     _PROMISE_VERB as _PROMISE_VERB,
     _SHORT_FOLLOWUP_AFTER_SEND_CHARS as _SHORT_FOLLOWUP_AFTER_SEND_CHARS,
-    _VISIBLE_RESULT_MARKERS as _VISIBLE_RESULT_MARKERS,
+    _VISIBLE_RESULT_PREFIXES as _VISIBLE_RESULT_PREFIXES,
     _apply_send_followup_guard as _apply_send_followup_guard,
     _is_short_plaintext_followup as _is_short_plaintext_followup,
     _only_promise_results as _only_promise_results,
