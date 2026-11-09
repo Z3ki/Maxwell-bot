@@ -71,3 +71,44 @@ def test_corrupt_preferences_are_not_overwritten(tmp_path, content):
     with pytest.raises(ValueError, match="refusing to overwrite"):
         store.set_default("1", "mode", "code")
     assert path.read_text() == content
+
+
+def test_content_permission_uses_one_locked_snapshot(tmp_path, monkeypatch):
+    store = mod.UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default("1", "tracking", "on")
+    read = store._read
+    snapshots = []
+
+    def snapshot():
+        root = read()
+        snapshots.append(root)
+        return root
+
+    monkeypatch.setattr(store, "_read", snapshot)
+    assert store.content_allowed("1") is True
+    assert len(snapshots) == 1
+
+
+def test_content_permission_rejects_revocation_despite_stale_public_preferences(
+    tmp_path, monkeypatch
+):
+    store = mod.UserPreferenceStore(tmp_path / "prefs.json")
+    store.set_default("1", "tracking", "on")
+    stale = store.get("1")
+    store.set_default("1", "tracking", "off")
+    # Reproduce the stale opt-in result that could escape get() before a
+    # concurrent revocation acquired the lock for content_allowed's next read.
+    monkeypatch.setattr(store, "get", lambda _uid: stale)
+    assert store.content_allowed("1") is False
+
+
+def test_content_permission_preserves_deletion_barrier_and_fails_closed(tmp_path):
+    store = mod.UserPreferenceStore(tmp_path / "prefs.json")
+    store.delete_personal("1")
+    deleted_at = store._read()["users"]["1"]["deleted_at"]
+    store.set_default("1", "tracking", "on")
+    assert store.content_allowed("1", started_at=deleted_at) is False
+    assert store.content_allowed("1", started_at=deleted_at + 1) is True
+    assert store.content_allowed("2") is False
+    store.path.write_text('{"users":')
+    assert store.content_allowed("1") is False

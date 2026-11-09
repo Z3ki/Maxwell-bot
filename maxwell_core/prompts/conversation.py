@@ -34,6 +34,7 @@ from context_hydration import (
     hydration_value,
     is_pointer_only,
     message_text_without_mentions,
+    requester_can_read_history,
 )
 from utils import _safe_int, render_discord_context_text
 from maxwell_core.transport.context_helpers import (
@@ -122,6 +123,8 @@ class ConversationPromptBuilder:
             if is_user_install_message(message)
             else None
         )
+        if not requester_can_read_history(message):
+            app_history_limit = 0
         preferences = getattr(host, "_user_preferences", None)
         storage_allowed = True
         if preferences is not None:
@@ -605,14 +608,15 @@ class ConversationPromptBuilder:
             if hydrated_id:
                 pin_ids.add(hydrated_id)
             if pin_ids:
-                already = {str(row.get("message_id") or "") for row in context_memory}
-                context_memory.extend(
+                context_memory = [
                     row
                     for row in memory
-                    if str(row.get("message_id") or "") in pin_ids
-                    and str(row.get("message_id") or "") not in already
-                    and not row.get("is_tool")
-                )
+                    if id(row) in selected_ids
+                    or (
+                        str(row.get("message_id") or "") in pin_ids
+                        and not row.get("is_tool")
+                    )
+                ]
             self_user_id = str(getattr(host.user, "id", "")) if host.user else ""
             # Group chronological rows by speaker role before flattening.
             # User rows keep author IDs; bot groups receive a Maxwell label.
@@ -926,9 +930,12 @@ class ConversationPromptBuilder:
         request_instructions = getattr(message, "user_install_request_instructions", "")
         if request_instructions:
             user_parts.insert(0, "Current app-action options; apply to this request only:\n" + request_instructions)
-        user_parts.extend(host._reply_parent_context_lines(message))
+        history_allowed = requester_can_read_history(message)
+        if history_allowed:
+            user_parts.extend(host._reply_parent_context_lines(message))
         hydrated = str(
-            hydration_value(host, message, "hydrated_context", "") or ""
+            (hydration_value(host, message, "hydrated_context", "") or "")
+            if history_allowed else ""
         ).strip()
         if hydrated:
             user_parts.append(hydrated)

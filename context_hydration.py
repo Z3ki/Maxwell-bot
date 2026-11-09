@@ -204,6 +204,39 @@ def _author_is_bot(author: Any, self_ids: set[str]) -> bool:
     return author_id is not None and str(author_id) in self_ids
 
 
+def requester_can_read_history(message: Any, channel: Any = None) -> bool:
+    """Check requester access before using old guild messages, not bot access."""
+    interaction = getattr(message, "interaction", None) or message
+    source = getattr(interaction, "channel", None) or getattr(message, "channel", None)
+    channel = channel if channel is not None else source
+    guild = (
+        getattr(channel, "guild", None)
+        or getattr(message, "guild", None)
+        or getattr(interaction, "guild", None)
+    )
+    guild_id = getattr(message, "guild_id", None) or getattr(interaction, "guild_id", None)
+    if guild is None and not guild_id:
+        return True
+    try:
+        # Interaction permissions describe the source channel, never an
+        # unrelated referenced channel. They remain authoritative even when
+        # the bot has no cached guild/member for a user-installed command.
+        source_id = getattr(source, "id", None) or getattr(interaction, "channel_id", None)
+        same_channel = channel is source or (
+            source_id is not None and str(getattr(channel, "id", "")) == str(source_id)
+        )
+        permissions = getattr(interaction, "permissions", None) if same_channel else None
+        if permissions is None:
+            requester = getattr(message, "author", None) or getattr(interaction, "user", None)
+            permissions = channel.permissions_for(requester)
+        return bool(
+            getattr(permissions, "view_channel", False)
+            and getattr(permissions, "read_message_history", False)
+        )
+    except Exception:
+        return False
+
+
 async def _iter_preceding(channel: Any, message: Any, limit: int = 15):
     history = getattr(channel, "history", None)
     if not callable(history):
@@ -240,6 +273,8 @@ def _is_newer_than_live(candidate_id: str, live_id: str, live_snowflake: int | N
 
 async def preceding_non_bot_message(bot: Any, message: Any) -> Any:
     """Immediate previous non-bot message, from channel history then memory."""
+    if not requester_can_read_history(message):
+        return None
     self_ids = _self_ids(bot)
     channel = getattr(message, "channel", None)
     live_id = str(getattr(message, "id", "") or "")
@@ -339,8 +374,13 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
     """Fill pointer-only and empty-reply targets before a turn is dispatched."""
     if message is None:
         return
+    # Edits and repeated admissions may hydrate the same message object or
+    # slotted-message cache entry again. Never carry a previous target forward.
+    hydration_set(
+        bot, message, hydration_failed=False, hydrated_context=None,
+        hydrated_target=None, hydrated_target_id="",
+    )
     if message_reference_is_forward(message):
-        hydration_set(bot, message, hydration_failed=False)
         return
     text = message_text_without_mentions(message, bot)
     pointer = is_pointer_only(text)
@@ -353,12 +393,16 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
     content_empty = not str(getattr(message, "content", "") or "").strip()
     needs_target = pointer or (content_empty and has_reference)
     resolved = getattr(reference, "resolved", None) if reference is not None else None
-    target = resolved if reference_payload_usable(resolved) else None
-    # Only a bare pointer (^ / "this") means "the previous message". An empty
-    # reply names its own target via the reference; if that cannot be loaded we
-    # must not substitute an unrelated earlier message — fall through to the
-    # "could not be loaded" notice below instead.
-    if target is None and pointer:
+    target_channel = getattr(resolved, "channel", None)
+    target = (
+        resolved
+        if reference_payload_usable(resolved)
+        and requester_can_read_history(message, target_channel)
+        else None
+    )
+    # An explicit reply names its own target. If it cannot be loaded, a
+    # pointer in that reply must not silently refer to another channel message.
+    if target is None and pointer and not has_reference:
         target = await preceding_non_bot_message(bot, message)
         if target is not None and not isinstance(target, dict):
             if not reference_payload_usable(target) and not str(
@@ -368,9 +412,7 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
     if target is None:
         # "@Maxwell this" plus an image is about that image. Drop the turn
         # only when the pointer has neither a prior message nor its own media.
-        if pointer and not message_has_visible_media(message):
-            hydration_set(bot, message, hydration_failed=True, hydrated_context="")
-        elif content_empty and has_reference:
+        if needs_target and has_reference:
             hydration_set(
                 bot,
                 message,
@@ -380,8 +422,8 @@ async def hydrate_turn_context(bot: Any, message: Any) -> None:
                     "Do not invent what it said."
                 ),
             )
-        else:
-            hydration_set(bot, message, hydration_failed=False)
+        elif pointer and not message_has_visible_media(message):
+            hydration_set(bot, message, hydration_failed=True)
         return
     fields: dict[str, Any] = {
         "hydration_failed": False,

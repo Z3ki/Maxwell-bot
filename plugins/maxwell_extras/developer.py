@@ -379,9 +379,9 @@ class PluginWorkbenchTool(Tool):
             if str(manifest.get("name") or "") != plugin:
                 raise RuntimeError("plugin.json name does not match plugin directory")
             manager = getattr(self.bot, "plugin_manager", None)
-            if manager is None or not callable(getattr(manager, "reload_plugins", None)):
+            if manager is None or not callable(getattr(manager, "reload_plugins_async", None)):
                 raise RuntimeError("plugin manager is unavailable")
-            reload_result = manager.reload_plugins()
+            reload_result = await manager.reload_plugins_async()
             if plugin not in (getattr(manager, "loaded_plugins", {}) or {}):
                 raise RuntimeError(f"plugin failed to load after edit ({reload_result})")
         except Exception as exc:
@@ -394,9 +394,9 @@ class PluginWorkbenchTool(Tool):
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(text, "utf-8")
             manager = getattr(self.bot, "plugin_manager", None)
-            if manager is not None and callable(getattr(manager, "reload_plugins", None)):
+            if manager is not None and callable(getattr(manager, "reload_plugins_async", None)):
                 with contextlib.suppress(Exception):
-                    manager.reload_plugins()
+                    await manager.reload_plugins_async()
             await self.store.update(pid, last_error=f"{type(exc).__name__}: {exc}")
             return f"Error: plugin change rolled back: {type(exc).__name__}: {exc}"
 

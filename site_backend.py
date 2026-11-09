@@ -321,9 +321,9 @@ def destroy(data_dir, slug: str) -> None:
     path = store_path(data_dir, slug)
     # Never unlink the sidecar while another process holds it: doing so lets a
     # concurrent writer create a new inode and defeats the lock entirely.
-    # Keeping an empty .lock file is harmless and avoids a release/delete race.
-    with contextlib.suppress(FileNotFoundError, OSError, TimeoutError):
-        with FileLock(path, timeout=10.0):
+    # A timeout must propagate so site reuse cannot inherit the old store.
+    with FileLock(path, timeout=10.0):
+        with contextlib.suppress(FileNotFoundError):
             path.unlink()
 
 
@@ -364,10 +364,18 @@ class RateLimiter:
             return False
         self._buckets[key] = (tokens - cost, now)
         if len(self._buckets) > self.max_keys:
-            # Cheap eviction: drop the half that has been idle longest.
+            # Drop idle refilled keys only. Evicting a key that is still
+            # below cost lets a caller mint new keys and refresh a penalty.
             oldest = sorted(self._buckets.items(), key=lambda kv: kv[1][1])
-            for k, _ in oldest[: len(oldest) // 2]:
-                self._buckets.pop(k, None)
+            for stale, (tokens, _last) in oldest:
+                if len(self._buckets) <= self.max_keys:
+                    break
+                if stale == key or tokens < cost:
+                    continue
+                self._buckets.pop(stale, None)
+            if len(self._buckets) > self.max_keys:
+                self._buckets.pop(key, None)
+                return False
         return True
 
 

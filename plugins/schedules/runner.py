@@ -99,7 +99,6 @@ class ScheduleRunner:
     def __init__(self, bot, store: ScheduleStore):
         self.bot = bot
         self.store = store
-        self._first_try: dict[str, float] = {}
         self._running = False
 
     async def tick(self) -> None:
@@ -113,30 +112,39 @@ class ScheduleRunner:
                     await self.fire(row, now)
                 except Exception:
                     logger.exception("schedule %s failed to fire", row.get("id"))
-                    # Don't hot-loop on a row that keeps exploding.
-                    await asyncio.to_thread(
-                        self.store.retry_later, row["id"], now + CHANNEL_RETRY_SECONDS, "error: will retry"
-                    )
         finally:
             self._running = False
 
     async def _finish(self, row: dict, now: float, status: str, *, ran=False, job="", failed=False,
                       pause=False) -> None:
-        self._first_try.pop(row["id"], None)
         next_run = None if pause else advance(row, now)
         if not pause and failed and row["failures"] + 1 >= MAX_FAILURES:
             next_run, status = None, f"paused after {MAX_FAILURES} failures: {status}"
         await asyncio.to_thread(
             self.store.record, row["id"], status=status, next_run=next_run,
             enabled=next_run is not None, ran=ran, job=job, failed=failed,
-            expected_next=row["next_run"],
+            expected_next=row["next_run"], claim_token=row["claim_token"],
         )
 
     async def fire(self, row: dict, now: float) -> None:
+        claimed = await asyncio.to_thread(
+            self.store.claim, row, now, GRACE_SECONDS + CHANNEL_RETRY_SECONDS
+        )
+        if claimed is None:
+            return
+        try:
+            await self._fire(claimed, now)
+        except Exception:
+            await asyncio.to_thread(
+                self.store.retry_later, claimed, now + CHANNEL_RETRY_SECONDS, "error: will retry"
+            )
+            raise
+
+    async def _fire(self, row: dict, now: float) -> None:
         from plugins.maxwell_extras.task_workers import has_premium
 
-        sid, uid = row["id"], row["user_id"]
-        first = self._first_try.setdefault(sid, float(row["next_run"]))
+        uid = row["user_id"]
+        first = float(row["retry_since"])
         control = getattr(self.bot, "_control", None) or {}
         if not await asyncio.to_thread(has_premium, self.bot, uid):
             await self._finish(row, now, "paused: Premium is not active", pause=True)
@@ -145,7 +153,10 @@ class ScheduleRunner:
             await self._finish(row, now, "missed: Maxwell was offline or busy at the scheduled time")
             return
         if not control.get("bot_enabled", True) or not control.get("premium_task_workers_enabled", True):
-            await self._finish(row, now, "skipped: background runs are switched off right now")
+            await asyncio.to_thread(
+                self.store.retry_later, row, now + CHANNEL_RETRY_SECONDS,
+                "retrying: background runs are switched off right now",
+            )
             return
         used = await asyncio.to_thread(self.store.runs_since, uid, now - 86400)
         if used >= daily_run_limit():
@@ -163,14 +174,15 @@ class ScheduleRunner:
                 await self._finish(row, now, f"paused: {exc.reason}", failed=True, pause=True)
             else:
                 await asyncio.to_thread(
-                    self.store.record, sid, status=f"retrying: {exc.reason}",
-                    next_run=now + CHANNEL_RETRY_SECONDS, enabled=True, failed=True,
-                    expected_next=row["next_run"],
+                    self.store.retry_later, row, now + CHANNEL_RETRY_SECONDS,
+                    f"retrying: {exc.reason}", failed=True,
                 )
             return
         scope = getattr(self.bot, "_dev_scope_allows", None)
         if callable(scope) and not scope(message):
             await self._finish(row, now, "paused: this bot only runs in its test servers", pause=True)
+            return
+        if not await asyncio.to_thread(self.store.claimed, row):
             return
         header = (
             f"⏰ **{row['name']}**" if row["dm"] else f"⏰ <@{uid}> **{row['name']}**"
@@ -189,7 +201,7 @@ class ScheduleRunner:
         if "already running or workers are busy" in text:
             # One job per user at a time; wait for theirs to finish.
             await asyncio.to_thread(
-                self.store.retry_later, sid, now + RETRY_SECONDS, "waiting: another background job is running"
+                self.store.retry_later, row, now + RETRY_SECONDS, "waiting: another background job is running"
             )
             return
         await self._finish(row, now, text[:180] or "error: the job did not start", failed=True)
@@ -233,6 +245,16 @@ class ScheduleRunner:
                 raise Unavailable("Discord did not answer", permanent=False) from exc
         if not channel.permissions_for(member).view_channel:
             raise Unavailable("you can no longer see that channel", permanent=True)
+        if isinstance(channel, discord.Thread) and channel.is_private():
+            # Thread permissions inherit the parent's view_channel bit; that
+            # bit alone does not grant access to a private thread.
+            if not channel.permissions_for(member).manage_threads and channel.get_member(uid) is None:
+                try:
+                    await channel.fetch_member(uid)
+                except (discord.NotFound, discord.Forbidden) as exc:
+                    raise Unavailable("you can no longer see that private thread", permanent=True) from exc
+                except discord.HTTPException as exc:
+                    raise Unavailable("Discord did not answer", permanent=False) from exc
         me = getattr(guild, "me", None)
         if me is not None:
             mine = channel.permissions_for(me)

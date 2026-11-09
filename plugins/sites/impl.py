@@ -22,6 +22,24 @@ def _private_request(message: Any) -> bool:
     return str(getattr(message, "response_visibility", "public") or "public") == "private"
 
 
+
+def _site_residue(data_dir, slug: str) -> tuple[bool, bool]:
+    """Whether an unowned slug still has a KV store or a server registry."""
+    store = server = False
+    try:
+        store = site_backend.store_path(data_dir, slug).exists()
+    except Exception:
+        store = True
+    try:
+        server = site_server.code_dir(data_dir, slug).exists()
+        registry = site_server.registry_path(data_dir)
+        if registry.is_file():
+            raw = json.loads(registry.read_text(encoding="utf-8"))
+            server = server or (isinstance(raw, dict) and slug in raw)
+    except Exception:
+        server = True
+    return store, server
+
 _SITE_API_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 _SITE_API_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SITE_API_RESPONSE_BYTES = 12_000
@@ -332,6 +350,16 @@ class CreateSiteTool(Tool):
                 await asyncio.to_thread(slug_lock.__exit__, None, None, None)
             raise
         try:
+            owner_now = (
+                str(existing.get("user_id") or "") if isinstance(existing, dict) else ""
+            )
+            if not owner_now:
+                data_dir = self.bot.config.DATA_DIR
+                store_left, server_left = _site_residue(data_dir, slug)
+                if store_left:
+                    await asyncio.to_thread(site_backend.destroy, data_dir, slug)
+                if server_left:
+                    await site_server.destroy(data_dir, slug)
 
             # Copy images into site's images/ directory
             image_urls = []
@@ -531,17 +559,26 @@ class CreateSiteTool(Tool):
             try:
                 if path.exists():
                     data = json.loads(path.read_text(encoding="utf-8"))
-                    if isinstance(data, dict):
-                        sites = {k: v for k, v in data.items() if isinstance(v, dict)}
-            except (json.JSONDecodeError, OSError, ValueError) as e:
+                    if not isinstance(data, dict) or any(not isinstance(value, dict) for value in data.values()):
+                        raise ValueError("malformed site metadata")
+                    sites = data
+            except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as e:
                 logger.error(f"Corrupt sites.json on commit, aborting: {e}")
                 return False
             # Re-check slug ownership under the lock (may have changed).
-            existing = sites.get(slug)
-            if isinstance(existing, dict):
-                owner = str(existing.get("user_id") or "")
+            previous = sites.get(slug)
+            if isinstance(previous, dict):
+                owner = str(previous.get("user_id") or "")
                 if owner and owner != user_id:
                     return False
+                if not owner or previous.get("backend"):
+                    from site_backend import destroy as destroy_site_store
+                    from site_server import destroy as destroy_site_server
+
+                    destroy_site_store(self.bot.config.DATA_DIR, slug)
+                    destroy_site_server(self.bot.config.DATA_DIR, slug)
+            elif slug in sites:
+                return False
             sites[slug] = entry
             _atomic_json_write_sync(path, sites)
             # Keep the in-memory map + mtime in sync for this process.
@@ -586,6 +623,7 @@ class EditSiteTool(_SiteOwnedTool):
             "path, content, files, find, replace, all, title, encoding, backend, permanent, start_line."
         )
 
+    @_locked_site_action
     async def execute(
         self,
         message: Message,
@@ -851,6 +889,7 @@ class DeleteSiteTool(_SiteOwnedTool):
             "Params: name (slug). Irreversible — the URL 404s immediately."
         )
 
+    @_locked_site_action
     async def execute(self, message: Message, name: str | None = None, **kwargs) -> str:
         slug, entry, site_dir, err = self._resolve(message, name)
         if err:
@@ -884,9 +923,15 @@ class DeleteSiteTool(_SiteOwnedTool):
         # teardown failure cannot leak credentials. Still say so rather than
         # silently claiming a complete cleanup.
         teardown_warning = ""
-        with contextlib.suppress(Exception):
+        try:
             await asyncio.to_thread(
                 site_backend.destroy, self.bot.config.DATA_DIR, slug
+            )
+        except Exception as exc:
+            logger.warning("Site store teardown failed: %s", type(exc).__name__)
+            teardown_warning = (
+                " Backend store cleanup did not finish; the slug must not be reused "
+                "until that store is gone."
             )
         # Container, server code, database, and secrets go too.
         try:
@@ -962,6 +1007,7 @@ class SiteServerTool(_SiteOwnedTool):
             "secrets and lifecycle are owner/admin-only; edit frontend pages with edit_site."
         )
 
+    @_locked_site_action
     async def execute(
         self,
         message: Message,
@@ -1022,7 +1068,7 @@ class SiteServerTool(_SiteOwnedTool):
                 if "app.py" not in parsed and not existing_app:
                     return "Error: the entry file must be called app.py."
                 new_env = (
-                    await asyncio.to_thread(site_server.parse_env, env) if env else None
+                    await asyncio.to_thread(site_server.parse_env, env) if env is not None else None
                 )
                 extra = await asyncio.to_thread(site_server.parse_packages, packages)
                 written = await asyncio.to_thread(
@@ -1055,7 +1101,7 @@ class SiteServerTool(_SiteOwnedTool):
                 if "app.py" not in parsed:
                     return "Error: the entry file must be called app.py."
                 new_env = (
-                    await asyncio.to_thread(site_server.parse_env, env) if env else None
+                    await asyncio.to_thread(site_server.parse_env, env) if env is not None else None
                 )
                 extra = await asyncio.to_thread(site_server.parse_packages, packages)
                 written = await asyncio.to_thread(
@@ -1156,7 +1202,7 @@ class SiteServerTool(_SiteOwnedTool):
                 return format_site_file_read(rel, text, start_line=start)
 
             if act in {"env", "secrets", "config"}:
-                if not env:
+                if env is None:
                     current = (site_server.get_entry(data_dir, slug) or {}).get(
                         "env"
                     ) or {}
@@ -1455,10 +1501,17 @@ class HostFileTool(Tool):
         slug_source = name or Path(rel).stem or fallback
         slug = _host_file_slug(slug_source, fallback)
         files_dir, pub_base = _public_files_target(self.bot)
-        dest_dir = os.path.join(files_dir, slug)
-        if os.path.isdir(dest_dir) and os.listdir(dest_dir):
-            slug = _host_file_slug(f"{slug}-{random.randint(10, 99)}", fallback)
+        await asyncio.to_thread(os.makedirs, files_dir, exist_ok=True)
+        base_slug = slug
+        while True:
             dest_dir = os.path.join(files_dir, slug)
+            try:
+                await asyncio.to_thread(os.mkdir, dest_dir)
+                break
+            except FileExistsError:
+                # Reserve the directory atomically, keeping the suffix inside
+                # the 30-character slug cap even for an already-maximal name.
+                slug = f"{base_slug[:21]}-{uuid.uuid4().hex[:8]}"
 
         err = await _write_site_file(dest_dir, rel, blob)
         if err:

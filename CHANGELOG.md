@@ -3,9 +3,13 @@
 ## Unreleased — limited standby candidate
 
 - Add isolated, manually fenced text-only emergency runtime, immutable no-tool/file boundaries, bounded resources, scoped atomic config snapshots and truthful role context. Automatic failover is not implemented; review and explicit activation approval required. See `docs/STANDBY.md`.
+- Export sparse `bot_control.json` overrides by merging primary defaults, and merge `blacklist.json` into standby `ignore_users`. Missing or malformed blacklist input fails closed.
 
 ## Unreleased
 
+- Stage GitHub OAuth until the authorizing Discord user confirms a private code. The browser callback no longer publishes the token.
+- Do not reuse a site slug's backend store, server, or secrets unless the same owner is replacing that site.
+- Keep reply and mention names out of memory when the quoted account opted out or the quoting turn predates their deletion, including after they opt back in.
 - Reduce chat prompt overhead with a stable fixed prefix, compact guidance and a
   permission-filtered native tool catalog. Load additional schemas per turn with
   `load_tools`; workers and the custom tool protocol retain their tool access.

@@ -194,6 +194,71 @@ def test_synthesis_error_is_safe_and_does_not_start_cooldown(monkeypatch):
     assert "11" not in TtsTool._last_tts
 
 
+def test_tts_concurrent_requests_share_one_channel_admission(monkeypatch):
+    from unittest.mock import Mock
+
+    synthesize = Mock(return_value=b"mp3")
+    monkeypatch.setattr("plugins.tts_voice.impl.synthesize_speech", synthesize)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    TtsTool._last_tts.clear()
+    tool = TtsTool(SimpleNamespace(config=None))
+
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def deliver(_bot, message, _audio):
+            if getattr(message, "id", None) == 1:
+                entered.set()
+                await release.wait()
+            return SimpleNamespace(id=1)
+
+        monkeypatch.setattr("plugins.tts_voice.impl.deliver_speech", deliver)
+        message = SimpleNamespace(id=1, channel=SimpleNamespace(id=12))
+        first = asyncio.create_task(tool.execute(message, text="first"))
+        try:
+            await entered.wait()
+            second = await tool.execute(
+                SimpleNamespace(id=2, channel=SimpleNamespace(id=12)), text="second"
+            )
+            assert second.startswith("Error: TTS is already in progress")
+            assert synthesize.call_count == 1
+            other = await tool.execute(
+                SimpleNamespace(channel=SimpleNamespace(id=13)), text="other channel"
+            )
+            assert other.startswith("__TTS_SENT__")
+        finally:
+            release.set()
+            await first
+        assert synthesize.call_count == 2
+        assert "12" not in TtsTool._inflight_tts
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        TtsTool._last_tts.clear()
+
+
+def test_tts_failed_delivery_releases_channel_admission(monkeypatch):
+    monkeypatch.setattr("plugins.tts_voice.impl.synthesize_speech", lambda *_args: b"mp3")
+    delivery = AsyncMock(side_effect=[RuntimeError("failed"), SimpleNamespace(id=1)])
+    monkeypatch.setattr("plugins.tts_voice.impl.deliver_speech", delivery)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    TtsTool._last_tts.clear()
+    tool = TtsTool(SimpleNamespace(config=None))
+    message = SimpleNamespace(channel=SimpleNamespace(id=14))
+
+    async def scenario():
+        assert (await tool.execute(message, text="first")).startswith("Error:")
+        assert "14" not in TtsTool._inflight_tts
+        assert (await tool.execute(message, text="retry")).startswith("__TTS_SENT__")
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        TtsTool._last_tts.clear()
+
+
 def _clip(name: str = "clip.mp3", url: str | None = None):
     return SimpleNamespace(
         filename=name,

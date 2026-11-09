@@ -192,6 +192,37 @@ def test_gate_returns_have_terminal_reason(tmp_path, control, reason):
 
 
 @pytest.mark.parametrize(
+    ("control", "reason"),
+    [
+        ({"bot_enabled": False}, "bot_disabled"),
+        ({"blocked_channels": ["22"]}, "blocked_channel"),
+        ({"allowed_channels": ["44"]}, "channel_not_allowed"),
+    ],
+)
+def test_retired_prefix_notice_obeys_admission_policy(tmp_path, control, reason):
+    bot = _bot(tmp_path)
+    bot._control.update(control)
+    message = _message(bot, content=",help")
+
+    asyncio.run(bot.on_message(message))
+
+    row = bot._request_journal.get(message.id)
+    assert (row["status"], row["reason"]) == ("suppressed", reason)
+    assert not row["effects_started"]
+    assert message.channel.sent == []
+
+
+def test_retired_prefix_notice_still_guides_allowed_requests(tmp_path):
+    bot = _bot(tmp_path)
+    message = _message(bot, content=",help")
+
+    asyncio.run(bot.on_message(message))
+
+    assert len(message.channel.sent) == 1
+    assert "Text-prefix commands are retired" in message.channel.sent[0].content
+
+
+@pytest.mark.parametrize(
     ("webhooks", "channels", "webhook_id", "channel_id", "responds"),
     [
         ("", "", 77, 22, False),
@@ -1389,3 +1420,111 @@ def test_turn_correlation_is_unique_inherited_and_reset(tmp_path, monkeypatch):
     asyncio.run(run())
     assert len({item["correlation_id"] for item in seen}) == 2
     assert all(item["trigger"] == "interaction" and "user_id" not in item for item in seen)
+
+
+@pytest.mark.parametrize("denial", ["disabled", "private", "schema"])
+def test_denied_tool_keeps_effect_checkpoint_clear_and_delivers_fallback(tmp_path, denial):
+    bot = _bot(tmp_path)
+    bot._control["error_replies"] = True
+    message = _message(bot)
+    name = "reminder" if denial == "private" else "fetch_url"
+    tool = SimpleNamespace(
+        tool_name=name,
+        execute=AsyncMock(),
+        get_parameters=lambda: {
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+        },
+    )
+    arguments = {"value": "invalid"} if denial == "schema" else {}
+    if denial == "disabled":
+        bot._control["disabled_tools"] = [name]
+    elif denial == "private":
+        message.response_visibility = "private"
+
+    async def handle(msg, _content):
+        with pytest.raises(PermissionError, match="refused:"):
+            await bot._invoke_request_tool(msg, name, tool, **arguments)
+        assert not bot._request_journal.get(msg.id)["effects_started"]
+        raise PermissionError("refused: tool did not run")
+
+    bot._handle_message = handle
+
+    async def run():
+        try:
+            await bot.on_message(message)
+            await _drain(bot)
+            await bot._retry_pending_inbound()
+            tool.execute.assert_not_awaited()
+            assert [sent.content for sent in message.channel.sent] == [
+                "I couldn't finish that request. Please try again."
+            ]
+            assert bot._request_journal.get(message.id)["status"] == "delivered"
+        finally:
+            await bot._reply_queue.close()
+            bot._request_journal.close()
+
+    asyncio.run(run())
+
+
+def test_delayed_replacement_is_not_superseded_by_another_author(tmp_path):
+    bot = _bot(tmp_path, capacity=8)
+    blocker, alice_old, bob_old, alice_new, bob_new = (
+        _message(bot, mid) for mid in range(100, 105)
+    )
+    blocker.author = SimpleNamespace(id=33, display_name="Carol", bot=False)
+    for message in (bob_old, bob_new):
+        message.author = SimpleNamespace(id=22, display_name="Bob", bot=False)
+    handled = []
+
+    async def run():
+        started, release_turn, paused, release_admission = (
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        async def answer(message, _content):
+            handled.append(message.id)
+            if message is blocker:
+                started.set()
+                await release_turn.wait()
+            await bot._send_with_slowmode(
+                message.channel, f"answer {message.id}", reply_to=message
+            )
+
+        async def resolve_chain(message):
+            if message is alice_new:
+                paused.set()
+                await release_admission.wait()
+
+        bot._handle_message = answer
+        bot._ensure_reply_chain_resolved = resolve_chain
+        admission = None
+        try:
+            await bot.on_message(blocker)
+            await started.wait()
+            await bot.on_message(alice_old)
+            await bot.on_message(bob_old)
+            admission = asyncio.create_task(bot.on_message(alice_new))
+            await paused.wait()
+            await bot.on_message(bob_new)
+            release_admission.set()
+            await admission
+            release_turn.set()
+            await _drain(bot)
+            assert handled == [blocker.id, bob_new.id, alice_new.id]
+            for message in (alice_old, bob_old):
+                assert bot._request_journal.get(message.id)["status"] == "superseded"
+            for message in (blocker, alice_new, bob_new):
+                assert bot._request_journal.get(message.id)["status"] == "delivered"
+        finally:
+            release_admission.set()
+            release_turn.set()
+            if admission is not None:
+                await admission
+            await bot._reply_queue.close()
+            bot._request_journal.close()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=5))

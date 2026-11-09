@@ -27,6 +27,8 @@ import asyncio
 import contextlib
 from typing import Any
 
+from concurrency_safety import cancel_once
+
 
 class TypingHandle:
     """One-shot lease on a channel's typing indicator.
@@ -58,6 +60,7 @@ class ChannelTyping:
         self._holders = 0
         self._suspended = False
         self._cm: Any = None
+        self._lock = asyncio.Lock()
 
     @property
     def holders(self) -> int:
@@ -69,14 +72,27 @@ class ChannelTyping:
 
     async def acquire(self) -> TypingHandle:
         self._holders += 1
-        await self._sync()
+        try:
+            await self._sync()
+        except asyncio.CancelledError:
+            # No handle reached the caller, so this lease cannot be released
+            # by its normal finally block.
+            await self.release()
+            raise
         return TypingHandle(self)
 
     async def release(self) -> None:
         self._holders = max(0, self._holders - 1)
         if self._holders == 0:
             self._suspended = False
-        await self._sync()
+        # A cancelled release must still reconcile the last holder, including
+        # when another coroutine is currently entering the typing context.
+        task = asyncio.create_task(self._sync())
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     async def suspend(self) -> None:
         self._suspended = True
@@ -89,42 +105,49 @@ class ChannelTyping:
         await self._sync()
 
     async def _sync(self) -> None:
-        if self._holders > 0 and not self._suspended:
-            if self._cm is None:
-                typing = getattr(self._channel, "typing", None)
-                if not callable(typing):
-                    return
-                try:
-                    cm = typing()
-                    await cm.__aenter__()
-                except Exception:
-                    return
-                self._cm = cm
-            return
-        await self._close()
+        async with self._lock:
+            if self._holders > 0 and not self._suspended:
+                if self._cm is None:
+                    typing = getattr(self._channel, "typing", None)
+                    if not callable(typing):
+                        return
+                    try:
+                        cm = typing()
+                        self._cm = cm
+                        await cm.__aenter__()
+                    except asyncio.CancelledError:
+                        await self._close()
+                        raise
+                    except Exception:
+                        await self._close()
+                return
+            await self._close()
 
     async def _close(self) -> None:
         """Stop the typing loop and drain it so no event can land late."""
         cm, self._cm = self._cm, None
         if cm is None:
             return
+        cleanup = asyncio.create_task(self._drain_context(cm))
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            # Keep the lock until the detached context has really stopped.
+            # Otherwise a cancelled suspend loses the only reference to an
+            # active loop, and later output cannot drain its typing events.
+            await cleanup
+            raise
+
+    async def _drain_context(self, cm: Any) -> None:
         task = getattr(cm, "task", None)
-        with contextlib.suppress(Exception):
-            await cm.__aexit__(None, None, None)
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                # Awaiting the typing task we just cancelled always raises
-                # CancelledError. Re-raise only when *this* task is being
-                # cancelled; otherwise every normal release would abort the
-                # caller's reply.
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise
-            except Exception:
-                pass
+        try:
+            with contextlib.suppress(Exception):
+                await cm.__aexit__(None, None, None)
+        finally:
+            if task is not None:
+                cancel_once(task)
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
 
 def _registry(owner: Any) -> dict[str, ChannelTyping] | None:

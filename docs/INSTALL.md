@@ -249,6 +249,10 @@ Linux uses `docker-compose.yml` with host networking. This keeps host-local Olla
 
 Docker Desktop uses `docker-compose.bridge.yml`. The installer rewrites local service addresses to `host.docker.internal` where appropriate and publishes the admin API on host loopback. For a manual bridge install, make sure `MAXWELL_API_HOST=0.0.0.0` is set inside the container configuration.
 
+The rewrite includes independently configured worker primary/fallback endpoints
+(`AI_WORKER_BASE_URL`, `AI_WORKER_FALLBACK_BASE_URL`) and `SEARXNG_URL`, not just
+the chat endpoints. Credentials and non-loopback service URLs remain unchanged.
+
 The Maxwell service mounts the Docker socket so shell sandboxes and generated-site backends can run as sibling containers. This is a host-root trust boundary; read [../SECURITY.md](../SECURITY.md).
 
 ## Running Maxwell

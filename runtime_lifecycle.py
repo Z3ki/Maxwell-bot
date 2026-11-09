@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from typing import Any
 
@@ -17,8 +18,8 @@ logger = logging.getLogger(__name__)
 def drain_timeout_seconds() -> float:
     """How long to wait for in-flight work after SIGINT or SIGTERM.
 
-    Unset or unparsable values default to 30 seconds. ``0`` does not wait.
-    Values are clamped to 0–600.
+    Unset, unparsable, or non-finite values default to 30 seconds.
+    ``0`` does not wait. Values are clamped to 0–600.
     """
     raw = os.getenv("DRAIN_TIMEOUT_SECONDS", "").strip()
     if not raw:
@@ -26,6 +27,8 @@ def drain_timeout_seconds() -> float:
     try:
         value = float(raw)
     except ValueError:
+        return 30.0
+    if not math.isfinite(value):
         return 30.0
     if value < 0:
         return 0.0
@@ -38,7 +41,8 @@ def shard_launch_kwargs() -> dict[str, Any]:
     """Keyword arguments for an auto-sharded Discord client.
 
     Both variables unset means automatic sharding (pass nothing). ``SHARD_IDS``
-    without ``SHARD_COUNT`` uses ``max(id) + 1``. Negative ids are dropped.
+    without ``SHARD_COUNT`` uses ``max(id) + 1``. Invalid ids are dropped,
+    but an explicitly configured subset with no valid ids refuses startup.
     """
     raw_count = os.getenv("SHARD_COUNT", "").strip()
     raw_ids = os.getenv("SHARD_IDS", "").strip()
@@ -54,6 +58,8 @@ def shard_launch_kwargs() -> dict[str, Any]:
                 continue
             if value >= 0:
                 ids.append(value)
+        if not ids:
+            raise ValueError("SHARD_IDS contains no valid non-negative shard IDs")
     count: int | None = None
     if raw_count:
         try:

@@ -5,9 +5,13 @@ Moved out of the historical bot_tools.py monolith. Shared helpers live in
 """
 from __future__ import annotations
 
+import os
+import stat
+import threading
+
 from tooling import helpers as _helpers
 from tools import Tool
-from generated_artifacts import register_generated_file
+from generated_artifacts import generated_file, register_generated_file
 
 # Mechanical split: the original classes used the bot_tools module globals.
 # Bind every helper/name here so execute() bodies keep working unchanged.
@@ -17,12 +21,73 @@ for _name in dir(_helpers):
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
 
+_OWNED_IMAGE_PATHS: dict[str, str] = {}
+_OWNED_IMAGE_LOCK = threading.Lock()
+_MAX_OWNED_IMAGES = 2048
 
-def _generated_image_result(bot, image_bytes: bytes, *, prefix: str, summary: str) -> str:
+
+def _image_requester_id(message) -> str:
+    author = getattr(message, "author", None) or getattr(message, "user", None)
+    return str(getattr(author, "id", "") or "").strip()
+
+
+def _remember_owned_image(path: str | None, requester_id: str | None) -> None:
+    """Bind a persisted image path to the requester who generated it."""
+    owner = str(requester_id or "").strip()
+    if not path or not owner:
+        return
+    try:
+        key = str(Path(path).resolve())
+    except OSError:
+        return
+    with _OWNED_IMAGE_LOCK:
+        _OWNED_IMAGE_PATHS.pop(key, None)
+        while len(_OWNED_IMAGE_PATHS) >= _MAX_OWNED_IMAGES:
+            _OWNED_IMAGE_PATHS.pop(next(iter(_OWNED_IMAGE_PATHS)))
+        _OWNED_IMAGE_PATHS[key] = owner
+
+
+def _owned_image_requester(path: Path) -> str | None:
+    with _OWNED_IMAGE_LOCK:
+        return _OWNED_IMAGE_PATHS.get(str(path))
+
+
+def _read_owned_image_bytes(path: Path, limit: int) -> bytes:
+    """Read a regular file without following a symlink swapped in after the check."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise OSError("image file is not a bounded regular file")
+        opened = os.readlink(f"/proc/self/fd/{fd}")
+        if Path(opened).resolve() != path:
+            raise OSError("image path changed while opening")
+        handle = os.fdopen(fd, "rb")
+        fd = -1
+        with handle:
+            data = handle.read(limit + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(data) > limit:
+        raise OSError("image file is not a bounded regular file")
+    return data
+
+
+
+def _generated_image_result(
+    bot,
+    image_bytes: bytes,
+    *,
+    prefix: str,
+    summary: str,
+    requester_id: str | None = None,
+) -> str:
     """Return model-visible media and reusable links without a Discord send."""
     mime = _sniff_image_mime(image_bytes)
     ext = {"image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}.get(mime, ".png")
     local_path, perm_url = _persist_public_image(bot, image_bytes, ext=ext, prefix=prefix)
+    _remember_owned_image(local_path, requester_id)
     attachment_path = register_generated_file(image_bytes, f"{prefix}{ext}")
     preview = image_bytes
     # The tool-media dispatcher accepts base64 payloads smaller than 5 MB.
@@ -89,8 +154,10 @@ class HDImageGeneratorTool(Tool):
             "requests, and for ANY edit of an existing image ('make the car red', 'add a hat', "
             "'remove the background', 'combine these'). "
             "Params: prompt (required — for an edit, describe the change, not the whole scene); "
-            "image (optional — an http(s) URL, a local path, or a list of up to 4 of them, to edit "
-            "or use as reference). If image is omitted and the user attached images to the message, "
+            "image (optional — an http(s) URL, a request-local generated attachment path, "
+            "a local path of an image this requester generated, or a list of up to 4 of them, "
+            "to edit or use as reference). "
+            "If image is omitted and the user attached images to the message, "
             "those are used automatically. Returns the image for inspection and a request-local attachment path. "
             "Does not send it to chat. Use send_file with that path to deliver it, or send_media with its URL when hosting is configured."
         )
@@ -138,19 +205,34 @@ class HDImageGeneratorTool(Tool):
             logger.debug(f"hd_image input downscale skipped: {type(e).__name__}")
             return raw, _sniff_image_mime(raw)
 
-    async def _load_one(self, ref: str) -> tuple[bytes | None, str]:
+    async def _load_one(self, ref: str, requester_id: str | None = None) -> tuple[bytes | None, str]:
         """Resolve a single image reference to bytes. Returns (bytes, error)."""
         ref = str(ref).strip()
         if not ref:
             return None, "empty image reference"
 
-        # Already-inlined data URI — accept it as-is.
+        if ref.startswith("generated:"):
+            item = generated_file(ref)
+            if item is None:
+                return None, "generated attachment is unavailable in this request"
+            raw, _filename = item
+            if len(raw) > self.MAX_INPUT_BYTES:
+                return None, "generated image exceeds the input size limit"
+            return raw, ""
+
+        # Inline inputs obey the same bound as local and downloaded images.
         m = self._DATA_URI_RE.search(ref)
         if m:
+            encoded = m.group("b64")
+            if len(encoded) > 4 * ((self.MAX_INPUT_BYTES + 2) // 3):
+                return None, "inline image exceeds the input size limit"
             try:
-                return base64.b64decode(m.group("b64")), ""
-            except Exception:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError):
                 return None, "malformed data: URI"
+            if len(raw) > self.MAX_INPUT_BYTES:
+                return None, "inline image exceeds the input size limit"
+            return raw, ""
 
         if ref.startswith(("http://", "https://")):
             if not _is_safe_url(ref):
@@ -184,20 +266,27 @@ class HDImageGeneratorTool(Tool):
             except Exception as e:
                 return None, f"could not fetch {ref[:80]}: {e}"
 
-        # Local path — only from the dirs Maxwell itself writes images to.
+        # Local files are not a shared album. Only the requester who generated
+        # the image may read it back, and only from the public image dir.
+        # The global temp directory is a shared scratch space, not an ownership
+        # boundary, so it is never an allowed root.
+        requester = str(requester_id or "").strip()
         try:
             img_dir, _ = _public_image_target(self.bot)
-            allowed = [img_dir, "temp"]
-            if not any(_is_path_allowed(ref, root) for root in allowed):
+            if not _is_path_allowed(ref, img_dir):
                 return None, f"local path outside the allowed image dirs: {ref[:80]}"
             path = Path(ref).resolve()
-            if path.stat().st_size > self.MAX_INPUT_BYTES:
+            if not requester or _owned_image_requester(path) != requester:
+                return None, "local image path is not owned by this requester"
+            return await asyncio.to_thread(
+                _read_owned_image_bytes, path, self.MAX_INPUT_BYTES
+            ), ""
+        except OSError as exc:
+            if "bounded regular file" in str(exc):
                 return None, f"file too large: {ref[:80]}"
-            # Off-thread: images run up to MAX_INPUT_BYTES and this is on the
-            # event loop, so a blocking read stalls unrelated chats.
-            return await asyncio.to_thread(path.read_bytes), ""
-        except Exception as e:
-            return None, f"could not read {ref[:80]}: {e}"
+            return None, f"could not read {ref[:80]}"
+        except Exception:
+            return None, f"could not read {ref[:80]}"
 
     def _attached_images(self, message: Message) -> list[str]:
         """Image URLs attached to the triggering message."""
@@ -258,7 +347,7 @@ class HDImageGeneratorTool(Tool):
         parts: list[dict] = [{"type": "text", "text": prompt}]
         loaded = 0
         for ref in refs:
-            raw, err = await self._load_one(ref)
+            raw, err = await self._load_one(ref, _image_requester_id(message))
             if raw is None:
                 logger.warning("hd_image input rejected")
                 return f"Error: {err}"
@@ -384,7 +473,11 @@ class HDImageGeneratorTool(Tool):
         if loaded:
             summary += f" (from {loaded} input image{'s' if loaded > 1 else ''})"
         return _generated_image_result(
-            self.bot, image_bytes, prefix=self.file_prefix, summary=summary
+            self.bot,
+            image_bytes,
+            prefix=self.file_prefix,
+            summary=summary,
+            requester_id=_image_requester_id(message),
         )
 
 

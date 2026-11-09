@@ -131,6 +131,53 @@ def test_auth_csrf_isolation_logout_and_shared_personal_settings(tmp_path, monke
     asyncio.run(run())
 
 
+def test_personal_put_does_not_restore_deleted_preferences(tmp_path, monkeypatch):
+    async def run():
+        async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
+            dashboard.preferences.delete_personal("100")
+            path = dashboard.preferences.path
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["users"]["100"]["deleted_at"] = 1e12
+            path.write_text(json.dumps(data), encoding="utf-8")
+            response = await client.put(
+                "/api/dashboard/personal",
+                json={"defaults": {"visibility": "private"}, "personality": "restored"},
+                headers=headers,
+            )
+            assert response.status == 400
+            saved = json.loads(path.read_text(encoding="utf-8"))["users"]["100"]
+            assert saved.get("personality") != "restored"
+
+    asyncio.run(run())
+
+
+def test_stale_dashboard_upload_does_not_restore_deleted_files(tmp_path, monkeypatch):
+    async def run():
+        async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):
+            monkeypatch.setattr(
+                type(dashboard.panels.storage()), "quota", lambda self, uid: 1024
+            )
+            dashboard.preferences.delete_personal("100")
+            path = dashboard.preferences.path
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["users"]["100"]["deleted_at"] = 1e12
+            path.write_text(json.dumps(data), encoding="utf-8")
+            response = await client.post(
+                "/api/dashboard/files/upload?path=restored.txt",
+                data=b"nope",
+                headers=headers,
+            )
+            assert response.status == 400
+            listing = await (
+                await client.get("/api/dashboard/files", headers=headers)
+            ).json()
+            assert all(
+                row.get("path") != "restored.txt" for row in listing.get("entries", [])
+            )
+
+    asyncio.run(run())
+
+
 def test_oauth_is_browser_bound_single_use_and_rotates_session(tmp_path, monkeypatch):
     async def run():
         async with setup(tmp_path, monkeypatch) as (dashboard, client, headers):

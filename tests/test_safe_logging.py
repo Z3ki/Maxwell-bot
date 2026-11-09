@@ -116,3 +116,11 @@ def test_env_secret_is_redacted_only_at_token_boundaries(monkeypatch):
     monkeypatch.setenv("CUSTOM_SECRET", "s3cr3tv4lue")
     text = redact_diagnostics("x s3cr3tv4lue id 9s3cr3tv4lue9")
     assert text == "x [redacted] id 9s3cr3tv4lue9"
+
+
+@pytest.mark.parametrize("value", ["918273645", "true", "none"])
+def test_explicit_password_values_are_never_treated_as_flags(monkeypatch, value):
+    monkeypatch.setenv("MAXWELL_ADMIN_PASSWORD", value)
+    record = _record(logging.WARNING, f"authentication rejected value {value}")
+    output = SafeLogFormatter(json_format=True).format(record)
+    assert json.loads(output)["message"] == "authentication rejected value [redacted]"

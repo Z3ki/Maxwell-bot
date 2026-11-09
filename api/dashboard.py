@@ -316,6 +316,9 @@ class Dashboard:
         )
         return response
 
+    def request_started(self, request):
+        return request.get(_PRIVACY_STARTED, time.time())
+
     @staticmethod
     def response(value, status=200):
         return web.json_response(
@@ -408,6 +411,7 @@ class Dashboard:
                 profile,
                 token["access_token"],
                 int(token["expires_in"]),
+                started_at=request[_PRIVACY_STARTED],
             )
             response = web.HTTPFound("/dashboard/")
             self.cookie(
@@ -440,7 +444,7 @@ class Dashboard:
             raise web.HTTPTooManyRequests(text="Too many sign-ins. Try again in a minute.")
         body = await self.body(request)
         payload = await asyncio.to_thread(self.sessions.redeem_link, str(body.get("token", "")))
-        if not payload or not str(payload.get("user", {}).get("id", "")).isdigit():
+        if not payload or "issued_at" not in payload or not str(payload.get("user", {}).get("id", "")).isdigit():
             raise web.HTTPUnauthorized(
                 text="This sign-in link expired or was already used. Run /dashboard in Discord for a new one."
             )
@@ -450,7 +454,8 @@ class Dashboard:
             if str(row.get("id", "")).isdigit()
         ][:200]
         token = await asyncio.to_thread(
-            self.sessions.create, payload["user"], "", LINK_SESSION_TTL, guilds=guilds, mode="link"
+            self.sessions.create, payload["user"], "", LINK_SESSION_TTL,
+            started_at=payload["issued_at"], guilds=guilds, mode="link"
         )
         return self.response(
             {"token": token, "user": payload["user"], "expires_in": LINK_SESSION_TTL}
@@ -468,7 +473,11 @@ class Dashboard:
         if request.method == "PUT":
             defaults, personality = validate_personal(await self.body(request))
             await asyncio.to_thread(
-                self.preferences.update, user_id, defaults, personality
+                self.preferences.update,
+                user_id,
+                defaults,
+                personality,
+                started_at=request.get(_PRIVACY_STARTED, time.time()),
             )
             if defaults.get("tracking") == "off":
                 from conversation_memory import delete_author_content_file

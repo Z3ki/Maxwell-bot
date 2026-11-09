@@ -7,6 +7,7 @@ import bot_common as _common
 import time as _metrics_time
 import usage_metrics
 from contextvars import ContextVar
+from tool_schemas import ends_turn
 
 _loaded_native_tools: ContextVar[set[str] | None] = ContextVar(
     "loaded_native_tools", default=None
@@ -250,6 +251,27 @@ class ToolCallsMixin:
                         "Set DISABLE_TAINT_GATE=true in .env to skip this gate."
                     )
                 hooks = getattr(self, "hooks", None)
+                enabled_hook_plugins = None
+                if plugin_manager is not None and callable(
+                    getattr(plugin_manager, "is_plugin_enabled_for_user", None)
+                ):
+                    author = getattr(message, "author", None)
+                    user_id = getattr(author, "id", None)
+                    if user_id is None:
+                        user_id = getattr(getattr(message, "user", None), "id", None)
+                    guild = getattr(message, "guild", None)
+                    guild_id = getattr(guild, "id", None)
+                    if guild_id is None:
+                        guild_id = getattr(message, "guild_id", None)
+                    if guild_id is not None and not str(guild_id).isdigit():
+                        guild_id = None
+                    loaded = getattr(plugin_manager, "loaded_plugins", None) or ()
+                    enabled_hook_plugins = [
+                        name for name in loaded
+                        if plugin_manager.is_plugin_enabled_for_user(
+                            name, user_id, guild_id
+                        )
+                    ]
                 if not result_text and hooks is not None:
                     from maxwell_core.hooks import HookPayload
 
@@ -265,6 +287,7 @@ class ToolCallsMixin:
                                     "tool": tool,
                                 }
                             ),
+                            plugins=enabled_hook_plugins,
                         )
                     except Exception:
                         logger.exception("before_tool hook failed")
@@ -327,6 +350,7 @@ class ToolCallsMixin:
                                         "result": result_text,
                                     }
                                 ),
+                                plugins=enabled_hook_plugins,
                             )
                         except Exception:
                             logger.exception("after_tool hook failed")
@@ -578,7 +602,7 @@ class ToolCallsMixin:
         needs_result_turn = any(
             not social_terminal(c) and (
                 returns_result(c["name"])
-                or c["name"] not in REPLY_BURST_TOOL_NAMES | {"no_response", "sleep", "typing", "wait"}
+                or (not ends_turn(c["name"]) and c["name"] not in REPLY_BURST_TOOL_NAMES | {"no_response", "sleep", "typing", "wait"})
             ) for c in calls
         )
 
@@ -688,17 +712,25 @@ class ToolCallsMixin:
         async def run_safely(call: dict) -> str:
             try:
                 return await run_one(call)
-            except Exception as exc:
-                line = f"Tool {call['name']}: Error - {type(exc).__name__}: {exc}"
+            except Exception:
+                logger.error(
+                    "Tool dispatch helper failed", exc_info=True,
+                    extra={"safe_log": True},
+                )
+                line = f"Tool {call['name']}: Error - internal tool failure ({call['name']})"
                 result_by_id[call["id"]] = line
                 with contextlib.suppress(Exception):
+                    mem_params = {
+                        k: v for k, v in (call.get("arguments") or {}).items()
+                        if k != "reasoning"
+                    }
                     await MaxwellBot._remember_tool_call(
-                        self, message, call["name"], call.get("arguments") or {}, line
+                        self, message, call["name"], mem_params, line
                     )
                 return line
 
         def parallel_safe(call: dict) -> bool:
-            if call["name"] in {"send_message", "no_response", "wait"}:
+            if ends_turn(call["name"]) or call["name"] in {"send_message", "no_response", "wait"}:
                 return False
             handler = self.tools.get(call["name"])
             if handler is None:
@@ -719,17 +751,23 @@ class ToolCallsMixin:
             send_burst_open = False
             sleep_seen = False
             social_done = False
+            ending_seen = False
             # A previous model round in this turn already posted. That post
             # owns the quote-reply; this round's sends go to the channel.
             request_state = (await MaxwellBot._request_state(self, message)) or {}
             prior_delivery = bool(request_state.get("response_id"))
             for call in calls:
+                if ending_seen:
+                    line = f"Tool {call['name']}: Skipped — the turn already ended"
+                    result_by_id[call["id"]] = line
+                    tool_results.append(line)
+                    continue
                 if social_done:
                     line = f"Tool {call['name']}: Skipped — the reaction/GIF already ended the turn"
                     result_by_id[call["id"]] = line
                     tool_results.append(line)
                     continue
-                if needs_result_turn and (call["name"] in TURN_ENDING_TOOL_NAMES or social_terminal(call)):
+                if needs_result_turn and (ends_turn(call["name"]) or social_terminal(call)):
                     line = (
                         f"Tool {call['name']}: Deferred — inspect the tool results "
                         "on the next model turn before replying or ending."
@@ -888,6 +926,8 @@ class ToolCallsMixin:
                         send_burst_open = True
                 elif call["name"] == "sleep":
                     sleep_seen = not _tool_results_need_followup([line])
+                elif ends_turn(call["name"]):
+                    ending_seen = not _tool_results_need_followup([line])
             await flush_reads()
 
         # Tools must run EXACTLY ONCE. The old `except Exception: await run_all()`

@@ -19,6 +19,7 @@ from standby.policy import (
     PolicyDenied,
     activation_record,
     deployment_mode,
+    parse_json,
     provider_payload,
     read_credential,
     response_text,
@@ -26,7 +27,7 @@ from standby.policy import (
     validate_provider,
 )
 
-from standby.sync import chat_allowed, validate_snapshot
+from standby.sync import chat_allowed, snowflake, validate_snapshot
 
 LIMITATION = (
     "I'm on the limited standby: text chat only; no tools, files or attachments."
@@ -79,23 +80,26 @@ async def run() -> None:
     credentials = Path(os.environ["CREDENTIALS_DIRECTORY"])
     activation_record(credentials / "activation")
     snapshot = validate_snapshot(
-        json.loads(read_credential(credentials / "chat-config"))
+        parse_json(read_credential(credentials / "chat-config"))
     )
     controls = snapshot["controls"]
     token = read_credential(credentials / "discord-token").strip()
-    provider = validate_provider(json.loads(read_credential(credentials / "provider")))
+    provider = validate_provider(
+        parse_json(read_credential(credentials / "provider"))
+    )
     base = provider["base_url"].rstrip("/")
     if not token:
         raise PolicyDenied("Missing operator-provisioned credential")
     # A separate, reviewed emergency audience is required, rather than silently
     # bypassing primary per-user privacy, consent, opt-out and allowance state.
-    allowed_channels = frozenset(
-        int(item)
-        for item in os.getenv("MAXWELL_STANDBY_CHANNEL_IDS", "").split(",")
-        if item
-    )
-    if not allowed_channels:
+    raw_channels = os.getenv("MAXWELL_STANDBY_CHANNEL_IDS", "").split(",")
+    if (
+        not raw_channels
+        or len(raw_channels) > 10000
+        or any(not item for item in raw_channels)
+    ):
         raise PolicyDenied("Explicit emergency channel allowlist required")
+    allowed_channels = frozenset(int(snowflake(item)) for item in raw_channels)
     # Imports are lazy so policy/check tooling needs no Discord/HTTP dependencies.
     import aiohttp
     import discord
@@ -113,6 +117,8 @@ async def run() -> None:
             pass
 
         async def on_interaction(self, interaction):
+            if interaction.guild_id is None:
+                return
             # Do not dispatch existing registered slash commands from the primary.
             permitted = interaction.channel_id in allowed_channels and chat_allowed(
                 controls,
@@ -136,7 +142,11 @@ async def run() -> None:
                     admission.leave()
 
         async def on_message(self, message):
-            if message.author.bot or message.channel.id not in allowed_channels:
+            if (
+                message.author.bot
+                or message.guild is None
+                or message.channel.id not in allowed_channels
+            ):
                 return
             if not chat_allowed(
                 controls,

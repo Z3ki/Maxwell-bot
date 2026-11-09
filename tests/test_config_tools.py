@@ -137,6 +137,35 @@ def test_tracking_off_deletes_that_account_and_rejects_unknown_values(tmp_path):
     assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
 
 
+def test_tracking_reset_deletes_history_for_only_the_requester(tmp_path):
+    bot = fixture_bot(tmp_path)
+    bot._user_preferences.set_default("100", "tracking", "on")
+    bot._user_preferences.set_default("200", "tracking", "on")
+    deleted = []
+
+    async def delete_author_content(author_id):
+        deleted.append(author_id)
+        return {"messages": 1, "facts": 0, "profiles": 0}
+
+    bot.memory = SimpleNamespace(delete_author_content=delete_author_content)
+    result = run(
+        ConfigureTool(bot), message(), setting="tracking", action="reset",
+        user_id="200",
+    )
+    assert result["saved"]
+    assert deleted == ["100"]
+    assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
+    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "on"
+
+
+def test_tracking_reset_reports_failed_deletion_without_restoring_opt_in(tmp_path):
+    bot = fixture_bot(tmp_path)
+    bot._user_preferences.set_default("100", "tracking", "on")
+    result = run(ConfigureTool(bot), message(), setting="tracking", action="reset")
+    assert "could not be deleted" in result["error"]
+    assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
+
+
 def test_tracking_off_keeps_the_opt_out_when_deletion_is_unavailable(tmp_path):
     bot = fixture_bot(tmp_path)
     result = run(ConfigureTool(bot), message(), setting="tracking", value="off")

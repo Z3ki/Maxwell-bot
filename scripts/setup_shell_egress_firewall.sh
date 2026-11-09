@@ -37,7 +37,11 @@ fi
 
 # A policy refresh invalidates old sandboxes before touching firewall state.
 # The one-controller deployment recovers user workspaces from scratch.
-mapfile -t stale_ids < <(docker ps -aq --filter label=maxwell.shell.managed=true)
+stale_output="$(docker ps -aq --filter label=maxwell.shell.managed=true)"
+stale_ids=()
+if [[ -n "${stale_output}" ]]; then
+    mapfile -t stale_ids <<<"${stale_output}"
+fi
 if ((${#stale_ids[@]})); then
     docker rm -f "${stale_ids[@]}" >/dev/null
 fi

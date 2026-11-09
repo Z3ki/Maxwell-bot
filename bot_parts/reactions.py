@@ -13,6 +13,25 @@ for _name in dir(_common):
     globals().setdefault(_name, getattr(_common, _name))
 del _name
 
+
+def _reaction_identity_allowed(bot, row: dict) -> bool:
+    """Recheck consent and the deletion fence for cached reaction identities."""
+    from plugins.maxwell_extras.user_preferences import tracks_message_content
+
+    uid = str(row.get("user_id") or "")
+    if not uid:
+        return not row.get("user_name")
+    store = getattr(bot, "_user_preferences", None)
+    if not tracks_message_content(store, uid):
+        return False
+    checker = getattr(store, "content_allowed", None)
+    try:
+        return not callable(checker) or bool(
+            checker(uid, row.get("privacy_started_at"))
+        )
+    except Exception:
+        return False
+
 class ReactionsMixin:
 
     _MAX_REACTION_MESSAGES = 500
@@ -59,7 +78,10 @@ class ReactionsMixin:
             if not any(
                 row.get("user_id") == uid and row.get("emoji") == mark for row in rows
             ):
-                rows.append({"emoji": mark, "user_id": uid, "user_name": name})
+                rows.append({
+                    "emoji": mark, "user_id": uid, "user_name": name,
+                    "privacy_started_at": time.time(),
+                })
                 if len(rows) > self._MAX_REACTORS_PER_MESSAGE:
                     rows = rows[-self._MAX_REACTORS_PER_MESSAGE :]
         else:
@@ -87,9 +109,13 @@ class ReactionsMixin:
         if mid in overlays:
             # An empty live overlay means the last reaction was removed.
             # Do not resurrect the persisted snapshot or Discord count cache.
-            return format_reactions_annotation(overlays[mid])
+            return format_reactions_annotation([
+                row for row in overlays[mid] if _reaction_identity_allowed(self, row)
+            ])
         if stored:
-            return format_reactions_annotation(stored)
+            return format_reactions_annotation([
+                row for row in stored if _reaction_identity_allowed(self, row)
+            ])
         if discord_msg is None:
             return ""
         counts: list[dict] = []
@@ -123,9 +149,13 @@ class ReactionsMixin:
         if not self.user or getattr(user, "id", None) == self.user.id:
             return
         self._load_control()
-        if not self._control.get("bot_enabled", True):
+        if not self._control.get("bot_enabled", True) or not self._control.get("store_memory", True):
             return
         uid = str(getattr(user, "id", ""))
+        if not _reaction_identity_allowed(
+            self, {"user_id": uid, "privacy_started_at": time.time()}
+        ):
+            return
         if uid in getattr(self, "_blacklist", set()) or uid in set(
             self._control.get("ignore_users", []) or []
         ):

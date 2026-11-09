@@ -172,7 +172,7 @@ def test_allowlisted_export_and_atomic_bad_import_retains_good(tmp_path):
         "history": ["SECRET"],
         "provider": "main",
     }
-    snap = sync.export_snapshot(full_controls(raw), revision="rev", now=1000)
+    snap = sync.export_snapshot(full_controls(raw), revision="rev", now=1000, blacklist=[])
     assert "SECRET" not in json.dumps(snap)
     assert "DO_NOT_EXPORT" not in json.dumps(snap)
     assert set(snap["controls"]) == sync.KEYS
@@ -183,7 +183,7 @@ def test_allowlisted_export_and_atomic_bad_import_retains_good(tmp_path):
     with pytest.raises(policy.PolicyDenied):
         sync.atomic_import(bad, path, now=1001)
     assert path.read_bytes() == good
-    stale = sync.export_snapshot(full_controls(), revision="old", now=999)
+    stale = sync.export_snapshot(full_controls(), revision="old", now=999, blacklist=[])
     with pytest.raises(policy.PolicyDenied):
         sync.atomic_import(stale, path, now=1001)
     assert path.read_bytes() == good
@@ -291,6 +291,9 @@ def test_stale_unfenced_or_running_primary_never_activates(proof):
         ("text", 1, "OK"),
         ("attachment", 0, "text chat only"),
         ("ignored", 0, None),
+        ("blacklisted", 0, None),
+        ("dm", 0, None),
+        ("slash_dm", 0, None),
         ("unapproved_channel", 0, None),
         ("slash", 0, "text chat only"),
         ("not_consented", 0, "No text has been forwarded"),
@@ -322,9 +325,18 @@ def test_transport_bypass_paths_with_no_network(
             "model": "test",
         },
     )
+    # Build a strict transport fixture independently of the exporter so handler
+    # regressions can also be exercised against an archived pre-fix runtime.
+    controls = full_controls({"ignore_users": ["98", "99"]})
     private(
         tmp_path / "chat-config",
-        sync.export_snapshot(full_controls({"ignore_users": [99]}), revision="test"),
+        {
+            "schema": 1,
+            "revision": "test",
+            "exported_at": 1000,
+            "sha256": sync.digest(controls),
+            "controls": controls,
+        },
     )
     monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
     monkeypatch.setenv("MAXWELL_DEPLOYMENT_MODE", "standby")
@@ -389,7 +401,7 @@ def test_transport_bypass_paths_with_no_network(
             assert not hasattr(self, "tree")
             assert not hasattr(self, "plugin_manager")
             assert not hasattr(self, "load_extension")
-            if case == "slash":
+            if case in {"slash", "slash_dm"}:
 
                 async def respond(text, **kwargs):
                     assert kwargs["ephemeral"] is True
@@ -398,7 +410,7 @@ def test_transport_bypass_paths_with_no_network(
 
                 interaction = SimpleNamespace(
                     channel_id=10,
-                    guild_id=7,
+                    guild_id=None if case == "slash_dm" else 7,
                     user=SimpleNamespace(id=1),
                     response=SimpleNamespace(
                         is_done=lambda: False, send_message=respond
@@ -407,9 +419,12 @@ def test_transport_bypass_paths_with_no_network(
                 await self.on_interaction(interaction)
                 return
             message = SimpleNamespace(
-                author=SimpleNamespace(id=99 if case == "ignored" else 1, bot=False),
+                author=SimpleNamespace(
+                    id=99 if case == "ignored" else 98 if case == "blacklisted" else 1,
+                    bot=False,
+                ),
                 channel=SimpleNamespace(id=11 if case == "unapproved_channel" else 10),
-                guild=SimpleNamespace(id=7),
+                guild=None if case == "dm" else SimpleNamespace(id=7),
                 mentions=[user],
                 attachments=[object()] if case == "attachment" else [],
                 stickers=[],
@@ -465,10 +480,8 @@ def test_transport_bypass_paths_with_no_network(
             assert expected_text in sends[0]
 
 
-def test_partial_controls_never_silently_broaden_access():
-    with pytest.raises(policy.PolicyDenied):
-        sync.export_snapshot({}, revision="wrong-file")
-    good = sync.export_snapshot(full_controls(), revision="known", now=1000)
+def test_partial_import_controls_never_silently_broaden_access():
+    good = sync.export_snapshot({}, revision="known", now=1000, blacklist=[])
     del good["controls"]["ignore_users"]
     good["sha256"] = sync.digest(good["controls"])
     with pytest.raises(policy.PolicyDenied):
@@ -524,7 +537,7 @@ def test_preflight_rejects_stale_configs_and_missing_dependencies(
     private(tmp_path / "audience.env", "MAXWELL_STANDBY_CHANNEL_IDS=10,11")
     private(
         tmp_path / "chat-config.json",
-        sync.export_snapshot(full_controls(), revision="reviewed", now=1000),
+        sync.export_snapshot(full_controls(), revision="reviewed", now=1000, blacklist=[]),
     )
     monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda name: object())
     preflight.validate(tmp_path, now=1001)
@@ -580,15 +593,11 @@ def test_provider_stream_reads_all_chunks_and_enforces_bound():
 def test_noncanonical_restriction_ids_are_rejected_not_silently_ignored(value):
     for key in ("ignore_users", "blocked_channels", "allowed_channels"):
         with pytest.raises(policy.PolicyDenied):
-            sync.export_snapshot(full_controls({key: [value]}), revision="bad-id")
+            sync.export_snapshot(full_controls({key: [value]}), revision="bad-id", blacklist=[])
     with pytest.raises(policy.PolicyDenied):
-        sync.export_snapshot(
-            full_controls({"guild_solo_channel": {value: "10"}}), revision="bad-id"
-        )
+        sync.export_snapshot(full_controls({"guild_solo_channel": {value: "10"}}), revision="bad-id", blacklist=[])
     with pytest.raises(policy.PolicyDenied):
-        sync.export_snapshot(
-            full_controls({"guild_solo_channel": {"7": value}}), revision="bad-id"
-        )
+        sync.export_snapshot(full_controls({"guild_solo_channel": {"7": value}}), revision="bad-id", blacklist=[])
 
 
 def test_staged_primary_awareness_never_claims_ready(monkeypatch):
@@ -603,10 +612,8 @@ def test_concurrent_snapshot_writer_is_rejected_before_compare_replace(tmp_path)
     import fcntl
 
     path = tmp_path / "chat.json"
-    old = sync.export_snapshot(full_controls(), revision="old", now=1000)
-    new = sync.export_snapshot(
-        full_controls({"bot_enabled": False}), revision="new", now=1001
-    )
+    old = sync.export_snapshot(full_controls(), revision="old", now=1000, blacklist=[])
+    new = sync.export_snapshot(full_controls({"bot_enabled": False}), revision="new", now=1001, blacklist=[])
     sync.atomic_import(old, path, now=1002)
     with (tmp_path / "chat.json.lock").open("r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -623,7 +630,7 @@ def test_post_replace_durability_failure_is_not_reported_as_unchanged(
     tmp_path, monkeypatch
 ):
     path = tmp_path / "chat.json"
-    snap = sync.export_snapshot(full_controls(), revision="new", now=1000)
+    snap = sync.export_snapshot(full_controls(), revision="new", now=1000, blacklist=[])
     original = sync.os.fsync
     calls = []
 
@@ -663,3 +670,431 @@ def test_primary_fence_parent_is_synced_before_stop(tmp_path, monkeypatch):
     exec(compile(script, "<offline-fence>", "exec"), {})
     assert kinds == [False, True]
     assert (tmp_path / "standby-primary-fence.json").exists()
+
+
+def test_sparse_primary_cli_roundtrip_preserves_blacklist_and_defaults(tmp_path):
+    from control_defaults import DEFAULT_CONTROL
+
+    source = private(
+        tmp_path / "bot_control.json",
+        {
+            "ignore_users": [12],
+            "allowed_channels": [10],
+            "guild_solo_channel": {"7": "10"},
+            "reply_mentions": " YES ",
+            "base_personality": "obsolete persisted persona",
+            "tools_enabled": True,
+            "api_key": "DO_NOT_EXPORT",
+        },
+    )
+    private(tmp_path / "blacklist.json", ["13", 12])
+    exported, imported = tmp_path / "export.json", tmp_path / "import.json"
+
+    def cli(*args):
+        result = subprocess.run(
+            [sys.executable, "-m", "standby.sync", *map(str, args)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    cli("export", "--input", source, "--output", exported, "--revision", "reviewed")
+    cli("import", "--input", exported, "--output", imported)
+    assert json.loads(cli("status", "--input", imported))["revision"] == "reviewed"
+    snapshot = sync.validate_snapshot(json.loads(imported.read_text()))
+    controls = snapshot["controls"]
+    assert controls["bot_enabled"] is DEFAULT_CONTROL["bot_enabled"]
+    assert controls["reply_mentions"] is True
+    assert controls["base_personality"] == DEFAULT_CONTROL["base_personality"]
+    assert controls["ignore_users"] == ["12", "13"]
+    assert set(controls) == sync.KEYS
+    assert "DO_NOT_EXPORT" not in exported.read_text()
+    for user_id in (12, 13):
+        assert not sync.chat_allowed(
+            controls, user_id=user_id, channel_id=10, guild_id=7
+        )
+    assert sync.chat_allowed(controls, user_id=14, channel_id=10, guild_id=7)
+    assert not sync.chat_allowed(controls, user_id=14, channel_id=11, guild_id=7)
+
+
+@pytest.mark.parametrize("key", ["bot_enabled", "reply_mentions"])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True), (False, False), (1, True), (0, False),
+        (" true ", True), ("FALSE", False), ("1", True), ("0", False),
+        ("yes", True), ("no", False), ("on", True), ("off", False),
+    ],
+)
+def test_export_normalizes_primary_boolean_spellings(key, value, expected):
+    snapshot = sync.export_snapshot({key: value}, blacklist=[], revision="boolean")
+    assert snapshot["controls"][key] is expected
+    assert sync.chat_allowed(
+        snapshot["controls"], user_id=1, channel_id=10, guild_id=7
+    ) is expected
+
+
+@pytest.mark.parametrize("key", ["bot_enabled", "reply_mentions"])
+@pytest.mark.parametrize("value", [None, 2, 0.0, "", "typo", [], {}])
+def test_malformed_primary_booleans_do_not_default_to_enabled(key, value):
+    with pytest.raises(policy.PolicyDenied):
+        sync.export_snapshot({key: value}, blacklist=[], revision="bad")
+
+
+@pytest.mark.parametrize(
+    "blacklist", [None, {}, "12", [True], [None], ["0012"], ["0"], [12.5], [[]]]
+)
+def test_malformed_authoritative_blacklist_is_not_ignored(blacklist):
+    with pytest.raises(policy.PolicyDenied):
+        sync.export_snapshot({}, blacklist=blacklist, revision="bad")
+
+
+def test_authoritative_blacklist_cannot_be_omitted():
+    with pytest.raises(TypeError):
+        sync.export_snapshot({}, revision="missing-blacklist")
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("ignore_users", None), ("ignore_users", "12"),
+        ("allowed_channels", {}), ("blocked_channels", [False]),
+        ("guild_solo_channel", []), ("guild_solo_channel", {"7": None}),
+    ],
+)
+def test_malformed_primary_restrictions_never_become_defaults(key, value):
+    with pytest.raises(policy.PolicyDenied):
+        sync.export_snapshot({key: value}, blacklist=[], revision="bad")
+
+
+def test_merged_blacklist_respects_snapshot_bound():
+    with pytest.raises(policy.PolicyDenied):
+        sync.export_snapshot(
+            {"ignore_users": list(range(1, 10001))},
+            blacklist=["10001"],
+            revision="too-many",
+        )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [None, "{truncated", "null", "{}", "[true]", '["0012"]', "[12.5]", "[NaN]"],
+)
+def test_cli_bad_or_missing_blacklist_keeps_last_good(tmp_path, monkeypatch, text):
+    source = private(tmp_path / "bot_control.json", {"ignore_users": [12]})
+    if text is not None:
+        (tmp_path / "blacklist.json").write_text(text)
+    target = tmp_path / "config.json"
+    sync.atomic_import(
+        sync.export_snapshot({}, blacklist=["13"], revision="good", now=1000),
+        target,
+        now=1001,
+    )
+    previous = target.read_bytes()
+    monkeypatch.setattr(
+        sys, "argv",
+        ["standby.sync", "export", "--input", str(source), "--output", str(target)],
+    )
+    with pytest.raises((policy.PolicyDenied, ValueError, OSError)):
+        sync.main()
+    assert target.read_bytes() == previous
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"ignore_users": ["12"], "ignore_users": []}',
+        '{"guild_solo_channel": {"7": "10", "7": "11"}}',
+        '{"bot_enabled": NaN}',
+        "[]",
+        "null",
+    ],
+)
+def test_cli_rejects_ambiguous_or_malformed_primary_input(tmp_path, monkeypatch, text):
+    source = tmp_path / "bot_control.json"
+    source.write_text(text)
+    private(tmp_path / "blacklist.json", [])
+    target = tmp_path / "config.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["standby.sync", "export", "--input", str(source), "--output", str(target)],
+    )
+    with pytest.raises((policy.PolicyDenied, ValueError)):
+        sync.main()
+    assert not target.exists()
+
+
+def test_cli_explicit_blacklist_path_is_authoritative(tmp_path, monkeypatch):
+    source = private(tmp_path / "bot_control.json", {})
+    blacklist = private(tmp_path / "reviewed-blacklist.json", ["42"])
+    target = tmp_path / "config.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "standby.sync", "export", "--input", str(source),
+            "--blacklist", str(blacklist), "--output", str(target),
+        ],
+    )
+    sync.main()
+    assert json.loads(target.read_text())["controls"]["ignore_users"] == ["42"]
+
+
+@pytest.mark.parametrize("key", sorted(sync.KEYS))
+def test_import_still_requires_every_effective_control(key):
+    snapshot = sync.export_snapshot({}, blacklist=[], revision="complete", now=1000)
+    del snapshot["controls"][key]
+    snapshot["sha256"] = sync.digest(snapshot["controls"])
+    with pytest.raises(policy.PolicyDenied):
+        sync.validate_snapshot(snapshot, now=1001)
+
+
+@pytest.mark.parametrize("key", ["bot_enabled", "reply_mentions"])
+def test_import_does_not_normalize_primary_boolean_strings(key):
+    snapshot = sync.export_snapshot({}, blacklist=[], revision="complete", now=1000)
+    snapshot["controls"][key] = "false"
+    snapshot["sha256"] = sync.digest(snapshot["controls"])
+    with pytest.raises(policy.PolicyDenied):
+        sync.validate_snapshot(snapshot, now=1001)
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o620, 0o601])
+def test_group_or_other_credential_permissions_are_rejected(tmp_path, mode):
+    credential = private(tmp_path / "credential", "offline-secret")
+    credential.chmod(mode)
+    with pytest.raises(policy.PolicyDenied):
+        policy.read_credential(credential)
+
+
+def test_primary_blacklist_cli_enforced_by_chat_policy(tmp_path, monkeypatch):
+    """Regression for #140 also runs unchanged against the old exporter API."""
+    source = private(tmp_path / "bot_control.json", full_controls({"ignore_users": [12]}))
+    private(tmp_path / "blacklist.json", ["13"])
+    target = tmp_path / "config.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["standby.sync", "export", "--input", str(source), "--output", str(target)],
+    )
+    sync.main()
+    controls = sync.validate_snapshot(json.loads(target.read_text()))["controls"]
+    assert not sync.chat_allowed(controls, user_id=12, channel_id=10, guild_id=7)
+    assert not sync.chat_allowed(controls, user_id=13, channel_id=10, guild_id=7)
+    assert sync.chat_allowed(controls, user_id=14, channel_id=10, guild_id=7)
+
+
+def _duplicate(text, needle, replacement):
+    assert text.count(needle) == 1
+    return text.replace(needle, replacement, 1)
+
+
+def _fenced_activation():
+    return {
+        "state": "manually_fenced",
+        "primary_running": False,
+        "primary_restart_policy": "no",
+        "primary_fence_id": "a" * 32,
+        "reviewed_commit": "b" * 40,
+    }
+
+
+def test_chat_allowed_denies_incomplete_or_mistyped_restrictions():
+    controls = sync.export_snapshot({}, blacklist=["13"], revision="typed")["controls"]
+    missing = dict(controls)
+    del missing["ignore_users"]
+    assert not sync.chat_allowed(missing, user_id=14, channel_id=10, guild_id=7)
+    mistyped = dict(controls)
+    mistyped["ignore_users"] = "13"
+    assert not sync.chat_allowed(mistyped, user_id=13, channel_id=10, guild_id=7)
+    assert not sync.chat_allowed(mistyped, user_id=14, channel_id=10, guild_id=7)
+    enabled = dict(controls)
+    enabled["bot_enabled"] = "false"
+    assert not sync.chat_allowed(enabled, user_id=14, channel_id=10, guild_id=7)
+
+
+def test_activation_duplicate_running_flag_is_not_last_key_wins(tmp_path):
+    text = _duplicate(
+        json.dumps(_fenced_activation()),
+        '"primary_running": false',
+        '"primary_running": true, "primary_running": false',
+    )
+    assert json.loads(text)["primary_running"] is False
+    path = private(tmp_path / "activation", text)
+    with pytest.raises(policy.PolicyDenied, match="Duplicate"):
+        policy.activation_record(path)
+
+
+def test_duplicate_provider_url_cannot_redirect_credential(tmp_path):
+    text = _duplicate(
+        json.dumps(
+            {
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "m",
+                "api_key": "secret",
+            }
+        ),
+        '"base_url": "https://openrouter.ai/api/v1"',
+        '"base_url": "https://openrouter.ai/api/v1", "base_url": "https://evil.example"',
+    )
+    assert json.loads(text)["base_url"] == "https://evil.example"
+    path = private(tmp_path / "provider.json", text)
+    with pytest.raises(policy.PolicyDenied, match="Duplicate"):
+        policy.validate_provider(policy.parse_json(policy.read_credential(path)))
+
+
+def test_runtime_rejects_snapshot_that_would_drop_blacklist(tmp_path, monkeypatch):
+    weak = full_controls()
+    text = _duplicate(
+        json.dumps(
+            {
+                "schema": 1,
+                "revision": "ambiguous",
+                "exported_at": 1000,
+                "sha256": sync.digest(weak),
+                "controls": weak,
+            }
+        ),
+        '"ignore_users": []',
+        '"ignore_users": ["13"], "ignore_users": []',
+    )
+    parsed = json.loads(text)
+    assert parsed["controls"]["ignore_users"] == []
+    assert sync.digest(parsed["controls"]) == parsed["sha256"]
+    private(tmp_path / "activation", _fenced_activation())
+    private(tmp_path / "chat-config", text)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("MAXWELL_DEPLOYMENT_MODE", "standby")
+    with pytest.raises(policy.PolicyDenied, match="Duplicate"):
+        asyncio.run(runtime.run())
+
+
+def test_preflight_rejects_duplicate_ignore_users(tmp_path, monkeypatch):
+    private(
+        tmp_path / "provider.json",
+        {
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "model",
+            "api_key": "dummy",
+        },
+    )
+    private(tmp_path / "discord-token", "dummy")
+    weak = full_controls()
+    text = _duplicate(
+        json.dumps(
+            {
+                "schema": 1,
+                "revision": "ambiguous",
+                "exported_at": 1000,
+                "sha256": sync.digest(weak),
+                "controls": weak,
+            }
+        ),
+        '"ignore_users": []',
+        '"ignore_users": ["13"], "ignore_users": []',
+    )
+    private(tmp_path / "chat-config.json", text)
+    monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda name: object())
+    with pytest.raises(policy.PolicyDenied, match="Duplicate"):
+        preflight.validate(tmp_path, now=1001)
+
+
+def test_import_leaves_ambiguous_snapshot_untouched(tmp_path):
+    path = tmp_path / "chat.json"
+    text = _duplicate(
+        json.dumps(
+            sync.export_snapshot({}, blacklist=[], revision="weak", now=1000),
+            sort_keys=True,
+        ),
+        '"ignore_users": []',
+        '"ignore_users": ["13"], "ignore_users": []',
+    )
+    path.write_text(text)
+    path.chmod(0o600)
+    newer = sync.export_snapshot({}, blacklist=["99"], revision="new", now=1001)
+    with pytest.raises(policy.PolicyDenied, match="Duplicate"):
+        sync.atomic_import(newer, path, now=1002)
+    assert path.read_text() == text
+
+
+def test_import_does_not_follow_or_replace_config_symlink(tmp_path):
+    real = tmp_path / "real.json"
+    link = tmp_path / "chat.json"
+    sync.atomic_import(
+        sync.export_snapshot({}, blacklist=["13"], revision="good", now=1000),
+        real,
+        now=1001,
+    )
+    link.symlink_to(real)
+    newer = sync.export_snapshot({}, blacklist=[], revision="weaker", now=1002)
+    with pytest.raises(policy.PolicyDenied, match="non-regular"):
+        sync.atomic_import(newer, link, now=1003)
+    assert json.loads(real.read_text())["controls"]["ignore_users"] == ["13"]
+
+
+def test_cli_symlink_blacklist_cannot_drop_restrictions(tmp_path, monkeypatch):
+    source = private(tmp_path / "bot_control.json", {"ignore_users": [12]})
+    real = private(tmp_path / "empty.json", [])
+    (tmp_path / "blacklist.json").symlink_to(real)
+    target = tmp_path / "config.json"
+    sync.atomic_import(
+        sync.export_snapshot({}, blacklist=["13"], revision="good", now=1000),
+        target,
+        now=1001,
+    )
+    previous = target.read_bytes()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["standby.sync", "export", "--input", str(source), "--output", str(target)],
+    )
+    with pytest.raises(policy.PolicyDenied, match="symlink"):
+        sync.main()
+    assert target.read_bytes() == previous
+    assert b'"13"' in previous
+
+
+def test_oversized_authoritative_blacklist_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "MAX_AUTHORITATIVE_JSON", 32)
+    source = private(tmp_path / "bot_control.json", {})
+    blacklist = tmp_path / "blacklist.json"
+    blacklist.write_text("[" + ",".join('"1"' for _ in range(20)) + "]")
+    blacklist.chmod(0o600)
+    assert blacklist.stat().st_size > 32
+    target = tmp_path / "config.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["standby.sync", "export", "--input", str(source), "--output", str(target)],
+    )
+    with pytest.raises(policy.PolicyDenied, match="too large"):
+        sync.main()
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("audience", ["10,", "10, 11", "0", "0010"])
+def test_runtime_rejects_noncanonical_emergency_audience(tmp_path, monkeypatch, audience):
+    private(tmp_path / "activation", _fenced_activation())
+    private(tmp_path / "discord-token", "offline-token")
+    private(
+        tmp_path / "provider",
+        {
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "test",
+            "api_key": "offline-key",
+        },
+    )
+    private(
+        tmp_path / "chat-config",
+        sync.export_snapshot({}, blacklist=["13"], revision="reviewed"),
+    )
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("MAXWELL_DEPLOYMENT_MODE", "standby")
+    monkeypatch.setenv("MAXWELL_STANDBY_CHANNEL_IDS", audience)
+    with pytest.raises(policy.PolicyDenied):
+        asyncio.run(runtime.run())
+
+
+def test_oversized_credential_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "MAX_AUTHORITATIVE_JSON", 8)
+    path = private(tmp_path / "token", "x" * 9)
+    with pytest.raises(policy.PolicyDenied, match="too large"):
+        policy.read_credential(path)

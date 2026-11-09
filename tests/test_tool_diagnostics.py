@@ -249,3 +249,40 @@ def test_site_file_params_accept_native_json_shapes():
     )
     for tool, args in cases:
         jsonschema.Draft202012Validator(TOOL_PARAMETERS[tool]).validate(args)
+
+
+def test_native_dispatch_helper_failures_do_not_leak_secrets_or_reasoning(monkeypatch):
+    import json
+    from unittest.mock import AsyncMock
+
+    owner = SimpleNamespace(_control={}, tools={})
+    message = _message()
+    message.guild = None
+    secret = "private-helper-response-and-credential"
+    monkeypatch.setattr(
+        MaxwellBot, "_execute_tool_by_name",
+        AsyncMock(side_effect=RuntimeError(secret)),
+    )
+    remember = AsyncMock()
+    monkeypatch.setattr(MaxwellBot, "_remember_tool_call", remember)
+    calls = [{
+        "id": "failed", "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "arguments": json.dumps({
+                "url": "https://example.invalid/",
+                "reasoning": "private-chain-of-thought",
+            }),
+        },
+    }]
+
+    _, results = asyncio.run(MaxwellBot._process_native_tool_calls(
+        owner, message, "", calls
+    ))
+
+    assert results == ["Tool fetch_url: Error - internal tool failure (fetch_url)"]
+    assert secret not in json.dumps(owner._last_native_followup_messages)
+    remember.assert_awaited_once()
+    saved_params, saved_result = remember.call_args.args[-2:]
+    assert saved_params == {"url": "https://example.invalid/"}
+    assert secret not in saved_result

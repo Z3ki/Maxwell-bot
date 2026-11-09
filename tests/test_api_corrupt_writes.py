@@ -83,3 +83,22 @@ def test_operator_memory_add_is_explicit_public_global_memory(monkeypatch):
     assert _memory_row_visible(
         {"kind": "ltm", "scope": "global", "metadata": metadata}, requester
     )
+
+
+def test_blacklist_write_fails_closed_when_file_lock_is_held(tmp_path, monkeypatch):
+    from utils import FileLock
+
+    monkeypatch.setattr(api, "DATA_DIR", tmp_path)
+    path = tmp_path / "blacklist.json"
+    path.write_text("[]", encoding="utf-8")
+    lock = FileLock(path, timeout=0.2)
+    lock.__enter__()
+    try:
+        async def run():
+            resp = await api.blacklist_post(FakeRequest({"id": "42"}))
+            assert resp.status == 409
+            assert json.loads(path.read_text(encoding="utf-8")) == []
+
+        asyncio.run(run())
+    finally:
+        lock.__exit__(None, None, None)

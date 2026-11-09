@@ -77,10 +77,6 @@ class MediaMixin:
     async def _extract_media(self, message) -> tuple[list[str], list[dict]]:
         proc_img = MaxwellBot._image_input_enabled(self)
         proc_aud = _owner_audio_input_enabled(self)
-        # If neither images nor audio processing, skip all binary media collection.
-        # (process_audio / ENABLE_AUDIO_INPUT controls audio input to the model)
-        if not proc_img and not proc_aud:
-            return [], []
         images = []
         media = []
         max_size = self._max_media_bytes()
@@ -113,6 +109,14 @@ class MediaMixin:
                 ("image/", "video/", "audio/")
             )
             is_known_text = _is_text_attachment(attachment.filename, content_type)
+            hinted_mime = content_type.split(";", 1)[0].strip().lower() or MIME_MAP.get(ext, "")
+            if not is_known_text:
+                if (hinted_mime.startswith("image/") or ext in image_exts) and not proc_img and not hinted_mime.startswith(("audio/", "video/")):
+                    continue
+                if hinted_mime.startswith("audio/") and not proc_aud:
+                    continue
+                if hinted_mime.startswith("video/") and not (proc_img or proc_aud):
+                    continue
             # Enforce absolute size limit for ALL attachments including text
             absolute_max = 50 * 1024 * 1024  # 50MB hard cap
             att_size = int(getattr(attachment, "size", 0) or 0)
@@ -153,7 +157,7 @@ class MediaMixin:
                     continue
                 if mime.startswith("image/") and not proc_img:
                     continue
-                if mime == "image/gif" or ext == ".gif":
+                if mime == "image/gif":
                     normalized = await self._normalize_gif(
                         blob, attachment.filename, max_size
                     )
@@ -186,7 +190,9 @@ class MediaMixin:
                     # Providers reject raw video_url parts; derivatives are
                     # the complete provider-safe representation.
                     continue
-                is_image = ext in image_exts or mime.startswith("image/")
+                is_image = mime.startswith("image/") or (
+                    ext in image_exts and not mime.startswith(("audio/", "text/"))
+                )
                 text = ""
                 b64 = ""
                 if is_text and not is_image:
@@ -953,13 +959,20 @@ class MediaMixin:
             mime = MIME_MAP.get(ext, "application/octet-stream")
         if not mime.startswith(("image/", "video/", "audio/")):
             mime = MIME_MAP.get(ext, mime)
+        # URL extensions and embed labels are only discovery hints. Enforce
+        # input switches against the fetched MIME as well: a .png URL can
+        # serve audio, and author/footer icons are images too.
+        if mime.startswith("image/") and not MaxwellBot._image_input_enabled(self):
+            return None
+        if mime.startswith("audio/") and not _owner_audio_input_enabled(self):
+            return None
         if not mime.startswith(("image/", "video/", "audio/")):
             logger.warning(
                 f"Skipping embed media {url[:120]}: unsupported mime {mime or 'unknown'}"
             )
             return None
         anim_name = filename if Path(filename).suffix else f"{filename}{ext or '.gif'}"
-        if mime == "image/gif" or ext == ".gif":
+        if mime == "image/gif":
             normalized = await self._normalize_gif(blob, anim_name, max_size)
             if normalized:
                 blob, mime, filename = normalized
@@ -971,6 +984,8 @@ class MediaMixin:
             )
             if normalized:
                 blob, mime, filename = normalized
+        if mime.startswith("image/") and not MaxwellBot._image_input_enabled(self):
+            return None
         is_image = mime.startswith("image/")
         logger.info(
             f"Extracted embed media {filename} ({len(blob)} bytes, mime={mime})"
@@ -993,6 +1008,7 @@ class MediaMixin:
         max_size: int,
         *,
         source_prefix: str,
+        include_frames: bool | None = None,
     ) -> list[dict]:
         """Turn a downloaded video item into provider-safe frames/audio.
 
@@ -1027,11 +1043,14 @@ class MediaMixin:
             item.get("message_id"),
             max_size,
             source_url=str(item.get("url") or ""),
-            include_frames=MaxwellBot._image_input_enabled(self),
+            include_frames=(
+                MaxwellBot._image_input_enabled(self)
+                and include_frames is not False
+            ),
             source_prefix=source_prefix,
         )
 
-    async def _extract_embeds(self, message) -> list[dict]:
+    async def _extract_embeds(self, message, *, include_binary: bool = True) -> list[dict]:
         embeds = self._payload_attr_list(message, "embeds", 8)
         if not embeds:
             return []
@@ -1057,6 +1076,8 @@ class MediaMixin:
                     f"Embed {idx} media URLs:\n"
                     + "\n".join(f"  - {u}" for _, u in embed_media_urls)
                 )
+            if not include_binary:
+                continue
             # Skip YouTube embeds — we do not download YouTube media.
             embed_url = getattr(embed, "url", None) or ""
             if _is_youtube_url(embed_url):
@@ -1068,7 +1089,7 @@ class MediaMixin:
                     break
                 if _is_youtube_url(url):
                     continue
-                if label in {"image", "thumbnail"} and not proc_img:
+                if label in {"image", "thumbnail", "author_icon", "footer_icon"} and not proc_img:
                     continue
                 if label == "video" and (
                     not video_input_enabled or not (proc_img or proc_aud)
@@ -1099,11 +1120,10 @@ class MediaMixin:
                 media_count += 1
                 if label in {"image", "thumbnail"} and mime.startswith("image/"):
                     embed_has_image = True
-            # GIF/klipy embeds ship a thumbnail + mp4. Keep the thumbnail when
-            # it is a real visual; otherwise derive the video. A provider may
-            # reject raw video_url parts, so never pass an un-derived video
-            # item downstream.
-            if not embed_has_image:
+            # A real thumbnail already supplies the visual, but it cannot
+            # replace a video's soundtrack. Still derive audio when enabled,
+            # without decoding redundant frames or passing raw video parts.
+            if not embed_has_image or proc_aud:
                 for item in pending_video:
                     if media_count >= 5 and not proc_aud:
                         break
@@ -1113,6 +1133,7 @@ class MediaMixin:
                             item,
                             max_size,
                             source_prefix="embed_video",
+                            include_frames=not embed_has_image,
                         )
                         for derived_item in derived:
                             if media_count >= 5 and derived_item.get("is_image"):
@@ -1123,7 +1144,7 @@ class MediaMixin:
                                 continue
                             media.append(derived_item)
                             media_count += 1
-                    elif mime.startswith("image/") and proc_img:
+                    elif mime.startswith("image/") and proc_img and not embed_has_image:
                         media.append(item)
                         media_count += 1
         if text_blocks:

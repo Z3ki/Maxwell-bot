@@ -242,11 +242,16 @@ class ShellTool(Tool):
 
     @classmethod
     def _user_slot(cls, tenant: ShellTenant) -> asyncio.Semaphore:
+        """One semaphore per owner for the process lifetime.
+
+        Replacing it after an idle recycle lets a waiter keep the old
+        semaphore while a new command takes a fresh one, so one user holds
+        two global slots.
+        """
         slot = cls._user_slots.get(tenant.owner_id)
-        if slot is None:
-            slot = asyncio.Semaphore(1)
-            cls._user_slots[tenant.owner_id] = slot
-        return slot
+        if slot is not None:
+            return slot
+        return cls._user_slots.setdefault(tenant.owner_id, asyncio.Semaphore(1))
 
     @classmethod
     def _runtime(cls) -> str:
@@ -408,14 +413,22 @@ class ShellTool(Tool):
                         if saver is not None:
                             with contextlib.suppress(Exception):
                                 await asyncio.wait_for(saver(tenant), 60)
+                        # pin() does not take this lock. A job can pin during
+                        # the save; destroying then wipes the workspace the
+                        # pin exists to protect. A command can also refresh
+                        # the stamp or enter _active_tenants.
+                        stamp = cls._last_used_by_tenant.get(name, 0.0)
+                        if (
+                            cls._pins.get(name)
+                            or name in cls._active_tenants
+                            or time.monotonic() - stamp < idle
+                        ):
+                            continue
                         await cls._destroy_container_unlocked(tenant)
                         cls._last_used_by_tenant.pop(name, None)
                         cls._tenants.pop(name, None)
-                        if not any(
-                            known.owner_id == tenant.owner_id
-                            for known in cls._tenants.values()
-                        ) and tenant.owner_id not in cls._active_owners:
-                            cls._user_slots.pop(tenant.owner_id, None)
+                        # Keep the owner's semaphore. Popping it strands anyone
+                        # already waiting on the old object.
                         logger.info("idle-recycled tenant shell %s", name)
                         reaped = True
                 if not reaped:
@@ -640,6 +653,7 @@ class ShellTool(Tool):
             raise RuntimeError(
                 stderr.decode(errors="replace").strip() or "docker run failed"
             )
+        self._tenants[tenant.container_name] = tenant
         self._active_tenants.add(tenant.container_name)
         self._prepared_tenants.add(tenant.container_name)
         self._storage_state[tenant.container_name] = {"mb": storage_mb}
@@ -673,10 +687,19 @@ class ShellTool(Tool):
         self, tenant: ShellTenant, script: str, *, stdin_file=None, stdout_file=None,
         stdout_limit: int = 0, timeout: float = 60,
     ) -> tuple[int, bytes, bytes]:
-        """Run a trusted helper script in the guest; never user input."""
+        """Run a trusted helper script in the guest; never user input.
+
+        The helper is a session leader. Cancelling this task kills that
+        session, not only the local docker client — otherwise a restore's
+        ``find -delete`` keeps unlinking after we think it stopped.
+        """
+        pid_file = f"/tmp/mw-helper-{uuid.uuid4().hex}.pid"
+        quoted_pid = shlex.quote(pid_file)
+        inner = f"echo $$ > {quoted_pid}; exec sh -c {shlex.quote(script)}"
+        wrapped = f"umask 077; exec setsid --wait sh -c {shlex.quote(inner)}"
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", *(["-i"] if stdin_file is not None else []),
-            "--user", "root", tenant.container_name, "sh", "-c", script,
+            "--user", "root", tenant.container_name, "sh", "-c", wrapped,
             stdin=asyncio.subprocess.PIPE if stdin_file is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -713,22 +736,152 @@ class ShellTool(Tool):
                 else:
                     out.extend(chunk)
 
+        tasks = [
+            asyncio.create_task(coro)
+            for coro in (feed(), pump(), proc.stderr.read(), proc.wait())
+        ]
         try:
             _fed, _pumped, err, _waited = await asyncio.wait_for(
-                asyncio.gather(feed(), pump(), proc.stderr.read(), proc.wait()), timeout
+                asyncio.gather(*tasks), timeout
             )
         except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(Exception):
+                await proc.communicate()
                 await proc.wait()
+            await self._kill_container_exec(tenant, pid_file)
             raise
         return proc.returncode, bytes(out), err
 
-    _FINGERPRINT = (
-        "find /storage -mindepth 1 -printf '%P\t%y\t%s\t%T@\n' 2>/dev/null "
-        "| LC_ALL=C sort | sha256sum | cut -c1-64"
-    )
+    # Content hash, not size/mtime. A same-size touch -r rewrite must not
+    # look unchanged. O_NOFOLLOW so a swapped symlink cannot hash another file.
+    _FINGERPRINT_PY = r'''
+import hashlib, os, stat, sys
+root_path = sys.argv[1]
+digest = hashlib.sha256()
+root = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY)
+def walk(parent, rel):
+    try:
+        names = sorted(os.listdir(parent))
+    except OSError:
+        return
+    for name in names:
+        path = f"{rel}/{name}" if rel else name
+        try:
+            info = os.lstat(name, dir_fd=parent)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            try:
+                target = os.readlink(name, dir_fd=parent)
+            except OSError:
+                target = ""
+            digest.update(f"l\0{path}\0{target}\0".encode())
+            continue
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+        except OSError:
+            continue
+        try:
+            if stat.S_ISDIR(info.st_mode):
+                digest.update(f"d\0{path}\0".encode())
+                walk(fd, path)
+            elif stat.S_ISREG(info.st_mode):
+                digest.update(f"f\0{path}\0".encode())
+                while True:
+                    chunk = os.read(fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                digest.update(b"\0")
+        finally:
+            os.close(fd)
+walk(root, "")
+os.close(root)
+sys.stdout.write(digest.hexdigest())
+'''
+    _FINGERPRINT = "python3 -c " + shlex.quote(_FINGERPRINT_PY) + " /storage"
+    # Copy job artifacts without following a directory symlink into public/.
+    _STORAGE_COPY = r'''
+import os, stat, sys
+def open_dir(root, parts, create):
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    for part in parts:
+        try:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        except FileNotFoundError:
+            if not create:
+                os.close(fd)
+                return None
+            try:
+                os.mkdir(part, 0o755, dir_fd=fd)
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError:
+                os.close(fd)
+                return None
+        except OSError:
+            os.close(fd)
+            return None
+        os.close(fd)
+        fd = nxt
+    return fd
+def copy_one(src, dest_fd):
+    if not src.startswith("/workspace/"):
+        return False
+    parts = src[len("/workspace/"):].split("/")
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return False
+    parent = open_dir("/workspace", parts[:-1], False)
+    if parent is None:
+        return False
+    try:
+        src_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            info = os.fstat(src_fd)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            out = os.open(
+                parts[-1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                0o644, dir_fd=dest_fd,
+            )
+            try:
+                while True:
+                    chunk = os.read(src_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    view = chunk
+                    while view:
+                        wrote = os.write(out, view)
+                        view = view[wrote:]
+            finally:
+                os.close(out)
+        finally:
+            os.close(src_fd)
+    except OSError:
+        return False
+    finally:
+        os.close(parent)
+    return True
+dest = sys.argv[1]
+if not dest.startswith("/storage/"):
+    sys.exit(0)
+parts = dest[len("/storage/"):].split("/")
+if any(part in {"", ".", ".."} for part in parts):
+    sys.exit(0)
+dest_fd = open_dir("/storage", parts, True)
+if dest_fd is None:
+    sys.exit(0)
+try:
+    for src in sys.argv[2:]:
+        if copy_one(src, dest_fd):
+            sys.stdout.write(src + "\n")
+finally:
+    os.close(dest_fd)
+'''
 
     async def _storage_fingerprint(self, tenant: ShellTenant) -> str | None:
         try:
@@ -757,15 +910,21 @@ class ShellTool(Tool):
         if state.get("gen") == generation and "base" in state:
             return
         spool, manifest, generation = await asyncio.to_thread(storage.export_tar, owner)
+        # Freeze before the guest wipe. Cancel must not save a half-deleted
+        # tree back as "the user removed these files".
+        self._storage_state[name] = {"mb": state["mb"], "broken": True}
+        failed: BaseException | None = None
         try:
-            code, _out, err = await self._guest_exec(
-                tenant,
-                "find /storage -mindepth 1 -delete && tar -x -C /storage --no-same-owner -f -",
-                stdin_file=spool,
-                timeout=120,
-            )
-        except Exception as exc:
-            code, err = 1, str(type(exc).__name__).encode()
+            try:
+                code, _out, err = await self._guest_exec(
+                    tenant,
+                    "find /storage -mindepth 1 -delete && tar -x -C /storage --no-same-owner -f -",
+                    stdin_file=spool,
+                    timeout=120,
+                )
+            except BaseException as exc:
+                code, err = 1, str(type(exc).__name__).encode()
+                failed = exc
         finally:
             spool.close()
         if code != 0:
@@ -779,6 +938,8 @@ class ShellTool(Tool):
                 "Free space with the storage tool or the dashboard."
             )
             logger.warning("storage restore failed for %s (exit=%s stderr_bytes=%s)", name, code, len(err))
+            if isinstance(failed, asyncio.CancelledError):
+                raise failed
             return
         fingerprint = await self._storage_fingerprint(tenant)
         self._storage_state[name] = {
@@ -803,7 +964,6 @@ class ShellTool(Tool):
                     stdout_limit=limit, timeout=120,
                 )
             except OverflowError:
-                state["fingerprint"] = fingerprint
                 return "[storage] /storage is larger than its quota; changes were not saved."
             if code != 0:
                 logger.warning("storage export failed for %s (exit=%s stderr_bytes=%s)", name, code, len(err))
@@ -813,10 +973,11 @@ class ShellTool(Tool):
                 storage.import_tar, tenant.owner_id, spool, state["base"],
                 base_generation=state.get("gen", -1),
             )
-        # Either way, don't re-export the same tree after every command.
-        state["fingerprint"] = fingerprint
         if result.error:
             return f"[storage] {result.error}"
+        # Only a merge that landed may look unchanged. A quota refusal or a
+        # bad archive must be retried after the user frees space.
+        state["fingerprint"] = fingerprint
         if result.clean and result.manifest is not None:
             state["gen"], state["base"] = result.generation, result.manifest
         else:
@@ -827,6 +988,17 @@ class ShellTool(Tool):
             more = f" and {len(result.skipped) - 5} more" if len(result.skipped) > 5 else ""
             return f"[storage] not saved (symlinks/special files are not kept): {shown}{more}"
         return ""
+
+    @staticmethod
+    def _storage_folder(folder: str) -> str | None:
+        """Relative /storage folder, or None if it could leave that tree."""
+        text = str(folder or "").strip().strip("/")
+        if not text or len(text) > 120 or not re.fullmatch(r"[A-Za-z0-9._/-]+", text):
+            return None
+        parts = text.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            return None
+        return text
 
     async def persist_to_storage(self, message, paths: list[str], folder: str) -> list[str]:
         """Copy sandbox files into /storage/<folder>/ and save. For jobs.
@@ -845,13 +1017,16 @@ class ShellTool(Tool):
             rel = self._workspace_relative_path(raw)
             if rel is not None:
                 sources.append("/workspace/" + rel)
-        if not sources or not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", folder or ""):
+        dest_folder = self._storage_folder(folder)
+        if not sources or dest_folder is None:
             return []
-        dest = "/storage/" + folder.strip("/")
-        script = "mkdir -p " + shlex.quote(dest) + " && " + " ; ".join(
-            f"[ -f {shlex.quote(src)} ] && [ ! -L {shlex.quote(src)} ] && "
-            f"cp -f -- {shlex.quote(src)} {shlex.quote(dest)}/ && echo {shlex.quote(src)}"
-            for src in sources
+        dest = "/storage/" + dest_folder
+        script = (
+            "python3 -c "
+            + shlex.quote(self._STORAGE_COPY)
+            + " "
+            + shlex.quote(dest)
+            + "".join(" " + shlex.quote(src) for src in sources)
         )
         async with self._user_slot(tenant):
             async with self._lock_for(tenant):
@@ -1078,6 +1253,7 @@ class ShellTool(Tool):
                             await asyncio.shield(cleanup)
                         with contextlib.suppress(ProcessLookupError):
                             proc.kill()
+                        await proc.communicate()
                         await proc.wait()
                         raise
                     except asyncio.CancelledError:
@@ -1091,6 +1267,7 @@ class ShellTool(Tool):
                         if proc.returncode is None:
                             with contextlib.suppress(ProcessLookupError):
                                 proc.kill()
+                            await proc.communicate()
                             await proc.wait()
                         raise
                     finally:
@@ -1102,6 +1279,7 @@ class ShellTool(Tool):
                             try:
                                 await self._kill_container_exec(tenant, pid_file)
                                 proc.kill()
+                                await proc.communicate()
                                 await proc.wait()
                             except Exception as e:
                                 # Usually means the process already exited.
@@ -1127,10 +1305,12 @@ class ShellTool(Tool):
 
     async def _save_then_destroy(self, tenant: ShellTenant) -> None:
         """Timeout/cancel path: keep /storage writes, then kill the guest."""
-        with contextlib.suppress(Exception):
+        try:
             note = await asyncio.wait_for(self._storage_save(tenant), 60)
-            if note:
-                type(self)._storage_notes[tenant.container_name] = note
+        except Exception:
+            note = "[storage] saving /storage failed; changes may not be kept."
+        if note:
+            type(self)._storage_notes[tenant.container_name] = note
         await self._destroy_container_unlocked(tenant)
 
     async def _kill_container_exec(self, tenant: ShellTenant, pid_file: str) -> None:
@@ -1187,7 +1367,7 @@ class ShellTool(Tool):
             note = type(self)._storage_notes.pop(tenant.container_name, "")
             saved = (
                 " Files saved in /storage were kept."
-                if await self._storage_mb(tenant) else ""
+                if await self._storage_mb(tenant) and not note else ""
             )
             return (
                 f"Error: Command timed out after {limit}s and the sandbox was reset "
@@ -1349,13 +1529,8 @@ finally:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 try:
-                    blob, _stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=15
-                    )
+                    blob, _stderr = await communicate_process(proc, timeout=15)
                 except asyncio.TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
-                    await proc.wait()
                     return None, None, "workspace read timed out"
                 if proc.returncode != 0:
                     if proc.returncode == 3:

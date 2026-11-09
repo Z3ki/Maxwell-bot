@@ -10,6 +10,8 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlparse
 
+
+MAX_AUTHORITATIVE_JSON = 8 * 1024 * 1024
 TOOLS: MappingProxyType[str, Any] = MappingProxyType({})
 MODE = "limited_standby"
 SYSTEM_CONTEXT = (
@@ -26,6 +28,36 @@ SYSTEM_CONTEXT = (
 
 class PolicyDenied(RuntimeError):
     """A forbidden capability or unverified activation was requested."""
+
+
+
+def parse_json(text: str) -> Any:
+    """Parse operator JSON without last-key-wins or non-finite numbers.
+
+    A repeated ignore list or provider URL must not discard the first value.
+    """
+    if type(text) is not str or len(text) > MAX_AUTHORITATIVE_JSON:
+        raise PolicyDenied("Authoritative JSON is missing or too large")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise PolicyDenied("Duplicate JSON object key")
+            result[key] = value
+        return result
+
+    def invalid_constant(_value):
+        raise PolicyDenied("Non-finite JSON value")
+
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=unique_object,
+            parse_constant=invalid_constant,
+        )
+    except json.JSONDecodeError as error:
+        raise PolicyDenied("Malformed JSON") from error
 
 
 def deployment_mode(value: str | None = None) -> str:
@@ -101,15 +133,37 @@ def response_text(data: dict[str, Any]) -> str:
 def read_credential(path: Path) -> str:
     """Read only operator-provisioned credentials, never user-selected paths."""
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o027:
+    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
         raise PolicyDenied("Credential must be a non-symlink private regular file")
     if info.st_uid not in {0, os.geteuid()}:
         raise PolicyDenied("Unexpected credential owner")
-    return path.read_text()
+    if info.st_size > MAX_AUTHORITATIVE_JSON:
+        raise PolicyDenied("Credential is too large")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        current = os.fstat(fd)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_mode & 0o077
+            or current.st_uid not in {0, os.geteuid()}
+            or current.st_size > MAX_AUTHORITATIVE_JSON
+        ):
+            raise PolicyDenied("Credential must be a non-symlink private regular file")
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            text = stream.read(MAX_AUTHORITATIVE_JSON + 1)
+            if len(text) > MAX_AUTHORITATIVE_JSON:
+                raise PolicyDenied("Credential is too large")
+            return text
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def activation_record(path: Path) -> dict[str, Any]:
-    record = json.loads(read_credential(path))
+    record = parse_json(read_credential(path))
+    if not isinstance(record, dict):
+        raise PolicyDenied("Positive verified primary fencing is required")
     if (
         record.get("state") != "manually_fenced"
         or record.get("primary_running") is not False

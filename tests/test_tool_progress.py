@@ -1214,3 +1214,87 @@ def test_repeated_working_acknowledgements_are_never_streamed(monkeypatch):
         assert msg.channel.sent == []
         await prog.stop()
     asyncio.run(run())
+
+
+def test_privacy_buffer_keeps_open_private_blocks_hidden_after_truncation():
+    prog = _progress_for_known_tool(FakeMessage())
+    prog._append("[PRIVATE INTERNAL CONTEXT]")
+    for _ in range(12):
+        prog._append("Confidential detail. " * 100)
+        assert len(prog._reasoning_buffer) <= tool_progress._HARD_FALLBACK_CHARS
+        assert prog._render() == "using shell…"
+    prog._append("[/PRIVATE INTERNAL CONTEXT]. Checking files.")
+    assert prog._render() == "thinking: Checking files. → shell"
+
+
+def test_privacy_buffer_keeps_long_context_sentences_hidden_after_truncation():
+    prog = _progress_for_known_tool(FakeMessage())
+    prog._append("Watch signals: ")
+    for _ in range(12):
+        prog._append("confidential detail " * 100)
+        assert len(prog._reasoning_buffer) <= tool_progress._HARD_FALLBACK_CHARS
+        assert prog._render() == "using shell…"
+    prog._append("End of private sentence. Checking files.")
+    assert prog._render() == "thinking: Checking files. → shell"
+
+
+def test_privacy_buffer_preserves_closed_private_blocks_crossing_the_cut():
+    prog = _progress_for_known_tool(FakeMessage())
+    prog._append(
+        "[PRIVATE INTERNAL CONTEXT]"
+        + "Confidential detail. " * 400
+        + "[/PRIVATE INTERNAL CONTEXT]. Checking files."
+    )
+    assert len(prog._reasoning_buffer) <= tool_progress._HARD_FALLBACK_CHARS
+    assert prog._render() == "thinking: Checking files. → shell"
+
+
+def test_privacy_buffer_filters_long_updates_before_posting(monkeypatch):
+    monkeypatch.setattr(tool_progress, "_DEFERRED_POST_WINDOW", 0)
+    monkeypatch.setattr(tool_progress, "_GRACE_BEFORE_FIRST_POST", 0)
+
+    async def run():
+        msg = FakeMessage()
+        prog = _progress_for_known_tool(msg)
+        await prog.update(
+            "shell",
+            "[PRIVATE INTERNAL CONTEXT]" + "Confidential detail. " * 400,
+        )
+        await prog.start()
+        await _drain()
+        assert len(prog._reasoning_buffer) <= tool_progress._HARD_FALLBACK_CHARS
+        assert [message.content for message in msg.channel.sent] == ["using shell…"]
+        for _ in range(3):
+            prog._last_edit = 0
+            await prog.tick(reasoning_delta="More confidential detail. " * 300)
+            assert msg.channel.sent[0].content == "using shell…"
+        await prog.stop()
+        await _drain()
+
+    asyncio.run(run())
+
+
+def test_concurrent_starts_own_only_one_progress_message(monkeypatch):
+    monkeypatch.setattr(tool_progress, "_DEFERRED_POST_WINDOW", 0)
+    monkeypatch.setattr(tool_progress, "_GRACE_BEFORE_FIRST_POST", 0)
+
+    async def run():
+        msg = FakeMessage()
+        original_send = msg.channel.send
+
+        async def yielding_send(*args, **kwargs):
+            # Both starters reach the transport in the same loop iteration
+            # unless the progress object owns its first send atomically.
+            await asyncio.sleep(0)
+            return await original_send(*args, **kwargs)
+
+        msg.channel.send = yielding_send
+        prog = _progress_for_known_tool(msg)
+        await asyncio.gather(prog.start(), prog.start())
+        assert len(msg.channel.sent) == 1
+        assert prog.posted is msg.channel.sent[0]
+        await prog.stop()
+        await _drain()
+        assert msg.channel.deleted == msg.channel.sent
+
+    asyncio.run(run())

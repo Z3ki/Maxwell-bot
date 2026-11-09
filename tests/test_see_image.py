@@ -146,3 +146,75 @@ def test_reply_to_tenor_link_counts_as_media():
     )
     message = SimpleNamespace(reference=SimpleNamespace(resolved=parent))
     assert MaxwellBot._reply_media_message_id(message) == 55
+
+
+def test_fetch_url_enforces_image_limit_for_content_type_detected_images(monkeypatch):
+    from plugins.web import impl as web_impl
+
+    async def fetch(url, *, max_bytes, timeout):
+        return url, "image/png", _PNG_1X1
+
+    monkeypatch.setattr(web_impl, "_fetch_public_url", fetch)
+    bot = SimpleNamespace(
+        _control={"process_images": True},
+        _max_media_bytes=lambda: len(_PNG_1X1) - 1,
+        _authorize_tool_execution=lambda *_args: None,
+    )
+    bot.tools = {"see_image": SeeImageTool(bot)}
+    result = asyncio.run(
+        FetchUrlTool(bot).execute(
+            SimpleNamespace(id=1, channel=SimpleNamespace(id=2)),
+            url="https://example.com/opaque",
+        )
+    )
+    assert result == "Error: image exceeds the configured media size limit"
+    assert "__IMAGE_B64__" not in result
+
+
+def test_see_image_video_fallback_rechecks_registered_tool_policy():
+    from unittest.mock import AsyncMock
+
+    video = SimpleNamespace(result_from_blob=AsyncMock(return_value="video inspected"))
+    bot = SimpleNamespace(
+        _control={"process_images": True},
+        _download_embed_media=AsyncMock(return_value={
+            "b64": base64.b64encode(b"video").decode(),
+            "mime_type": "video/mp4",
+            "filename": "clip.mp4",
+        }),
+        _extract_video_derivatives=AsyncMock(return_value=[]),
+        tools={"see_video": video},
+        _authorize_tool_execution=lambda *_args: "refused: this tool is disabled",
+    )
+    message = SimpleNamespace(id=1, channel=SimpleNamespace(id=2))
+    result = asyncio.run(
+        SeeImageTool(bot).execute(message, url="https://example.com/opaque")
+    )
+    assert result == "refused: this tool is disabled"
+    video.result_from_blob.assert_not_awaited()
+    bot._extract_video_derivatives.assert_not_awaited()
+
+
+def test_see_image_video_fallback_uses_registered_authorized_tool():
+    from unittest.mock import AsyncMock
+
+    video = SimpleNamespace(result_from_blob=AsyncMock(return_value="video inspected"))
+    bot = SimpleNamespace(
+        _control={"process_images": True},
+        _download_embed_media=AsyncMock(return_value={
+            "b64": base64.b64encode(b"video").decode(),
+            "mime_type": "video/mp4",
+            "filename": "clip.mp4",
+        }),
+        tools={"see_video": video},
+        _authorize_tool_execution=lambda *_args: None,
+    )
+    message = SimpleNamespace(id=1, channel=SimpleNamespace(id=2))
+    result = asyncio.run(
+        SeeImageTool(bot).execute(message, url="https://example.com/opaque")
+    )
+    assert result == "video inspected"
+    video.result_from_blob.assert_awaited_once_with(
+        b"video", "video/mp4", "https://example.com/opaque", message,
+        filename="clip.mp4",
+    )

@@ -8,7 +8,11 @@ import aiohttp
 
 from utils import _spawn_background as _fire_and_forget
 from .custom_tools import _CustomToolCallBuffer
-from .protocol import ProviderProtocolError, validate_stream_choices
+from .protocol import (
+    ProviderProtocolError,
+    _validate_complete_tool_arguments,
+    validate_stream_choices,
+)
 from .sse import iter_sse_payloads
 from .tool_calls import (
     _append_tool_call_arguments,
@@ -157,20 +161,7 @@ class _ChatStreamAssembler:
             # arguments string. Downstream decoding falls back to sending the
             # raw text as a content argument, so a truncated send_message can
             # post half a JSON object. Refuse it and let the caller retry.
-            for tool in self.tools.values():
-                arguments = (tool.get("function") or {}).get("arguments")
-                if not isinstance(arguments, str) or not arguments.strip():
-                    continue
-                try:
-                    decoded = json.loads(arguments)
-                except ValueError as exc:
-                    raise ProviderProtocolError(
-                        "Provider stream truncated a native tool call"
-                    ) from exc
-                if not isinstance(decoded, dict):
-                    raise ProviderProtocolError(
-                        "Provider stream truncated a native tool call"
-                    )
+            _validate_complete_tool_arguments(list(self.tools.values()))
         if self.custom is not None:
             if self.custom.truncated_tool_call:
                 # The stream was cut mid tool call (finish_reason="length", or

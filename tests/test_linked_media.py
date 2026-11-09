@@ -300,3 +300,91 @@ def test_video_link_is_skipped_when_video_input_is_disabled():
 
     assert calls == []
     assert media == []
+
+
+@pytest.mark.parametrize(
+    "mime,control",
+    [
+        ("audio/mpeg", {"process_images": True, "process_audio": False}),
+        ("image/png", {"process_images": False, "process_audio": True}),
+    ],
+)
+def test_downloaded_mime_cannot_bypass_disabled_input(monkeypatch, mime, control):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("bot_parts.media._is_safe_url", lambda _url: True)
+    owner = SimpleNamespace(
+        _control=control,
+        config=SimpleNamespace(ENABLE_AUDIO_INPUT=True),
+        _fetch_public_payload=AsyncMock(
+            return_value=("https://example.com/disguised.png", mime, b"binary")
+        ),
+        _is_gif_page_url=lambda _url: False,
+        _media_item=MaxwellBot._media_item,
+    )
+    result = asyncio.run(MaxwellBot._download_embed_media(
+        owner, "https://example.com/disguised.png", "media.png", 1024, 7
+    ))
+    assert result is None
+
+
+def test_disabled_images_do_not_download_embed_author_or_footer_icons():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    owner = object.__new__(MaxwellBot)
+    owner._control = {"process_images": False, "process_audio": True}
+    owner.config = SimpleNamespace(ENABLE_AUDIO_INPUT=True)
+    owner._download_embed_media = AsyncMock()
+    embed = SimpleNamespace(
+        author=SimpleNamespace(name="Alice", icon_url="https://example.com/author.png"),
+        footer=SimpleNamespace(text="footer", icon_url="https://example.com/footer.png"),
+    )
+    result = asyncio.run(owner._extract_embeds(SimpleNamespace(id=7, embeds=[embed])))
+    owner._download_embed_media.assert_not_awaited()
+    assert len(result) == 1 and result[0]["is_text"]
+
+
+def test_gif_video_normalization_cannot_reenable_disabled_images(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("bot_parts.media._is_safe_url", lambda _url: True)
+    owner = SimpleNamespace(
+        _control={"process_images": False, "process_audio": True},
+        config=SimpleNamespace(ENABLE_AUDIO_INPUT=True),
+        _fetch_public_payload=AsyncMock(
+            return_value=("https://tenor.com/clip.mp4", "video/mp4", b"video")
+        ),
+        _is_gif_page_url=lambda _url: True,
+        _normalize_gif=AsyncMock(return_value=(b"jpeg", "image/jpeg", "sheet.jpg")),
+        _media_item=MaxwellBot._media_item,
+    )
+    result = asyncio.run(MaxwellBot._download_embed_media(
+        owner, "https://tenor.com/clip.mp4", "clip.mp4", 1024, 7
+    ))
+    assert result is None
+
+
+def test_audio_with_gif_extension_keeps_its_actual_media_kind(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("bot_parts.media._is_safe_url", lambda _url: True)
+    owner = SimpleNamespace(
+        _control={"process_images": False, "process_audio": True},
+        config=SimpleNamespace(ENABLE_AUDIO_INPUT=True),
+        _fetch_public_payload=AsyncMock(
+            return_value=("https://example.com/clip.gif", "audio/mpeg", b"audio")
+        ),
+        _is_gif_page_url=lambda _url: False,
+        _normalize_gif=AsyncMock(side_effect=AssertionError("audio is not a GIF")),
+        _media_item=MaxwellBot._media_item,
+    )
+    result = asyncio.run(MaxwellBot._download_embed_media(
+        owner, "https://example.com/clip.gif", "clip.gif", 1024, 7
+    ))
+    assert result["mime_type"] == "audio/mpeg"
+    assert result["is_image"] is False
+    owner._normalize_gif.assert_not_awaited()

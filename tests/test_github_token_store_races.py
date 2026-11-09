@@ -332,3 +332,92 @@ def test_logout_without_token_file_does_not_create_a_credential_snapshot(tmp_pat
     assert asyncio.run(store.clear("absent")) is False
     assert not path.exists()
     assert not store.peek("absent")
+
+
+@pytest.mark.parametrize("operation", ["write", "set"])
+def test_token_write_cannot_restore_credentials_after_privacy_deletion(
+    tmp_path, monkeypatch, operation,
+):
+    import privacy
+
+    path = tmp_path / "plugins" / "github_projects" / "user_tokens.json"
+    store = github.TokenStore(path)
+    store.write("other-user", "synthetic-unrelated-token")
+    unrelated = _row_digest(store.row("other-user"))
+    fence = tmp_path / "plugins" / "maxwell_extras" / "user_preferences.json"
+    fence.parent.mkdir()
+    fence.write_text(json.dumps({"users": {"1": {"deleted_at": 200.0}}}))
+    monkeypatch.setattr(privacy, "request_started_at", lambda: 100.0)
+    with pytest.raises(ValueError, match="predates a privacy deletion"):
+        if operation == "write":
+            store.write("1", "synthetic-stale-token")
+        else:
+            asyncio.run(store.set("1", "synthetic-stale-token"))
+    assert not store.peek("1")
+    assert _row_digest(store.row("other-user")) == unrelated
+    store.write("1", "synthetic-new-token", started_at=201.0)
+    assert store.peek("1") == "synthetic-new-token"
+
+
+def test_stale_logout_cannot_delete_a_token_saved_after_privacy_deletion(tmp_path):
+    path = tmp_path / "plugins" / "github_projects" / "user_tokens.json"
+    store = github.TokenStore(path)
+    fence = tmp_path / "plugins" / "maxwell_extras" / "user_preferences.json"
+    fence.parent.mkdir()
+    fence.write_text(json.dumps({"users": {"1": {"deleted_at": 200.0}}}))
+    store.write("1", "synthetic-new-token", started_at=201.0)
+    with pytest.raises(ValueError, match="predates a privacy deletion"):
+        asyncio.run(store.clear("1", started_at=100.0))
+    assert store.peek("1") == "synthetic-new-token"
+
+
+def test_async_token_write_captures_request_before_waiting_for_store_lock(
+    tmp_path, monkeypatch,
+):
+    import privacy
+
+    path = tmp_path / "plugins" / "github_projects" / "user_tokens.json"
+    store = github.TokenStore(path)
+    fence = tmp_path / "plugins" / "maxwell_extras" / "user_preferences.json"
+    fence.parent.mkdir(parents=True)
+    now = [100.0]
+    captured = None
+
+    def request_time():
+        captured.set()
+        return now[0]
+
+    monkeypatch.setattr(privacy, "request_started_at", request_time)
+
+    async def scenario():
+        nonlocal captured
+        captured = asyncio.Event()
+        async with store.lock:
+            task = asyncio.create_task(store.set("1", "synthetic-stale-token"))
+            await captured.wait()
+            fence.write_text(json.dumps({"users": {"1": {"deleted_at": 200.0}}}))
+            now[0] = 300.0
+        with pytest.raises(ValueError, match="predates a privacy deletion"):
+            await task
+
+    asyncio.run(scenario())
+    assert not path.exists()
+
+
+def test_token_snapshots_are_private_and_ignore_predictable_temp_symlinks(tmp_path):
+    import os
+    import stat
+
+    path = tmp_path / "tokens.json"
+    outside = tmp_path / "unrelated-file"
+    outside.write_text("must remain unchanged")
+    path.with_suffix(".json.tmp").symlink_to(outside)
+    previous_umask = os.umask(0o022)
+    try:
+        store = github.TokenStore(path)
+        store.write("1", "synthetic-private-token")
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert outside.read_text() == "must remain unchanged"
+    assert store.peek("1") == "synthetic-private-token"

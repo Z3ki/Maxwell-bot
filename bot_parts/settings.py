@@ -30,10 +30,15 @@ class SettingsMixin:
         return _str_set(data)
 
     def _save_str_set(self, name, values, err, *, sort=False):
+        path = self._json_path(name)
         try:
-            _atomic_json_write_sync(
-                self._json_path(name), sorted(values) if sort else list(values)
-            )
+            # The API read-modify-writes these lists under the same sidecar lock.
+            # An unlocked save can land between that read and write and drop the
+            # API's change, or tear the file if the two writes overlap.
+            with FileLock(path, timeout=5):
+                _atomic_json_write_sync(
+                    path, sorted(values) if sort else list(values)
+                )
         except Exception as e:
             logger.error(f"{err}: {e}")
 
@@ -391,8 +396,12 @@ class SettingsMixin:
                     logger.error(
                         "Expired site backend teardown failed for %s: %s", slug, e
                     )
+                    # Keep the expiry record so the next cleanup pass can
+                    # finish a partial teardown.
+                    continue
             except Exception as e:
                 logger.error(f"Failed to delete site {slug}: {e}")
+                continue
             expired.append(slug)
         if expired:
             for slug in expired:

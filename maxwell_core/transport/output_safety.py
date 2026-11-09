@@ -442,19 +442,56 @@ def _unwrap_reply_envelopes(text: str) -> str:
 
 
 def _strip_leading_reasoning_json(text: str) -> str:
-    extracted = extract_json_object(text)
-    if not extracted:
-        return text
-    raw_json, end = extracted
-    try:
-        payload = json.loads(raw_json)
-    except json.JSONDecodeError as _exc:
-        return text
-    if not isinstance(payload, dict) or not (
-        {"thoughts", "intent", "decision", "tool_plan"} & set(payload)
-    ):
-        return text
-    return text[end:].lstrip()
+    reasoning_keys = {
+        "thoughts", "intent", "decision", "tool_plan", "reasoning",
+        "internal_monologue", "plan", "action_plan",
+    }
+    while extracted := extract_json_object(text):
+        raw_json, end = extracted
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(payload, dict) or not (
+            reasoning_keys & {key.lower() for key in payload}
+        ):
+            break
+        text = text[end:].lstrip()
+    return text
+
+
+def _strip_json_tool_payloads(text: str) -> str:
+    """Remove balanced tool objects regardless of key order or nesting."""
+    pieces = []
+    position = 0
+    while (start := text.find("{", position)) != -1:
+        extracted = extract_json_object(text, start)
+        if extracted is None:
+            break
+        raw_json, end = extracted
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError:
+            pieces.append(text[position:end])
+            position = end
+            continue
+        pending = [payload]
+        is_tool = False
+        while pending and not is_tool:
+            item = pending.pop()
+            if isinstance(item, dict):
+                keys = {key.lower() for key in item}
+                is_tool = bool(
+                    {"name", "tool", "tool_name", "function"} & keys
+                    and {"arguments", "parameters", "input"} & keys
+                )
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        pieces.append(text[position:start] if is_tool else text[position:end])
+        position = end
+    pieces.append(text[position:])
+    return "".join(pieces)
 
 
 _DSML_INVOKE_NAME_RE = re.compile(
@@ -680,32 +717,13 @@ def strip_tool_payload_leaks(text: str) -> str:
     # Extra defensive: strip common leaked reasoning blocks that escape other passes
     # (some models leak <think> or raw JSON decision objects into visible text).
     cleaned = re.sub(
-        r"<think\b[^>]*>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL
+        r"<think\b[^>]*>.*?(?:</think\s*>|$)",
+        "", cleaned, flags=re.IGNORECASE | re.DOTALL
     )
-    # Strip leading JSON decision/tool-call blocks. The previous trigger set
-    # missed models that invent their own keys ("reasoning", "name", "arguments",
-    # "emoji") and emit the raw tool JSON as their visible reply. Match any JSON
-    # object that LOOKS like a tool invocation: has both a "name"/"tool" key and
-    # an "arguments"/"parameters" key, OR has a "thoughts" key.
-    tool_call_obj_re = re.compile(
-        r"\{(?:[^{}]|\{[^{}]*\})*?"
-        r"(?:\"name\"|\"tool\"|\"tool_name\"|\"function\")"
-        r"(?:[^{}]|\{[^{}]*\})*?"
-        r"(?:\"arguments\"|\"parameters\"|\"input\")"
-        r"(?:[^{}]|\{[^{}]*\})*\}",
-        re.IGNORECASE | re.DOTALL,
-    )
-    cleaned = tool_call_obj_re.sub("", cleaned)
-    # Also catch decision objects that have just a "reasoning" / "intent" / etc key
-    # but no proper arguments block — the model is leaking its scratchpad.
-    decision_obj_re = re.compile(
-        r"^\s*\{[\s\S]*?"
-        r"(?:\"thoughts\"|\"intent\"|\"decision\"|\"tool_plan\"|\"reasoning\"|"
-        r"\"internal_monologue\"|\"plan\"|\"action_plan\")"
-        r"[\s\S]*?\}\s*",
-        re.IGNORECASE,
-    )
-    cleaned = decision_obj_re.sub("", cleaned)
+    # Parse complete JSON objects rather than matching up to a guessed closing
+    # brace: arguments may be deeply nested, reordered, or contain quoted braces.
+    cleaned = _strip_json_tool_payloads(cleaned)
+    cleaned = _strip_leading_reasoning_json(cleaned)
     # Final catch-all: if a reply is *just* a JSON object (possibly with surrounding
     # whitespace / quotes), treat it as a leak. Real replies don't start with `{`.
     cleaned = _unwrap_openai_text_part(cleaned)

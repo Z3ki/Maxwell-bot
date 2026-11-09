@@ -19,6 +19,7 @@ from bot_parts._compat import (  # noqa: F401
 )
 from response_guard import strip_internal_context
 from bot_parts.tool_calls import _loaded_native_tools
+from context_hydration import requester_can_read_history
 
 def _live_test_webhook(message):
     """Admit only explicitly configured webhook/channel pairs for live tests."""
@@ -199,9 +200,9 @@ class MessagesMixin:
             if getattr(self, "_privacy_preferences_revision", None) != revision:
                 # Dashboard deletion is a separate process. Discard old content
                 # caches before the next request can reuse them.
-                for name in ("_media_context", "_message_snapshots", "_message_update_state", "_recent_users"):
+                for name in ("_media_context", "_message_snapshots", "_message_update_state", "_recent_users", "_message_reactions", "_message_reactions_order"):
                     cache = getattr(self, name, None)
-                    if isinstance(cache, dict):
+                    if isinstance(cache, (dict, list)):
                         cache.clear()
                 self._privacy_preferences_revision = revision
         with contextlib.suppress(Exception):
@@ -250,21 +251,6 @@ class MessagesMixin:
             self._interrupt_same_user(message)
             self._mark_same_user_interrupt(message)
 
-        if (
-            not is_user_install_message(message)
-            and message.content
-            and message.content.startswith(self.command_prefix)
-            and not message.author.bot
-        ):
-            # Public text-prefix commands have moved to Discord application
-            # commands. Unknown prefix-like text remains ordinary chat.
-            command_name = self._retired_prefix_command_name(message)
-            if command_name:
-                await self._mark_request_effect(message)
-                await message.channel.send(
-                    "Text-prefix commands are retired. Use `/help` to see Maxwell's slash commands."
-                )
-                return "command"
 
         if not self._control.get("bot_enabled", True):
             return "bot_disabled"
@@ -284,6 +270,21 @@ class MessagesMixin:
             # returned above, so an admin can still run `/solo arguments:off` anywhere.
             if self._solo_blocks(message):
                 return "solo_restriction"
+        if (
+            not is_user_install_message(message)
+            and message.content
+            and message.content.startswith(self.command_prefix)
+            and not message.author.bot
+        ):
+            # Public text-prefix commands have moved to Discord application
+            # commands. Unknown prefix-like text remains ordinary chat.
+            command_name = self._retired_prefix_command_name(message)
+            if command_name:
+                await self._mark_request_effect(message)
+                await message.channel.send(
+                    "Text-prefix commands are retired. Use `/help` to see Maxwell's slash commands."
+                )
+                return "command"
 
         payloads = iter_message_payloads(message)
         has_attachment = any(getattr(src, "attachments", None) for src in payloads)
@@ -371,6 +372,7 @@ class MessagesMixin:
             and not message.reference.resolved
             and message.reference.message_id
             and not message_reference_is_forward(message)
+            and requester_can_read_history(message)
         ):
             try:
                 message.reference.resolved = await asyncio.wait_for(
@@ -397,7 +399,7 @@ class MessagesMixin:
         with contextlib.suppress(Exception):
             await hydrate_turn_context(self, message)
         hydrated = str(hydration_value(self, message, "hydrated_context", "") or "")
-        parent_ok = reference_payload_usable(self._reply_parent(message))
+        parent_ok = requester_can_read_history(message) and reference_payload_usable(self._reply_parent(message))
         if (
             not message_has_visible_payload(message)
             and not hydrated
@@ -1001,7 +1003,7 @@ class MessagesMixin:
                             if pm is None:
                                 cmd["result"] = "plugin manager missing"
                             else:
-                                cmd["result"] = pm.uninstall_plugin(
+                                cmd["result"] = await pm.uninstall_plugin(
                                     str(cmd.get("plugin") or "")
                                 )
                         elif typ in {"rem_run", "rem_enable", "rem_disable"}:
@@ -1027,13 +1029,15 @@ class MessagesMixin:
                             cmd["result"] = "unknown command"
                     except Exception as e:
                         cmd["result"] = f"error: {e}"
-                    cmd["status"] = "done"
+                        cmd["status"] = "failed"
+                    if cmd["status"] == "pending":
+                        cmd["status"] = "done"
                 if changed:
                     # Race mitigation: re-load fresh list (API may have appended during our long work)
-                    # and overlay our "done" results so we don't clobber new pending commands.
+                    # and overlay our terminal results so we don't clobber new pending commands.
                     # Additionally hold a cross-process FileLock around the read+merge+write
                     # to reduce (but not eliminate) window where concurrent appends are lost.
-                    snapshot = list(commands_data)  # the ones we just marked done
+                    snapshot = list(commands_data)  # commands processed in this batch
 
                     def _merge_and_write(snapshot=snapshot):
                         try:
@@ -1046,13 +1050,15 @@ class MessagesMixin:
                             done_by_id = {
                                 str(our.get("id") or ""): our
                                 for our in snapshot
-                                if our.get("status") == "done" and our.get("id")
+                                if isinstance(our, dict) and our.get("status") in {"done", "failed"} and our.get("id")
                             }
                             for fc in fresh:
+                                if not isinstance(fc, dict):
+                                    continue
                                 cid = str(fc.get("id") or "")
                                 if cid and cid in done_by_id:
                                     our = done_by_id[cid]
-                                    fc["status"] = "done"
+                                    fc["status"] = our["status"]
                                     fc["result"] = our.get("result")
                             to_write = fresh
                         else:
@@ -1118,10 +1124,17 @@ class MessagesMixin:
             task = str(content or getattr(message, "content", "") or "").strip()[:4000]
             if task:
                 try:
-                    await tool.execute(message, tasks=[{"task": task}])
+                    result = await MaxwellBot._invoke_request_tool(
+                        self, message, "delegate_task", tool, tasks=[{"task": task}]
+                    )
+                    job = json.loads(result)
+                    if isinstance(job, dict) and job.get("id"):
+                        if job.get("state") in {"queued", "running"}:
+                            return "Handed that to a subagent. The working notes stay there."
+                        return "This request already has a subagent job. Use `/tasks` to check its status."
                 except Exception:
                     logger.warning("Could not hand a work draft to the subagent", exc_info=True)
-            return "Handed that to a subagent. The working notes stay there."
+            return "That working draft stays off this chat. I couldn't start a subagent for this request."
         from premium_access import subagents_require_premium
 
         if subagents_require_premium(self):
@@ -1293,7 +1306,10 @@ class MessagesMixin:
                     media.append(grid)
             with contextlib.suppress(Exception):
                 await self._ensure_reply_chain_resolved(message)
-            chain = list(self._iter_resolved_reply_chain(message))
+            chain = (
+                list(self._iter_resolved_reply_chain(message))
+                if requester_can_read_history(message) else []
+            )
             first = chain[0] if chain else None
             walk_chain = (
                 first is not None
@@ -1334,22 +1350,23 @@ class MessagesMixin:
             media = []
         current_images = [item for item in media if item.get("is_image")]
         cached_media = []
+        history_allowed = requester_can_read_history(message)
         reply_media_id = self._reply_media_message_id(
             message, getattr(self, "_message_snapshots", None)
         )
         is_dm = isinstance(getattr(message, "channel", None), discord.DMChannel)
-        if reply_media_id is not None:
+        if history_allowed and reply_media_id is not None:
             cached_media = self._get_media_context(
                 channel_id, message_id=reply_media_id
             )
-        elif self._should_use_cached_media_context(message, content) and (
+        elif history_allowed and self._should_use_cached_media_context(message, content) and (
             not current_images or self._should_mix_cached_with_current(content)
         ):
             cached_media = self._get_media_context(channel_id)
         # DM INTERRUPT FIX: In DMs, if user sends image -> then another image/text quickly,
         # the second turn must see BOTH. The gated logic above drops cached in DMs unless
         # the text says "previous". Force-merge for DMs when there's recent cached media.
-        if not cached_media and is_dm:
+        if history_allowed and not cached_media and is_dm:
             dm_cached = self._get_media_context(channel_id)
             if dm_cached:
                 # Dedupe by message_id+filename so we don't double-count the current image

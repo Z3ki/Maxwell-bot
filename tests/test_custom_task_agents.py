@@ -154,3 +154,6 @@ def test_worker_runs_the_task_without_a_saved_profile(tmp_path):
     assert "Error" in asyncio.run(
         worker.run(msg, tasks=[{"profile": "builder", "task": "Inspect"}])
     )
+    description = ManageTaskAgentTool(bot).get_description()
+    assert "profile=<name>" not in description
+    assert "include any saved instructions explicitly" in description

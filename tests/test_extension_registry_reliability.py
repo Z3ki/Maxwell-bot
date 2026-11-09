@@ -271,3 +271,40 @@ def test_dynamic_schema_catalog_refreshes_and_preserves_another_manager(tmp_path
     managers[0]._publish_result_tools()
     assert "dynamic" not in tool_schemas.TOOL_PARAMETERS
     assert tool_schemas.TOOL_PARAMETERS["builtin"] is base_schema
+
+
+def test_later_silent_publication_clears_older_result_contract(monkeypatch):
+    """The latest owner of a name decides whether it returns a result.
+
+    Unioning every owner's result flag kept a stale follow-up after a later
+    silent registration replaced the tool.
+    """
+    import gc
+
+    import tool_schemas
+    from maxwell_core.tools.publication import publish_plugin_tools
+
+    monkeypatch.setattr(tool_schemas, "TOOL_PARAMETERS", {})
+    monkeypatch.setattr(tool_schemas, "_maxwell_plugin_publications", None, raising=False)
+    previous = set(tool_schemas._PLUGIN_RESULT_TOOL_NAMES)
+    tool_schemas._PLUGIN_RESULT_TOOL_NAMES.clear()
+    schema = {"type": "object", "properties": {}}
+    first = SimpleNamespace()
+    second = SimpleNamespace()
+    try:
+        publish_plugin_tools(first, [ToolSpec(
+            name="dynamic", plugin="old", tool=object(),
+            returns_result=True, parameters=schema,
+        )])
+        assert "dynamic" in tool_schemas._PLUGIN_RESULT_TOOL_NAMES
+        publish_plugin_tools(second, [ToolSpec(
+            name="dynamic", plugin="new", tool=object(),
+            returns_result=False, parameters=schema,
+        )])
+        assert "dynamic" not in tool_schemas._PLUGIN_RESULT_TOOL_NAMES
+        del second
+        gc.collect()
+        assert "dynamic" in tool_schemas._PLUGIN_RESULT_TOOL_NAMES
+    finally:
+        tool_schemas._PLUGIN_RESULT_TOOL_NAMES.clear()
+        tool_schemas._PLUGIN_RESULT_TOOL_NAMES.update(previous)

@@ -5,9 +5,10 @@ with the live provider.
 
 import asyncio
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, "/root/maxwell")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bot import MaxwellBot
 

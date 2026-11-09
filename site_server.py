@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from site_routes import client_guide, route_mount_errors, server_path
+from process_utils import communicate_process
 from utils import FileLock, FileLockTimeout, _atomic_json_write_sync, controller_id, docker_bind_path
 
 logger = logging.getLogger(__name__)
@@ -120,6 +121,31 @@ def _check_slug(slug: str) -> str:
         raise SiteServerError("bad site slug")
     return str(slug)
 
+
+
+@contextlib.asynccontextmanager
+async def site_mutation(data_dir, slug: str):
+    """Hold one slug across authorization, filesystem changes and metadata.
+
+    Share create_site's lock with the dashboard and other site tools so a
+    delete/reclaim cannot hand an in-flight old owner's writes to a new owner.
+    Backend start/stop/destroy use a separate daemon lifecycle lock.
+    """
+    slug = _check_slug(slug)
+    lock = FileLock(Path(data_dir) / "site_locks" / f"{slug}.lock", timeout=0)
+    deadline = asyncio.get_running_loop().time() + 15
+    while True:
+        try:
+            lock.__enter__()
+            break
+        except FileLockTimeout:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise SiteServerError("another update for this site is busy; retry") from None
+            await asyncio.sleep(0.05)
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
 
 def container_name(slug: str) -> str:
     return CONTAINER_PREFIX + _check_slug(slug)
@@ -337,13 +363,11 @@ async def _docker(*args: str, timeout: float = 30.0) -> tuple[int, str, str]:
         )
     except FileNotFoundError as exc:
         raise SiteServerError("docker is not installed or not on PATH") from exc
+    except ValueError as exc:
+        raise SiteServerError("docker arguments are not valid") from exc
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await communicate_process(proc, timeout=timeout)
     except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.wait()
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise SiteServerError(f"docker did not respond within {timeout:.0f}s") from None
@@ -674,6 +698,8 @@ def parse_env(env: Any) -> dict[str, str]:
                 ) from None
         if len(text) > MAX_ENV_VALUE:
             raise SiteServerError(f"{key} is too long (max {MAX_ENV_VALUE} chars)")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+            raise SiteServerError(f"{key} contains a control character")
         out[key] = text
     if len(out) > MAX_ENV_KEYS:
         raise SiteServerError(f"too many env vars (max {MAX_ENV_KEYS})")
@@ -837,7 +863,9 @@ def patch_code(
     """Swap exact text in one backend file. Returns a one-line result."""
     if not str(find or ""):
         raise SiteServerError("replace needs `find` (the exact text to swap out)")
-    safe = _safe_rel(rel or "app.py") or "app.py"
+    safe = _safe_rel(rel or "app.py")
+    if not safe:
+        raise SiteServerError(f"bad path {rel!r}")
     text = read_code(data_dir, slug, safe)
     if find not in text:
         raise SiteServerError(
@@ -993,12 +1021,22 @@ async def _start_unlocked(
             "no app.py for this site — write the server first (it must listen on 0.0.0.0:$PORT)"
         )
     previous = _read_registry(data_dir, for_write=True).get(slug) or {}
+    sites_owner = ""
+    try:
+        raw = json.loads((Path(data_dir) / "sites.json").read_text(encoding="utf-8"))
+        row = raw.get(slug) if isinstance(raw, dict) else None
+        sites_owner = str(row.get("user_id") or "") if isinstance(row, dict) else ""
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        sites_owner = ""
+    if previous and not sites_owner:
+        await _clear_state(data_dir, slug)
+        previous = {}
     await _check_host_ready()
     await _admit_backend(slug)
     await _ensure_image()
     if not previous:
-        # No registry row: this is a fresh claim of the slug (often after a
-        # deletion). Never hand the previous tenant's database to a new owner.
+        # No registry row, or the site no longer has an owner: never hand the
+        # previous tenant's database to a new claim of this slug.
         await _clear_state(data_dir, slug)
     if env is None:
         previous_env = previous.get("env")

@@ -42,8 +42,10 @@ def _opt_out_transcript_plan(rows, uid: str) -> tuple[list[str], list[tuple[str,
     """
     grouped: dict[tuple[str, str], list[tuple]] = {}
     for row in rows:
-        row_id, channel_id, guild_id, author_id, _kind, _stamp, _created, raw = row
+        row_id, channel_id, guild_id, author_id, kind, _stamp, _created, raw = row
         meta = _decode_metadata(raw)
+        if kind == "bot_output":
+            meta = meta | {"author_is_bot": True}
         grouped.setdefault((str(channel_id or ""), str(guild_id or "")), []).append(
             (str(row_id), str(author_id or ""), meta)
         )
@@ -57,6 +59,19 @@ def _opt_out_transcript_plan(rows, uid: str) -> tuple[list[str], list[tuple[str,
             str(meta.get("reply_to_author_id") or "") == uid
             or str(meta.get("requested_by") or "") == uid
             or str(meta.get("origin_request_id") or "") in user_message_ids
+            or any(
+                isinstance(reaction, dict)
+                and str(reaction.get("user_id") or "") == uid
+                for reaction in (
+                    meta["reactions"] if isinstance(meta.get("reactions"), list) else []
+                )
+            )
+            or any(
+                isinstance(item, dict) and str(item.get("id") or "") == uid
+                for item in (
+                    meta["mentions"] if isinstance(meta.get("mentions"), list) else []
+                )
+            )
             for _row_id, _author_id, meta in group
         )
         if not involves:
@@ -72,18 +87,44 @@ def _opt_out_transcript_plan(rows, uid: str) -> tuple[list[str], list[tuple[str,
                 author_id == uid
                 or requested
                 or from_user_turn
-                or (is_tool and (replied or last_human == uid))
+                or (is_tool and (replied or (
+                    not meta.get("requested_by")
+                    and not meta.get("origin_request_id")
+                    and last_human == uid
+                )))
                 or (is_bot and replied)
             )
             if drop:
                 delete_ids.append(row_id)
-            elif replied and str(meta.get("reply_to_content") or "").strip():
+            else:
                 cleaned = dict(meta)
-                cleaned.pop("reply_to_content", None)
-                strips.append((
-                    row_id,
-                    json.dumps(cleaned, ensure_ascii=False, default=str),
-                ))
+                if replied:
+                    cleaned.pop("reply_to_content", None)
+                    cleaned.pop("reply_to_author", None)
+                    cleaned.pop("reply_to_author_id", None)
+                mentions = cleaned.get("mentions")
+                if isinstance(mentions, list):
+                    cleaned["mentions"] = [
+                        item for item in mentions
+                        if not (
+                            isinstance(item, dict)
+                            and str(item.get("id") or "") == uid
+                        )
+                    ]
+                reactions = cleaned.get("reactions")
+                if isinstance(reactions, list):
+                    cleaned["reactions"] = [
+                        reaction for reaction in reactions
+                        if not (
+                            isinstance(reaction, dict)
+                            and str(reaction.get("user_id") or "") == uid
+                        )
+                    ]
+                if cleaned != meta:
+                    strips.append((
+                        row_id,
+                        json.dumps(cleaned, ensure_ascii=False, default=str),
+                    ))
             if _is_human_author(author_id, meta):
                 last_human = author_id
     return list(dict.fromkeys(delete_ids)), strips
@@ -97,7 +138,7 @@ def _delete_author_rows(db, author_id: str) -> dict:
     older table is present.
     """
     uid = str(author_id or "").strip()
-    empty = {"messages": 0, "facts": 0, "profiles": 0}
+    empty = {"messages": 0, "facts": 0, "profiles": 0, "graph": 0}
     if not uid.isdigit():
         return dict(empty)
     db.execute("PRAGMA secure_delete=ON")
@@ -134,6 +175,9 @@ def _delete_author_rows(db, author_id: str) -> dict:
             profiles = db.execute(
                 "DELETE FROM user_entities WHERE user_id=?", (uid,)
             ).rowcount
+        from knowledge_graph import delete_author_graph
+
+        graph = delete_author_graph(db, uid)
         db.execute("COMMIT")
     except BaseException:
         db.execute("ROLLBACK")
@@ -142,6 +186,7 @@ def _delete_author_rows(db, author_id: str) -> dict:
         "messages": int(messages or 0),
         "facts": int(facts or 0),
         "profiles": int(profiles or 0),
+        "graph": graph,
     }
 
 
@@ -163,12 +208,105 @@ def delete_author_content_file(path, author_id: str) -> dict:
     """Delete one account's stored content through a short-lived connection."""
     db_path = Path(path)
     if not db_path.is_file():
-        return {"messages": 0, "facts": 0, "profiles": 0}
+        return {"messages": 0, "facts": 0, "profiles": 0, "graph": 0}
     db = sqlite3.connect(str(db_path), isolation_level=None, timeout=5)
     try:
         return _delete_author_rows(db, author_id)
     finally:
         db.close()
+
+
+def _content_allowed(memory, user_id: str, started_at=None) -> bool:
+    """Apply both the live opt-out and the originating turn's deletion fence."""
+    checker = getattr(memory, "tracks_message_content", None)
+    if not callable(checker):
+        return True
+    try:
+        if not checker(user_id):
+            return False
+        preferences = getattr(memory, "preferences", None)
+        return preferences is None or preferences.content_allowed(user_id, started_at)
+    except Exception:
+        return False
+
+
+def _account_identity_hidden(memory, user_id: str, started_at=None) -> bool:
+    """True for an opted-out account, a deletion fence, or an unreadable store.
+
+    A missing preference row is not an opt-out. Reply and mention names on
+    someone else's message stay unless this account turned storage off, the
+    quoting turn predates their deletion, or the store cannot be trusted.
+    """
+    uid = str(user_id or "")
+    if not uid.isdigit():
+        return False
+    preferences = getattr(memory, "preferences", None)
+    if preferences is None:
+        return not _content_allowed(memory, uid, started_at)
+    try:
+        reader = getattr(preferences, "_read", None)
+        if callable(reader):
+            root = reader()
+            if isinstance(root, dict) and root.get("unavailable"):
+                return True
+        disallows = getattr(preferences, "explicitly_disallows_content", None)
+        if callable(disallows) and disallows(uid):
+            return True
+        if not started_at:
+            return False
+        # get() omits deleted_at. The raw fence is what stops a pre-deletion
+        # turn from writing a name after the person opts back in.
+        allowed = getattr(preferences, "request_allowed", None)
+        if callable(allowed):
+            return not allowed(uid, started_at)
+        getter = getattr(preferences, "get", None)
+        row = getter(uid) if callable(getter) else None
+        if not isinstance(row, dict):
+            return False
+        return float(started_at) <= float(row.get("deleted_at") or 0)
+    except Exception:
+        return True
+
+
+def _tracking_metadata(memory, metadata: dict) -> dict:
+    """Keep another person's message, but never return a suppressed identity."""
+    reply_uid = str(metadata.get("reply_to_author_id") or "")
+    started = metadata.get("privacy_started_at")
+    if reply_uid.isdigit() and not _content_allowed(memory, reply_uid, started):
+        metadata = dict(metadata)
+        metadata.pop("reply_to_content", None)
+    if reply_uid.isdigit() and _account_identity_hidden(memory, reply_uid, started):
+        metadata = dict(metadata)
+        metadata.pop("reply_to_content", None)
+        metadata.pop("reply_to_author", None)
+        metadata.pop("reply_to_author_id", None)
+    mentions = metadata.get("mentions")
+    if isinstance(mentions, list):
+        kept = [
+            item for item in mentions
+            if not (
+                isinstance(item, dict)
+                and str(item.get("id") or "").isdigit()
+                and _account_identity_hidden(memory, str(item.get("id")), started)
+            )
+        ]
+        if kept != mentions:
+            metadata = dict(metadata)
+            metadata["mentions"] = kept
+    reactions = metadata.get("reactions")
+    if isinstance(reactions, list):
+        metadata = dict(metadata)
+        metadata["reactions"] = [
+            reaction for reaction in reactions
+            if isinstance(reaction, dict) and (
+                not str(reaction.get("user_id") or "").isdigit()
+                or _content_allowed(
+                    memory, str(reaction["user_id"]),
+                    reaction.get("privacy_started_at"),
+                )
+            )
+        ]
+    return metadata
 
 
 def _tracking_blocks(memory, message: dict) -> bool:
@@ -194,17 +332,10 @@ def _tracking_blocks(memory, message: dict) -> bool:
         subjects.append(requested)
     if (message.get("author_is_bot") or _is_tool_metadata(message)) and not subjects:
         return True
-    for uid in subjects:
-        try:
-            preferences = getattr(memory, "preferences", None)
-            allowed = checker(uid)
-            if allowed and preferences is not None and message.get("privacy_started_at"):
-                allowed = preferences.content_allowed(uid, message["privacy_started_at"])
-        except Exception:
-            return True
-        if not allowed:
-            return True
-    return False
+    return any(
+        not _content_allowed(memory, uid, message.get("privacy_started_at"))
+        for uid in subjects
+    )
 
 
 _RECALL_STOP_WORDS = frozenset(
@@ -317,7 +448,7 @@ class ConversationMemoryManager:
             "ORDER BY timestamp DESC, created_at DESC LIMIT ?",
             (requester.channel_id, "" if requester.is_dm else requester.guild_id, self.max_messages),
         ).fetchall()
-        return [sanitize_media_memory(_decode_metadata(row["metadata"]) | {
+        return [sanitize_media_memory(_tracking_metadata(self, _decode_metadata(row["metadata"])) | {
             "message_id": row["id"], "author": row["author"],
             "author_id": row["author_id"], "content": row["content"],
             "timestamp": row["timestamp"],
@@ -360,7 +491,7 @@ class ConversationMemoryManager:
             metadata = _decode_metadata(row["metadata"])
             if metadata.get("is_tool") or _tracking_blocks(self, metadata | {"author_id": row["author_id"]}):
                 continue
-            result.append(sanitize_media_memory(metadata | {
+            result.append(sanitize_media_memory(_tracking_metadata(self, metadata) | {
                 "message_id": row["id"], "author": row["author"],
                 "author_id": row["author_id"], "content": row["content"],
                 "timestamp": row["timestamp"],
@@ -408,9 +539,7 @@ class ConversationMemoryManager:
             if _tracking_blocks(self, entry):
                 self._db.execute("ROLLBACK")
                 return
-            reply_uid = str(entry.get("reply_to_author_id") or "")
-            if reply_uid.isdigit() and not self.tracks_message_content(reply_uid):
-                metadata.pop("reply_to_content", None)
+            metadata = _tracking_metadata(self, metadata)
             self._db.execute("DELETE FROM vectors WHERE id=?", (mid,))
             self._db.execute(
                 "INSERT INTO vectors (id,kind,channel_id,guild_id,author,author_id,source,"
@@ -436,12 +565,27 @@ class ConversationMemoryManager:
         return await self._run_db(self._merge_message_metadata, message_id, patch)
 
     def _merge_message_metadata(self, message_id, patch):
-        row = self._db.execute("SELECT metadata FROM vectors WHERE id=? AND kind IN ('message','bot_output')", (str(message_id),)).fetchone()
-        if row is None:
-            return False
-        metadata = _decode_metadata(row["metadata"]) | sanitize_media_memory(patch)
-        self._db.execute("UPDATE vectors SET metadata=? WHERE id=?", (json.dumps(metadata, ensure_ascii=False, default=str), str(message_id)))
-        return True
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._db.execute(
+                "SELECT metadata FROM vectors WHERE id=? AND kind IN ('message','bot_output')",
+                (str(message_id),),
+            ).fetchone()
+            if row is None:
+                self._db.execute("ROLLBACK")
+                return False
+            metadata = _tracking_metadata(
+                self, _decode_metadata(row["metadata"]) | sanitize_media_memory(patch)
+            )
+            self._db.execute(
+                "UPDATE vectors SET metadata=? WHERE id=?",
+                (json.dumps(metadata, ensure_ascii=False, default=str), str(message_id)),
+            )
+            self._db.execute("COMMIT")
+            return True
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
 
     async def clear_channel_memory(self, channel_id: str) -> None:
         await self._run_db(self._clear_channel_memory, str(channel_id))

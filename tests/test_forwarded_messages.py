@@ -283,3 +283,37 @@ def test_memory_content_includes_forwarded_attachment_name():
     assert "secret.png" in text
     assert "peek" in text
     assert "forwarded message" in text
+
+
+def test_readable_attachments_survive_disabled_binary_inputs():
+    class Attachment:
+        filename = "notes.txt"
+        content_type = "text/plain"
+        size = 12
+        url = "https://cdn.discordapp.com/notes.txt"
+
+        async def read(self):
+            return b"meeting notes"
+
+    bot = _media_bot()
+    bot._control.update(process_images=False, process_audio=False)
+    message = _forwarded_message(snapshot=_snapshot(attachments=[Attachment()]))
+    images, media = asyncio.run(MaxwellBot._extract_media(bot, message))
+    assert images == []
+    assert len(media) == 1
+    assert media[0]["is_text"] is True
+    assert media[0]["text"] == "meeting notes"
+
+
+def test_disabled_binary_attachments_are_not_read():
+    from unittest.mock import AsyncMock
+
+    bot = _media_bot()
+    bot._control.update(process_images=False, process_audio=False)
+    attachment = SimpleNamespace(
+        filename="photo.png", content_type="image/png", size=4,
+        read=AsyncMock(return_value=b"png"),
+    )
+    message = _forwarded_message(snapshot=_snapshot(attachments=[attachment]))
+    assert asyncio.run(MaxwellBot._extract_media(bot, message)) == ([], [])
+    attachment.read.assert_not_awaited()

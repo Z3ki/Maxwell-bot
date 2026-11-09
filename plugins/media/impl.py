@@ -17,6 +17,23 @@ for _name in dir(_helpers):
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
 
+def _authorize_nested_media(bot: Any, message: Any, tool_name: str, url: str):
+    """Apply the normal dispatcher policy before an internal tool delegation."""
+    tool = (getattr(bot, "tools", None) or {}).get(tool_name)
+    if tool is None:
+        return None, f"Error: {tool_name} is not enabled."
+    authorize = getattr(bot, "_authorize_tool_execution", None)
+    if not callable(authorize):
+        return None, "refused: tool authorization is unavailable"
+    try:
+        denied = authorize(message, tool_name, tool, {"url": url})
+    except Exception:
+        return None, "refused: tool authorization could not be verified"
+    if denied:
+        return None, str(denied)
+    return tool, None
+
+
 class SeeImageTool(Tool):
     """Download an image/GIF URL and attach it as vision on the next turn."""
     tool_name = 'see_image'
@@ -64,6 +81,8 @@ class SeeImageTool(Tool):
         if self.bot is not None and hasattr(self.bot, "_max_media_bytes"):
             with contextlib.suppress(Exception):
                 max_size = self.bot._max_media_bytes()
+        if len(blob) > max_size:
+            return "Error: image exceeds the configured media size limit"
         if (
             self.bot is not None
             and hasattr(self.bot, "_normalize_gif")
@@ -144,8 +163,16 @@ class SeeImageTool(Tool):
             return f"Error: could not load an image from {url}"
         mime = str(item.get("mime_type") or "")
         if mime.startswith("video/"):
-            blob = base64.b64decode(item["b64"], validate=True)
-            return await SeeVideoTool(self.bot).result_from_blob(
+            media_tool, denied = _authorize_nested_media(
+                self.bot, message, "see_video", url
+            )
+            if denied:
+                return denied
+            try:
+                blob = base64.b64decode(item["b64"], validate=True)
+            except (ValueError, TypeError):
+                return "Error: downloaded video was invalid"
+            return await media_tool.result_from_blob(
                 blob,
                 mime,
                 url,

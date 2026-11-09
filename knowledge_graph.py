@@ -255,7 +255,7 @@ class KnowledgeGraph:
                 props TEXT NOT NULL DEFAULT '{}',
                 updated_at REAL NOT NULL,
                 scope TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (src, rel, dst)
+                PRIMARY KEY (src, rel, dst, scope)
             )
             """
         )
@@ -268,6 +268,36 @@ class KnowledgeGraph:
             self._db.execute(
                 "ALTER TABLE graph_edges ADD COLUMN scope TEXT NOT NULL DEFAULT ''"
             )
+        primary_key = [
+            row[1] for row in sorted(
+                self._db.execute("PRAGMA table_info(graph_edges)"),
+                key=lambda row: row[5],
+            ) if row[5]
+        ]
+        if primary_key != ["src", "rel", "dst", "scope"]:
+            # Public site nodes can occur in chat facts from multiple channels.
+            # An edge's provenance is part of its identity, not mutable state.
+            self._db.execute("SAVEPOINT graph_scope_migration")
+            try:
+                self._db.execute("""
+                    CREATE TABLE graph_edges_scoped (
+                        src TEXT NOT NULL, rel TEXT NOT NULL, dst TEXT NOT NULL,
+                        props TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL,
+                        scope TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY (src, rel, dst, scope)
+                    )
+                """)
+                self._db.execute("""
+                    INSERT INTO graph_edges_scoped
+                    SELECT src, rel, dst, props, updated_at, scope FROM graph_edges
+                """)
+                self._db.execute("DROP TABLE graph_edges")
+                self._db.execute("ALTER TABLE graph_edges_scoped RENAME TO graph_edges")
+                self._db.execute("RELEASE graph_scope_migration")
+            except BaseException:
+                self._db.execute("ROLLBACK TO graph_scope_migration")
+                self._db.execute("RELEASE graph_scope_migration")
+                raise
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_scope ON graph_edges(scope)"
         )
@@ -315,10 +345,9 @@ class KnowledgeGraph:
             """
             INSERT INTO graph_edges (src, rel, dst, props, updated_at, scope)
             VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(src, rel, dst) DO UPDATE SET
+            ON CONFLICT(src, rel, dst, scope) DO UPDATE SET
                 props=excluded.props,
-                updated_at=excluded.updated_at,
-                scope=excluded.scope
+                updated_at=excluded.updated_at
             """,
             (src_id, relation, dst_id, payload, _now(), str(scope or "")),
         )
@@ -506,7 +535,11 @@ class KnowledgeGraph:
                 f"{scope_prefix}:user:{speaker_id}",
                 "user",
                 _norm_name(speaker_name) or speaker_id,
-                {"user_id": speaker_id, "source_scope": scope},
+                {
+                    "user_id": speaker_id,
+                    "source_scope": scope,
+                    "source_user_id": str(requester.user_id),
+                },
             )
         stored = 0
         speaker_l = str(speaker_name or "").strip().lower()
@@ -523,29 +556,43 @@ class KnowledgeGraph:
             if subj.lower() in STOP_NAMES or obj.lower() in STOP_NAMES:
                 continue
             src = self._node_for_label(
-                subj, speaker_id, speaker_l, scope_prefix, scope
+                subj, speaker_id, speaker_l, scope_prefix, scope,
+                source_user_id=requester.user_id, create=False,
             )
             dst = self._node_for_label(
-                obj, speaker_id, speaker_l, scope_prefix, scope
+                obj, speaker_id, speaker_l, scope_prefix, scope,
+                source_user_id=requester.user_id, create=False,
             )
             if not src or not dst or src == dst:
                 continue
-            self.upsert_edge(src, rel, dst, scope=scope)
+            self._node_for_label(
+                subj, speaker_id, speaker_l, scope_prefix, scope,
+                source_user_id=requester.user_id,
+            )
+            self._node_for_label(
+                obj, speaker_id, speaker_l, scope_prefix, scope,
+                source_user_id=requester.user_id,
+            )
+            self.upsert_edge(
+                src, rel, dst, {"source_user_id": requester.user_id}, scope=scope
+            )
             stored += 1
         return stored
 
     def _node_for_label(
         self, label: str, speaker_id: str, speaker_l: str,
-        scope_prefix: str, scope: str,
+        scope_prefix: str, scope: str, *,
+        source_user_id: str = "", create: bool = True,
     ) -> str:
+        props = {"source_scope": scope}
+        if source_user_id:
+            props["source_user_id"] = str(source_user_id)
         if speaker_id and label.lower() == speaker_l:
             return f"{scope_prefix}:user:{speaker_id}"
         if label.isdigit() and len(label) >= 15:
             nid = f"{scope_prefix}:user:{label}"
-            self.upsert_node(
-                nid, "user", label,
-                {"user_id": label, "source_scope": scope},
-            )
+            if create:
+                self.upsert_node(nid, "user", label, {"user_id": label, **props})
             return nid
         slug = re.sub(r"[^a-z0-9-]", "", label.lower())[:30]
         if slug:
@@ -555,7 +602,8 @@ class KnowledgeGraph:
             if row:
                 return str(row["id"])
         nid = f"{scope_prefix}:{_slug_id('thing', label)}"
-        self.upsert_node(nid, "thing", label, {"source_scope": scope})
+        if create:
+            self.upsert_node(nid, "thing", label, props)
         return nid
 
     def find_anchors(
@@ -705,6 +753,66 @@ class KnowledgeGraph:
             kept.append(line)
             used += extra
         return "\n".join(kept) if len(kept) > 1 else ""
+
+
+def delete_author_graph(db: sqlite3.Connection, user_id: str) -> int:
+    """Remove attributable chat facts and identity nodes without deleting sites.
+
+    The caller owns the transaction. Legacy chat edges have no source account;
+    only their explicit user links and account-specific DM scope are attributable.
+    Chat labels stamped with this account are removed even when their edge was
+    skipped or already dropped. Public site nodes stay.
+    """
+    tables = {
+        row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('graph_nodes','graph_edges')"
+        )
+    }
+    if tables != {"graph_nodes", "graph_edges"}:
+        return 0
+    uid = str(user_id)
+    user_nodes = (
+        "SELECT id FROM graph_nodes WHERE id=? OR "
+        "(json_valid(props) AND CAST(json_extract(props,'$.user_id') AS TEXT)=?)"
+    )
+    columns = {row[1] for row in db.execute("PRAGMA table_info(graph_edges)")}
+    scope_clause = " OR scope LIKE ?" if "scope" in columns else ""
+    args = [f"user:{uid}", uid, f"user:{uid}", uid, uid]
+    if scope_clause:
+        args.append(f"dm:{uid}:%")
+    owned_edges = (
+        f"src IN ({user_nodes}) OR dst IN ({user_nodes}) OR "
+        "(json_valid(props) AND CAST(json_extract(props,'$.source_user_id') AS TEXT)=?)"
+        + scope_clause
+    )
+    candidates = {
+        node for row in db.execute(
+            "SELECT src,dst FROM graph_edges WHERE " + owned_edges, args
+        ) for node in row if node.startswith("chat-")
+    }
+    candidates.update(
+        str(row[0]) for row in db.execute(
+            "SELECT id FROM graph_nodes WHERE id LIKE 'chat-%' AND json_valid(props) "
+            "AND (CAST(json_extract(props,'$.source_user_id') AS TEXT)=? "
+            "OR CAST(json_extract(props,'$.source_scope') AS TEXT) LIKE ?)",
+            (uid, f"dm:{uid}:%"),
+        )
+    )
+    removed = db.execute("DELETE FROM graph_edges WHERE " + owned_edges, args).rowcount
+    db.execute(f"DELETE FROM graph_nodes WHERE id IN ({user_nodes})", (f"user:{uid}", uid))
+    # Detached chat labels can contain private text even after their edge is gone.
+    # Public site/route/file nodes are retained for the published-content workflow.
+    nodes = sorted(candidates)
+    for start in range(0, len(nodes), 400):
+        chunk = nodes[start:start + 400]
+        marks = ",".join("?" for _ in chunk)
+        db.execute(
+            f"DELETE FROM graph_nodes WHERE id IN ({marks}) "
+            "AND NOT EXISTS (SELECT 1 FROM graph_edges WHERE src=graph_nodes.id OR dst=graph_nodes.id)",
+            chunk,
+        )
+    return max(0, removed)
 
 
 def graph_from_bot(bot: Any) -> KnowledgeGraph | None:

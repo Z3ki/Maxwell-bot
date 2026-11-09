@@ -4,11 +4,19 @@ import ast
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from bot import MaxwellBot
 from utils import format_reactions_annotation
 
 BOT_PY = Path(__file__).resolve().parent.parent / "bot.py"
+
+
+@pytest.fixture(autouse=True)
+def _reaction_clock(monkeypatch):
+    monkeypatch.setattr("bot_parts.reactions.time", SimpleNamespace(time=lambda: 123.0))
 
 
 def test_reaction_path_has_no_fake_reply():
@@ -46,6 +54,10 @@ def _reaction_bot():
         _load_control=lambda: None,
         _control={"bot_enabled": True, "reply_to_bots": True, "ignore_users": []},
         _blacklist=set(),
+        _user_preferences=SimpleNamespace(
+            get=lambda _uid: {"defaults": {"tracking": "on"}},
+            content_allowed=lambda _uid, _started_at=None: True,
+        ),
         _message_reactions={},
         _message_reactions_order=[],
         memory=None,
@@ -85,7 +97,7 @@ def test_reaction_on_maxwell_message_is_recorded_not_answered():
 
     assert calls == []
     assert bot._message_reactions["777"] == [
-        {"emoji": "😂", "user_id": "99", "user_name": "alice"}
+        {"emoji": "😂", "user_id": "99", "user_name": "alice", "privacy_started_at": 123.0}
     ]
     assert (
         MaxwellBot._reactions_annotation_for(bot, original)
@@ -112,7 +124,7 @@ def test_second_person_same_emoji_is_kept():
 
     asyncio.run(run())
     assert bot._message_reactions["5"] == [
-        {"emoji": "😂", "user_id": "2", "user_name": "bob"}
+        {"emoji": "😂", "user_id": "2", "user_name": "bob", "privacy_started_at": 123.0}
     ]
 
 
@@ -136,3 +148,64 @@ def test_reply_parent_includes_reactions():
     rendered = MaxwellBot._render_reply_parent(bot, SimpleNamespace(channel=None), parent)
     assert "said hi" in rendered
     assert "[reactions: 👍 z3ki]" in rendered
+
+
+@pytest.mark.parametrize("policy", ["missing", "off", "unknown", "unreadable", "disabled"])
+def test_reaction_identity_never_enters_memory_without_consent(tmp_path, policy):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    bot = _reaction_bot()
+    store = UserPreferenceStore(tmp_path / "preferences.json")
+    if policy in {"off", "disabled"}:
+        store.set_default("99", "tracking", "off" if policy == "off" else "on")
+    if policy == "unreadable":
+        store.path.write_text('{"users":')
+    bot._user_preferences = None if policy == "missing" else store
+    if policy == "disabled":
+        bot._control["store_memory"] = False
+    merge = AsyncMock()
+    bot.memory = SimpleNamespace(merge_message_metadata=merge)
+    message = SimpleNamespace(id=777, author=bot.user)
+    reaction = SimpleNamespace(message=message, emoji="😂")
+    user = SimpleNamespace(id=99, display_name="private-name", bot=False)
+
+    asyncio.run(MaxwellBot.on_reaction_add(bot, reaction, user))
+
+    assert bot._message_reactions == {}
+    merge.assert_not_awaited()
+    assert MaxwellBot._reactions_annotation_for(bot, message) == ""
+
+
+def test_reaction_overlay_and_snapshot_recheck_consent_and_deletion_fence(tmp_path, monkeypatch):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    bot = _reaction_bot()
+    store = UserPreferenceStore(tmp_path / "preferences.json")
+    store.set_default("99", "tracking", "on")
+    bot._user_preferences = store
+    message = SimpleNamespace(id=777, author=bot.user)
+    reaction = SimpleNamespace(message=message, emoji="😂")
+    user = SimpleNamespace(id=99, display_name="private-name", bot=False)
+    asyncio.run(MaxwellBot.on_reaction_add(bot, reaction, user))
+    rows = list(bot._message_reactions["777"])
+    assert "private-name" in MaxwellBot._reactions_annotation_for(bot, message)
+
+    store.delete_personal("99")
+    assert MaxwellBot._reactions_annotation_for(bot, message) == ""
+    store.set_default("99", "tracking", "on")
+    # Re-enabling tracking does not resurrect pre-deletion identities.
+    assert MaxwellBot._reactions_annotation_for(bot, message) == ""
+    bot._message_reactions.clear()
+    assert MaxwellBot._reactions_annotation_for(
+        bot, {"message_id": "777", "reactions": rows}
+    ) == ""
+
+    deleted_at = store._read()["users"]["99"]["deleted_at"]
+    monkeypatch.setattr(
+        "bot_parts.reactions.time", SimpleNamespace(time=lambda: deleted_at + 1)
+    )
+    merge = AsyncMock()
+    bot.memory = SimpleNamespace(merge_message_metadata=merge)
+    asyncio.run(MaxwellBot.on_reaction_add(bot, reaction, user))
+    assert "private-name" in MaxwellBot._reactions_annotation_for(bot, message)
+    assert merge.call_args.args[1]["reactions"][0]["privacy_started_at"] > deleted_at

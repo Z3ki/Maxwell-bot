@@ -415,6 +415,10 @@ class CreateChannelTool(Tool):
         category = cast(Any, category)
         if error:
             return error
+        if category is not None:
+            missing = _missing_cap(guild, "manage_channels", message, channel=category)
+            if missing:
+                return missing
         channel_kind = str(kind or type or "text").strip().lower()
         nsfw_flag = parse_bool(nsfw, False)
         try:
@@ -515,7 +519,7 @@ class EditChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if not guild:
             return "Error: channel is not in a server"
-        missing = _missing_cap(guild, "manage_channels", message)
+        missing = _missing_cap(guild, "manage_channels", message, channel=channel)
         if missing:
             return missing
         updates = {}
@@ -531,6 +535,10 @@ class EditChannelTool(Tool):
             category, error = _find_category(guild, category_id, category_name)
             if error:
                 return error
+            if category is not None:
+                missing = _missing_cap(guild, "manage_channels", message, channel=category)
+                if missing:
+                    return missing
             updates["category"] = category
         textish = isinstance(channel, discord.TextChannel) or isinstance(
             channel, getattr(discord, "ForumChannel", ())
@@ -620,7 +628,7 @@ class DeleteChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if not guild:
             return "Error: channel is not in a server"
-        missing = _missing_cap(guild, "manage_channels", message)
+        missing = _missing_cap(guild, "manage_channels", message, channel=channel)
         if missing:
             return missing
         actual = getattr(channel, "name", "")
@@ -674,6 +682,9 @@ class EditCategoryTool(Tool):
             return error
         if category is None:
             return "Error: category_id or category_name is required"
+        missing = _missing_cap(guild, "manage_channels", message, channel=category)
+        if missing:
+            return missing
         updates = {}
         if name:
             clean = _clean_discord_name(name)
@@ -732,7 +743,7 @@ class MoveChannelTool(Tool):
             return "Error: channel is not in a server"
         if isinstance(channel, discord.CategoryChannel):
             return "Error: cannot move a category into a category; use edit_category position"
-        missing = _missing_cap(guild, "manage_channels", message)
+        missing = _missing_cap(guild, "manage_channels", message, channel=channel)
         if missing:
             return missing
         if category_id is None and category_name is None:
@@ -740,6 +751,10 @@ class MoveChannelTool(Tool):
         category, error = _find_category(guild, category_id, category_name)
         if error:
             return error
+        if category is not None:
+            missing = _missing_cap(guild, "manage_channels", message, channel=category)
+            if missing:
+                return missing
         updates = {"category": category}
         if position is not None:
             try:
@@ -786,7 +801,7 @@ class CloneChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: channel is not in a server"
-        missing = _missing_cap(guild, "manage_channels", message)
+        missing = _missing_cap(guild, "manage_channels", message, channel=channel)
         if missing:
             return missing
         clone_kwargs = {"reason": _mod_reason(message)}
@@ -802,6 +817,10 @@ class CloneChannelTool(Tool):
             category, error = _find_category(guild, category_id, category_name)
             if error:
                 return error
+            if category is not None:
+                missing = _missing_cap(guild, "manage_channels", message, channel=category)
+                if missing:
+                    return missing
             clone_kwargs["category"] = category
         if not hasattr(channel, "clone"):
             return "Error: this channel type cannot be cloned"
@@ -841,7 +860,7 @@ class SyncChannelTool(Tool):
         guild = getattr(channel, "guild", None)
         if guild is None:
             return "Error: channel is not in a server"
-        missing = _missing_cap(guild, "manage_channels", message)
+        missing = _missing_cap(guild, "manage_channels", message, channel=channel)
         if missing:
             return missing
         why = _mod_reason(message)
@@ -857,6 +876,10 @@ class SyncChannelTool(Tool):
         synced = []
         errors = []
         for ch in targets:
+            missing = _missing_cap(guild, "manage_channels", message, channel=ch)
+            if missing:
+                errors.append(f"{_channel_label(ch)}: {missing}")
+                continue
             try:
                 await ch.edit(sync_permissions=True, reason=why)
                 synced.append(_channel_label(ch))
@@ -897,7 +920,7 @@ class ListPermissionsTool(Tool):
         if guild is None:
             return "Error: channel is not in a server"
         missing = _missing_cap(
-            guild, "manage_roles", message, alt_caps=("manage_channels",)
+            guild, "manage_roles", message, alt_caps=("manage_channels",), channel=channel
         )
         if missing:
             return missing

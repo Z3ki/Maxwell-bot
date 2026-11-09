@@ -59,7 +59,9 @@ installed for offline checks without credentials or activation permission:
 4. `/etc/maxwell-standby/` is root-only. Only independently required provider data
    is in `provider.json`: `{base_url,model,api_key}`. Provision `discord-token`
    separately, only after review/approved activation; do not print credentials.
-   Use systemd LoadCredential, not environment secrets. The service is non-root,
+   Use systemd LoadCredential, not environment secrets. Credential files must be
+   regular non-symlink files owned by root (or the consuming service user), with
+   no group/other permissions, e.g. mode `0600`. The service is non-root, with a
    read-only filesystem, no capabilities, bounded tmpfs/log rate, 512 MiB RAM,
    128 MiB swap and 75% CPU. Root administration API remains separate.
 5. Run `python -m standby.runtime --check` offline. This reports capabilities,
@@ -72,19 +74,54 @@ installed for offline checks without credentials or activation permission:
 
 No activation/token/config means service startup is skipped by systemd conditions;
 startup also checks a positive root-provisioned fencing receipt and approved
-channel list before importing Discord or contacting its gateway.
+channel list before importing Discord or contacting its gateway. Channel IDs must
+be canonical positive decimals with no blanks; spaced, zero, or empty entries
+refuse startup rather than being skipped.
 
 ## Scoped one-way configuration snapshots
 
+Run the exporter from the reviewed **primary checkout**, using its shared
+`control_defaults.py` (not a copy of the isolated standby artifact):
+
 `python -m standby.sync export --input data/bot_control.json --output /secure/chat-config.json --revision <sha>`
 
-The exporter requires a **complete effective** controls object and copies **only** supported primary controls (partial/wrong input fails closed):
+Both authoritative inputs must exist and contain valid JSON:
+
+- `--input` is the primary's `bot_control.json` **object**. Sparse saved overrides,
+  including `{}`, are supported: absent supported fields use primary
+  `DEFAULT_CONTROL`. Supported boolean values are JSON booleans, integer `0`/`1`,
+  or case-insensitive, whitespace-trimmed strings `true`/`false`, `yes`/`no`,
+  `on`/`off`, `1`/`0`, normalized with the primary's `parse_bool`. Other values
+  (including null) are rejected, not defaulted to enabled.
+- The primary's separate `blacklist.json` must be a JSON **array of user IDs**.
+  By default it is read beside `--input`; use `--blacklist /actual/data/blacklist.json`
+  if it lives elsewhere. An explicitly reviewed empty blacklist is `[]`.
+  Missing, unreadable, truncated or malformed input prevents export; do not create
+  an empty blacklist just to bypass a failure or discard known restrictions.
+- Both inputs must be regular non-symlink files of at most 8 MiB. The exporter
+  does not follow links, so a replaced symlink cannot substitute an empty
+  blacklist or a weaker control file.
+
+The exporter copies **only** seven supported effective chat controls:
 `bot_enabled`, `reply_mentions`, `ignore_users`, `allowed_channels`,
 `blocked_channels`, `guild_solo_channel`, and `base_personality` (bounded style).
-The runtime honors these **in addition to**, never instead of, its immutable
-emergency audience and text-only restrictions. Primary ignores/blocks/solo
-channels remain restrictive. The style is explicitly labeled untrusted preference,
-not permission to override the system or physical runtime boundary.
+Primary blacklist entries are merged with `ignore_users`; both restrictions are
+enforced after takeover without adding a new snapshot key. The personality comes
+from the code-owned primary default, matching the primary loader rather than a
+stale persisted override. Lists/mappings must have the expected types and canonical
+positive decimal Discord IDs; malformed entries, duplicate JSON object keys,
+non-finite JSON numbers, or an oversized merged ignore list reject the whole export.
+The same strict parser, including the 8 MiB bound, is used for import, status,
+offline preflight, and standby startup. Python last-key-wins is never applied:
+a repeated `ignore_users` key cannot drop blacklist entries, and a repeated
+provider `base_url` cannot redirect the credential. Unsupported primary settings
+are omitted rather than copied.
+
+The runtime honors the snapshot **in addition to**, never instead of, its immutable
+emergency audience and text-only restrictions. Primary ignores/blacklist/blocks/solo
+channels remain restrictive. DMs are rejected even if their IDs are accidentally
+listed in the emergency audience. The style is explicitly labeled untrusted
+preference, not permission to override the system or physical runtime boundary.
 
 No `.env`, tokens, provider routes, tools/plugins/commands, file settings, API
 permissions, memory, databases, conversation history, BYOK, per-user private
@@ -96,10 +133,15 @@ root**, never a bot-accessible upload route:
 
 `python -m standby.sync import --input /secure/incoming.json --output /etc/maxwell-standby/chat-config.json`
 
+Imports do **not** fill defaults or normalize primary overrides: every snapshot
+must contain all seven controls with strict types (including actual booleans).
 Imports enforce schema/type/size/ID/checksum validation, reject unexpected control
-keys, noncanonical/zero Discord IDs, future timestamps, older snapshots and same-version conflicts. Validated
-snapshots use a shared nonblocking cross-process lock across validation/comparison
-and atomic replacement, plus file/directory fsync. Post-replacement durability
+keys, partial controls, noncanonical/zero Discord IDs, future timestamps, older
+snapshots and same-version conflicts. An existing snapshot with duplicate keys,
+or a symlink/non-regular output path, is left untouched rather than interpreted
+with last-key-wins. Validated snapshots use a shared nonblocking cross-process
+lock across validation/comparison and atomic replacement, plus file/directory
+fsync. Post-replacement durability
 errors are distinguished from pre-commit rejection; invalid input keeps
 last-known-good intact. `standby.sync status --input ...` reports revision,
 export time and checksum, without secret/history data.
@@ -176,9 +218,14 @@ coordinator or additional subscription is required/created by this change.
 ## Verification / rollback
 
 Offline regression tests cover immutable policy, real message/interaction handlers
-with fake Discord/provider, attachment/model-tool-call rejection, absent primary
-imports, bounded quota, validated atomic config sync, approval gates, positive
-fencing, timeout/stale-proof rejection, and ordered failback. No live Discord sends.
+with fake Discord/provider, attachment/model-tool-call rejection, guild-only
+audience enforcement, absent primary imports, bounded quota, sparse primary CLI
+export/import/status, effective default/boolean normalization, merged authoritative
+blacklists, rejection of missing/malformed/symlink/oversized restrictions, strict
+snapshot imports, duplicate-key refusal at runtime/preflight/activation, mistyped
+controls denied by chat policy, private credential permissions, validated atomic
+config sync, approval gates, positive fencing, timeout/stale-proof rejection, and
+ordered failback. No live Discord sends.
 Before promotion, get review and test deployment-specific behavior independently.
 
 Passive rollback: keep/remove the stopped disabled unit and candidate directory;

@@ -149,6 +149,22 @@ def test_bridge_rewrite_changes_only_local_connection_addresses(tmp_path):
     assert path.read_text() == result
 
 
+def test_bridge_rewrite_keeps_worker_and_search_routes_reachable(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text(
+        "AI_WORKER_BASE_URL=http://localhost:9000/v1\n"
+        "AI_WORKER_FALLBACK_BASE_URL=http://127.0.0.1:9001/v1\n"
+        "SEARXNG_URL=http://localhost:8888/search\n"
+        "AI_WORKER_API_KEY=secret-localhost-127.0.0.1\n"
+    )
+    rewrite_bridge_env(path)
+    values = dotenv_values(path)
+    assert values["AI_WORKER_BASE_URL"] == "http://host.docker.internal:9000/v1"
+    assert values["AI_WORKER_FALLBACK_BASE_URL"] == "http://host.docker.internal:9001/v1"
+    assert values["SEARXNG_URL"] == "http://host.docker.internal:8888/search"
+    assert values["AI_WORKER_API_KEY"] == "secret-localhost-127.0.0.1"
+
+
 def test_env_writer_updates_duplicate_and_spaced_assignments(tmp_path):
     path = tmp_path / ".env"
     path.write_text("TOKEN=old\n  export TOKEN = stale\nTOKEN=last\nOTHER=keep\n")

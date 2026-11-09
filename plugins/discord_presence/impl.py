@@ -87,6 +87,8 @@ class SetActivityTool(Tool):
         **kwargs,
     ) -> str:
         activity_type = (type or "custom").lower()
+        if activity_type not in {"playing", "watching", "listening", "competing", "custom"}:
+            return "Error: type must be playing/watching/listening/competing/custom"
 
         if not text:
             if activity_type == "custom":
@@ -114,8 +116,6 @@ class SetActivityTool(Tool):
                     start_time = datetime.now(timezone.utc) - timedelta(milliseconds=ms)
                     act_kwargs["timestamps"] = {"start": int(start_time.timestamp() * 1000)}
             self.bot._current_game = Activity(**act_kwargs)
-        else:
-            return "Error: type must be playing/watching/listening/competing/custom"
 
         activities = self.bot._build_activities()
         await self.bot.change_presence(

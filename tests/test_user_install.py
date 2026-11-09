@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from bot import MaxwellBot
 from bot_tools import SendMessageTool
 from user_install import (
@@ -13,6 +15,7 @@ from user_install import (
     USER_INSTALL_MESSAGE_ASK,
     USER_INSTALL_MESSAGE_CAP,
     USER_INSTALL_MESSAGE_SUMMARIZE,
+    UserInstallChannelAdapter,
     UserInstallMessageAdapter,
     UserInstallSession,
     _ephemeral,
@@ -286,6 +289,80 @@ def test_snapshot_channel_history_reads_async_history():
     interaction.channel = Chan()
     rows = asyncio.run(snapshot_channel_history(None, interaction))
     assert [row["content"] for row in rows] == ["line 0", "line 1", "line 2"]
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+@pytest.mark.parametrize("payload_permissions", [False, True])
+def test_snapshot_respects_requester_history_permissions(allowed, payload_permissions):
+    interaction = _interaction()
+    interaction.guild = SimpleNamespace(id=77)
+    permissions = SimpleNamespace(view_channel=True, read_message_history=allowed)
+    calls = []
+
+    async def history(*, limit):
+        calls.append(limit)
+        yield SimpleNamespace(
+            id=1, content="older message",
+            author=SimpleNamespace(id=3, display_name="n", bot=False),
+            attachments=[], created_at=None,
+        )
+
+    interaction.channel.history = history
+    interaction.channel.permissions_for = lambda member: permissions
+    if payload_permissions:
+        interaction.permissions = permissions
+        interaction.channel.permissions_for = lambda member: SimpleNamespace(
+            view_channel=True, read_message_history=not allowed
+        )
+    rows = asyncio.run(snapshot_channel_history(None, interaction))
+    assert bool(rows) is allowed
+    assert bool(calls) is allowed
+
+
+def test_snapshot_fails_closed_without_guild_permission_evidence():
+    interaction = _interaction()
+    interaction.guild_id = 77
+
+    def history(**kwargs):
+        raise AssertionError("History must not be fetched without requester permissions")
+
+    interaction.channel.history = history
+    assert asyncio.run(snapshot_channel_history(None, interaction)) == []
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_adapter_history_requires_requester_permissions(allowed):
+    interaction = _interaction()
+    interaction.guild = SimpleNamespace(id=77)
+    calls = []
+
+    async def history(*, limit=None, **kwargs):
+        calls.append(("history", limit))
+        yield SimpleNamespace(id=1, content="secret")
+
+    async def fetch_message(mid):
+        calls.append(("fetch", mid))
+        return SimpleNamespace(id=mid, content="secret")
+
+    interaction.channel.history = history
+    interaction.channel.fetch_message = fetch_message
+    interaction.channel.permissions_for = lambda member: SimpleNamespace(
+        view_channel=True, read_message_history=allowed
+    )
+    channel = UserInstallChannelAdapter(UserInstallSession(interaction))
+
+    async def go():
+        rows = [row async for row in channel.history(limit=5)]
+        if allowed:
+            assert [row.content for row in rows] == ["secret"]
+            assert (await channel.fetch_message(1)).content == "secret"
+        else:
+            assert rows == []
+            with pytest.raises(LookupError):
+                await channel.fetch_message(1)
+
+    asyncio.run(go())
+    assert bool(calls) is allowed
 
 
 def test_adapter_send_caps_at_six():

@@ -50,6 +50,85 @@ def run(coro):
 PAGE = "<!DOCTYPE html><html><head><title>t</title></head><body><h1>hi</h1></body></html>"
 
 
+def test_host_file_maximal_slug_never_overwrites_existing_file(bot):
+    from plugins.sites.impl import HostFileTool
+    from urllib.parse import urlparse
+
+    tool = HostFileTool(bot)
+    name = "a" * 30
+    first = run(tool.execute(_msg(42), name=name, filename="report.txt", content="first"))
+    second = run(tool.execute(_msg(43), name=name, filename="report.txt", content="second"))
+    first_url = first.splitlines()[0].removeprefix("Hosted file: ")
+    second_url = second.splitlines()[0].removeprefix("Hosted file: ")
+    assert first_url != second_url
+    root = Path(bot.config.MAXWELL_SITE_DIR) / "_files"
+    assert (root / name / "report.txt").read_text() == "first"
+    second_slug = urlparse(second_url).path.split("/")[-2]
+    assert len(second_slug) <= 30
+    assert (root / second_slug / "report.txt").read_text() == "second"
+
+
+@pytest.mark.parametrize("tool_name", ["edit", "delete", "server"])
+def test_queued_site_action_rechecks_reclaimed_owner(bot, monkeypatch, tool_name):
+    import site_server
+    from plugins.sites.impl import SiteServerTool
+    from utils import FileLock
+
+    async def no_backend(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(site_server, "start", no_backend)
+    monkeypatch.setattr(site_server, "destroy", no_backend)
+
+    run(CreateSiteTool(bot).execute(_msg(42), name="reclaimed", title="Old", body=PAGE))
+    tool = {"edit": EditSiteTool, "delete": DeleteSiteTool, "server": SiteServerTool}[tool_name](bot)
+    original_resolve = tool._resolve
+    root = Path(bot.config.MAXWELL_SITE_DIR) / "reclaimed"
+
+    async def scenario():
+        resolved = asyncio.Event()
+
+        def resolve(message, name):
+            result = original_resolve(message, name)
+            resolved.set()
+            return result
+
+        monkeypatch.setattr(tool, "_resolve", resolve)
+        with FileLock(Path(bot.config.DATA_DIR) / "site_locks/reclaimed.lock", timeout=0):
+            kwargs = {"name": "reclaimed"}
+            if tool_name == "edit":
+                kwargs.update(action="write", content="old owner overwrite")
+            elif tool_name == "server":
+                kwargs.update(action="write", content="old owner code")
+            task = asyncio.create_task(tool.execute(_msg(42), **kwargs))
+            await resolved.wait()
+            # Model a deletion/reclaim completed by the current lock holder.
+            bot._sites["reclaimed"] = dict(bot._sites["reclaimed"], user_id="43")
+            root.mkdir(exist_ok=True)
+            (root / "index.html").write_text("new owner page")
+            await asyncio.sleep(0)
+        result = await task
+        assert result.startswith("Error:")
+        assert "belongs" in result or "only the site owner" in result
+        assert (root / "index.html").read_text() == "new owner page"
+        assert bot._sites["reclaimed"]["user_id"] == "43"
+
+    run(scenario())
+
+
+def test_reused_site_slug_cannot_inherit_previous_store(bot, monkeypatch):
+    calls = []
+    monkeypatch.setattr("site_backend.destroy", lambda *_args: calls.append("store") or (_ for _ in ()).throw(TimeoutError("store busy")))
+    tool = CreateSiteTool(bot)
+    first = run(tool.execute(_msg(42), name="reused", title="Old", body=PAGE, backend=True))
+    assert "https://" in first
+    second = run(tool.execute(_msg(42), name="reused", title="New", body=PAGE))
+    assert second.startswith("Error creating site:")
+    assert "store busy" in second
+    assert calls == ["store"]
+    assert bot._sites["reused"]["title"] == "Old"
+
+
 def test_extra_files_land_next_to_index(bot, tmp_path):
     tool = CreateSiteTool(bot)
     out = run(
@@ -464,3 +543,15 @@ def test_api_path_warnings_quiet_on_relative_paths():
 
     body = '<script>fetch("api/notes")</script>'
     assert _site_api_path_warnings("quantum-forge", body, []) == []
+
+
+def test_unowned_slug_does_not_inherit_the_old_store(bot):
+    path = site_backend.store_path(bot.config.DATA_DIR, "guest")
+    path.parent.mkdir(parents=True)
+    path.write_text('{"secret": "old-tenant"}', encoding="utf-8")
+    bot._sites["guest"] = {"title": "Old", "user_id": ""}
+    out = run(
+        CreateSiteTool(bot).execute(_msg(uid=7), name="guest", title="New", body=PAGE)
+    )
+    assert not out.startswith("Error:")
+    assert not path.exists()

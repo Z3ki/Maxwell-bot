@@ -1,7 +1,7 @@
 """Interactive per-user GitHub repository tools with isolated workspaces."""
 from __future__ import annotations
 
-import asyncio, base64, contextlib, hashlib, hmac, json, os, re, shlex, time, uuid
+import asyncio, base64, contextlib, hashlib, hmac, json, os, re, secrets, shlex, time, uuid
 from urllib.parse import urlencode
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +11,7 @@ from typing import Any, Callable, ClassVar
 import aiohttp
 
 from tools import Tool
-from utils import FileLock, _atomic_json_write_sync, controller_id
+from utils import FileLock, _atomic_json_write_sync, controller_id, docker_bind_path
 from plugins.github_projects.inspection import INSPECTION_SCRIPT
 from plugins.github_projects.credential_git import GIT_SCRIPT, validate_git_commands
 
@@ -82,7 +82,8 @@ def sign_oauth_state(uid: str, scopes: list[str] | None = None) -> str:
     secret = oauth_client_secret().encode()
     if not secret:
         raise RuntimeError("GitHub OAuth is not configured")
-    payload = json.dumps({"u": uid, "s": normalize_scopes(scopes), "e": int(time.time()) + 600}, separators=(",", ":"))
+    issued_at = time.time()
+    payload = json.dumps({"u": uid, "s": normalize_scopes(scopes), "i": issued_at, "e": int(issued_at) + 600}, separators=(",", ":"))
     body = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     sig = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
     return body + "." + sig
@@ -108,7 +109,90 @@ def verify_oauth_state(state: str) -> dict[str, Any]:
     uid = str(data.get("u") or "")
     if not uid.isdigit():
         raise ValueError("invalid oauth state")
-    return {"uid": uid, "scopes": normalize_scopes(data.get("s"))}
+    return {"uid": uid, "scopes": normalize_scopes(data.get("s")), "issued_at": float(data["i"])}
+
+
+def _oauth_pending_path() -> Path:
+    from config import Config
+
+    return Path(Config.DATA_DIR) / "plugins" / "github_projects" / "oauth_pending.json"
+
+
+def _new_confirmation_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def stage_oauth_login(
+    uid: str,
+    token: str,
+    *,
+    login: str,
+    scopes: list[str],
+    issued_at: float,
+) -> str:
+    """Store an unconfirmed login. The browser callback must not publish it."""
+    uid = str(uid or "").strip()
+    token = str(token or "").strip()
+    if not uid.isdigit() or not token:
+        raise ValueError("invalid staged GitHub login")
+    path = _oauth_pending_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    code = _new_confirmation_code()
+    with FileLock(path, timeout=5):
+        from privacy import owned_write_allowed
+
+        if not owned_write_allowed(path.parent.parent.parent, uid, issued_at):
+            raise ValueError("Request predates a privacy deletion; submit a new request")
+        try:
+            pending = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            pending = {}
+        if not isinstance(pending, dict):
+            pending = {}
+        pending[uid] = {
+            "token": token,
+            "login": str(login or "")[:80],
+            "scopes": normalize_scopes(scopes),
+            "issued_at": issued_at,
+            "code_hash": hashlib.sha256(code.encode()).hexdigest(),
+            "expires_at": time.time() + 600,
+        }
+        os.chmod(path.parent, 0o700)
+        _json_atomic(path, pending)
+        os.chmod(path, 0o600)
+    return code
+
+
+def confirm_oauth(uid: str, code: str) -> str:
+    """Publish a staged login only for the Discord user who received its code."""
+    uid = str(uid or "").strip()
+    submitted = str(code or "").strip()
+    if not uid.isdigit() or not re.fullmatch(r"\d{6}", submitted):
+        raise ValueError("GitHub confirmation code must be six digits")
+    path = _oauth_pending_path()
+    with FileLock(path, timeout=5):
+        try:
+            pending = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            pending = {}
+        row = pending.get(uid) if isinstance(pending, dict) else None
+        if not isinstance(row, dict) or float(row.get("expires_at") or 0) < time.time():
+            raise ValueError("No pending GitHub login; authorize the link again")
+        expected = str(row.get("code_hash") or "")
+        if not hmac.compare_digest(hashlib.sha256(submitted.encode()).hexdigest(), expected):
+            raise ValueError("GitHub confirmation code does not match")
+        store = TokenStore(path.with_name("user_tokens.json"))
+        store.write(
+            uid,
+            str(row.get("token") or ""),
+            login=row.get("login"),
+            scopes=row.get("scopes"),
+            source="oauth",
+            started_at=float(row.get("issued_at") or 0),
+        )
+        del pending[uid]
+        _json_atomic(path, pending)
+    return str(row.get("login") or "GitHub")
 
 
 def authorize_url(uid: str, scopes: Any = None) -> str:
@@ -136,7 +220,7 @@ def _repo(raw: Any) -> str:
     value = str(raw or "").strip().strip("/")
     if value.endswith(".git"):
         value = value[:-4]
-    if not _REPO_RE.fullmatch(value):
+    if not _REPO_RE.fullmatch(value) or any(part in {".", ".."} for part in value.split("/")):
         raise ValueError("repo must be owner/name")
     return value
 
@@ -161,10 +245,7 @@ def _clip(value: Any) -> str:
 
 
 def _json_atomic(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
-    os.replace(tmp, path)
+    _atomic_json_write_sync(path, data)
 
 
 class PolicyStore:
@@ -230,9 +311,14 @@ class TokenStore:
         if raw:
             return {"token": str(raw)}
         return {}
-    def write(self, uid: str, token: str, **meta: Any) -> None:
+    def write(self, uid: str, token: str, *, started_at: float | None = None, **meta: Any) -> None:
+        from privacy import owned_write_allowed, request_started_at
+        if started_at is None:
+            started_at = request_started_at()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(self.path, timeout=5.0):
+            if not owned_write_allowed(self.path.parent.parent.parent, uid, started_at):
+                raise ValueError("Request predates a privacy deletion; submit a new request")
             data = self._read()
             row = {"token": token, "updated_at": time.time()}
             for key, value in meta.items():
@@ -240,20 +326,31 @@ class TokenStore:
                     row[key] = value
             data[str(uid)] = row
             _json_atomic(self.path, data)
-    async def set(self, uid: str, token: str, **meta: Any) -> None:
+    async def set(self, uid: str, token: str, *, started_at: float | None = None, **meta: Any) -> None:
+        from privacy import request_started_at
+        if started_at is None:
+            started_at = request_started_at()
         async with self.lock:
-            await asyncio.to_thread(self.write, uid, token, **meta)
-    def _clear_sync(self, uid: str) -> bool:
+            await asyncio.to_thread(self.write, uid, token, started_at=started_at, **meta)
+    def _clear_sync(self, uid: str, *, started_at: float | None = None) -> bool:
+        from privacy import owned_write_allowed, request_started_at
+        if started_at is None:
+            started_at = request_started_at()
         with FileLock(self.path, timeout=5.0):
+            if not owned_write_allowed(self.path.parent.parent.parent, uid, started_at):
+                raise ValueError("Request predates a privacy deletion; submit a new request")
             data = self._read()
             existed = str(uid) in data
             if existed:
                 del data[str(uid)]
                 _json_atomic(self.path, data)
             return existed
-    async def clear(self, uid: str) -> bool:
+    async def clear(self, uid: str, *, started_at: float | None = None) -> bool:
+        from privacy import request_started_at
+        if started_at is None:
+            started_at = request_started_at()
         async with self.lock:
-            return await asyncio.to_thread(self._clear_sync, uid)
+            return await asyncio.to_thread(self._clear_sync, uid, started_at=started_at)
 
 
 class RepoKnowledge:
@@ -371,10 +468,32 @@ class GitHubProjectService:
             (f"{uid}\0{controller_id()}" if controller_id() else uid).encode()
         ).hexdigest()[:16]
     def user_root(self, uid: str) -> Path:
-        root = (self.workspace_root/hashlib.sha256(uid.encode()).hexdigest()[:24]).resolve(); root.mkdir(parents=True, exist_ok=True); return root
+        root = self.workspace_root.resolve() / hashlib.sha256(uid.encode()).hexdigest()[:24]
+        if root.resolve() != root:
+            raise ValueError("workspace escaped user root")
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     def repo_root(self, uid: str, repo: str) -> Path:
-        owner,name = _repo(repo).split("/",1); root=(self.user_root(uid)/"repos"/owner/name).resolve(); root.parent.mkdir(parents=True,exist_ok=True)
-        if self.user_root(uid) not in root.parents: raise ValueError("workspace escaped user root")
+        owner, name = _repo(repo).split("/", 1)
+        user_root = self.user_root(uid)
+        root = user_root / "repos" / owner / name
+        if user_root not in root.resolve().parents:
+            raise ValueError("workspace escaped user root")
+        # The guest can rename these directories concurrently. Never let a
+        # host mkdir follow a guest-controlled parent symlink.
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptor = os.open(user_root, flags)
+        try:
+            for part in ("repos", owner):
+                try:
+                    os.mkdir(part, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+        finally:
+            os.close(descriptor)
         return root
 
     async def _proc(
@@ -390,32 +509,31 @@ class GitHubProjectService:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(input=input), timeout=timeout)
-        except asyncio.TimeoutError:
-            if on_timeout is not None:
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            try:
+                if on_timeout is not None:
+                    with contextlib.suppress(Exception):
+                        await on_timeout()
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                # A cancelled communicate can leave pipe transports paused at
+                # their buffer limit. Drain them before waiting for process exit.
                 with contextlib.suppress(Exception):
-                    await on_timeout()
-            proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
+                    await proc.communicate()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError(f"command timed out after {timeout}s") from None
         return ExecResult(proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace"))
 
-    async def _kill_workspace_exec(self, container: str, pid_file: str) -> None:
-        """Terminate the in-container command, not just its docker client."""
-        quoted = shlex.quote(pid_file)
-        cleanup = (
-            f"pid=$(cat {quoted} 2>/dev/null); "
-            'case "$pid" in '
-            "''|*[!0-9]*) ;; "
-            f"*) kill -TERM -- -$pid 2>/dev/null; sleep 0.2; "
-            f"kill -KILL -- -$pid 2>/dev/null; rm -f {quoted} ;; "
-            "esac"
-        )
+    async def _kill_workspace_exec(self, container_id: str) -> None:
+        """Stop the guest from the host. In-container cleanup can be blocked."""
         with contextlib.suppress(Exception):
-            await self._proc(
-                "docker", "exec", "--user", "root", container,
-                "bash", "-lc", cleanup, timeout=10,
-            )
+            await self._proc("docker", "kill", container_id, timeout=20)
+        with contextlib.suppress(Exception):
+            await self._proc("docker", "rm", "-f", container_id, timeout=20)
 
     async def _ensure_image(self)->None:
         check=await self._proc("docker","image","inspect",_IMAGE,timeout=20)
@@ -431,7 +549,7 @@ class GitHubProjectService:
                 if inspect.stdout.strip().lower()=="true": return name
                 if (await self._proc("docker","start",name,timeout=30)).code==0:return name
                 await self._proc("docker","rm","-f",name,timeout=30)
-            root=str(self.user_root(uid))
+            root=docker_bind_path(self.user_root(uid))
             args=["docker","run","-d","--init","--name",name,"--network","bridge","--memory","4g","--memory-swap","4g","--cpus","2","--pids-limit","768","--security-opt","no-new-privileges","--cap-drop","ALL","--cap-add","CHOWN","--cap-add","DAC_OVERRIDE","--cap-add","FOWNER","--cap-add","SETGID","--cap-add","SETUID","--tmpfs","/tmp:rw,exec,nosuid,size=256m","-v",f"{root}:/workspace:rw",_IMAGE]
             res=await self._proc(*args,timeout=60)
             if res.code!=0: raise RuntimeError("could not start user workspace: "+res.render())
@@ -468,18 +586,13 @@ class GitHubProjectService:
         if not root.exists(): raise FileNotFoundError("repo is not checked out yet")
         container=await self.ensure_container(uid); owner,name=repo.split("/",1); argv=["docker","exec","--workdir",f"/workspace/repos/{owner}/{name}"]
         for k,v in (env or {}).items(): argv += ["-e",f"{k}={v}"]
-        pid_file = f"/tmp/.maxwell-gh-{uuid.uuid4().hex}.pid"
-        quoted_pid = shlex.quote(pid_file)
-        wrapped = (
-            f"echo $$ > {quoted_pid}\n"
-            f"trap 'rm -f {quoted_pid}' EXIT\n"
-            f"{command}\n"
-        )
-        argv += [container, "bash", "-lc", wrapped]
+        ident = await self._proc("docker", "inspect", "-f", "{{.Id}}", container, timeout=20)
+        container_id = ident.stdout.strip() if ident.code == 0 and ident.stdout.strip() else container
+        argv += [container, "bash", "-lc", command]
         return await self._proc(
             *argv,
             timeout=max(1, min(int(timeout), 3600)),
-            on_timeout=lambda: self._kill_workspace_exec(container, pid_file),
+            on_timeout=lambda: self._kill_workspace_exec(container_id),
         )
 
     async def inspect_repository(
@@ -493,16 +606,24 @@ class GitHubProjectService:
         root = self.repo_root(uid, repo)
         if not root.exists():
             raise FileNotFoundError("repo is not checked out yet")
+        container = self._container(uid) + "-inspect-" + uuid.uuid4().hex
         await self._ensure_image()
         args = [
-            "docker", "run", "--rm", "--init", "--read-only", "--network", "none",
+            "docker", "run", "--rm", "--name", container, "--init", "--read-only", "--network", "none",
             "--memory", "512m", "--memory-swap", "512m", "--cpus", "1",
             "--pids-limit", "64", "--security-opt", "no-new-privileges",
             "--cap-drop", "ALL", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
-            "-v", f"{root}:/repository:ro", "--workdir", "/tmp", _IMAGE,
-            "python3", "-I", "-c", INSPECTION_SCRIPT, operation, "/repository", ref,
+            "-v", f"{docker_bind_path(self.user_root(uid))}:/workspace:ro", "--workdir", "/tmp", _IMAGE,
+            "python3", "-I", "-c", INSPECTION_SCRIPT, operation, f"/workspace/repos/{repo}", ref,
         ]
-        return await self._proc(*args, timeout=max(1, min(int(timeout), 180)))
+        return await self._proc(
+            *args, timeout=max(1, min(int(timeout), 180)),
+            on_timeout=lambda: self._remove_sidecar(container),
+        )
+
+    async def _remove_sidecar(self, container: str) -> None:
+        """Remove only the unique container created for this invocation."""
+        await self._proc("docker", "rm", "-f", container, timeout=15)
 
     async def git(self,uid:str,repo:str,policy:dict[str,Any],commands:list[list[str]],*,timeout:int=300)->ExecResult:
         repo=_repo(repo)
@@ -525,24 +646,28 @@ class GitHubProjectService:
         token = self.token(uid, identity)
         if not token:
             raise PermissionError("GitHub credential is not configured")
-        target = self.repo_root(uid, repo)
+        self.repo_root(uid, repo)
         cache_volume = "maxwell-git-cache-" + hashlib.sha256(
             f"{uid}\0{repo}".encode()
         ).hexdigest()[:24]
+        container = self._container(uid) + "-git-" + uuid.uuid4().hex
         args = [
-            "docker", "run", "--rm", "--init", "--interactive", "--read-only",
+            "docker", "run", "--rm", "--name", container, "--init", "--interactive", "--read-only",
             "--network", "bridge", "--memory", "2g", "--memory-swap", "2g",
             "--cpus", "1.5", "--pids-limit", "384",
             "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
             "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
             "--mount", f"type=volume,source={cache_volume},destination=/git-scratch",
-            "-v", f"{target}:/repository:rw", "--workdir", "/tmp", _IMAGE,
-            "python3", "-I", "-c", GIT_SCRIPT, "/repository", "/git-scratch",
+            "-v", f"{docker_bind_path(self.user_root(uid))}:/workspace:rw", "--workdir", "/tmp", _IMAGE,
+            "python3", "-I", "-c", GIT_SCRIPT, f"/workspace/repos/{repo}", "/git-scratch",
         ]
         payload = json.dumps({
             "repo": repo, "commands": commands, "checkout": checkout, "token": token,
         }).encode()
-        result = await self._proc(*args, input=payload, timeout=max(1, min(int(timeout), 1800)))
+        result = await self._proc(
+            *args, input=payload, timeout=max(1, min(int(timeout), 1800)),
+            on_timeout=lambda: self._remove_sidecar(container),
+        )
         return ExecResult(result.code, result.stdout.replace(token, "[redacted]"), result.stderr.replace(token, "[redacted]"))
 
     async def checkout(self,uid:str,repo:str,policy:dict[str,Any],ref:str="")->str:
@@ -550,7 +675,6 @@ class GitHubProjectService:
         await self._require_command_permission(uid, repo)
         ref = _ref(ref)
         target=self.repo_root(uid,repo)
-        target.mkdir(exist_ok=True)
         commands = [["fetch", "--prune", "origin"]]
         if ref:
             commands.append(["checkout", ref])
@@ -626,14 +750,21 @@ class GitHubRepoTool(Tool):
             row = self.service.user_tokens.row(uid)
             login = str(row.get("login") or "")
             connected = "yes" + (f" as {login}" if login else "") if (self.service.token(uid) or login) else "no"
+            confirmation = str(kw.get("confirmation_code") or kw.get("code") or "").strip()
+            if confirmation:
+                try:
+                    confirmed = await asyncio.to_thread(confirm_oauth, uid, confirmation)
+                except (OSError, ValueError) as exc:
+                    return f"Error: {exc}"
+                return f"GitHub login confirmed for Discord user {uid} as {confirmed}."
             try:
                 url = authorize_url(uid, scopes)
             except Exception as exc:
                 return f"Error: cannot generate GitHub login link: {exc}"
             return (
                 f"GitHub login for Discord user {uid}. connected={connected}. scopes={','.join(scopes)}.\n"
-                f"Click this link and authorize Maxwell, then come back:\n{url}\n"
-                "Ask for different permissions by passing scopes= (repo, public_repo, workflow, gist, read:org, user, notifications, …)."
+                f"Click this link and authorize Maxwell. A private confirmation code will be DM'd to this Discord user; "
+                f"then call auth again with confirmation_code. The browser callback alone does not connect the account.\n{url}"
             )
         if action=="auth_set":
             raw=str(kw.get("token") or kw.get("body") or "").strip()
@@ -660,11 +791,11 @@ class GitHubRepoTool(Tool):
             cur=await self.service.policy.get(uid,r); candidate=dict(cur); candidate.update(changes)
             try:
                 status,text,data=await self.service._api(uid,candidate,"GET",f"/repos/{r}")
-                if status!=200:return f"Error: GitHub access check failed HTTP {status}: {_clip(text)}"
-                if isinstance(data,dict):
-                    perms=data.get("permissions") if isinstance(data.get("permissions"),dict) else {}; wanted=self.service.mode(candidate)
-                    if wanted in {"write","admin"} and not perms.get("push"):return "Error: selected credential lacks push permission"
-                    if wanted=="admin" and not perms.get("admin"):return "Error: selected credential lacks admin permission"
+                if status!=200 or not isinstance(data, dict):
+                    return f"Error: GitHub access check failed HTTP {status}: {_clip(text)}"
+                perms=data.get("permissions") if isinstance(data.get("permissions"),dict) else {}; wanted=self.service.mode(candidate)
+                if wanted in {"write","admin"} and not perms.get("push"):return "Error: selected credential lacks push permission"
+                if wanted=="admin" and not perms.get("admin"):return "Error: selected credential lacks admin permission"
             except Exception as exc:return f"Error: GitHub access is not ready: {exc}"
             row=await self.service.policy.set(uid,r,changes); return "Policy saved and access verified:\n"+json.dumps(row,indent=2,ensure_ascii=False)
         if action=="list":

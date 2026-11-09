@@ -907,6 +907,8 @@ class ChessGame:
 
     def apply_move(self, move: chess.Move) -> str:
         """Push a legal move and return its SAN."""
+        if self.is_over:
+            raise ValueError("the chess game is already over; start a new game")
         if move not in self.board.legal_moves:
             raise ValueError(f"{move} is not a legal move right now")
         san = self.board.san(move)

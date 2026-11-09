@@ -164,7 +164,7 @@ class CoreMixin:
         # discord.Message uses slots, so per-message admission flags must live
         # on the bot rather than being attached to Discord model objects.
         self._same_user_interrupts: dict[str, None] = {}
-        self._same_user_latest: dict[str, int] = {}
+        self._same_user_latest: dict[tuple[str, str], int] = {}
         # Per-channel current progress. Under load many channels can
         # have tool batches in flight concurrently; a single bot-wide
         # attribute would let channel B's run_one clobber channel A's,

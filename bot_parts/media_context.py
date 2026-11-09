@@ -4,6 +4,7 @@ Split out of bot.py; methods keep their original bodies.
 """
 
 import bot_common as _common
+from context_hydration import requester_can_read_history
 
 # Mechanical split: the methods below were written against bot.py's
 # module globals. Bind every shared name so the bodies run unchanged.
@@ -93,6 +94,8 @@ class MediaContextMixin:
     @staticmethod
     def _should_use_cached_media_context(message, content: str) -> bool:
         """Only attach old images when the latest turn actually points at them."""
+        if not requester_can_read_history(message):
+            return False
         return (
             bool(VISUAL_REFERENCE_RE.search(str(content or "")))
             or MaxwellBot._reply_media_message_id(message) is not None
@@ -100,12 +103,16 @@ class MediaContextMixin:
 
     @staticmethod
     def _reply_media_message_id(message, snapshots=None):
+        if not requester_can_read_history(message):
+            return None
         reference = getattr(message, "reference", None)
         ref = getattr(reference, "resolved", None) if reference else None
         ref_id = getattr(reference, "message_id", None) if reference else None
         if snapshots:
             ref = snapshots.get(str(ref_id or getattr(ref, "id", "") or ""), ref)
         if ref is None:
+            return None
+        if not requester_can_read_history(message, getattr(ref, "channel", None)):
             return None
         if getattr(ref, "attachments", None) or getattr(ref, "stickers", None):
             return getattr(ref, "id", None)

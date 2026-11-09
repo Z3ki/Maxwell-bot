@@ -106,19 +106,24 @@ class LavalinkBackend:
                 )
             if not getattr(self.bot, 'user', None):
                 raise MusicError('Maxwell is not connected to Discord yet.')
-            self.client = MusicClient(self.bot.user.id, player=ManagedPlayer,
-                                         request_timeout=aiohttp.ClientTimeout(total=15))
-            self.client.music_service = self.service
-            self.client.add_event_hook(self.event)
             try:
                 lavalink_port = int(os.getenv('LAVALINK_PORT', '2333'))
             except (TypeError, ValueError):
-                # A bare ValueError here escapes as an unhandled startup error;
-                # surface it as MusicError so the caller reports it properly.
                 raise MusicError('LAVALINK_PORT must be an integer port.') from None
-            self.node = self.client.add_node(os.getenv('LAVALINK_HOST', '127.0.0.1'),
-                                            lavalink_port, password, 'us',
-                                            name='music', ssl=os.getenv('LAVALINK_TLS', '').lower() == 'true')
+            if not 1 <= lavalink_port <= 65535:
+                raise MusicError('LAVALINK_PORT must be between 1 and 65535.')
+            client = MusicClient(self.bot.user.id, player=ManagedPlayer,
+                                 request_timeout=aiohttp.ClientTimeout(total=15))
+            client.music_service = self.service
+            client.add_event_hook(self.event)
+            try:
+                node = client.add_node(os.getenv('LAVALINK_HOST', '127.0.0.1'),
+                                       lavalink_port, password, 'us',
+                                       name='music', ssl=os.getenv('LAVALINK_TLS', '').lower() == 'true')
+            except BaseException:
+                await client.close()
+                raise
+            self.client, self.node = client, node
             self.bot.add_listener(self.voice_state, 'on_voice_state_update')
             self.bot.add_listener(self.guild_removed, 'on_guild_remove')
 
@@ -172,14 +177,23 @@ class LavalinkBackend:
     async def connect_voice(self, guild, channel, *, timeout=15, self_deaf=True, self_mute=False):
         event = self._voice_events.setdefault(guild.id, asyncio.Event())
         event.clear()
-        await guild.change_voice_state(channel=channel, self_deaf=self_deaf, self_mute=self_mute)
         try:
+            await guild.change_voice_state(channel=channel, self_deaf=self_deaf, self_mute=self_mute)
             async with asyncio.timeout(timeout):
                 await event.wait()
-        except TimeoutError:
-            await guild.change_voice_state(channel=None)
-            await self.destroy(guild.id)
-            raise MusicError('Discord did not establish the voice connection. Check Connect and Speak permissions and try again.') from None
+        except BaseException as exc:
+            # Cancellation and gateway failures can leave a half-connected player
+            # just as a handshake timeout can. Retire it before releasing admission.
+            try:
+                await guild.change_voice_state(channel=None)
+            except Exception as cleanup_error:
+                log.warning('Music voice cleanup failed guild=%s type=%s',
+                            guild.id, type(cleanup_error).__name__)
+            finally:
+                await self.destroy(guild.id)
+            if isinstance(exc, TimeoutError):
+                raise MusicError('Discord did not establish the voice connection. Check Connect and Speak permissions and try again.') from None
+            raise
         finally:
             self._voice_events.pop(guild.id, None)
 
@@ -329,12 +343,14 @@ class LavalinkBackend:
                 log.warning('Music player cleanup failed guild=%s type=%s', gid, type(exc).__name__)
 
     async def leave(self, guild):
-        protocol = getattr(guild, 'voice_client', None)
-        if isinstance(protocol, LavalinkVoiceProtocol):
-            await protocol.disconnect(force=True)
-        else:
-            await guild.change_voice_state(channel=None)
-        await self.destroy(guild.id)
+        try:
+            protocol = getattr(guild, 'voice_client', None)
+            if isinstance(protocol, LavalinkVoiceProtocol):
+                await protocol.disconnect(force=True)
+            else:
+                await guild.change_voice_state(channel=None)
+        finally:
+            await self.destroy(guild.id)
 
     async def close(self):
         self._closed = True

@@ -225,6 +225,58 @@ def extract_assets(html: str, base_url: str, *, limit: int = 24) -> list[str]:
             break
     return seen
 
+def _site_path_prefix(path: str, slug: str) -> str | None:
+    """Public path through /<slug>/, including a deploy prefix before /bot."""
+    if not slug:
+        return None
+    marker = f"/bot/{slug}/"
+    if marker in path:
+        return path[: path.index(marker) + len(marker)]
+    tail = f"/{slug}/"
+    idx = path.rfind(tail)
+    if idx < 0:
+        return None
+    return path[: idx + len(tail)]
+
+
+def _request_origin(url: str) -> tuple[str, str, int] | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not host:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, host, port
+
+
+def _probe_request_allowed(url: str, target: str) -> bool:
+    """Page JS may load the site itself, not the host's other services."""
+    if (url or "").startswith(("about:", "data:", "blob:", "chrome:", "chrome-error:")):
+        return True
+    origin = _request_origin(url)
+    allowed = _request_origin(target)
+    return origin is not None and origin == allowed
+
+
+def _chromium_isolation_flags(url: str) -> tuple[str, ...]:
+    origin = _request_origin(url)
+    if origin is None:
+        return ("--proxy-server=http://127.0.0.1:9",)
+    _scheme, host, _port = origin
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost"):
+        return ()
+    bypass = f"[{host}]" if ":" in host else host
+    return (
+        "--proxy-server=http://127.0.0.1:9",
+        f"--proxy-bypass-list=<-loopback>;{bypass}",
+    )
+
 
 def _asset_relpath(raw: str, slug: str) -> str | None:
     """Map a src/href to a file inside the site directory, or None to skip."""
@@ -233,18 +285,17 @@ def _asset_relpath(raw: str, slug: str) -> str | None:
         return None
     parsed = urlparse(text)
     path = unquote(parsed.path or "")
-    prefix = f"/bot/{slug}/"
+    prefix = _site_path_prefix(path, slug)
     if parsed.scheme in {"http", "https"}:
-        if not slug or not path.startswith(prefix):
+        if prefix is None:
             return None
         rel = path[len(prefix) :]
     elif path.startswith("/"):
         if path.startswith("/api/"):
             return None
-        if slug and path.startswith(prefix):
-            rel = path[len(prefix) :]
-        else:
+        if prefix is None:
             return None
+        rel = path[len(prefix) :]
     else:
         rel = path
     rel = rel.strip("/")
@@ -281,8 +332,8 @@ def missing_local_assets(
 def html_path_for_url(site_dir: str, slug: str, url: str) -> Path:
     """Which file on disk corresponds to the page we are testing."""
     path = urlparse(url).path or "/"
-    prefix = f"/bot/{slug}/"
-    if path.startswith(prefix):
+    prefix = _site_path_prefix(path, slug)
+    if prefix is not None and path.startswith(prefix):
         rel = path[len(prefix) :]
     else:
         rel = ""
@@ -754,6 +805,7 @@ async def _probe_with_chromium(
         "--disable-background-networking",
         "--hide-scrollbars",
         "--window-size=1280,800",
+        f"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE {urlparse(url).hostname or 'localhost'}",
         "--remote-allow-origins=*",
     )
     # Snap Chromium often dies on --headless=new with a private /tmp; the
@@ -765,8 +817,8 @@ async def _probe_with_chromium(
             port = _free_loopback_port()
             proc = await asyncio.create_subprocess_exec(
                 binary,
-                headless,
                 *common_flags,
+                *_chromium_isolation_flags(url),
                 f"--remote-debugging-port={port}",
                 f"--user-data-dir={profile}",
                 "about:blank",
@@ -817,9 +869,12 @@ async def _probe_with_obscura(
             "serve",
             "--port",
             str(port),
-            # Site tests legitimately target loopback (the local site server),
-            # which Obscura blocks by default as SSRF protection.
-            "--allow-private-network",
+            *(
+                ["--allow-private-network"]
+                if (urlparse(url).hostname or "").lower()
+                in {"localhost", "127.0.0.1", "::1"}
+                else []
+            ),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
@@ -889,20 +944,38 @@ async def _cdp_session(
     has_canvas_or_media = False
     session_id: str | None = None
     loaded = asyncio.Event()
+    gate_tasks: set[asyncio.Task] = set()
+    cdp_lock = asyncio.Lock()
 
     async def send(method: str, params: dict | None = None) -> Any:
         nonlocal msg_id
-        msg_id += 1
-        payload: dict[str, Any] = {"id": msg_id, "method": method}
-        if params:
-            payload["params"] = params
-        if session_id:
-            payload["sessionId"] = session_id
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future = loop.create_future()
-        pending[msg_id] = fut
-        await ws.send_str(json.dumps(payload))
-        return await asyncio.wait_for(fut, timeout=20)
+        async with cdp_lock:
+            msg_id += 1
+            payload: dict[str, Any] = {"id": msg_id, "method": method}
+            if params:
+                payload["params"] = params
+            if session_id:
+                payload["sessionId"] = session_id
+            loop = asyncio.get_running_loop()
+            fut: asyncio.Future = loop.create_future()
+            pending[msg_id] = fut
+            await ws.send_str(json.dumps(payload))
+            return await asyncio.wait_for(fut, timeout=20)
+
+    async def gate(request_id: str, req_url: str) -> None:
+        allowed = _probe_request_allowed(req_url, url)
+        if not allowed:
+            note_failed(f"blocked {req_url}")
+        try:
+            if allowed:
+                await send("Fetch.continueRequest", {"requestId": request_id})
+            else:
+                await send(
+                    "Fetch.failRequest",
+                    {"requestId": request_id, "errorReason": "BlockedByClient"},
+                )
+        except Exception:
+            logger.debug("site_test request gate failed", exc_info=True)
 
     def note_failed(item: str) -> None:
         if item.startswith(("data:", "blob:", "chrome:", "chrome-error:", "about:")):
@@ -963,6 +1036,13 @@ async def _cdp_session(
                         console_errors.append(text)
                     else:
                         console_warnings.append(text)
+            elif method == "Fetch.requestPaused":
+                request_id = str(params.get("requestId") or "")
+                req_url = str((params.get("request") or {}).get("url") or "")
+                if request_id:
+                    task = asyncio.create_task(gate(request_id, req_url))
+                    gate_tasks.add(task)
+                    task.add_done_callback(gate_tasks.discard)
             elif method == "Network.requestWillBeSent":
                 req_id = str(params.get("requestId") or "")
                 req_url = str((params.get("request") or {}).get("url") or "")
@@ -1009,6 +1089,11 @@ async def _cdp_session(
             # Obscura has no Log domain; its absence must not abort the probe.
             await send("Log.enable")
         await send("Network.enable")
+        with suppress(Exception):
+            await send(
+                "Fetch.enable",
+                {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]},
+            )
         await send("Page.enable")
         # Install the console recorder BEFORE navigating: an error thrown by an
         # inline script during parse is over before any post-load evaluate.

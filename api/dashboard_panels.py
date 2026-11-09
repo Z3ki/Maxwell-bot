@@ -173,10 +173,16 @@ class Panels:
         if self.storage().quota(uid) <= 0:
             raise web.HTTPForbidden(text="Persistent storage is part of Premium on this bot.")
 
+    def _require_owned_write(self, request, uid: str) -> None:
+        started = self.dashboard.request_started(request)
+        if not self.dashboard.preferences.request_allowed(uid, started):
+            raise ValueError("Personal data was deleted. Make a new dashboard sign-in link.")
+
     async def upload(self, request, session):
         from plugins.user_storage.store import StorageError
 
         uid = self.uid(session)
+        await asyncio.to_thread(self._require_owned_write, request, uid)
         await asyncio.to_thread(self._require_space, uid)
         path = request.query.get("path", "")
         if request.content_length is not None and request.content_length > UPLOAD_LIMIT:
@@ -198,6 +204,7 @@ class Panels:
         from plugins.user_storage.store import StorageError
 
         uid = self.uid(session)
+        await asyncio.to_thread(self._require_owned_write, request, uid)
         await asyncio.to_thread(self._require_space, uid)
         body = await self._json(request)
         try:
@@ -210,6 +217,7 @@ class Panels:
         from plugins.user_storage.store import StorageError
 
         uid = self.uid(session)
+        await asyncio.to_thread(self._require_owned_write, request, uid)
         body = await self._json(request)
         try:
             await asyncio.to_thread(
@@ -266,6 +274,7 @@ class Panels:
         from plugins.user_storage.store import StorageError
 
         uid = self.uid(session)
+        await asyncio.to_thread(self._require_owned_write, request, uid)
         await asyncio.to_thread(self._require_space, uid)
         body = await self._json(request)
         try:
@@ -402,6 +411,8 @@ class Panels:
 
         uid = self.uid(session)
         try:
+            if request.method != "GET":
+                await asyncio.to_thread(self._require_owned_write, request, uid)
             if request.method == "POST":
                 body = await self._json(request)
                 await asyncio.to_thread(self._create, uid, body)

@@ -4,6 +4,7 @@ Split out of bot.py; methods keep their original bodies.
 """
 
 import bot_common as _common
+from context_hydration import requester_can_read_history
 
 # Mechanical split: the methods below were written against bot.py's
 # module globals. Bind every shared name so the bodies run unchanged.
@@ -74,6 +75,8 @@ class MessageUpdatesMixin:
             or "unknown"
         )
         with contextlib.suppress(Exception):
+            if str(getattr(author, "id", "")).isdigit():
+                author.id = int(author.id)
             author.bot = bot_flag
             if not getattr(author, "display_name", None):
                 author.display_name = display
@@ -106,7 +109,12 @@ class MessageUpdatesMixin:
         if previous is None:
             for state in self._inflight_for_message(message_id):
                 candidate = state.get("message")
-                if candidate is not None:
+                # A turn may list this id only because it replied to it.
+                # That root is a different message and must not fill this update.
+                if (
+                    candidate is not None
+                    and str(getattr(candidate, "id", "") or "") == message_id
+                ):
                     previous = candidate
                     break
         resolved = None
@@ -168,6 +176,25 @@ class MessageUpdatesMixin:
             stickers = self._raw_update_namespace(data.get("stickers") or [])
         else:
             stickers = list(getattr(previous, "stickers", None) or [])
+        reference = _field("reference")
+        if "message_reference" in data:
+            raw_reference = data.get("message_reference")
+            reference = self._raw_update_namespace(raw_reference) if raw_reference else None
+            if reference is not None:
+                reference.type = SimpleNamespace(
+                    name="forward" if raw_reference.get("type") == 1 else "default"
+                )
+                old_reference = getattr(previous, "reference", None)
+                reference.resolved = (
+                    getattr(old_reference, "resolved", None)
+                    if str(getattr(old_reference, "message_id", "")) == str(getattr(reference, "message_id", ""))
+                    else None
+                )
+        created_at = getattr(previous, "created_at", None)
+        if created_at is None:
+            created_at = _coerce_utc_datetime(data.get("timestamp"))
+        if created_at is None and message_id.isdigit():
+            created_at = discord.utils.snowflake_time(int(message_id))
         snapshot = SimpleNamespace(
             id=message_id,
             channel=channel
@@ -178,17 +205,29 @@ class MessageUpdatesMixin:
             embeds=embeds,
             attachments=attachments,
             stickers=stickers,
-            mentions=_field("mentions", []) or [],
+            mentions=[self._coerce_raw_author(user) for user in (_field("mentions", []) or [])],
             role_mentions=_field("role_mentions", []) or [],
+            raw_role_mentions=[
+                int(value) if str(value).isdigit() else value
+                for value in (
+                    (data.get("mention_roles") or [])
+                    if "mention_roles" in data
+                    else (getattr(previous, "raw_role_mentions", None) or [])
+                )
+            ],
             mention_everyone=bool(_field("mention_everyone", False)),
-            reference=_field("reference"),
+            reference=reference,
+            created_at=created_at,
+            type=getattr(previous, "type", None),
             components=_field("components", []) or [],
             poll=_field("poll"),
             message_snapshots=_field("message_snapshots") or _field("snapshots") or [],
         )
         donors = [cached, previous]
         donors.extend(
-            state.get("message") for state in self._inflight_for_message(message_id)
+            state.get("message")
+            for state in self._inflight_for_message(message_id)
+            if str(getattr(state.get("message"), "id", "") or "") == message_id
         )
         return preserve_message_delivery(snapshot, *donors)
 
@@ -419,8 +458,7 @@ class MessageUpdatesMixin:
         if not callable(fetch) or message_id is None:
             # Cached Message objects can be updated in place by discord.py while
             # this coroutine yields, so the caller still re-reads its fields.
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.sleep(min(0.25, LATE_EMBED_WAIT_SECONDS))
+            await asyncio.sleep(min(0.25, LATE_EMBED_WAIT_SECONDS))
             return message
         try:
             await asyncio.sleep(min(0.25, LATE_EMBED_WAIT_SECONDS))
@@ -460,20 +498,34 @@ class MessageUpdatesMixin:
         # Keep the live message's reply() so send_media and the final answer
         # still post into the same DM or channel.
         latest = preserve_message_delivery(latest, message, state.get("message"))
+        reference = getattr(latest, "reference", None)
+        if reference is not None:
+            parent = self._reply_parent(latest)
+            if parent is not None:
+                reference.resolved = parent
+        await hydrate_turn_context(self, latest)
         message = latest
         content = str(getattr(latest, "content", "") or "")
         media = list(latest_media)
+        history_allowed = requester_can_read_history(latest)
+        if not history_allowed:
+            root_id = str(getattr(latest, "id", "") or "")
+            media = [
+                item for item in media
+                if str(item.get("message_id", "")) == root_id
+                or item.get("source") == "emoji_grid"
+            ]
         current_images = [item for item in media if item.get("is_image")]
         channel_id = str(getattr(getattr(latest, "channel", None), "id", "") or "")
         cached_media = []
         reply_media_id = self._reply_media_message_id(
             latest, getattr(self, "_message_snapshots", None)
         )
-        if reply_media_id is not None:
+        if history_allowed and reply_media_id is not None:
             cached_media = self._get_media_context(
                 channel_id, message_id=reply_media_id
             )
-        elif self._should_use_cached_media_context(latest, content) and (
+        elif history_allowed and self._should_use_cached_media_context(latest, content) and (
             not current_images or self._should_mix_cached_with_current(content)
         ):
             cached_media = self._get_media_context(channel_id)
@@ -483,7 +535,7 @@ class MessageUpdatesMixin:
         state["content"] = content
         state["media"] = list(media)
         state["active_media"] = list(active_media)
-        state["seen_version"] = state.get("version", 0)
+        state["seen_version"] = refresh_version
         messages = await self._build_messages(
             latest,
             content,
@@ -565,6 +617,11 @@ class MessageUpdatesMixin:
 
         media: list[dict] = []
         media_changed = previous is None or previous[1] != media_fp
+        refreshed_embed_text = (
+            await self._extract_embeds(message, include_binary=False)
+            if not media_changed and self._inflight_for_message(mid)
+            else []
+        )
         media_refresh_ok = True
         if media_changed:
             try:
@@ -613,6 +670,14 @@ class MessageUpdatesMixin:
 
         for state in self._inflight_for_message(mid):
             state_media = list(state.get("media") or [])
+            if not media_changed:
+                state_media = [
+                    item for item in state_media
+                    if not (item.get("is_text") and item.get("source") == "embed"
+                            and str(item.get("message_id", "")) == mid)
+                ]
+                state_media.extend(refreshed_embed_text)
+                state["media"] = state_media
             is_root = mid == str(state.get("root_message_id") or "")
             if is_root:
                 if media_changed and media_refresh_ok:
@@ -622,7 +687,7 @@ class MessageUpdatesMixin:
                 state["content"] = str(getattr(message, "content", "") or "")
                 state["latest_message"] = message
                 state["latest_content"] = state["content"]
-                state["latest_media"] = list(state.get("media") or state_media)
+                state["latest_media"] = list(state.get("media") or [])
             else:
                 # A reply's parent is part of the in-flight context, but it
                 # must not replace the message Maxwell is answering. Refresh
@@ -639,7 +704,7 @@ class MessageUpdatesMixin:
                     state["media"] = state_media
                 state["latest_message"] = state.get("message")
                 state["latest_content"] = state.get("content", "")
-                state["latest_media"] = list(state.get("media") or state_media)
+                state["latest_media"] = list(state.get("media") or [])
             state["version"] = int(state.get("version", 0)) + 1
             event = state.get("update_event")
             if event is not None:
@@ -691,10 +756,19 @@ class MessageUpdatesMixin:
         journal = getattr(self, "_request_journal", None)
         if journal is None or self.user is None:
             return
-        if self.user not in (getattr(after, "mentions", None) or []):
+        get_self_ids = getattr(self, "_self_ids", None)
+        self_ids = {str(uid) for uid in get_self_ids()} if callable(get_self_ids) else set()
+        self_ids.add(str(self.user.id))
+        after_mentions = {
+            str(getattr(user, "id", "")) for user in (getattr(after, "mentions", None) or [])
+        }
+        if not self_ids.intersection(after_mentions):
             return
+        before_mentions = {
+            str(getattr(user, "id", "")) for user in (getattr(before, "mentions", None) or [])
+        }
         if before is not None and (
-            self.user in (getattr(before, "mentions", None) or [])
+            self_ids.intersection(before_mentions)
             or getattr(before, "content", "") == getattr(after, "content", "")
         ):
             return

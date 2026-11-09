@@ -535,6 +535,10 @@ def test_tool_dispatch_never_consumes_shared_state():
         "https://169.254.169.254/v1",
         "https://[::1]/v1",
         "https://[::ffff:127.0.0.1]/v1",
+        "https://224.0.0.1/v1",
+        "https://[ff02::1]/v1",
+        "https://[fec0::1]/v1",
+        "https://[64:ff9b::7f00:1]/v1",
         "https://user:password@example.test/v1",
     ],
 )
@@ -542,6 +546,24 @@ def test_public_policy_rejects_unsafe_urls_before_any_session(url):
     with pytest.raises(ValueError):
         openai_compat_provider(
             base_url=url, model="m", policy=ProviderPolicy(public_network_only=True)
+        )
+
+
+@pytest.mark.parametrize(
+    "alternate",
+    [
+        {"fallback_base_url": "https://127.0.0.1/v1", "fallback_model": "backup"},
+        {"vision_base_url": "https://[64:ff9b::7f00:1]/v1", "vision_model": "vision"},
+    ],
+)
+def test_public_policy_checks_legacy_alternate_literals_before_session(alternate):
+    with pytest.raises(ValueError, match="public"):
+        OpenAICompatibleProvider(
+            "https://example.test/v1",
+            "primary",
+            100,
+            policy=ProviderPolicy(public_network_only=True),
+            **alternate,
         )
 
 

@@ -142,9 +142,11 @@ class GuildEventsMixin:
         opening line so Maxwell is present in the new room and it lands in his
         memory / conversation-watch scope (his own posts go through the normal
         memory path). Fire-and-forget: never raises, never blocks a turn. Gated
-        by the server's ticket-greeting setting, ``bot_enabled``, and the bot
-        actually having send permission in the channel.
+        by the server's ticket-greeting setting, ``bot_enabled``, channel scope
+        controls, and the bot having view and send permission in the channel.
         """
+        if getattr(self, "_draining", False):
+            return
         if not MaxwellBot._dev_scope_allows(self, channel):
             return
         try:
@@ -152,6 +154,12 @@ class GuildEventsMixin:
         except Exception:
             return
         if not self._control.get("bot_enabled", True):
+            return
+        channel_id = str(getattr(channel, "id", "") or "")
+        if channel_id in set(self._control.get("blocked_channels", []) or []):
+            return
+        allowed = set(self._control.get("allowed_channels", []) or [])
+        if allowed and channel_id not in allowed:
             return
         # Only real text channels can be greeted. Voice/category/stage/forum
         # events are observation-only, never a place to post a line. Guard with
@@ -192,7 +200,9 @@ class GuildEventsMixin:
             perms = channel.permissions_for(me)
         except Exception:
             return
-        if not getattr(perms, "send_messages", False):
+        if not getattr(perms, "view_channel", False) or not getattr(
+            perms, "send_messages", False
+        ):
             return
         try:
             await channel.send(

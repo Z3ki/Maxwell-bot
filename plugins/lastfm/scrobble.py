@@ -202,10 +202,17 @@ class ScrobbleManager:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='lastfm-outbox')
         try:
             self._counts = await self._disk(self._store.open)
-        except Exception:
-            await self._disk(self._store.close)
-            self._executor.shutdown(wait=False)
-            self._executor = None
+        except BaseException as exc:
+            # The disk thread can finish opening after its awaiter is cancelled.
+            # Queue close behind it before dropping the executor reference.
+            try:
+                await self._disk(self._store.close)
+            finally:
+                self._executor.shutdown(wait=False)
+                self._executor = None
+                self._started = False
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError('Last.fm listening storage could not be opened.') from None
         self.music.playback_observer = self._observer
         self._worker = asyncio.create_task(self._run(), name='lastfm-scrobble-worker')

@@ -159,6 +159,31 @@ def test_signed_links_expire_and_bind_path(tmp_path, monkeypatch):
     run(go())
 
 
+def test_signed_download_does_not_negotiate_unsigned_compressed_sibling(tmp_path, monkeypatch):
+    import gzip
+
+    async def go():
+        async with client_for(tmp_path, monkeypatch) as (client, storage):
+            storage.write(UID, "private/report.txt", b"shared report")
+            storage.write(UID, "private/report.txt.gz", gzip.compress(b"unshared private report"))
+            sig, expires = storage.sign(UID, "private/report.txt", ttl=3600)
+            url = f"/u/_s/{UID}/{expires}/{sig}/private/report.txt"
+            for method in ("GET", "HEAD"):
+                response = await client.request(method, url, headers={"Accept-Encoding": "gzip, br"})
+                assert response.status == 200
+                assert "Content-Encoding" not in response.headers
+                assert response.headers["Content-Length"] == str(len(b"shared report"))
+                if method == "GET":
+                    assert await response.read() == b"shared report"
+            response = await client.get(
+                url, headers={"Accept-Encoding": "gzip", "Range": "bytes=0-5"}
+            )
+            assert response.status == 206
+            assert await response.read() == b"shared"
+
+    run(go())
+
+
 def test_shim_lands_after_head_without_breaking_doctype():
     assert inject_shim(b"<!DOCTYPE html><p>x").startswith(b"<!DOCTYPE html><script>")
     assert inject_shim(b"<p>bare</p>").startswith(b"<script>")

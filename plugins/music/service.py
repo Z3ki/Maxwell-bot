@@ -41,7 +41,7 @@ def identifier(query: str) -> str:
         url = urlsplit(query if '://' in query else 'https://' + query)
         # urlsplit() tolerates a malformed/out-of-range port; reading .port
         # raises a bare ValueError that is not a MusicError.
-        has_port = bool(url.port)
+        has_port = url.port is not None
         hostname = url.hostname
     except ValueError:
         raise MusicError(

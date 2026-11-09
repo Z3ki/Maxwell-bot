@@ -40,3 +40,14 @@ def test_reported_files_respect_tool_authorization(tmp_path, gate_result, expect
     jobs = TaskJobs(bot, tmp_path / "jobs.sqlite3")
     asyncio.run(jobs._send_reported_files(_job()))
     assert sent == expected
+
+
+def test_reported_files_refuse_when_authorization_is_unavailable(tmp_path):
+    sent = []
+    tool = FakeTool(sent)
+    bot = SimpleNamespace(tools={"send_file": tool})
+    jobs = TaskJobs(bot, tmp_path / "jobs.sqlite3")
+    job = _job()
+    asyncio.run(jobs._send_reported_files(job))
+    assert sent == []
+    assert job.unsent == ["/workspace/chart.png"]

@@ -73,3 +73,18 @@ def test_night_fallback_is_disabled_without_a_configured_fallback(monkeypatch):
     assert bot._night_fallback_active() is False
     asyncio.run(bot._generate_response([{"role": "user", "content": "hi"}]))
     assert "prefer_fallback" not in bot.ai_provider.kwargs
+
+
+def test_personal_provider_does_not_inherit_nightly_operator_routing(monkeypatch):
+    bot = _make_bot()
+    personal = _FakeProvider()
+    monkeypatch.setattr(
+        bot_mod.time, "localtime", lambda: SimpleNamespace(tm_hour=23)
+    )
+    result = asyncio.run(bot._generate_response(
+        [{"role": "user", "content": "personal request"}],
+        provider=personal, prefer_fallback=True,
+    ))
+    assert result == "ok"
+    assert "prefer_fallback" not in personal.kwargs
+    assert bot.ai_provider.kwargs is None

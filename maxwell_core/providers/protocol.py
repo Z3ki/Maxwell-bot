@@ -1,5 +1,6 @@
 """Validate chat envelopes before output can reach the tool dispatcher."""
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -93,6 +94,23 @@ def _validate_tool_fields(call: dict) -> None:
         raise ProviderProtocolError("Provider returned invalid tool arguments")
 
 
+def _validate_complete_tool_arguments(tool_calls: list[dict]) -> None:
+    """Reject native calls whose arguments were cut off at the output limit."""
+    for call in tool_calls:
+        arguments = (call.get("function") or {}).get("arguments")
+        if arguments is None or arguments == "":
+            continue
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                raise ProviderProtocolError(
+                    "Provider truncated a native tool call"
+                ) from None
+        if not isinstance(arguments, dict):
+            raise ProviderProtocolError("Provider truncated a native tool call")
+
+
 def normalize_completion_message(choices) -> dict:
     """Normalize the first non-streamed message without mutating its envelope.
 
@@ -112,7 +130,7 @@ def normalize_completion_message(choices) -> dict:
     elif isinstance(content, list):
         content = "".join(
             str(part.get("text") or "")
-            if isinstance(part, dict)
+            if isinstance(part, dict) and part.get("type") == "text"
             else part
             if isinstance(part, str)
             else ""
@@ -131,4 +149,6 @@ def normalize_completion_message(choices) -> dict:
         raise ProviderProtocolError("Provider returned invalid completion tool calls")
     for call in tool_calls or []:
         _validate_tool_fields(call)
+    if choices[0].get("finish_reason") == "length":
+        _validate_complete_tool_arguments(tool_calls or [])
     return message

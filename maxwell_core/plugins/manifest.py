@@ -212,7 +212,7 @@ def validate_manifest(
     api_version = data.get("api_version", data.get("plugin_api", PLUGIN_API_VERSION))
     try:
         api_version_i = int(api_version)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ManifestError(
             f"api_version must be an integer (got {api_version!r})", path=path
         ) from exc
@@ -226,7 +226,7 @@ def validate_manifest(
     spec_version = data.get("manifest_version", data.get("spec_version", MANIFEST_SPEC_VERSION))
     try:
         spec_version_i = int(spec_version)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ManifestError("manifest_version must be an integer", path=path) from None
     if spec_version_i != MANIFEST_SPEC_VERSION:
         raise ManifestError(f"unsupported manifest version {spec_version_i}", path=path)
@@ -259,6 +259,22 @@ def validate_manifest(
     enabled = _as_bool(
         data.get("enabled_by_default", data.get("enabled_globally")), False
     )
+    capabilities = {}
+    for field_name, alias in (
+        ("required_capabilities", "requires"),
+        ("provided_capabilities", "provides"),
+        ("permissions", "requested_permissions"),
+    ):
+        try:
+            value = data.get(field_name) or data.get(alias)
+            if value is not None and not isinstance(value, (str, list, tuple, set)):
+                raise TypeError("capabilities must be a string or a list")
+            capabilities[field_name] = normalize_capabilities(value)
+        except (TypeError, ValueError) as exc:
+            raise ManifestError(
+                f"{field_name} must be a string or a list of capability names",
+                path=path,
+            ) from exc
     return PluginManifest(
         spec_version=spec_version_i,
         id=plugin_id,
@@ -273,15 +289,9 @@ def validate_manifest(
             data.get("optional_dependencies") or data.get("optional_python")
         ),
         required_features=_as_str_list(data.get("required_features")),
-        required_capabilities=normalize_capabilities(
-            data.get("required_capabilities") or data.get("requires")
-        ),
-        provided_capabilities=normalize_capabilities(
-            data.get("provided_capabilities") or data.get("provides")
-        ),
-        permissions=normalize_capabilities(
-            data.get("permissions") or data.get("requested_permissions")
-        ),
+        required_capabilities=capabilities["required_capabilities"],
+        provided_capabilities=capabilities["provided_capabilities"],
+        permissions=capabilities["permissions"],
         config_schema=_as_str_map(data.get("config_schema")),
         default_config=_as_str_map(data.get("default_config") or data.get("config")),
         platforms=_as_str_list(data.get("platforms") or data.get("supported_platforms"))
@@ -306,7 +316,7 @@ def load_manifest_file(path: Path, *, directory_name: str) -> PluginManifest:
         raise ManifestError(
             f"invalid JSON in {path}: {exc}", path=path
         ) from exc
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise ManifestError(f"cannot read {path}: {exc}", path=path) from exc
     if not isinstance(raw, dict):
         raise ManifestError("plugin.json must be a JSON object", path=path)

@@ -450,3 +450,87 @@ os.link = cross_mount_link""", 1)
             assert TOKEN.encode() not in path.read_bytes()
             assert encoded not in path.read_bytes()
     assert not list(storage.glob("maxwell-git-*"))
+
+
+def test_git_command_deadline_includes_wait_after_output_pipes_close(monkeypatch):
+    import io
+
+    namespace = {}
+    exec(GIT_SCRIPT.rsplit("raise SystemExit(main())", 1)[0], namespace)
+    events = []
+
+    class Process:
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("fixture", timeout)
+            return -9
+
+        def kill(self):
+            events.append(("kill", None))
+
+    class Selector:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def register(self, *_args):
+            return None
+
+        def get_map(self):
+            # Both child pipes have already reached EOF.
+            return {}
+
+    monkeypatch.setattr(namespace["subprocess"], "Popen", lambda *_a, **_k: Process())
+    monkeypatch.setattr(namespace["selectors"], "DefaultSelector", Selector)
+    with pytest.raises(subprocess.TimeoutExpired):
+        namespace["command"](["fixture"], ".", {})
+    assert events[0][0] == "wait" and 0 < events[0][1] <= 1500
+    assert events[1:] == [("kill", None), ("wait", None)]
+
+
+@pytest.mark.parametrize("operation", ["inspect", "git"])
+def test_sidecar_bind_source_is_not_a_racing_guest_repository_path(
+    tmp_path, monkeypatch, operation,
+):
+    service = GitHubProjectService(SimpleNamespace(), SimpleNamespace(data_dir=tmp_path / "plugin"))
+    worktree = service.repo_root("1", "acme/app")
+    worktree.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    calls = []
+
+    async def image():
+        return None
+
+    async def process(*args, **kwargs):
+        calls.append(args)
+        # Model a guest replacing the checkout immediately before Docker
+        # resolves its bind source. Only a stable per-user mount is safe here.
+        worktree.rmdir()
+        worktree.symlink_to(outside, target_is_directory=True)
+        source = args[args.index("-v") + 1].rsplit(":", 2)[0]
+        assert Path(source).resolve() == service.user_root("1")
+        assert args[-2] == "/workspace/repos/acme/app"
+        return ExecResult(0, "synthetic-safe-sidecar-result", "")
+
+    monkeypatch.setattr(service, "_ensure_image", image)
+    monkeypatch.setattr(service, "_proc", process)
+    monkeypatch.setattr(service, "token", lambda *_args: TOKEN)
+
+    async def scenario():
+        if operation == "inspect":
+            result = await service.inspect_repository("1", "acme/app", "status")
+        else:
+            result = await service._trusted_git(
+                "1", "acme/app", {}, [["status", "--short", "--branch"]],
+            )
+        assert result.stdout == "synthetic-safe-sidecar-result"
+
+    asyncio.run(scenario())
+    assert len(calls) == 1

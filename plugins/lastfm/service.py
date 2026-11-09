@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import time
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -127,10 +128,16 @@ class LastFmService:
 
     def _load(self):
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.path.parent.is_symlink():
+            raise ValueError('Last.fm storage must be a private directory.')
         os.chmod(self.path.parent, 0o700)
-        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
-        os.close(descriptor)
-        os.chmod(self.path, 0o600)
+        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError('Last.fm storage must be a regular file.')
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
         db = self._db()
         try:
             for table in ('accounts', 'pending'):

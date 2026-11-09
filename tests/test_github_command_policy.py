@@ -129,12 +129,8 @@ def test_opt_in_preserves_custom_command_text_and_execution(workspace, action):
         assert not result.startswith("Error:")
         executed = [args for args, _ in calls if args[:2] == ("docker", "exec")]
         assert len(executed) == 1
-        # The command text stays verbatim inside the timeout bootstrap that
-        # records the guest pid for cleanup.
-        assert executed[0][-3:-1] == ("bash", "-lc")
-        script = executed[0][-1]
-        assert script.startswith("echo $$ > ")
-        assert script.endswith(command + "\n")
+        assert executed[0][-3:-1] == ("simulated-container", "bash")
+        assert executed[0][-1] == command
 
     asyncio.run(scenario())
 
@@ -178,7 +174,7 @@ def test_read_only_inspection_uses_isolated_container_without_opt_in(workspace, 
         assert args[args.index("--network") + 1] == "none"
         assert (
             args[args.index("-v") + 1]
-            == f"{service.repo_root('1', 'acme/app')}:/repository:ro"
+            == f"{service.user_root('1')}:/workspace:ro"
         )
         assert args[args.index("--workdir") + 1] == "/tmp"
         assert args[args.index("python3") + 1 : args.index("python3") + 3] == (

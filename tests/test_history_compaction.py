@@ -155,3 +155,17 @@ def test_remote_send_receipt_is_not_replayed_as_a_reply_in_this_channel():
     cleaned = canonical_history([row], "1", {"Maxwell"}, channel_id="here")
     assert cleaned[0]["is_tool"]
     assert cleaned[0]["content"] == "send_message to other: __MESSAGE_SENT__"
+
+
+def test_legacy_send_conversion_does_not_restore_encoded_media_from_tool_result():
+    for kind in ("IMAGE", "AUDIO"):
+        payload = f"__{kind}_B64__PRIVATE_BINARY__END_{kind}_B64__"
+        row = tool_row(f"Here is the result.\n{payload}")
+        before = copy.deepcopy(row)
+        cleaned = canonical_history([row], "1", {"Maxwell"})
+        assert len(cleaned) == 1
+        assert cleaned[0]["content"] == (
+            f"Here is the result.\n[{kind.lower()} payload omitted]"
+        )
+        assert "PRIVATE_BINARY" not in cleaned[0]["content"]
+        assert row == before

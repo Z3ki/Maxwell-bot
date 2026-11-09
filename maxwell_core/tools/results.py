@@ -37,6 +37,8 @@ _PROMISE_MAX_CHARS = 200
 
 _SHORT_FOLLOWUP_AFTER_SEND_CHARS = 200
 
+_MESSAGE_SENT_PREFIX = "Tool send_message: __MESSAGE_SENT__"
+
 
 # A negated promise verb is a refusal, not a plan: "I'm not going to create
 # that site." must not force another model turn. Checked per clause so
@@ -55,10 +57,9 @@ def _promises_followup_work(result: str) -> bool:
     The turn must loop back so the announced work actually happens. Anything
     long enough to be a substantive reply is treated as a real answer.
     """
-    idx = result.find("__MESSAGE_SENT__")
-    if idx < 0:
+    if not result.startswith(_MESSAGE_SENT_PREFIX):
         return False
-    sent = result[idx + len("__MESSAGE_SENT__") :].strip()
+    sent = result[len(_MESSAGE_SENT_PREFIX) :].strip()
     if not sent or len(sent) > _PROMISE_MAX_CHARS:
         return False
     for clause in re.split(r"[.!?;\n,—–]+", sent):
@@ -74,12 +75,11 @@ def _promises_followup_work(result: str) -> bool:
 
 
 def _plugin_result_needs_followup(result: str) -> bool:
-    """Whether a tool result came from a plugin tool that returns output.
+    """Whether the named tool's current contract returns output.
 
-    Plugin tool names are discovered at import time, so they cannot be in the
-    static FOLLOWUP_TOOL_NAMES set. Without this check a plugin that looked
-    something up had its output collected and then discarded when the dispatch
-    loop broke — the model never saw what it asked for.
+    The schema helper handles both live registrations and legacy catalog
+    entries. A live silent/ending declaration must override a static result
+    name, just as it does in the schema shown to the model.
     """
     if not result.startswith("Tool "):
         return False
@@ -93,8 +93,7 @@ def _tts_result(result: str) -> bool:
     The model uses an error to fix the voice or the line. A success already
     played in the channel, and feeding it back makes another clip.
     """
-    text = str(result or "")
-    return text.startswith("Tool tts:") and "__TTS_SENT__" in text
+    return str(result or "").startswith("Tool tts: __TTS_SENT__")
 
 
 def _tool_results_need_followup(tool_results: list[str]) -> bool:
@@ -122,9 +121,7 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
             )
         ):
             return True
-        if any(result.startswith(f"Tool {name}:") for name in FOLLOWUP_TOOL_NAMES):
-            has_followup_signal = True
-        elif _plugin_result_needs_followup(result):
+        if _plugin_result_needs_followup(result):
             has_followup_signal = True
     if has_followup_signal:
         return True
@@ -132,7 +129,7 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
     # Second pass: no follow-up tool in the batch, so a terminal action
     # (send_message or explicit no_response) genuinely ends the turn.
     for result in tool_results:
-        if "__MESSAGE_SENT__" in result:
+        if result.startswith(_MESSAGE_SENT_PREFIX):
             # A send_message that only promises future work is NOT terminal.
             # The protocol tells the model not to ack, but it still emits
             # "on it…" alone and plans to act "next turn". There is no next
@@ -143,7 +140,7 @@ def _tool_results_need_followup(tool_results: list[str]) -> bool:
             if _promises_followup_work(result):
                 return True
             return False
-        if result.startswith("Tool no_response:") and "__NO_RESPONSE__" in result:
+        if result.startswith("Tool no_response: __NO_RESPONSE__"):
             return False
 
     return False
@@ -157,7 +154,7 @@ def _only_promise_results(tool_results: list[str]) -> bool:
     """
     saw_promise = False
     for result in tool_results:
-        if "__MESSAGE_SENT__" in result:
+        if result.startswith(_MESSAGE_SENT_PREFIX):
             if not _promises_followup_work(result):
                 return False
             saw_promise = True
@@ -167,36 +164,33 @@ def _only_promise_results(tool_results: list[str]) -> bool:
     return saw_promise
 
 
-_VISIBLE_RESULT_MARKERS = (
-    "__REACTION_SENT__",
-    "__GIF_SENT__",
-    "__MESSAGE_SENT__",
-    "__FILE_SENT__",
-    "__MEDIA_SENT__",
-    "__MEME_SENT__",
-    "__POLL_SENT__",
-    "__TTS_SENT__",
+_VISIBLE_RESULT_PREFIXES = (
+    "Tool react: __REACTION_SENT__",
+    "Tool send_gif: __GIF_SENT__",
+    _MESSAGE_SENT_PREFIX,
+    "Tool send_file: __FILE_SENT__",
+    "Tool send_media: __MEDIA_SENT__",
+    "Tool send_meme: __MEME_SENT__",
+    "Tool create_poll: __POLL_SENT__",
+    "Tool tts: __TTS_SENT__",
+    "Tool send_rich_message: Sent rich embed message.",
+    "Tool send_rich_message: Sent Components V2 rich message.",
+    "Tool send_rich_message: Sent plain-text fallback message (rich messages were unavailable).",
+    "Tool create_poll: Poll created",
 )
 
 
 def _turn_sent_message(tool_results: list[str] | None) -> bool:
-    """True when a tool already delivered the user-visible result this turn."""
-    for tr in tool_results or []:
-        text = str(tr or "")
-        if any(marker in text for marker in _VISIBLE_RESULT_MARKERS):
-            return True
-        lowered = text.lower()
-        if "tool send_rich_message:" in lowered and not lowered.startswith(
-            ("tool send_rich_message: error",)
-        ):
-            if "error" not in lowered.split(":", 1)[-1][:12]:
-                return True
-        if (
-            "tool create_poll:" in lowered
-            and "error" not in lowered.split(":", 1)[-1][:12]
-        ):
-            return True
-    return False
+    """True only for a delivery acknowledgement from its owning tool.
+
+    Fetched pages, shell output and error details are untrusted data, even
+    when they quote a delivery marker or a complete ``Tool ...:`` result.
+    """
+    return any(
+        str(result or "").startswith(_VISIBLE_RESULT_PREFIXES)
+        or re.match(r"^Tool send_rich_message: Sent [1-9]\d* plain-text fallback messages,", str(result or "")) is not None
+        for result in tool_results or []
+    )
 
 
 def _is_short_plaintext_followup(response: str) -> bool:

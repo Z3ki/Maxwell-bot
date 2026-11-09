@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from maxwell_core.providers.errors import ProviderUnavailableError
+from maxwell_core.providers.errors import (
+    ProviderMediaUnsupportedError,
+    ProviderUnavailableError,
+)
 from maxwell_core.providers.models import ProviderPolicy
 from providers import OpenAICompatibleProvider
 
@@ -93,6 +96,24 @@ def test_completion_parts_are_normalized_consistently_without_mutating_source():
     assert raw == before
 
 
+@pytest.mark.parametrize("hidden_type", ["reasoning", "thinking", "redacted_thinking"])
+def test_nonstream_content_parts_do_not_promote_private_reasoning(hidden_type):
+    raw = completion({
+        "role": "assistant",
+        "content": [
+            {"type": hidden_type, "text": "private scratchpad"},
+            {"type": "text", "text": "public answer"},
+        ],
+    })
+    before = copy.deepcopy(raw)
+    provider = client(Response(raw))
+    result = asyncio.run(provider.generate_response([], stream=False))
+    assert result.content == "public answer"
+    assert result.assistant_message["content"] == "public answer"
+    assert result.timing["content_chars"] == len("public answer")
+    assert raw == before
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -165,6 +186,47 @@ def test_byok_explicit_stream_request_scrubs_json_and_skips_progress_callbacks()
     assert result["tool_calls"][0]["extra_content"]["credential"] == "[redacted]"
     assert not tokens
     assert provider._session.requests[0][1]["stream"] is False
+
+
+@pytest.mark.parametrize("double_encoded", [False, True])
+def test_byok_scrubs_escaped_credentials_before_tool_argument_decoding(double_encoded):
+    from tool_schemas import normalize_native_tool_calls
+
+    credential = "private-token"
+    escaped = "".join(f"\\u{ord(char):04x}" for char in credential)
+    arguments = '{"content":"' + escaped + '"}'
+    if double_encoded:
+        arguments = json.dumps(arguments)
+    payload = completion({
+        "content": "",
+        "tool_calls": [{
+            "id": "call",
+            "type": "function",
+            "function": {"name": "send_message", "arguments": arguments},
+        }],
+    })
+    before = copy.deepcopy(payload)
+    provider = client(
+        Response(payload),
+        policy=ProviderPolicy(sensitive_credentials=True),
+        api_key=credential,
+    )
+    result = asyncio.run(provider.generate_response([], stream=False))
+    calls = normalize_native_tool_calls(result.tool_calls)
+    assert calls[0]["arguments"]["content"] == "[redacted]"
+    assert payload == before
+
+
+def test_byok_scrubs_escaped_credentials_in_reply_envelopes():
+    credential = "private-token"
+    escaped = "".join(f"\\u{ord(char):04x}" for char in credential)
+    provider = client(
+        Response(completion({"content": '{"text":"' + escaped + '"}'})),
+        policy=ProviderPolicy(sensitive_credentials=True),
+        api_key=credential,
+    )
+    result = asyncio.run(provider.generate_response([], stream=False))
+    assert json.loads(result.content)["text"] == "[redacted]"
 
 
 def test_failed_stream_falls_back_without_returning_partial_tools_or_crossing_keys(
@@ -285,3 +347,100 @@ def test_context_recovery_clamp_is_not_carried_to_larger_fallback():
     assert requests[1][1]["max_tokens"] < 340
     assert requests[2][0].startswith("https://fallback.test")
     assert requests[2][1]["max_tokens"] == 4096
+
+
+@pytest.mark.parametrize("arguments", ['{"content":"half', '["not an object"]'])
+def test_nonstream_length_truncated_native_tool_is_not_returned(arguments):
+    payload = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "truncated",
+                    "type": "function",
+                    "function": {"name": "send_message", "arguments": arguments},
+                }],
+            },
+        }],
+    }
+    provider = client(Response(payload))
+    with pytest.raises(ProviderUnavailableError, match="truncated a native tool"):
+        asyncio.run(provider.generate_response([], stream=False))
+    assert len(provider._session.requests) == 1
+    assert not provider._timing_history
+
+
+@pytest.mark.parametrize("arguments", ['{"content":"complete"}', {"content": "complete"}])
+def test_nonstream_length_finished_native_tool_remains_usable(arguments):
+    payload = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "complete",
+                    "type": "function",
+                    "function": {"name": "send_message", "arguments": arguments},
+                }],
+            },
+        }],
+    }
+    provider = client(Response(payload))
+    result = asyncio.run(provider.generate_response([], stream=False))
+    assert result.tool_calls[0]["function"]["arguments"] == arguments
+
+
+def test_sensitive_media_rejection_retains_structured_classification(caplog):
+    provider = client(
+        Response(status=400, error="private-token: model does not support images"),
+        policy=ProviderPolicy(sensitive_credentials=True),
+        api_key="private-token",
+    )
+    with pytest.raises(ProviderMediaUnsupportedError):
+        asyncio.run(provider.generate_response(
+            [{"role": "user", "content": "inspect"}],
+            images=["encoded-image"],
+            allow_media_degrade=False,
+        ))
+    assert len(provider._session.requests) == 1
+    assert "private-token" not in caplog.text
+
+
+def test_sensitive_output_limit_recovery_uses_raw_error_without_logging_it(caplog):
+    provider = client(
+        Response(status=400, error="private-token: maximum output tokens (1024)"),
+        Response(completion({"content": "recovered"})),
+        policy=ProviderPolicy(sensitive_credentials=True),
+        api_key="private-token",
+    )
+    result = asyncio.run(provider.generate_response([], stream=False))
+    assert result == "recovered"
+    assert [request[1]["max_tokens"] for request in provider._session.requests] == [
+        4096, 960,
+    ]
+    assert "private-token" not in caplog.text
+    assert "model primary" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ProviderPolicy(sensitive_credentials=True),
+        ProviderPolicy(max_output_tokens=4096),
+    ],
+)
+def test_policy_clamped_default_output_still_recovers_context_overflow(policy):
+    provider = client(
+        Response(
+            status=400,
+            error="maximum context length is 8192 tokens. you requested about 12000 tokens",
+        ),
+        Response(completion({"content": "recovered"})),
+        policy=policy,
+    )
+    result = asyncio.run(provider.generate_response([], stream=False))
+    assert result == "recovered"
+    assert [request[1]["max_tokens"] for request in provider._session.requests] == [
+        4096, 252,
+    ]

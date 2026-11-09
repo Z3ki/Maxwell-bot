@@ -179,6 +179,8 @@ class ChessMoveTool(Tool):
             return f"Error: {exc}"
         except PermissionError as exc:
             return f"Error: {exc}"
+        if game.is_over:
+            return "Error: the chess game is already over. Use chess_start to begin a new game."
 
         played: list[str] = []
         error_text: str | None = None

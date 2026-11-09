@@ -824,3 +824,180 @@ def test_text_only_worker_is_nudged_then_ends_as_no_tools_not_completed(tmp_path
             await manager.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("plan", ["free", "premium"])
+def test_detached_worker_keeps_the_callers_real_plan_snapshot(tmp_path, plan):
+    from premium_access import current_plan
+
+    async def run():
+        bot, msg, _, engine, manager = environment(tmp_path)
+        bot._message_quota.configure("123", plan=plan)
+        seen = []
+
+        async def generate(messages, **kwargs):
+            seen.append(current_plan.get())
+            return call() if len(seen) == 1 else ProviderResult("Verified result")
+
+        bot._generate_response.side_effect = generate
+        try:
+            job = await launch(engine, manager, msg)
+            await join(job)
+            assert seen == [("123", plan), ("123", plan)]
+            assert job.row["state"] == "completed"
+        finally:
+            await manager.close()
+
+    asyncio.run(run())
+
+
+def test_shared_public_job_status_never_exposes_artifact_paths(tmp_path):
+    async def run():
+        bot, msg, _, engine, manager = environment(tmp_path)
+        try:
+            job = await launch(engine, manager, msg)
+            await join(job)
+            job.kept = ["/storage/jobs/private-project/secret-plan.pdf"]
+            job.unsent = ["/workspace/confidential/customer-list.csv"]
+            other = SimpleNamespace(**vars(msg))
+            other.author = SimpleNamespace(id=456, bot=False)
+            shared = await manager.inspect("456", message=other, include_channel=True)
+            assert shared[0]["requester"] == "123"
+            for view in (shared[0], json.loads(manager.summary(other))[0]):
+                assert not ({"reports", "kept", "unsent"} & view.keys())
+                assert "secret-plan" not in json.dumps(view)
+                assert "customer-list" not in json.dumps(view)
+            own = (await manager.inspect("123", message=msg))[0]
+            assert own["kept"] == job.kept and own["unsent"] == job.unsent
+            assert own["reports"]
+        finally:
+            await manager.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["eligibility", "metadata"])
+def test_shutdown_during_admission_never_accepts_an_unowned_job(
+    tmp_path, monkeypatch, phase
+):
+    import threading
+
+    async def run():
+        bot, msg, _, engine, manager = environment(tmp_path)
+        entered, release = threading.Event(), threading.Event()
+        if phase == "metadata":
+            original = manager.store.create
+
+            def create(*args):
+                entered.set()
+                assert release.wait(3)
+                return original(*args)
+
+            monkeypatch.setattr(manager.store, "create", create)
+        else:
+            async def eligible(_message):
+                entered.set()
+                assert await asyncio.to_thread(release.wait, 3)
+                return True
+
+            monkeypatch.setattr(engine, "_eligible", eligible)
+        pending = asyncio.create_task(engine.execute(msg, tasks=TASKS))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            await manager.close()
+        finally:
+            release.set()
+        result = await asyncio.wait_for(pending, 3)
+        assert "manager is stopping" in result
+        assert not manager.jobs and manager._active == 0 and not manager._users
+        rows = manager.store.list("123")
+        assert [row["state"] for row in rows] == (
+            ["interrupted"] if phase == "metadata" else []
+        )
+        bot._generate_response.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_reported_files_with_duplicate_basenames_keep_and_attach_distinct_bytes(
+    tmp_path,
+):
+    from plugins.maxwell_extras.task_jobs import Job
+
+    async def run():
+        bot, msg, shell, _, manager = environment(tmp_path)
+        files = {
+            "/workspace/first/report.pdf": b"first deliverable",
+            "/workspace/second/report.pdf": b"second deliverable",
+            "/workspace/other/summary.txt": b"summary",
+        }
+        persisted = {}
+
+        async def persist(_message, paths, folder):
+            kept = []
+            for path in paths:
+                destination = f"/storage/{folder}/{path.rsplit('/', 1)[-1]}"
+                persisted[destination] = files[path]
+                kept.append(destination)
+            return kept
+
+        sent = []
+
+        async def send(_message, path):
+            sent.append(persisted[path])
+            return "__FILE_SENT__"
+
+        shell.persist_to_storage = persist
+        bot.tools["send_file"] = SimpleNamespace(execute=send)
+        job = Job(
+            row={"id": "abcdefabcdef"},
+            message=msg,
+            engine=None,
+            reports=[{"report": " ".join([*files, next(iter(files))])}],
+        )
+        try:
+            await manager._keep_artifacts(job, shell)
+            await manager._send_reported_files(job)
+            assert len(set(job.artifacts)) == 3
+            assert sent == list(files.values())
+            assert job.artifacts[-1] == "/storage/jobs/abcdefabcdef/summary.txt"
+            assert job.kept == job.artifacts and not job.unsent
+        finally:
+            await manager.close()
+
+    asyncio.run(run())
+
+
+def test_cancelled_duplicate_submission_preserves_existing_job_state(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    async def run():
+        bot, msg, _, engine, manager = environment(tmp_path)
+        job = await launch(engine, manager, msg)
+        await join(job)
+        manager.jobs.clear()
+        entered, release = threading.Event(), threading.Event()
+        original = manager.store.create
+
+        def create(*args):
+            entered.set()
+            assert release.wait(3)
+            return original(*args)
+
+        monkeypatch.setattr(manager.store, "create", create)
+        pending = asyncio.create_task(engine.execute(msg, tasks=TASKS))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            pending.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert manager.store.get(job.row["id"])["state"] == "completed"
+            assert manager._active == 0 and not manager._users and not manager.jobs
+        finally:
+            release.set()
+            await manager.close()
+
+    asyncio.run(run())

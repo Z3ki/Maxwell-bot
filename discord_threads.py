@@ -13,15 +13,17 @@ channel; this file is only the brief + parent snapshot.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import discord
 from discord import Message
 
+from context_hydration import requester_can_read_history
 from tools import Tool
 from maxwell_core.memory.scope import MemoryRequester
 from utils import FileLock, _atomic_json_write_sync, _load_json_safe, _safe_int
@@ -120,24 +122,45 @@ class ThreadStore:
             self._cache = self._load_sync()
         return self._cache
 
-    def _load_sync(self) -> dict[str, dict[str, Any]]:
-        data = _load_json_safe(self.path, dict)
+    def _load_sync(self, *, for_update: bool = False) -> dict[str, dict[str, Any]]:
+        if for_update:
+            try:
+                raw = self.path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                raw = ""
+            data = json.loads(raw) if raw.strip() else {}
+        else:
+            data = _load_json_safe(self.path, dict)
         if not isinstance(data, dict):
+            if for_update:
+                raise ValueError("discord_threads.json is corrupt; refusing to overwrite it")
             return {}
         threads = data.get("threads", data)
         if not isinstance(threads, dict):
+            if for_update:
+                raise ValueError("discord_threads.json has invalid threads")
             return {}
         out: dict[str, dict[str, Any]] = {}
         for key, rec in threads.items():
             if isinstance(rec, dict) and key:
                 out[str(key)] = rec
+            elif for_update:
+                raise ValueError("discord_threads.json has an invalid thread record")
         return out
 
-    def _save_sync(self, threads: dict[str, dict[str, Any]]) -> None:
-        pruned = self._prune(threads)
+    def _mutate_sync(
+        self,
+        mutate: Callable[[dict[str, dict[str, Any]]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        # The read belongs inside the file lock too: another store/process may
+        # have written newer briefs since this instance populated its cache.
         with FileLock(self.path):
+            threads = self._load_sync(for_update=True)
+            result = mutate(threads)
+            pruned = self._prune(threads)
             _atomic_json_write_sync(self.path, {"threads": pruned})
         self._cache = pruned
+        return result
 
     @staticmethod
     def _prune(threads: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -203,8 +226,7 @@ class ThreadStore:
             "jump_url": str(getattr(thread, "jump_url", "") or ""),
             "opening": _clip(opening, 500),
         }
-        async with self._lock:
-            threads = dict(self.load())
+        def mutate(threads: dict[str, dict[str, Any]]) -> dict[str, Any]:
             prev = threads.get(thread_id)
             if isinstance(prev, dict):
                 rec["created_at"] = prev.get("created_at") or rec["created_at"]
@@ -214,8 +236,10 @@ class ThreadStore:
                 if not rec["parent_snapshot"]:
                     rec["parent_snapshot"] = prev.get("parent_snapshot") or ""
             threads[thread_id] = rec
-            await asyncio.to_thread(self._save_sync, threads)
-        return rec
+            return rec
+
+        async with self._lock:
+            return await asyncio.to_thread(self._mutate_sync, mutate)
 
     async def update(
         self,
@@ -227,8 +251,8 @@ class ThreadStore:
         status: str | None = None,
     ) -> dict[str, Any]:
         tid = str(thread_id)
-        async with self._lock:
-            threads = dict(self.load())
+
+        def mutate(threads: dict[str, dict[str, Any]]) -> dict[str, Any]:
             rec = dict(threads.get(tid) or {"id": tid, "notes": [], "context": ""})
             rec["id"] = tid
             rec["updated_at"] = _utcnow()
@@ -245,8 +269,10 @@ class ThreadStore:
                     notes.append(text)
                     rec["notes"] = notes[-NOTES_MAX:]
             threads[tid] = rec
-            await asyncio.to_thread(self._save_sync, threads)
-        return rec
+            return rec
+
+        async with self._lock:
+            return await asyncio.to_thread(self._mutate_sync, mutate)
 
     def list_for(
         self,
@@ -274,7 +300,7 @@ class ThreadStore:
     def prompt_block(self, message: Any) -> str:
         """System-prompt text for a turn that is happening inside a thread."""
         channel = getattr(message, "channel", None)
-        if not is_discord_thread(channel):
+        if not can_access_thread(message, channel):
             return ""
         rec = self.get(str(getattr(channel, "id", "") or ""))
         name = str(getattr(channel, "name", "") or (rec or {}).get("name") or "thread")
@@ -332,7 +358,12 @@ async def snapshot_parent_conversation(
     memory = getattr(bot, "memory", None)
     channel = getattr(message, "channel", None)
     channel_id = str(getattr(channel, "id", "") or "")
-    if memory is not None and hasattr(memory, "get_channel_memory") and channel_id:
+    if (
+        memory is not None
+        and hasattr(memory, "get_channel_memory")
+        and channel_id
+        and requester_can_read_history(message, channel)
+    ):
         try:
             checker = getattr(bot, "_is_admin", None)
             try:
@@ -389,6 +420,14 @@ async def open_discord_thread(
         if isinstance(created, tuple):
             return created[0]
         return created
+    if getattr(message, "user_install", False):
+        # The adapter's ID is an interaction, not a Discord message. Open a
+        # standalone public thread rather than using it as a starter message.
+        return await channel.create_thread(
+            name=clean,
+            auto_archive_duration=archive,
+            type=discord.ChannelType.public_thread,
+        )
     if hasattr(message, "create_thread"):
         return await message.create_thread(
             name=clean, auto_archive_duration=archive
@@ -424,6 +463,25 @@ async def resolve_thread_channel(bot: Any, message: Any, thread_id: str | None) 
     return None
 
 
+def _thread_create_allowed(message: Any) -> str:
+    """Do not lend the bot's thread-creation rights to the requester."""
+    from tooling.helpers import _member_channel_perms, _resolve_requester_member
+
+    guild = getattr(message, "guild", None)
+    channel = getattr(message, "channel", None)
+    cap = "send_messages" if is_forum_channel(channel) else "create_public_threads"
+    for label, member in (
+        ("I", getattr(guild, "me", None)),
+        ("The person asking", _resolve_requester_member(guild, message)),
+    ):
+        permissions = _member_channel_perms(member, channel)
+        if not all(
+            getattr(permissions, name, False) for name in ("view_channel", cap)
+        ):
+            return f"Error: {label} must have view_channel and {cap} in this channel"
+    return ""
+
+
 def _thread_edit_allowed(message: Any, channel: Any) -> str:
     """Rename and archive need manage_threads for the bot and the asker.
 
@@ -445,6 +503,23 @@ def _thread_edit_allowed(message: Any, channel: Any) -> str:
     return _missing_cap(guild, "manage_threads", message, channel=channel)
 
 
+def _requester_channel_permissions(message: Any, channel: Any) -> Any:
+    from tooling.helpers import _member_channel_perms, _resolve_requester_member
+
+    interaction = getattr(message, "interaction", None)
+    source = getattr(interaction, "channel", None)
+    source_id = getattr(source, "id", None) or getattr(interaction, "channel_id", None)
+    permissions = getattr(interaction, "permissions", None)
+    if (
+        permissions is not None
+        and source_id is not None
+        and str(source_id) == str(getattr(channel, "id", ""))
+    ):
+        return permissions
+    guild = getattr(channel, "guild", None) or getattr(message, "guild", None)
+    return _member_channel_perms(_resolve_requester_member(guild, message), channel)
+
+
 def can_access_thread(message: Any, channel: Any) -> bool:
     if not is_discord_thread(channel):
         return False
@@ -455,15 +530,12 @@ def can_access_thread(message: Any, channel: Any) -> bool:
     author = getattr(message, "author", None)
     if author is None:
         return False
-    permissions_for = getattr(channel, "permissions_for", None)
-    permissions = None
-    if callable(permissions_for):
-        try:
-            permissions = permissions_for(author)
-        except Exception:
-            return False
-        if not getattr(permissions, "view_channel", False):
-            return False
+    permissions = _requester_channel_permissions(message, channel)
+    if not all(
+        getattr(permissions, name, False)
+        for name in ("view_channel", "read_message_history")
+    ):
+        return False
     is_private = getattr(channel, "is_private", None)
     if callable(is_private) and is_private():
         if not getattr(permissions, "manage_threads", False):
@@ -472,6 +544,20 @@ def can_access_thread(message: Any, channel: Any) -> bool:
             if uid is None or not callable(member) or member(uid) is None:
                 return False
     return True
+
+
+def _thread_brief_in_response_scope(message: Any, channel: Any) -> bool:
+    """Membership authorizes the asker, not readers of a public parent reply."""
+    is_private = getattr(channel, "is_private", None)
+    if not callable(is_private) or not is_private():
+        return True
+    source = getattr(message, "channel", None)
+    if str(getattr(source, "id", "")) == str(getattr(channel, "id", "")):
+        return True
+    return bool(
+        getattr(message, "user_install", False)
+        and getattr(message, "response_visibility", "") == "private"
+    )
 
 
 class CreateThreadTool(Tool):
@@ -519,6 +605,9 @@ class CreateThreadTool(Tool):
             )
         if getattr(message, "guild", None) is None:
             return "Error: Discord threads only exist in servers, not DMs"
+        denied = _thread_create_allowed(message)
+        if denied:
+            return denied
         title = sanitize_thread_name(
             name or kwargs.get("title") or brief[:50] or "thread"
         )
@@ -614,6 +703,8 @@ class ThreadControlTool(Tool):
         if not can_access_thread(message, channel):
             return "Error: choose a Discord thread you can access in this server"
         if act in {"status", "info", "show"}:
+            if not _thread_brief_in_response_scope(message, channel):
+                return "Error: read a private thread's brief inside that thread or in a private response"
             return await self._status(store, message, tid)
         if act in {"context", "brief", "update", "add"}:
             if not brief:
@@ -649,6 +740,9 @@ class ThreadControlTool(Tool):
             rec for rec in rows
             if callable(getter)
             and can_access_thread(message, getter(_safe_int(rec.get("id"), 0)))
+            and _thread_brief_in_response_scope(
+                message, getter(_safe_int(rec.get("id"), 0))
+            )
         ]
         if not rows:
             return "No Discord threads with a stored brief in this server."
@@ -716,6 +810,8 @@ class ThreadControlTool(Tool):
         tid = str(getattr(channel, "id", "") or thread_id or "")
         if not tid:
             return "Error: pass thread_id or run this inside the thread"
+        if store.get(tid) is None:
+            await store.remember(channel, parent_message=message, source="thread_control")
         rec = await store.update(tid, context=brief, mode=mode)
         verb = "replaced" if mode == "replace" else "appended"
         return (
@@ -740,6 +836,8 @@ class ThreadControlTool(Tool):
         except Exception as exc:
             return f"Error renaming thread: {exc}"[:300]
         tid = str(getattr(channel, "id", "") or "")
+        if store.get(tid) is None:
+            await store.remember(channel, parent_message=message, source="thread_control")
         await store.update(tid, name=clean)
         return f"Renamed thread {tid} to {clean}"
 
@@ -759,6 +857,8 @@ class ThreadControlTool(Tool):
         except Exception as exc:
             return f"Error updating thread: {exc}"[:300]
         tid = str(getattr(channel, "id", "") or "")
+        if store.get(tid) is None:
+            await store.remember(channel, parent_message=message, source="thread_control")
         await store.update(tid, status="archived" if archived else "open")
         verb = "Archived" if archived else "Unarchived"
         return f"{verb} thread {tid}"

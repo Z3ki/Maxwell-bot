@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-from conversation_memory import delete_author_content_file
+from conversation_memory import _delete_author_rows, delete_author_content_file
 from privacy import retention_days
 from utils import FileLock, _atomic_json_write_sync
 
@@ -153,7 +153,7 @@ def delete_data(root, user_id, preferences, *, sessions=None):
     elif sessions is not None:
         run("dashboard_sessions", lambda: sessions.delete_user(uid))
     manual = [
-        "Operator review: published sites/files, shell and GitHub workspaces, inbox/thread records and optional plugin stores; stop active jobs before erasing them.",
+        "Operator review: published sites/files, shell and GitHub workspaces, inbox/thread records, legacy unattributed graph facts and optional plugin stores; stop active jobs before erasing them.",
         "Discord posts, previous provider copies and operator backups are outside this deletion. Contact the operator for these copies.",
     ]
     return {
@@ -164,6 +164,100 @@ def delete_data(root, user_id, preferences, *, sessions=None):
         "storage": "off",
         "retained": "Storage suppression, short-lived usage/security metadata, and any billing records required by law.",
     }
+
+
+def _message_author_id(message) -> str:
+    return str(getattr(getattr(message, "author", None), "id", "") or "")
+
+
+def _without_author(items, uid: str) -> list:
+    return [item for item in list(items or []) if _message_author_id(item) != uid]
+
+
+def _scrub_watch_debounce(bot, uid: str) -> list:
+    """Cancel bursts that would flush this account's text after deletion."""
+    debounce = getattr(bot, "_watch_debounce", None)
+    tasks = []
+    if not isinstance(debounce, dict):
+        return tasks
+    for cid, bucket in list(debounce.items()):
+        if not isinstance(bucket, dict):
+            continue
+        burst = list(bucket.get("burst") or [])
+        owns_bucket = (
+            _message_author_id(bucket.get("latest")) == uid
+            or _message_author_id(bucket.get("latest_directed")) == uid
+        )
+        if owns_bucket:
+            task = bucket.get("task")
+            debounce.pop(cid, None)
+            if task is not None and not getattr(task, "done", lambda: True)():
+                task.cancel()
+                if asyncio.isfuture(task) or asyncio.iscoroutine(task):
+                    tasks.append(task)
+            continue
+        if any(_message_author_id(item) == uid for item in burst):
+            bucket["burst"] = _without_author(burst, uid)
+    return tasks
+
+
+def _scrub_reply_queue(bot, uid: str) -> None:
+    """Drop this account's queued turns and quotes carried on other turns."""
+    queue = getattr(bot, "_reply_queue", None)
+    channels = getattr(queue, "_channels", None)
+    if not isinstance(channels, dict):
+        return
+    drop = getattr(queue, "drop_author", None)
+    for cid, state in list(channels.items()):
+        if callable(drop):
+            drop(cid, uid)
+        entries = list(getattr(state, "queue", []) or [])
+        running = getattr(state, "running_entry", None)
+        if running is not None:
+            entries.append(running)
+        for entry in entries:
+            message = getattr(entry, "message", None)
+            burst = getattr(message, "_watch_burst", None) if message is not None else None
+            if isinstance(burst, list):
+                message._watch_burst = _without_author(burst, uid)
+            entry_burst = getattr(entry, "burst", None)
+            if isinstance(entry_burst, list):
+                entry.burst = _without_author(entry_burst, uid)
+
+
+async def _suppress_author_journal(bot, uid: str) -> None:
+    """Stop a cancelled pre-deletion turn from being replayed after restart."""
+    journal = getattr(bot, "_request_journal", None)
+    pending = getattr(journal, "pending", None)
+    update = getattr(journal, "update", None)
+    if not callable(pending) or not callable(update):
+        return
+    submit = getattr(journal, "submit", None)
+
+    async def call(fn, *args, **kwargs):
+        if callable(submit):
+            return await submit(fn, *args, **kwargs)
+        return fn(*args, **kwargs)
+
+    before = time.time()
+    after = None
+    while True:
+        rows = await call(pending, 500, after=after, before=before)
+        if not rows:
+            return
+        for row in rows:
+            if str(row.get("author_id") or "") != uid or row.get("effects_started"):
+                continue
+            try:
+                await call(
+                    update, row.get("message_id"), "suppressed", reason="privacy_deletion"
+                )
+            except KeyError:
+                continue
+        last = rows[-1]
+        after = (last.get("created_at"), str(last.get("message_id") or ""))
+        if len(rows) < 500:
+            return
 
 
 async def delete_live_data(bot, user_id):
@@ -179,6 +273,10 @@ async def delete_live_data(bot, user_id):
         for jid, job in list(manager.jobs.items()):
             if job.row["user_id"] == uid:
                 manager.jobs.pop(jid, None)
+    watch_tasks = _scrub_watch_debounce(bot, uid)
+    if watch_tasks:
+        await asyncio.gather(*watch_tasks, return_exceptions=True)
+    _scrub_reply_queue(bot, uid)
     owners = getattr(bot, "_active_request_user", {}) or {}
     tasks = getattr(bot, "_active_requests", {}) or {}
     current = asyncio.current_task()
@@ -190,15 +288,22 @@ async def delete_live_data(bot, user_id):
             pending.append(task)
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
+    # Cancellation journals an effect-free turn as deferred. Suppress those
+    # rows after the handlers finish, or the next restart replays the turn.
+    await _suppress_author_journal(bot, uid)
+    _scrub_reply_queue(bot, uid)
     # These caches may contain quoted content. Clearing is deliberately conservative.
     for name in (
         "_media_context",
         "_message_snapshots",
         "_message_update_state",
         "_recent_users",
+        "_message_reactions",
+        "_message_reactions_order",
+        "_hydration",
     ):
         cache = getattr(bot, name, None)
-        if isinstance(cache, dict):
+        if isinstance(cache, (dict, list)):
             cache.clear()
     service = getattr(getattr(bot, "plugin_manager", None), "services", None)
     lastfm_failed = False
@@ -211,14 +316,18 @@ async def delete_live_data(bot, user_id):
             lastfm_failed = True
     shell = (getattr(bot, "tools", None) or {}).get("shell")
     discard = getattr(type(shell), "discard_owner", None) if shell is not None else None
+    shell_failed = False
     if callable(discard):
         try:
             await discard(uid)
         except Exception:
             logger.warning("Privacy deletion could not recycle shell sandboxes")
+            shell_failed = True
     result = await asyncio.to_thread(delete_data, bot.config.DATA_DIR, uid, preferences)
     if lastfm_failed:
         result["failed"].append("lastfm")
+    if shell_failed:
+        result["failed"].append("shell_sandboxes")
     return result
 
 
@@ -256,7 +365,14 @@ def cleanup_data(root, preferences):
             users = [
                 str(row[0])
                 for row in db.execute(
-                    "SELECT DISTINCT author_id FROM vectors WHERE author_id!='' AND source!='bot' UNION SELECT json_extract(metadata,'$.requested_by') FROM vectors WHERE json_valid(metadata) AND json_extract(metadata,'$.requested_by') IS NOT NULL UNION SELECT json_extract(metadata,'$.reply_to_author_id') FROM vectors WHERE json_valid(metadata) AND json_extract(metadata,'$.reply_to_author_id') IS NOT NULL"
+                    "SELECT DISTINCT author_id FROM vectors WHERE author_id!='' AND source!='bot' "
+                    "UNION SELECT json_extract(metadata,'$.requested_by') FROM vectors "
+                    "WHERE json_valid(metadata) AND json_extract(metadata,'$.requested_by') IS NOT NULL "
+                    "UNION SELECT json_extract(metadata,'$.reply_to_author_id') FROM vectors "
+                    "WHERE json_valid(metadata) AND json_extract(metadata,'$.reply_to_author_id') IS NOT NULL "
+                    "UNION SELECT json_extract(reaction.value,'$.user_id') FROM vectors AS v, "
+                    "json_each(CASE WHEN json_valid(v.metadata) THEN v.metadata ELSE '{}' END, '$.reactions') AS reaction "
+                    "WHERE reaction.type='object'"
                 )
             ]
             blocked = [
@@ -264,20 +380,11 @@ def cleanup_data(root, preferences):
                 for uid in users
                 if uid.isdigit() and preferences.explicitly_disallows_content(uid)
             ]
+            # Use the same provenance-aware deletion as an explicit opt-out:
+            # legacy tool rows may belong to a turn without naming its owner.
+            for uid in blocked:
+                _delete_author_rows(db, uid)
             with db:
-                db.execute(
-                    "CREATE TEMP TABLE privacy_blocked (user_id TEXT PRIMARY KEY)"
-                )
-                db.executemany(
-                    "INSERT INTO privacy_blocked VALUES (?)",
-                    ((uid,) for uid in blocked),
-                )
-                db.execute(
-                    "DELETE FROM vectors WHERE author_id IN (SELECT user_id FROM privacy_blocked) OR (json_valid(metadata) AND (json_extract(metadata,'$.requested_by') IN (SELECT user_id FROM privacy_blocked) OR (kind='bot_output' AND json_extract(metadata,'$.reply_to_author_id') IN (SELECT user_id FROM privacy_blocked))))"
-                )
-                db.execute(
-                    "UPDATE vectors SET metadata=json_remove(metadata,'$.reply_to_content') WHERE json_valid(metadata) AND json_extract(metadata,'$.reply_to_author_id') IN (SELECT user_id FROM privacy_blocked)"
-                )
                 db.execute(
                     "DELETE FROM vectors WHERE created_at<?",
                     (

@@ -517,6 +517,9 @@ class DeleteMessageTool(Tool):
             return "Error: target channel is outside this server"
         if channel is None or not hasattr(channel, "fetch_message"):
             return "Error: channel is unavailable"
+        denial = await SearchMessagesTool._read_denial(message, channel)
+        if denial:
+            return denial
         try:
             msg = await channel.fetch_message(int(str(message_id).strip()))
             mine = self.bot.user and msg.author.id == self.bot.user.id
@@ -646,6 +649,9 @@ class ForwardMessageTool(Tool):
             return "Error: message_id and channel_id are required"
         if _is_private_chat(message):
             return "Error: forwarding to another channel is not available in DMs"
+        denial = await SearchMessagesTool._read_denial(message, message.channel)
+        if denial:
+            return denial
         try:
             dest = self.bot.get_channel(int(channel_id))
             if not dest:
@@ -669,12 +675,20 @@ class ForwardMessageTool(Tool):
                 return "Error: could not verify channel permissions"
             user_perms = dest.permissions_for(member)
             bot_perms = dest.permissions_for(bot_member)
+            thread = isinstance(dest, discord.Thread)
+            send_permission = "send_messages_in_threads" if thread else "send_messages"
+            if thread and dest.type == discord.ChannelType.private_thread:
+                if not getattr(user_perms, "manage_threads", False):
+                    try:
+                        await dest.fetch_thread_member(member.id)
+                    except (discord.HTTPException, AttributeError):
+                        return "Error: private thread membership could not be verified"
             if not getattr(user_perms, "view_channel", False) or not getattr(
-                user_perms, "send_messages", False
+                user_perms, send_permission, False
             ):
                 return "Error: you cannot send messages in the destination channel"
             if not getattr(bot_perms, "view_channel", False) or not getattr(
-                bot_perms, "send_messages", False
+                bot_perms, send_permission, False
             ):
                 return "Error: I cannot send messages in the destination channel"
 
@@ -1679,6 +1693,9 @@ class SearchMessagesTool(Tool):
                     return f"Message {target_id} was not found in the authorized channel."
                 except discord.Forbidden:
                     return "Error: Discord denied reading that message"
+                marker = getattr(self.bot, "mark_message_tainted", None)
+                if callable(marker):
+                    marker(message)
                 return "Message lookup:\n" + self._format_message(target, target_channel)
 
             if not hasattr(target_channel, "history"):
@@ -1812,9 +1829,6 @@ class CreateInviteTool(Tool):
             return "Error: max_uses must be between 1 and 100"
         if age < 0 or age > 604800:
             return "Error: max_age must be between 0 and 604800 seconds"
-        missing = _missing_cap(guild, "create_instant_invite", message)
-        if missing:
-            return missing
         channel = None
         if channel_id:
             channel, error = await _get_guild_channel(self.bot, channel_id)
@@ -1832,7 +1846,7 @@ class CreateInviteTool(Tool):
             ):
                 channel = msg_channel
             else:
-                channel, err = _pick_invite_channel(guild)
+                channel, err = _pick_invite_channel(guild, message)
                 if channel is None:
                     return err
         missing = _missing_cap(
@@ -1856,9 +1870,8 @@ class CreateInviteTool(Tool):
             return f"Error creating invite: {e}"
 
 
-def _pick_invite_channel(guild) -> tuple[Any, str]:
-    """First channel in `guild` this bot can actually create an invite from."""
-    me = _guild_me(guild)
+def _pick_invite_channel(guild, message) -> tuple[Any, str]:
+    """First channel where both the requester and bot can create an invite."""
     seen: set[int] = set()
     candidates: list[Any] = []
     for attr in ("system_channel", "rules_channel"):
@@ -1883,20 +1896,11 @@ def _pick_invite_channel(guild) -> tuple[Any, str]:
     for ch in candidates:
         if not hasattr(ch, "create_invite"):
             continue
-        if me is not None:
-            perms_for = getattr(ch, "permissions_for", None)
-            if callable(perms_for):
-                perms = None
-                with contextlib.suppress(Exception):
-                    perms = perms_for(me)
-                if perms is not None and not (
-                    getattr(perms, "administrator", False)
-                    or getattr(perms, "create_instant_invite", False)
-                ):
-                    continue
+        if _missing_cap(guild, "create_instant_invite", message, channel=ch):
+            continue
         return ch, ""
     name = getattr(guild, "name", "that server")
-    return None, f"Error: no channel in {name} I can create an invite from"
+    return None, f"Error: no channel in {name} where we both have create_instant_invite"
 
 
 class BotInviteUrlTool(Tool):

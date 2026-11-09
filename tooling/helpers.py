@@ -11,6 +11,7 @@ sent directly to their target.
 
 import contextlib
 import html
+from functools import wraps
 import ipaddress
 import json
 import logging
@@ -1505,21 +1506,15 @@ async def _lock_target(channel, locked: bool, reason: str) -> str:
     if target is None:
         return f"Error: @everyone role is unavailable for {_channel_label(channel)}"
     try:
+        overwrite = channel.overwrites_for(target)
         if isinstance(channel, discord.VoiceChannel) or isinstance(
             channel, getattr(discord, "StageChannel", type(None))
         ):
-            await channel.set_permissions(
-                target,
-                connect=False if locked else None,
-                reason=reason,
-            )
+            overwrite.connect = False if locked else None
         else:
-            await channel.set_permissions(
-                target,
-                send_messages=False if locked else None,
-                send_messages_in_threads=False if locked else None,
-                reason=reason,
-            )
+            overwrite.send_messages = False if locked else None
+            overwrite.send_messages_in_threads = False if locked else None
+        await channel.set_permissions(target, overwrite=overwrite, reason=reason)
     except discord.Forbidden:
         return f"Error: Discord denied locking {_channel_label(channel)}"
     except Exception as e:
@@ -3536,6 +3531,22 @@ def _inject_site_csp(body: str) -> str:
     return "<head>" + SITE_CSP_META + "</head>\n" + body
 
 
+def _locked_site_action(execute):
+    """Re-resolve authorization under the same slug lock as create/delete."""
+    @wraps(execute)
+    async def locked(self, message, name=None, *args, **kwargs):
+        slug, _entry, _site_dir, error = self._resolve(message, name)
+        if error:
+            return error
+        try:
+            async with site_server.site_mutation(self.bot.config.DATA_DIR, slug):
+                return await execute(self, message, name, *args, **kwargs)
+        except site_server.SiteServerError as exc:
+            return f"Error: {exc}"
+
+    return locked
+
+
 # class CreateSiteTool(Tool):  — moved to a plugin
 
 
@@ -3583,10 +3594,11 @@ class _SiteOwnedTool(Tool):
             try:
                 if path.exists():
                     data = json.loads(path.read_text(encoding="utf-8"))
-                    if isinstance(data, dict):
-                        sites = {k: v for k, v in data.items() if isinstance(v, dict)}
-            except (json.JSONDecodeError, OSError, ValueError):
-                sites = dict(self.bot._sites or {})
+                    if not isinstance(data, dict) or any(not isinstance(value, dict) for value in data.values()):
+                        raise ValueError("malformed site metadata")
+                    sites = data
+            except (json.JSONDecodeError, OSError, UnicodeError, ValueError) as exc:
+                raise RuntimeError("refusing to overwrite unreadable site metadata") from exc
             if entry is None:
                 sites.pop(slug, None)
             else:
@@ -3619,6 +3631,7 @@ class SiteTestTool(_SiteOwnedTool):
             "re-test the same URL without changing a file."
         )
 
+    @_locked_site_action
     async def execute(
         self,
         message: Message,
@@ -3677,15 +3690,20 @@ class SiteTestTool(_SiteOwnedTool):
                 backend_bits.append(f"Python API {api_url} unreachable: {api_err}")
             else:
                 backend_bits.append(f"Python API {api_url} HTTP {api_status}")
-            try:
-                log_text = await site_server.logs(
-                    self.bot.config.DATA_DIR, slug, lines=20
-                )
-                clipped = (log_text or "").strip()
-                if clipped:
-                    backend_bits.append("Recent logs:\n" + clipped)
-            except Exception as e:
-                backend_bits.append(f"logs: {e}")
+            # Visitors can probe public pages, but runtime output can contain
+            # credentials and private application data just like backend source.
+            owner = str(entry.get("user_id") or "")
+            requester = str(getattr(getattr(message, "author", None), "id", "") or "")
+            if (owner and owner == requester) or _caller_is_admin(self.bot, message):
+                try:
+                    log_text = await site_server.logs(
+                        self.bot.config.DATA_DIR, slug, lines=20
+                    )
+                    clipped = (log_text or "").strip()
+                    if clipped:
+                        backend_bits.append("Recent logs:\n" + clipped)
+                except Exception as e:
+                    backend_bits.append(f"logs: {e}")
         if entry.get("backend"):
             public = getattr(self.bot.config, "MAXWELL_PUBLIC_BASE_URL", "").rstrip("/")
             kv_url = f"{public}/api/site/{slug}/kv"
@@ -4178,6 +4196,7 @@ async def _run_docker_cmd(
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         with contextlib.suppress(Exception):
+            await proc.communicate()
             await proc.wait()
         raise
 

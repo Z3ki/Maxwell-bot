@@ -141,9 +141,8 @@ class SitesMixin:
         slug_seed = re.sub(r"[^a-z0-9]+", "-", (original_content or "").lower())[:24]
         slug_seed = re.sub(r"-+", "-", slug_seed).strip("-") or "site"
         slug = f"{slug_seed[:20]}-{int(time.time()) % 100000}"
-        title = (original_content or "").strip().splitlines()[0][
-            :80
-        ].strip() or "untitled site"
+        title_lines = (original_content or "").strip().splitlines()
+        title = title_lines[0][:80].strip() if title_lines else "untitled site"
         result = await MaxwellBot._invoke_request_tool(
             self,
             message,

@@ -4,7 +4,7 @@ Split out of bot.py; methods keep their original bodies.
 """
 
 import bot_common as _common
-from context_hydration import strip_addressing_mentions
+from context_hydration import requester_can_read_history, strip_addressing_mentions
 
 # Mechanical split: the methods below were written against bot.py's
 # module globals. Bind every shared name so the bodies run unchanged.
@@ -179,11 +179,15 @@ class AddressingMixin:
 
     def _iter_resolved_reply_chain(self, message):
         """Parents of `message`, nearest first. Relies on refs already resolved."""
+        if not requester_can_read_history(message):
+            return
         current = message
         seen: set[str] = set()
         for _ in range(getattr(self, "_MAX_REPLY_CHAIN", 6)):
             parent = self._reply_parent(current)
-            if parent is None:
+            if parent is None or not requester_can_read_history(
+                message, getattr(parent, "channel", None)
+            ):
                 return
             pid = str(getattr(parent, "id", "") or "") or str(id(parent))
             if pid in seen:
@@ -200,6 +204,8 @@ class AddressingMixin:
         """
         if message is None or message_reference_is_forward(message):
             return
+        if not requester_can_read_history(message):
+            return
         first = self._reply_parent(message)
         if first is None:
             ref = getattr(message, "reference", None)
@@ -215,7 +221,9 @@ class AddressingMixin:
             except Exception as e:
                 logger.warning("Failed to fetch referenced message: %s", e)
                 return
-        if first is None:
+        if first is None or not requester_can_read_history(
+            message, getattr(first, "channel", None)
+        ):
             return
         if not self._directly_addressed(message) or self._author_is_self(first):
             return
@@ -229,11 +237,15 @@ class AddressingMixin:
                 return
             nxt = self._reply_parent(current)
             if nxt is not None:
+                if not requester_can_read_history(message, getattr(nxt, "channel", None)):
+                    return
                 current = nxt
                 continue
             channel = getattr(current, "channel", None) or getattr(
                 message, "channel", None
             )
+            if not requester_can_read_history(message, channel):
+                return
             fetch = getattr(channel, "fetch_message", None)
             if not callable(fetch):
                 return
@@ -259,6 +271,8 @@ class AddressingMixin:
         return getattr(parent.author, "id", None) == getattr(author, "id", None)
 
     def _render_reply_parent(self, message, parent) -> str:
+        if not requester_can_read_history(message, getattr(parent, "channel", None)):
+            return ""
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         rendered = render_discord_context_text(
             parent,
@@ -357,6 +371,8 @@ class AddressingMixin:
 
     def _reply_meta_from_message(self, message) -> dict:
         """Who this Discord message is a reply to, plus a short quote."""
+        if not requester_can_read_history(message):
+            return {}
         if message_reference_is_forward(message):
             return {}
         reference = getattr(message, "reference", None)
@@ -366,6 +382,10 @@ class AddressingMixin:
             str(ref_id or getattr(ref, "id", "") or "")
         )
         ref = snapshot or ref
+        if ref is not None and not requester_can_read_history(
+            message, getattr(ref, "channel", None)
+        ):
+            return {}
         if not ref or not hasattr(ref, "author"):
             target = hydration_value(self, message, "hydrated_target", None)
             if isinstance(target, dict) and (
@@ -385,6 +405,8 @@ class AddressingMixin:
                     "reply_to_content": quoted,
                 }
             if target is not None and hasattr(target, "author"):
+                if not requester_can_read_history(message, getattr(target, "channel", None)):
+                    return {}
                 ref = target
             else:
                 return {}

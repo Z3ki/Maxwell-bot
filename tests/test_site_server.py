@@ -74,6 +74,13 @@ def test_env_values_are_capped_and_counted():
         site_server.parse_env({f"K{i}": "v" for i in range(site_server.MAX_ENV_KEYS + 1)})
 
 
+def test_env_values_reject_control_characters():
+    with pytest.raises(site_server.SiteServerError, match="control character"):
+        site_server.parse_env({"API_KEY": "ab\x00cd"})
+    with pytest.raises(site_server.SiteServerError, match="control character"):
+        site_server.parse_env({"API_KEY": "line\nbreak"})
+
+
 # ── code on disk ──────────────────────────────────────────────────────────
 def test_code_lives_outside_the_web_root(data_dir):
     """Source and secrets must never be reachable as a static file."""
@@ -143,6 +150,14 @@ def test_patch_code_swaps_exact_text(data_dir):
     )
     assert "5 occurrence" in all_hits
     assert site_server.read_code(data_dir, "demo", "app.py") == "gAmmA betA AlphA"
+
+
+@pytest.mark.parametrize("path", ["../helpers.py", "_data/private.py", "bad?.py"])
+def test_invalid_patch_target_does_not_modify_app(data_dir, path):
+    site_server.write_code(data_dir, "demo", {"app.py": "unchanged"})
+    with pytest.raises(site_server.SiteServerError, match="bad path"):
+        site_server.patch_code(data_dir, "demo", path, "unchanged", "corrupted")
+    assert site_server.read_code(data_dir, "demo", "app.py") == "unchanged"
 
 
 def test_delete_code_file_refuses_app_py(data_dir):
@@ -435,6 +450,19 @@ def test_secret_values_are_never_echoed_back(tool):
     assert "sk-do-not-leak" not in status
 
 
+@pytest.mark.parametrize("action", ["env", "write", "deploy"])
+def test_explicit_empty_environment_clears_existing_secrets(tool, action):
+    site_server._write_entry(
+        tool.bot.config.DATA_DIR, "demo", {"env": {"OLD_SECRET": "private"}},
+    )
+    out = run(tool.execute(
+        _msg(), name="demo", action=action, env={}, files={"app.py": "print('ok')"},
+    ))
+    assert not out.startswith("Error:")
+    assert tool._started[-1][1] == {}
+    assert site_server.get_entry(tool.bot.config.DATA_DIR, "demo")["env"] == {}
+
+
 @pytest.mark.parametrize("action", ["write", "read", "env", "logs", "restart", "stop"])
 def test_another_user_cannot_access_the_backend(tool, action):
     out = run(tool.execute(
@@ -706,12 +734,26 @@ def test_capacity_counts_stopped_orphaned_and_label_only_containers(data_dir, sa
 
 def test_replacement_keeps_its_slot_at_exact_capacity(data_dir, sandbox_host):
     _live_backend(data_dir, sandbox_host)
+    (data_dir / "sites.json").write_text(
+        json.dumps({"demo": {"user_id": "42"}}), encoding="utf-8"
+    )
     for index in range(site_server.MAX_BACKENDS - 1):
         sandbox_host["containers"][f"maxwell-site-other-{index}"] = ""
     result = run(site_server.start(data_dir, "demo"))
     assert result["running"] is True
     assert result["env"] == {"API_KEY": "retained"}
     assert len(sandbox_host["containers"]) == site_server.MAX_BACKENDS
+
+
+def test_unowned_restart_does_not_keep_previous_secrets(data_dir, sandbox_host):
+    _live_backend(data_dir, sandbox_host)
+    secret = site_server.state_dir(data_dir, "demo") / "secret.txt"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("old-tenant", encoding="utf-8")
+    result = run(site_server.start(data_dir, "demo"))
+    assert result["running"] is True
+    assert result["env"] == {}
+    assert not secret.exists()
 
 
 def test_backend_ownership_is_scoped_per_controller(data_dir, sandbox_host, monkeypatch):

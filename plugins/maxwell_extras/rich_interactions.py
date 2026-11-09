@@ -109,17 +109,23 @@ class RichInteractionStore:
         self._write(actions)
         return token
 
-    def get(self, token: str) -> dict[str, Any] | None:
+    def get(self, token: str, *, user_id: str | None = None) -> dict[str, Any] | None:
+        """Read an action; consume one-shot actions only for their owner."""
         from utils import FileLock
         with FileLock(self.path, timeout=5):
-            return self._get_locked(token)
+            return self._get_locked(token, user_id)
 
-    def _get_locked(self, token):
+    def _get_locked(self, token, user_id):
         actions = self._read()
         row = actions.get(str(token))
         if row is None:
             return None
-        if bool(row.get("one_shot")):
+        if (
+            bool(row.get("one_shot"))
+            and user_id is not None
+            and str(row.get("owner_id") or "") == str(user_id)
+            and str(user_id)
+        ):
             actions.pop(str(token), None)
             self._write(actions)
         return dict(row)
@@ -146,10 +152,10 @@ def _message_context_from_execute(args: tuple[Any, ...], kwargs: dict[str, Any])
     # execute(message, mode="auto", title=None, description=None, ...)
     title = kwargs.get("title")
     description = kwargs.get("description")
-    if title is None and len(args) >= 2:
-        title = args[1]
-    if description is None and len(args) >= 3:
-        description = args[2]
+    if title is None and len(args) >= 3:
+        title = args[2]
+    if description is None and len(args) >= 4:
+        description = args[3]
     message = args[0] if args else kwargs.get("message")
     return {
         "owner_id": str(getattr(getattr(message, "author", None), "id", "")),
@@ -252,7 +258,7 @@ def _patch_rich_message_tool(tool: Any, store: RichInteractionStore) -> None:
         buttons["description"] = (
             "Up to 5 buttons. Link: {label,url,emoji?}. Callback: {label,"
             "style:primary|secondary|success|danger,prompt,emoji?,disabled?,one_shot?}; "
-            "a click starts a new Maxwell turn for whoever clicked, with prompt as the instruction."
+            "a click starts a new Maxwell turn only for the user who requested the card."
         )
         item = buttons.setdefault("items", {"type": "object"})
         item.setdefault("properties", {}).update(
@@ -365,7 +371,8 @@ def install_rich_interactions(bot: Any, ctx: PluginContext, tool: Any) -> RichIn
         if not custom_id.startswith(_PREFIX):
             return
         token = custom_id[len(_PREFIX) :]
-        row = await asyncio.to_thread(store.get, token)
+        clicker = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+        row = await asyncio.to_thread(store.get, token, user_id=clicker)
         if row is None:
             await _expired(interaction)
             return
@@ -373,7 +380,6 @@ def install_rich_interactions(bot: Any, ctx: PluginContext, tool: Any) -> RichIn
         # The stored prompt runs with the *clicker's* identity and permissions.
         # Only the user who created the card may execute that hidden
         # instruction; otherwise this is a confused-deputy escalation.
-        clicker = str(getattr(getattr(interaction, "user", None), "id", "") or "")
         owner = str(row.get("owner_id") or "")
         if not owner or clicker != owner:
             response = getattr(interaction, "response", None)

@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import time
 from pathlib import Path
 
-from standby.policy import PolicyDenied, read_credential, validate_provider
+from standby.policy import PolicyDenied, parse_json, read_credential, validate_provider
 from standby.sync import snowflake, validate_snapshot
 
 
 def validate(root: Path, *, now: float | None = None) -> None:
-    validate_provider(json.loads(read_credential(root / "provider.json")))
+    validate_provider(parse_json(read_credential(root / "provider.json")))
     if not read_credential(root / "discord-token").strip():
         raise PolicyDenied("Missing Discord credential")
     snapshot = validate_snapshot(
-        json.loads(read_credential(root / "chat-config.json")), now=now
+        parse_json(read_credential(root / "chat-config.json")), now=now
     )
     if (time.time() if now is None else now) - snapshot["exported_at"] > 900:
         raise PolicyDenied(

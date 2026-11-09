@@ -303,3 +303,229 @@ def test_raw_author_without_bot_flag_is_human():
     merged = asyncio.run(MaxwellBot._message_from_raw_update(bot, payload))
     assert merged.author.bot is False
     assert merged.author.display_name == "alice"
+
+
+def test_raw_update_preserves_creation_time_and_decodes_discord_reference():
+    bot = _bot()
+    cached = _message(404, "before")
+    parent = _message(403, "parent")
+    cached.reference = SimpleNamespace(message_id=403, resolved=parent)
+    payload = SimpleNamespace(
+        cached_message=cached, message_id=404, channel_id=22,
+        data={
+            "content": "after",
+            "mentions": [{"id": "1", "username": "Maxwell", "bot": True}],
+            "mention_roles": ["99"],
+            "message_reference": {"message_id": "403", "channel_id": "22"},
+        },
+    )
+    merged = asyncio.run(bot._message_from_raw_update(payload))
+    assert merged.created_at == cached.created_at
+    assert merged.type == cached.type
+    assert merged.mentions[0].id == 1
+    assert merged.raw_role_mentions == [99]
+    assert bot._reply_parent(merged) is parent
+    assert bot._message_memory_item(merged)["timestamp"] == cached.created_at.isoformat()
+
+
+def test_uncached_raw_update_uses_discord_creation_timestamp():
+    bot = _bot()
+    payload = SimpleNamespace(
+        cached_message=None, message_id=405, channel_id=22,
+        data={
+            "author": {"id": "11", "username": "Alice"},
+            "timestamp": "2026-08-23T04:05:06+00:00",
+        },
+    )
+    merged = asyncio.run(bot._message_from_raw_update(payload))
+    assert merged.created_at == datetime(2026, 8, 23, 4, 5, 6, tzinfo=timezone.utc)
+
+
+def test_embed_text_edit_refreshes_inflight_summary_without_binary_download():
+    from unittest.mock import AsyncMock
+
+    bot = _bot()
+    before = _message(500, "look", embeds=[SimpleNamespace(description="old description")])
+    after = _message(500, "look", embeds=[SimpleNamespace(description="new description")])
+    state = bot._begin_inflight_context(before, before.content)
+    state["media"] = [{
+        "is_text": True, "source": "embed", "message_id": 500,
+        "text": "old description", "mime_type": "text/plain",
+    }]
+    bot._message_update_state["500"] = (
+        bot._message_update_fingerprint(before),
+        bot._message_media_fingerprint(before), 0.0,
+    )
+    bot._extract_context_media = AsyncMock()
+    asyncio.run(bot._refresh_edited_message(after))
+    bot._extract_context_media.assert_not_awaited()
+    summary = bot._format_media_summary(state["latest_media"], [])
+    assert "new description" in summary
+    assert "old description" not in summary
+
+
+def test_inflight_edit_clears_stale_pointer_hydration():
+    bot = _bot()
+    before = _message(600, "^")
+    before.hydrated_context = "obsolete private target"
+    before.hydrated_target = {"message_id": "599", "content": "obsolete private target"}
+    after = _message(600, "unrelated explicit request")
+    after.hydrated_context = before.hydrated_context
+    after.hydrated_target = before.hydrated_target
+    state = bot._begin_inflight_context(before, before.content)
+    state.update(version=1, latest_message=after, latest_media=[])
+
+    async def build(message, content, **_kwargs):
+        assert not getattr(message, "hydrated_context", None)
+        assert getattr(message, "hydrated_target", None) is None
+        return [{"role": "user", "content": content}]
+
+    bot._build_messages = build
+    result = asyncio.run(bot._apply_inflight_refresh(
+        state, before, before.content, [], [], "", []
+    ))
+    assert result[-1] == [{"role": "user", "content": after.content}]
+
+
+def test_raw_edited_mentions_dispatch_by_identity_not_user_object_equality():
+    from unittest.mock import AsyncMock
+
+    bot = _bot()
+    bot._connection = SimpleNamespace(user=SimpleNamespace(id=1))
+    bot._request_journal = SimpleNamespace()
+    bot._request_state = AsyncMock(return_value=None)
+    bot.on_message = AsyncMock()
+    before = _message(700, "original")
+    payload = SimpleNamespace(
+        cached_message=before, message_id=700, channel_id=22,
+        data={
+            "content": "<@1> question",
+            "mentions": [{"id": "1", "username": "Maxwell", "bot": True}],
+        },
+    )
+    after = asyncio.run(bot._message_from_raw_update(payload))
+    asyncio.run(bot._maybe_reply_to_edited_mention(before, after))
+    bot.on_message.assert_awaited_once_with(after)
+
+
+def test_removing_last_attachment_clears_inflight_pixels():
+    from unittest.mock import AsyncMock
+
+    bot = _bot()
+    before = _message(800, "look")
+    before.attachments = [SimpleNamespace(
+        id=1, filename="old.png", url="https://example.com/old.png",
+        content_type="image/png", size=3,
+    )]
+    after = _message(800, "look")
+    state = bot._begin_inflight_context(before, before.content)
+    state["media"] = [{
+        "b64": "b2xk", "mime_type": "image/png", "is_image": True,
+        "filename": "old.png", "message_id": 800,
+    }]
+    bot._message_update_state["800"] = (
+        bot._message_update_fingerprint(before),
+        bot._message_media_fingerprint(before), 0.0,
+    )
+    bot._extract_context_media = AsyncMock(return_value=[])
+    asyncio.run(bot._refresh_edited_message(after))
+    assert state["media"] == []
+    assert state["latest_media"] == []
+
+
+def test_update_during_hydration_is_not_marked_consumed(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    bot = _bot()
+    before = _message(900, "before")
+    first = _message(900, "first edit")
+    newest = _message(900, "newest edit")
+    state = bot._begin_inflight_context(before, before.content)
+    state.update(version=1, latest_message=first, latest_media=[])
+
+    async def hydrate(_bot, message):
+        if message is first:
+            state.update(version=2, latest_message=newest, latest_media=[])
+
+    monkeypatch.setattr("bot_parts.message_updates.hydrate_turn_context", hydrate)
+    bot._build_messages = AsyncMock(return_value=[])
+    result = asyncio.run(bot._apply_inflight_refresh(
+        state, before, before.content, [], [], "", []
+    ))
+    assert result[0] is newest
+    assert result[1] == newest.content
+    assert state["seen_version"] == 2
+
+
+def test_unfetchable_late_embed_wait_propagates_cancellation(monkeypatch):
+    from bot_parts import message_updates
+    from unittest.mock import AsyncMock
+    import pytest
+
+    async def scenario():
+        bot = _bot()
+        message = _message(901, "https://example.test/image.png")
+        entered = asyncio.Event()
+
+        async def wait_for_embed(_seconds):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            message_updates, "asyncio", SimpleNamespace(sleep=wait_for_embed)
+        )
+        continued = AsyncMock()
+
+        async def turn():
+            await bot._wait_for_late_embeds(message, message.content)
+            await continued()
+
+        task = asyncio.create_task(turn())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        continued.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_raw_update_does_not_copy_an_inflight_reply_parent():
+    bot = _bot()
+
+    class PrivateChannel:
+        id = 22
+
+        async def send(self, content=None, **kwargs):
+            return None
+
+    turn = _message(500, "PRIVATE_PROMPT")
+    turn.channel = PrivateChannel()
+
+    async def private_reply(content=None, **kwargs):
+        return None
+
+    turn.reply = private_reply
+    state = MaxwellBot._begin_inflight_context(bot, turn, turn.content)
+    state["message_ids"].add("99")
+
+    async def fail_fetch(_mid):
+        raise RuntimeError("message cache miss")
+
+    bot.get_channel = lambda *_args, **_kwargs: SimpleNamespace(
+        id=22, guild=None, name="room", fetch_message=fail_fetch,
+    )
+    payload = SimpleNamespace(
+        cached_message=None,
+        message_id=99,
+        channel_id=22,
+        data={"id": "99", "channel_id": "22", "embeds": [{"title": "preview"}]},
+    )
+    merged = asyncio.run(MaxwellBot._message_from_raw_update(bot, payload))
+    assert merged.content != "PRIVATE_PROMPT"
+    assert getattr(merged.author, "id", None) != 11
+    assert not callable(getattr(merged, "reply", None))
+    assert not callable(getattr(merged.channel, "send", None))
+    assert merged.channel is not turn.channel
+
+

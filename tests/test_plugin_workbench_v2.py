@@ -14,7 +14,7 @@ class _Manager:
         self.reloads = 0
         self._job_specs = {}
 
-    def reload_plugins(self):
+    async def reload_plugins_async(self):
         self.reloads += 1
         self.loaded_plugins[self.name] = {
             "tools": {},

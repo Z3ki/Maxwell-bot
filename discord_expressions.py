@@ -58,16 +58,16 @@ def mark_send_unavailable(bot, message):
 
 
 def cannot_send(message, bot=None) -> bool:
+    if str(getattr(message, "id", "")) in (
+        getattr(bot, "_send_unavailable_requests", None) or ()
+    ):
+        return True
     # Interactions use a webhook, including private replies in restricted rooms.
     if (
         getattr(message, "user_install", False)
         or getattr(getattr(message, "channel", None), "_session", None) is not None
     ):
         return False
-    if str(getattr(message, "id", "")) in (
-        getattr(bot, "_send_unavailable_requests", None) or ()
-    ):
-        return True
     perms = channel_permissions(message)
     channel = getattr(message, "channel", None)
     thread = isinstance(channel, discord.Thread) or getattr(channel, "type", None) in {

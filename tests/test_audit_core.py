@@ -240,7 +240,7 @@ def test_parallel_tool_error_survives_history_reconstruction(monkeypatch):
         _, results = await MaxwellBot._process_native_tool_calls(
             owner, message, "", calls
         )
-        assert results == ["Tool helper: Error - RuntimeError: broken helper"]
+        assert results == ["Tool helper: Error - internal tool failure (helper)"]
         tool_rows = [
             m for m in owner._last_native_followup_messages if m["role"] == "tool"
         ]

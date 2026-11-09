@@ -1057,6 +1057,20 @@ def returns_result(name: str) -> bool:
     return name in RESULT_TOOL_NAMES or name in _PLUGIN_RESULT_TOOL_NAMES
 
 
+def ends_turn(name: str) -> bool:
+    """Whether ``name`` ends the turn, preferring its live registered contract."""
+    try:
+        from maxwell_core.tools.registry import get_global_registry
+        from maxwell_core.tools.spec import CONTRACT_ENDING
+
+        spec = get_global_registry().get(name)
+        if spec is not None:
+            return spec.contract == CONTRACT_ENDING
+    except Exception:
+        pass
+    return name in TURN_ENDING_TOOL_NAMES
+
+
 # One line per contract class, appended to the tool's description so the model
 # reads it in the same place it reads the parameters. Kept short on purpose —
 # this text is paid for on every single request, for every single tool.
@@ -1069,7 +1083,7 @@ def result_contract(name: str) -> str:
     """The one-line result contract appended to `name`'s description."""
     if returns_result(name):
         return _CONTRACT_RESULT
-    if name in TURN_ENDING_TOOL_NAMES:
+    if ends_turn(name):
         return _CONTRACT_ENDING
     return _CONTRACT_SILENT
 
@@ -1080,7 +1094,7 @@ def contract_groups(names: list[str]) -> dict[str, list[str]]:
     for name in names:
         if returns_result(name):
             groups["result"].append(name)
-        elif name in TURN_ENDING_TOOL_NAMES:
+        elif ends_turn(name):
             groups["ending"].append(name)
         else:
             groups["silent"].append(name)
@@ -1099,6 +1113,37 @@ REASONING_PARAM: dict[str, Any] = {
 }
 
 
+def _declared_parameters(name: str) -> dict[str, Any]:
+    """Schema the model was shown, not a stale process-wide catalog entry.
+
+    Native publication calls the live tool's ``get_parameters``. Text recovery
+    has to use that same declaration: a plugin parameter absent from
+    ``TOOL_PARAMETERS`` is otherwise dropped, and the leaked call is posted
+    as a visible reply.
+    """
+    spec = None
+    try:
+        from maxwell_core.tools.registry import get_global_registry
+
+        spec = get_global_registry().get(name)
+    except Exception:
+        spec = None
+    if spec is not None:
+        getter = getattr(getattr(spec, "tool", None), "get_parameters", None)
+        if callable(getter):
+            try:
+                declared = getter()
+            except Exception:
+                declared = None
+            if isinstance(declared, dict):
+                return declared
+        cached = getattr(spec, "parameters", None)
+        if isinstance(cached, dict) and cached:
+            return cached
+    catalog = TOOL_PARAMETERS.get(name)
+    return catalog if isinstance(catalog, dict) else {}
+
+
 def _recovery_properties(name: str) -> dict[str, Any]:
     """Declared tool params plus optional ``reasoning``.
 
@@ -1106,7 +1151,8 @@ def _recovery_properties(name: str) -> dict[str, Any]:
     leaked text dialects still emit it. Recovery must accept that key without
     treating it as a required schema field.
     """
-    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
+    raw = _declared_parameters(name).get("properties")
+    props = dict(raw) if isinstance(raw, dict) else {}
     props.setdefault("reasoning", REASONING_PARAM)
     return props
 
@@ -1163,17 +1209,15 @@ def build_openai_tools(
         if len(desc) > max_description_chars:
             desc = desc[: max_description_chars - 1] + "…"
         desc = (desc or name) + result_contract(name)
-        declared = TOOL_PARAMETERS.get(name)
+        # A live declaration can update even a built-in tool's schema. The
+        # process-wide catalog is only a fallback for legacy implementations.
+        getter = getattr(tool, "get_parameters", None)
+        try:
+            declared = getter() if callable(getter) else None
+        except Exception:
+            declared = None
         if declared is None:
-            # Drop-in plugins are discovered at runtime, so their schemas
-            # cannot live in this module's static registry. Let a plugin
-            # provide the same get_parameters() contract as built-in tools;
-            # otherwise retain a permissive empty object for legacy plugins.
-            getter = getattr(tool, "get_parameters", None)
-            try:
-                declared = getter() if callable(getter) else None
-            except Exception:
-                declared = None
+            declared = TOOL_PARAMETERS.get(name)
         if not isinstance(declared, dict) or declared.get("type") != "object":
             declared = {
                 "type": "object",
@@ -1718,7 +1762,8 @@ def _coerce_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
     and ``max_results`` is ``"5"``. Tools take those through kwargs, where a
     non-empty string is truthy — ``reply="false"`` would Discord-reply.
     """
-    props = dict((TOOL_PARAMETERS.get(name) or {}).get("properties") or {})
+    raw = _declared_parameters(name).get("properties")
+    props = dict(raw) if isinstance(raw, dict) else {}
     out: dict[str, Any] = {}
     for key, value in args.items():
         declared = props.get(key)

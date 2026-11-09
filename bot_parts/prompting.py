@@ -151,15 +151,18 @@ class PromptingMixin:
         self_id = (
             str(getattr(self.user, "id", "")) if getattr(self, "user", None) else ""
         )
+        get_self_ids = getattr(self, "_self_ids", None)
+        self_ids = {str(uid) for uid in get_self_ids()} if callable(get_self_ids) else set()
+        if self_id:
+            self_ids.add(self_id)
         openers: list[str] = []
         for entry in reversed(memory):
             if len(openers) >= MaxwellBot._ECHO_LOOKBACK:
                 break
             if entry.get("is_tool"):
                 continue
-            is_self = bool(entry.get("author_is_bot")) or (
-                self_id and str(entry.get("author_id") or "") == self_id
-            )
+            author_id = str(entry.get("author_id") or "")
+            is_self = author_id in self_ids if author_id else bool(entry.get("author_is_bot"))
             if not is_self:
                 continue
             words = re.findall(

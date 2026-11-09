@@ -43,7 +43,6 @@ from api.storage import (  # noqa: E402
     _safe_int,
     _safe_list,
     _safe_object,
-    atomic_json_write,
 )
 
 # Resolve limits only after storage has loaded .env and the checkout is on
@@ -573,6 +572,39 @@ async def context_delete(request):
 
 
 # ---------- Blacklist ----------
+def _update_id_list(path, item, *, remove=False, stringify=False):
+    """Read-modify-write a JSON id list under a cross-process FileLock."""
+    with FileLock(path, timeout=5.0):
+        items = _load_for_write(path, list, [])
+        if stringify:
+            items = [str(x) for x in items]
+        if remove:
+            if item not in items:
+                return 404
+            items.remove(item)
+        elif item in items:
+            return 200
+        else:
+            items.append(item)
+        _atomic_json_write_sync(path, items)
+        return 200
+
+
+async def _id_list_response(path, item, *, remove=False, stringify=False):
+    async with _file_lock:
+        try:
+            status = await asyncio.to_thread(
+                _update_id_list, path, item, remove=remove, stringify=stringify
+            )
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, 409)
+        except FileLockTimeout as exc:
+            return _json_response({"error": str(exc)}, 409)
+    if status == 404:
+        return _json_response({"error": "not found"}, 404)
+    return _json_response({"ok": True})
+
+
 async def blacklist_post(request):
     try:
         body = await request.json()
@@ -583,31 +615,12 @@ async def blacklist_post(request):
     uid = _clean_id(body.get("id", ""))
     if not uid:
         return _json_response({"error": "empty"}, 400)
-    path = DATA_DIR / "blacklist.json"
-    async with _file_lock:
-        try:
-            bl = _load_for_write(path, list, [])
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if uid not in bl:
-            bl.append(uid)
-            await atomic_json_write(path, bl)
-    return _json_response({"ok": True})
+    return await _id_list_response(DATA_DIR / "blacklist.json", uid)
 
 
 async def blacklist_del(request):
     uid = _clean_id(request.query.get("id", ""))
-    path = DATA_DIR / "blacklist.json"
-    async with _file_lock:
-        try:
-            bl = _load_for_write(path, list, [])
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if uid not in bl:
-            return _json_response({"error": "not found"}, 404)
-        bl.remove(uid)
-        await atomic_json_write(path, bl)
-    return _json_response({"ok": True})
+    return await _id_list_response(DATA_DIR / "blacklist.json", uid, remove=True)
 
 
 # ---------- Auto channels ----------
@@ -622,32 +635,17 @@ async def auto_channel_post(request):
     cid = _clean_id(body.get("id") or body.get("channel_id") or "")
     if not cid:
         return _json_response({"error": "empty"}, 400)
-    path = DATA_DIR / "auto_channels.json"
-    async with _file_lock:
-        try:
-            channels = [str(x) for x in _load_for_write(path, list, [])]
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if cid not in channels:
-            channels.append(cid)
-            await atomic_json_write(path, channels)
-    return _json_response({"ok": True})
+    return await _id_list_response(
+        DATA_DIR / "auto_channels.json", cid, stringify=True
+    )
 
 
 async def auto_channel_del(request):
     # Accept both `id` and `channel_id` from operator API clients.
     cid = _clean_id(request.query.get("id") or request.query.get("channel_id") or "")
-    path = DATA_DIR / "auto_channels.json"
-    async with _file_lock:
-        try:
-            channels = [str(x) for x in _load_for_write(path, list, [])]
-        except ValueError as exc:
-            return _json_response({"error": str(exc)}, 409)
-        if cid not in channels:
-            return _json_response({"error": "not found"}, 404)
-        channels.remove(cid)
-        await atomic_json_write(path, channels)
-    return _json_response({"ok": True})
+    return await _id_list_response(
+        DATA_DIR / "auto_channels.json", cid, remove=True, stringify=True
+    )
 
 
 def _safe_site_slug(value: str) -> str:
@@ -667,6 +665,14 @@ async def site_update(request):
     slug = _safe_site_slug(body.get("slug", ""))
     if not slug:
         return _json_response({"error": "bad slug"}, 400)
+    try:
+        async with site_server.site_mutation(DATA_DIR, slug):
+            return await _site_update_locked(slug, body)
+    except site_server.SiteServerError as exc:
+        return _json_response({"error": str(exc)}, 409)
+
+
+async def _site_update_locked(slug, body):
     path = DATA_DIR / "sites.json"
 
     def _do_update():
@@ -709,6 +715,14 @@ async def site_delete(request):
     slug = _safe_site_slug(request.query.get("slug", ""))
     if not slug:
         return _json_response({"error": "bad slug"}, 400)
+    try:
+        async with site_server.site_mutation(DATA_DIR, slug):
+            return await _site_delete_locked(slug)
+    except site_server.SiteServerError as exc:
+        return _json_response({"error": str(exc)}, 409)
+
+
+async def _site_delete_locked(slug):
     site_dir = (BASE_SITE_DIR / slug).resolve()
     if BASE_SITE_DIR not in site_dir.parents and site_dir != BASE_SITE_DIR:
         return _json_response({"error": "bad path"}, 400)
@@ -977,7 +991,38 @@ _SITE_PROXY_HOP_HEADERS = {
 }
 # A generated site shares the public origin with every other site. Do not let
 # its backend set a cookie Domain or Path that covers the operator host.
-_SITE_PROXY_DROP_RESPONSE_HEADERS = _SITE_PROXY_HOP_HEADERS | {"clear-site-data"}
+_SITE_PROXY_DROP_RESPONSE_HEADERS = _SITE_PROXY_HOP_HEADERS | {
+    "clear-site-data",
+    # A user backend must not install a worker controlling /dashboard/ or
+    # another site's requests on the shared public origin.
+    "service-worker-allowed",
+}
+
+_DASHBOARD_COOKIES = frozenset({
+    "__Host-maxwell_session", "__Host-maxwell_login",
+    "maxwell_dev_session", "maxwell_dev_login",
+})
+
+
+def _site_request_headers(request):
+    """Keep site authentication, never forward Maxwell's own credentials."""
+    operator = _has_admin_auth(request)
+    headers = {}
+    for key, value in request.headers.items():
+        lowered = key.lower()
+        if lowered in _SITE_PROXY_HOP_HEADERS:
+            continue
+        if lowered == "authorization" and operator:
+            continue
+        if lowered == "cookie":
+            value = "; ".join(
+                part.strip() for part in value.split(";")
+                if part.strip().partition("=")[0].strip() not in _DASHBOARD_COOKIES
+            )
+            if not value:
+                continue
+        headers[key] = value
+    return headers
 
 
 def _site_public_path(slug: str) -> str:
@@ -1034,7 +1079,7 @@ def _rewrite_site_location(value: str, slug: str) -> str:
 
 
 def _scope_site_cookie(value: str, slug: str) -> str | None:
-    """Force a proxied Set-Cookie onto /bot/<slug>/ and drop Domain."""
+    """Scope a backend cookie to its deployment-prefixed site, without Domain."""
     parts = [part.strip() for part in str(value or "").split(";") if part.strip()]
     if not parts or "=" not in parts[0]:
         return None
@@ -1048,7 +1093,7 @@ def _scope_site_cookie(value: str, slug: str) -> str | None:
         if key.strip().lower() in {"domain", "path"}:
             continue
         kept.append(attr)
-    kept.append(f"Path=/bot/{slug}/")
+    kept.append("Path=" + _site_public_path(slug).removesuffix("/api") + "/")
     return "; ".join(kept)
 # Uploads are bounded by the /bot sub-app's client_max_size, not by holding the
 # body in memory here. sock_read is a per-chunk idle limit, not a total: an SSE
@@ -1083,10 +1128,8 @@ async def _proxy_websocket(request, slug: str, target: str):
         if p.strip()
     ]
     headers = {
-        k: v
-        for k, v in request.headers.items()
-        if k.lower() not in _SITE_PROXY_HOP_HEADERS
-        and not k.lower().startswith("sec-websocket-")
+        k: v for k, v in _site_request_headers(request).items()
+        if not k.lower().startswith("sec-websocket-")
     }
     headers["X-Forwarded-For"] = _get_client_ip(request)
     headers["X-Forwarded-Prefix"] = server_path(slug)
@@ -1210,11 +1253,7 @@ async def _site_proxy_request(request, slug: str):
     ):
         return await _proxy_websocket(request, slug, target)
 
-    headers = {
-        k: v
-        for k, v in request.headers.items()
-        if k.lower() not in _SITE_PROXY_HOP_HEADERS
-    }
+    headers = _site_request_headers(request)
     # The backend gets to know where it really is, and who is really calling.
     headers["X-Forwarded-For"] = _get_client_ip(request)
     headers["X-Forwarded-Prefix"] = server_path(slug)
@@ -2190,10 +2229,10 @@ def _github_oauth_page(title: str, body: str, *, ok: bool = True, status: int = 
 async def github_oauth_callback(request):
     import html as _html
     from plugins.github_projects.impl import (
-        TokenStore,
         oauth_client_id,
         oauth_client_secret,
         oauth_redirect_uri,
+        stage_oauth_login,
         verify_oauth_state,
     )
 
@@ -2241,13 +2280,41 @@ async def github_oauth_callback(request):
                 user = await resp.json(content_type=None)
         if isinstance(user, dict):
             login = str(user.get("login") or "")[:80]
-        store = TokenStore(DATA_DIR / "plugins" / "github_projects" / "user_tokens.json")
-        store.write(payload["uid"], token, login=login, scopes=payload.get("scopes"), source="oauth")
+        try:
+            code = stage_oauth_login(
+                payload["uid"],
+                token,
+                login=login,
+                scopes=payload.get("scopes") or [],
+                issued_at=payload["issued_at"],
+            )
+            notifier = getattr(request.app.get("bot", None), "fetch_user", None)
+            if not callable(notifier):
+                raise TypeError("confirmation delivery is unavailable")
+            user = await notifier(int(payload["uid"]))
+            dm = await user.send(
+                f"Your GitHub confirmation code is {code}. "
+                "Tell Maxwell: confirm GitHub login with this code. "
+                "The browser tab alone does not connect the account."
+            )
+            if dm is None:
+                raise RuntimeError("confirmation DM was not delivered")
+        except Exception:
+            logger.error("github oauth confirmation delivery failed")
+            return _github_oauth_page(
+                "GitHub login needs another attempt",
+                "Authorization was received, but the private confirmation could not be delivered. Start login again from Discord.",
+                ok=False,
+                status=503,
+            )
     except Exception as exc:
         logger.error("github oauth callback failed (%s)", type(exc).__name__)
         return _github_oauth_page("GitHub login failed", "Could not finish login.", ok=False, status=500)
     who = _html.escape(login or "GitHub")
-    return _github_oauth_page("GitHub connected", f"Logged in as <strong>{who}</strong>. Maxwell can use this GitHub account for your Discord user now.")
+    return _github_oauth_page(
+        "GitHub authorization received",
+        f"Authorized <strong>{who}</strong>. Check your Maxwell DM and confirm the login in Discord before it is connected.",
+    )
 
 
 app = web.Application(

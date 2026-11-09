@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlsplit
 from process_utils import communicate_process
 from tools import Tool
 
-from .clones import download_cdn_audio, prepare_sample, select_audio
+from .clones import _mp3_bytes, download_cdn_audio, prepare_sample, select_audio
 from .voices import prepare_line, resolve_voice
 from .url_audio import download_reference_audio
 
@@ -105,14 +105,16 @@ def synthesize_speech(
         raise SpeechError(exc.code, message) from None
     except urllib.error.URLError as exc:
         raise SpeechError(0, "Mistral TTS could not be reached") from exc
-    if body.startswith((b"ID3", b"\xff\xfb")):
+    if _mp3_bytes(body):
         return body
     try:
         parsed = json.loads(body)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise SpeechError(
             status, "Mistral TTS returned an unreadable audio body"
         ) from exc
+    if not isinstance(parsed, dict):
+        raise SpeechError(status, "Mistral TTS returned no audio")
     encoded = str(parsed.get("audio_data") or "")
     try:
         audio = base64.b64decode(encoded, validate=True)
@@ -619,6 +621,7 @@ class TtsTool(Tool):
         "required": ["text"],
     }
     _last_tts: ClassVar[dict[str, float]] = {}
+    _inflight_tts: ClassVar[set[str]] = set()
 
     def get_description(self) -> str:
         return (
@@ -679,6 +682,8 @@ class TtsTool(Tool):
 
         channel_id = str(getattr(getattr(message, "channel", None), "id", "") or "")
         if channel_id:
+            if channel_id in TtsTool._inflight_tts:
+                return "Error: TTS is already in progress for this channel. Wait and try again."
             now = asyncio.get_running_loop().time()
             last = TtsTool._last_tts.get(channel_id, 0.0)
             if now - last < _COOLDOWN_SECONDS:
@@ -691,6 +696,8 @@ class TtsTool(Tool):
         api_key = mistral_api_key(self.bot)
         if not api_key:
             return "Error: Mistral TTS is not configured"
+        if channel_id:
+            TtsTool._inflight_tts.add(channel_id)
         try:
             audio = await asyncio.to_thread(
                 synthesize_speech,
@@ -713,6 +720,8 @@ class TtsTool(Tool):
         except Exception as exc:
             logger.warning("TTS delivery failed (%s)", type(exc).__name__)
             return f"Error: could not send the voice message ({type(exc).__name__})"
+        finally:
+            TtsTool._inflight_tts.discard(channel_id)
 
         if channel_id:
             now = asyncio.get_running_loop().time()

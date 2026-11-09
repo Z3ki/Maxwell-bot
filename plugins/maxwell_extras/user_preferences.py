@@ -185,17 +185,24 @@ class UserPreferenceStore:
             self._write(root)
         return text
 
-    def update(self, user_id: Any, defaults: dict, personality: str) -> None:
+    def update(self, user_id: Any, defaults: dict, personality: str, *, started_at=None) -> None:
         """Save a dashboard form atomically, sharing the Discord writer lock."""
+        from privacy import request_started_at
+
         uid = str(user_id or "").strip()
         if not uid.isdigit() or not defaults.keys() <= _ALLOWED_DEFAULTS:
             raise ValueError("invalid user preference")
         if not isinstance(personality, str) or len(personality) > _PERSONALITY_LIMIT:
             raise ValueError("personal style is limited to 800 characters")
+        started_at = request_started_at() if started_at is None else started_at
         with _LOCK, FileLock(self.path, timeout=5):
             root = copy.deepcopy(self._read(for_write=True))
+            if root.get("unavailable"):
+                raise ValueError("Personal settings are temporarily unavailable.")
             row = root["users"].get(uid)
             row = dict(row) if isinstance(row, dict) else {}
+            if float(started_at) <= float(row.get("deleted_at") or 0):
+                raise ValueError("Personal data was deleted. Make a new dashboard sign-in link.")
             saved = row.get("defaults")
             saved = dict(saved) if isinstance(saved, dict) else {}
             if "tracking" in defaults:
@@ -250,10 +257,16 @@ class UserPreferenceStore:
 
     def content_allowed(self, user_id, started_at=None):
         uid = str(user_id)
-        if self.get(uid)["defaults"]["tracking"] != "on":
-            return False
         with _LOCK:
-            row = self._read()["users"].get(uid, {})
+            root = self._read()
+            if root.get("unavailable"):
+                return False
+            row = root["users"].get(uid)
+            if not isinstance(row, dict):
+                return False
+            defaults = row.get("defaults")
+            if not isinstance(defaults, dict) or defaults.get("tracking") != "on":
+                return False
             return not (
                 started_at and float(started_at) <= float(row.get("deleted_at") or 0)
             )

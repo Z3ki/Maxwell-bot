@@ -21,10 +21,15 @@ NEW = "https://cdn.discordapp.com/attachments/22/500/picture.png?ex=ffffffffff&i
 
 
 def _message(channel, mid=100, url=OLD):
+    if not hasattr(channel, "permissions_for"):
+        channel.permissions_for = lambda _member: SimpleNamespace(
+            view_channel=True, read_message_history=True
+        )
     return SimpleNamespace(
         id=mid,
         channel=channel,
         guild=SimpleNamespace(id=33),
+        author=SimpleNamespace(id=11),
         attachments=[SimpleNamespace(url=url, proxy_url=url)],
         content="",
         embeds=[],
@@ -70,11 +75,68 @@ def test_message_link_uses_the_real_channel_of_a_private_app_request():
     message = SimpleNamespace(
         channel=SimpleNamespace(id="private:11:33:22"),
         guild=None,
-        interaction=SimpleNamespace(channel=channel, guild_id=33),
+        interaction=SimpleNamespace(
+            channel=channel,
+            guild_id=33,
+            permissions=SimpleNamespace(view_channel=True, read_message_history=True),
+        ),
     )
     link = "https://discord.com/channels/33/22/100"
     assert discord_message_link(link) == ("33", "22", "100")
     assert asyncio.run(resolve_discord_message(message, link)) == "resolved"
+    channel.fetch_message.assert_awaited_once_with(100)
+
+
+@pytest.mark.parametrize("permission", ["view_channel", "read_message_history"])
+@pytest.mark.parametrize("interaction_request", [False, True])
+def test_history_permission_denial_never_fetches_message_or_media(
+    permission, interaction_request
+):
+    channel = SimpleNamespace(
+        id=22,
+        fetch_message=AsyncMock(),
+        history=AsyncMock(),
+    )
+    message = _message(channel)
+    permissions = SimpleNamespace(
+        view_channel=True, read_message_history=True
+    )
+    setattr(permissions, permission, False)
+    channel.permissions_for = lambda _member: permissions
+    if interaction_request:
+        # The interaction's permissions are authoritative even when the
+        # bot's cached channel resolver would grant broader access.
+        channel.permissions_for = lambda _member: SimpleNamespace(
+            view_channel=True, read_message_history=True
+        )
+        message.interaction = SimpleNamespace(
+            channel=channel, guild_id=33, permissions=permissions
+        )
+    link = "https://discord.com/channels/33/22/100"
+    assert asyncio.run(resolve_discord_message(message, link)) is None
+    assert asyncio.run(refresh_discord_media_url(SimpleNamespace(), message, OLD)) is None
+    channel.fetch_message.assert_not_awaited()
+    channel.history.assert_not_called()
+
+
+def test_unreadable_guild_permissions_do_not_default_to_bot_authority():
+    channel = SimpleNamespace(id=22, fetch_message=AsyncMock())
+    message = _message(channel)
+    del channel.permissions_for
+    assert asyncio.run(
+        resolve_discord_message(message, "https://discord.com/channels/33/22/100")
+    ) is None
+    channel.fetch_message.assert_not_awaited()
+
+
+def test_dm_message_link_stays_available_without_guild_permissions():
+    channel = SimpleNamespace(id=22, fetch_message=AsyncMock(return_value="resolved"))
+    message = _message(channel)
+    message.guild = None
+    del channel.permissions_for
+    assert asyncio.run(
+        resolve_discord_message(message, "https://discord.com/channels/@me/22/100")
+    ) == "resolved"
     channel.fetch_message.assert_awaited_once_with(100)
 
 

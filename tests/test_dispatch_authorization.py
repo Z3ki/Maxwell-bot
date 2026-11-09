@@ -106,7 +106,7 @@ def test_byok_budget_counts_parallel_model_tool_calls_as_one_shared_budget():
 
 @pytest.mark.parametrize("tool_name", ["see_image", "see_video"])
 def test_nested_media_tool_delegation_rechecks_tool_policy(tool_name):
-    from plugins.web.impl import _authorize_nested_media
+    from plugins.media.impl import _authorize_nested_media
 
     calls = []
     media_tool = SimpleNamespace(tool_name=tool_name, execute=lambda *_a, **_k: calls.append(1))

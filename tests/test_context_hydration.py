@@ -288,7 +288,11 @@ def test_pointer_uses_scoped_stored_history_when_discord_history_is_unavailable(
             })
             message = SimpleNamespace(
                 id=9, content="^", author=_author("Sam", 4),
-                channel=SimpleNamespace(id=42), guild=SimpleNamespace(id=30), reference=None,
+                channel=SimpleNamespace(
+                    id=42, permissions_for=lambda _requester: SimpleNamespace(
+                        view_channel=True, read_message_history=True
+                    )
+                ), guild=SimpleNamespace(id=30), reference=None,
                 attachments=[], embeds=[], stickers=[], mentions=[],
             )
             bot = SimpleNamespace(user=SimpleNamespace(id=1), memory=memory)

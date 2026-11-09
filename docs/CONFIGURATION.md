@@ -133,6 +133,11 @@ all logs protected and enable DEBUG only when necessary.
 Handlers attached separately to individual loggers and direct writes to streams
 are not covered by this formatter.
 
+Configured credential values of at least four characters are redacted even when
+an explicitly secret setting contains only digits or looks like a boolean.
+Token-count settings, webhook ID lists and non-secret feature flags are not
+treated as credentials merely because their names contain `token` or `key`.
+
 Set `LOG_FILE` to enable an additional rotating file. `LOG_FILE_MAX_BYTES`
 defaults to 10485760 and is clamped to 1024–1073741824;
 `LOG_FILE_BACKUP_COUNT` defaults to 5 and is clamped to 1–100. A newly created

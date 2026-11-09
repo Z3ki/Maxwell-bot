@@ -78,7 +78,9 @@ def _field(text: str, index: int) -> frozenset[int]:
     for part in text.split(","):
         if not part:
             raise CronError(f"empty list item in the {_LABELS[index]} field")
-        base, _, step_text = part.partition("/")
+        base, separator, step_text = part.partition("/")
+        if separator and not step_text:
+            raise CronError(f"missing step after '/' in the {_LABELS[index]} field")
         step = 1
         if step_text:
             if not step_text.isdigit() or int(step_text) < 1:
@@ -196,11 +198,26 @@ def upcoming(cron: Cron, after: datetime, tz: ZoneInfo, count: int) -> list[date
 
 
 def shortest_gap(cron: Cron, after: datetime, tz: ZoneInfo, samples: int = 60) -> timedelta | None:
-    """Smallest spacing between the next ``samples`` runs. None = fewer than two runs."""
-    runs = upcoming(cron, after, tz, samples)
-    if len(runs) < 2:
+    """Smallest spacing through the scheduling horizon.
+
+    A short sample misses a spring-forward day, where two local times that
+    look far apart can land less than the interval floor apart in UTC.
+    ``samples`` is unused; the walk stops at the first one-minute gap.
+    """
+    del samples
+    prev = next_after(cron, after, tz)
+    if prev is None:
         return None
-    return min(b - a for a, b in zip(runs, runs[1:]))
+    gap: timedelta | None = None
+    while True:
+        found = next_after(cron, prev, tz)
+        if found is None:
+            return gap
+        delta = found - prev
+        gap = delta if gap is None else min(gap, delta)
+        if gap <= timedelta(minutes=1):
+            return gap
+        prev = found
 
 
 _RELATIVE = re.compile(r"^\+?\s*(?:in\s+)?(\d{1,6})\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)$")
@@ -213,7 +230,7 @@ def parse_at(text: str, tz: ZoneInfo, now: datetime) -> datetime:
     if match:
         amount, unit = int(match[1]), match[2][0]
         delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount), "d": timedelta(days=amount)}[unit]
-        return (now + delta).astimezone(timezone.utc).replace(second=0, microsecond=0)
+        return (now + delta).astimezone(timezone.utc)
     try:
         moment = datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
     except ValueError as exc:
@@ -229,7 +246,7 @@ def parse_at(text: str, tz: ZoneInfo, now: datetime) -> datetime:
         # reject a time that is only "past" in its first fold.
         first = aware.replace(fold=0).astimezone(timezone.utc)
         second = aware.replace(fold=1).astimezone(timezone.utc)
-        if second > first and first < now:
+        if second > first and first <= now:
             aware = aware.replace(fold=1)
         moment = aware
     return moment.astimezone(timezone.utc)

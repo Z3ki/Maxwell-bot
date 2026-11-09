@@ -113,7 +113,9 @@ def test_create_channel_rejects_unknown_kind():
 
 def test_edit_category_requires_a_field():
     me = _member()
-    cat = SimpleNamespace(id=20, name="chat")
+    cat = SimpleNamespace(
+        id=20, name="chat", permissions_for=lambda member: member.guild_permissions
+    )
     guild = SimpleNamespace(id=10, name="Villa", me=me, categories=[cat])
     bot = SimpleNamespace(get_guild=lambda _gid: None)
     asker = _author()

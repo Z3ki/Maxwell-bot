@@ -8,11 +8,13 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
+from standby import policy as standby_policy
 from standby.policy import PolicyDenied
 
 BOOLS = frozenset({"bot_enabled", "reply_mentions"})
@@ -69,10 +71,45 @@ def digest(controls: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def export_snapshot(
-    source: dict[str, Any], *, revision: str, now: float | None = None
+def effective_controls(
+    source: dict[str, Any], *, blacklist: list[Any]
 ) -> dict[str, Any]:
-    controls = controls_only(source)
+    """Resolve primary overrides without loading its runtime or exporting other state."""
+    # Export runs on the primary checkout. Standby's isolated import/runtime paths
+    # must not need primary modules, including the shared defaults.
+    from control_defaults import DEFAULT_CONTROL, parse_bool
+
+    if not isinstance(source, dict):
+        raise PolicyDenied("Primary control settings must be an object")
+    if not isinstance(blacklist, list) or len(blacklist) > 10000:
+        raise PolicyDenied("Authoritative blacklist must be an ID list")
+    blocked_users = {snowflake(item) for item in blacklist}
+    effective = {key: source.get(key, DEFAULT_CONTROL[key]) for key in KEYS}
+    # The primary ignores persisted persona overrides: this preference is code-owned.
+    effective["base_personality"] = DEFAULT_CONTROL["base_personality"]
+    for key in BOOLS:
+        value = effective[key]
+        if (
+            not isinstance(value, (bool, int, str))
+            or str(value).strip().lower()
+            not in {"true", "false", "1", "0", "yes", "no", "on", "off"}
+        ):
+            raise PolicyDenied("Invalid primary boolean control")
+        effective[key] = parse_bool(value, DEFAULT_CONTROL[key])
+    controls = controls_only(effective)
+    controls["ignore_users"] = sorted(set(controls["ignore_users"]) | blocked_users)
+    # The union must satisfy the same bounds as an imported snapshot.
+    return controls_only(controls, strict=True)
+
+
+def export_snapshot(
+    source: dict[str, Any],
+    *,
+    blacklist: list[Any],
+    revision: str,
+    now: float | None = None,
+) -> dict[str, Any]:
+    controls = effective_controls(source, blacklist=blacklist)
     return {
         "schema": 1,
         "revision": revision,
@@ -94,7 +131,8 @@ def validate_snapshot(
     }:
         raise PolicyDenied("Unsupported snapshot envelope")
     if (
-        data["schema"] != 1
+        type(data["schema"]) is not int
+        or data["schema"] != 1
         or not isinstance(data["revision"], str)
         or len(data["revision"]) > 100
     ):
@@ -126,8 +164,10 @@ def atomic_import(
         # Compare and replace share one cross-process lock for CLI and receivers.
         # Nonblocking acquisition bounds request time; the next refresh may retry.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise PolicyDenied("Refusing to replace a non-regular config path")
         if target.exists():
-            previous = validate_snapshot(json.loads(target.read_text()), now=now)
+            previous = validate_snapshot(read_json(target), now=now)
             if data["exported_at"] < previous["exported_at"]:
                 raise PolicyDenied("Refusing older configuration")
             if (
@@ -169,20 +209,55 @@ def atomic_import(
 def chat_allowed(
     controls: dict[str, Any], *, user_id: int, channel_id: int, guild_id: int | None
 ) -> bool:
+    """Deny unless every restriction field is present and well typed.
+
+    Missing or mistyped ignore/block lists must not become an empty allow.
+    """
+    try:
+        normalized = controls_only(controls, strict=True)
+    except PolicyDenied:
+        return False
     user, channel = str(user_id), str(channel_id)
-    if not controls.get("bot_enabled", True) or not controls.get(
-        "reply_mentions", True
-    ):
+    if not normalized["bot_enabled"] or not normalized["reply_mentions"]:
         return False
-    if user in controls.get("ignore_users", []) or channel in controls.get(
-        "blocked_channels", []
-    ):
+    if user in normalized["ignore_users"] or channel in normalized["blocked_channels"]:
         return False
-    allowed = controls.get("allowed_channels", [])
+    allowed = normalized["allowed_channels"]
     if allowed and channel not in allowed:
         return False
-    solo = controls.get("guild_solo_channel", {}).get(str(guild_id))
+    solo = normalized["guild_solo_channel"].get(str(guild_id))
     return not solo or channel == solo
+
+
+def read_json(path: Path) -> Any:
+    """Reject ambiguous authoritative JSON rather than discarding restrictions."""
+    limit = standby_policy.MAX_AUTHORITATIVE_JSON
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise PolicyDenied("Authoritative input is unavailable") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise PolicyDenied("Authoritative input must be a regular non-symlink file")
+    if info.st_size > limit:
+        raise PolicyDenied("Authoritative input is too large")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise PolicyDenied("Authoritative input is unavailable") from error
+    try:
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode) or current.st_size > limit:
+            raise PolicyDenied("Authoritative input must be a bounded regular file")
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            try:
+                text = stream.read(limit + 1)
+            except UnicodeDecodeError as error:
+                raise PolicyDenied("Authoritative input is not UTF-8 text") from error
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return standby_policy.parse_json(text)
 
 
 def main():
@@ -190,16 +265,25 @@ def main():
     parser.add_argument("action", choices=["export", "import", "status"])
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--blacklist",
+        type=Path,
+        help="Authoritative primary blacklist JSON (default: blacklist.json beside --input)",
+    )
     parser.add_argument("--revision", default="manual")
     args = parser.parse_args()
-    data = json.loads(args.input.read_text())
+    data = read_json(args.input)
     if args.action == "status":
         data = validate_snapshot(data)
         print(json.dumps({k: data[k] for k in ("revision", "exported_at", "sha256")}))
     elif args.action == "export":
         if args.output is None:
             parser.error("--output required")
-        atomic_import(export_snapshot(data, revision=args.revision), args.output)
+        blacklist = read_json(args.blacklist or args.input.with_name("blacklist.json"))
+        atomic_import(
+            export_snapshot(data, blacklist=blacklist, revision=args.revision),
+            args.output,
+        )
     else:
         if args.output is None:
             parser.error("--output required")

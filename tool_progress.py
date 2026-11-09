@@ -192,6 +192,30 @@ def _safe_preview(text: str) -> str:
     return "".join(kept).strip()
 
 
+def _bounded_preview_buffer(text: str) -> str:
+    """Cap retained text without discarding a private region's boundary."""
+    if len(text) <= _HARD_FALLBACK_CHARS:
+        return text
+    private_prefix = "[PRIVATE INTERNAL CONTEXT]"
+    # Reserve enough space for either privacy sentinel. Keeping a bare tail
+    # would expose private text once its opening marker rolled out of view.
+    cut = len(text) - _HARD_FALLBACK_CHARS + len(private_prefix)
+    prefix = ""
+    if any(start < cut < end for start, end in (
+        match.span() for match in _PRIVATE_BLOCK.finditer(text)
+    )):
+        prefix = private_prefix
+    else:
+        for match in _PREVIEW_SENTENCE.finditer(text):
+            if match.start() < cut < match.end():
+                if not _safe_preview(match.group()):
+                    # Preserve suppression through this sentence's end even
+                    # when its original context marker was in the removed head.
+                    prefix = "Watch signals: "
+                break
+    return prefix + text[cut:]
+
+
 def _continues_preview_marker(previous: str, delta: str) -> bool:
     """Keep split marker tokens intact despite the normal delta space join.
 
@@ -364,21 +388,25 @@ class ToolProgress:
     async def _do_first_post(self) -> None:
         try:
             await asyncio.sleep(_GRACE_BEFORE_FIRST_POST)
-            if self._stopped or self._tool_streaming or self._posted is not None:
-                return
-            content = strip_internal_context(self._render())
-            if not content.strip():
-                return
-            posted = await self._post_reply(content)
-            if self._stopped:
-                if posted is not None:
-                    with contextlib.suppress(Exception):
-                        await posted.delete()
-                return
-            self._posted = posted
-            self._last_content = content
-            self._last_edit = time.monotonic()
-            self._edits_made = 1
+            # Generation and dispatch can both ask to start the same status.
+            # Own the send until its message ID is published so the loser
+            # cannot post a second, untracked placeholder.
+            async with self._lock:
+                if self._stopped or self._tool_streaming or self._posted is not None:
+                    return
+                content = strip_internal_context(self._render())
+                if not content.strip():
+                    return
+                posted = await self._post_reply(content)
+                if self._stopped:
+                    if posted is not None:
+                        with contextlib.suppress(Exception):
+                            await posted.delete()
+                    return
+                self._posted = posted
+                self._last_content = content
+                self._last_edit = time.monotonic()
+                self._edits_made = 1
         except Exception as e:  # noqa: BLE001
             logger.debug("Discord progress post failed: %s", e)
             self._posted = None
@@ -392,17 +420,22 @@ class ToolProgress:
         content = strip_internal_context(content)
         if not content.strip():
             return None
+        kwargs = {}
+        if self._platform == "discord":
+            from discord import AllowedMentions
+
+            kwargs["allowed_mentions"] = AllowedMentions.none()
         msg = self._msg
         channel = getattr(msg, "channel", None)
         send_fn = getattr(channel, "send", None)
         if send_fn is not None and callable(send_fn):
             try:
-                return await send_fn(content)
+                return await send_fn(content, **kwargs)
             except Exception as e:  # noqa: BLE001
                 logger.debug("channel.send() failed, falling back to reply: %s", e)
         reply_fn = getattr(msg, "reply", None)
         if reply_fn is not None and callable(reply_fn):
-            return await reply_fn(content)
+            return await reply_fn(content, **kwargs)
         raise RuntimeError("No channel.send() or reply() available for progress post")
 
     def _append(self, text: str) -> None:
@@ -433,9 +466,7 @@ class ToolProgress:
         else:
             merged = (prev + text) if prev else text
         merged = " ".join(merged.split())
-        if len(merged) > _HARD_FALLBACK_CHARS:
-            merged = merged[-_HARD_FALLBACK_CHARS:]
-        self._reasoning_buffer = merged
+        self._reasoning_buffer = _bounded_preview_buffer(merged)
 
     async def update(self, tool_name: str, reasoning: str = "", snippet: str = "") -> None:
         """Record a tool's progress. Coalesces edits; never raises.
@@ -471,7 +502,7 @@ class ToolProgress:
             # Normalize and set (not append — update() carries full
             # reasoning strings from the model's tool-call announcement,
             # not per-token deltas. tick() owns the per-token append.)
-            self._reasoning_buffer = " ".join(reasoning.split())
+            self._reasoning_buffer = _bounded_preview_buffer(" ".join(reasoning.split()))
         if snippet:
             # Replace the snippet buffer with a normalized head of
             # the new artifact. The user wants to see the code
@@ -584,6 +615,8 @@ class ToolProgress:
         content = strip_internal_context(content)
         if not content.strip():
             return
+        from discord import AllowedMentions
+
         async with self._lock:
             if self._stopped or not self._posted or self._edits_disabled:
                 return
@@ -592,7 +625,9 @@ class ToolProgress:
             if not first_flush and now - self._last_edit < _TOKEN_TICK_INTERVAL:
                 return
             try:
-                await self._posted.edit(content=content)
+                await self._posted.edit(
+                    content=content, allowed_mentions=AllowedMentions.none()
+                )
                 self._last_edit = time.monotonic()
                 self._last_content = content
                 self._edits_made += 1
@@ -853,8 +888,12 @@ class ToolProgress:
         try:
             _fire_and_forget(self._background_transition(posted, content))
         except RuntimeError:
+            from discord import AllowedMentions
+
             with contextlib.suppress(Exception):
-                await posted.edit(content=content)
+                await posted.edit(
+                    content=content, allowed_mentions=AllowedMentions.none()
+                )
         return True
 
     async def _background_transition(self, posted: Any, content: str) -> None:
@@ -904,7 +943,9 @@ class ToolProgress:
         if not delivered:
             try:
                 async with self._lock:
-                    await posted.edit(content=content)
+                    await posted.edit(
+                        content=content, allowed_mentions=AllowedMentions.none()
+                    )
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     "Progress transition fallback edit failed; reply dropped: %s", e

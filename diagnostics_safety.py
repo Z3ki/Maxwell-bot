@@ -62,7 +62,10 @@ def _env_secret_values() -> list[str]:
         if (
             len(stripped) < _MIN_ENV_SECRET_LENGTH
             or _ENV_CONFIG_NAME_RE.search(key)
-            or _ENV_PLAIN_VALUE_RE.fullmatch(stripped)
+            or (
+                _ENV_PLAIN_VALUE_RE.fullmatch(stripped)
+                and not _SECRET_KEY_RE.match(key)
+            )
         ):
             continue
         values.add(value)

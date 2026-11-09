@@ -11,6 +11,8 @@ import asyncio
 import re
 from urllib.parse import unquote, urlparse
 
+from context_hydration import requester_can_read_history
+
 _CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
 _MESSAGE_HOSTS = {
     "discord.com",
@@ -100,6 +102,8 @@ async def resolve_discord_message(message, url: str):
     guild_id = getattr(interaction, "guild_id", None) or getattr(guild, "id", None)
     if link[0] != (str(guild_id) if guild_id else "@me"):
         return None
+    if not requester_can_read_history(message, channel):
+        return None
     fetch = getattr(channel, "fetch_message", None)
     if not callable(fetch):
         return None
@@ -139,6 +143,8 @@ async def refresh_discord_media_url(bot, message, url: str) -> str | None:
     key = discord_attachment_key(url)
     channel = _source_channel(message)
     if not key or str(getattr(channel, "id", "")) != key[0]:
+        return None
+    if not requester_can_read_history(message, channel):
         return None
     candidates = [message]
     parent = message

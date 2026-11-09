@@ -548,3 +548,12 @@ def test_proxy_rewrites_loopback_and_relative_redirects(monkeypatch):
     assert api._rewrite_site_location(
         "/dev/bot/demo/api/login", "demo"
     ) == "/dev/bot/demo/api/login"
+
+
+def test_new_keys_do_not_refresh_an_exhausted_bucket():
+    limiter = site_backend.RateLimiter(rate=0, burst=1, max_keys=2)
+    assert limiter.allow("victim") is True
+    assert limiter.allow("victim") is False
+    assert limiter.allow("filler") is True
+    assert limiter.allow("attacker-1") is False
+    assert limiter.allow("victim") is False

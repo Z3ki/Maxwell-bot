@@ -350,3 +350,61 @@ def test_global_registry_is_lazy_and_replaceable(monkeypatch):
     replacement = ToolRegistry()
     registry_mod.set_global_registry(replacement)
     assert registry_mod.get_global_registry() is replacement
+
+
+def test_live_contracts_reach_schema_prompt_groups_and_followup_policy(monkeypatch):
+    from maxwell_core.tools.results import _tool_results_need_followup
+    from tool_schemas import build_openai_tools, contract_groups, ends_turn, result_contract
+
+    registry = ToolRegistry()
+    monkeypatch.setattr(registry_mod, "_GLOBAL", registry)
+    registry.register(_spec(name="custom_finish", ends_turn=True))
+    registry.register(_spec(name="send_message"))
+    registry.register(_spec(name="web_search"))
+    registry.register(_spec(name="custom_lookup", returns_result=True))
+    names = ["custom_finish", "send_message", "web_search", "custom_lookup"]
+
+    assert ends_turn("custom_finish") is True
+    assert ends_turn("send_message") is False
+    assert result_contract("custom_finish") == " [ends the turn]"
+    assert result_contract("send_message") == " [returns nothing]"
+    assert contract_groups(names) == {
+        "result": ["custom_lookup"],
+        "ending": ["custom_finish"],
+        "silent": ["send_message", "web_search"],
+    }
+    schemas = {
+        item["function"]["name"]: item["function"]
+        for item in build_openai_tools(registry.snapshot_as_dict())
+    }
+    assert schemas["custom_finish"]["description"].endswith(" [ends the turn]")
+    assert schemas["web_search"]["description"].endswith(" [returns nothing]")
+    assert not _tool_results_need_followup(["Tool web_search: completed silently"])
+    assert _tool_results_need_followup(["Tool custom_lookup: found a record"])
+
+    # Contract queries must reflect later registrations, not an import-time set.
+    registry.register(
+        _spec(name="custom_finish", returns_result=True), allow_override=True
+    )
+    assert ends_turn("custom_finish") is False
+    assert result_contract("custom_finish") == " [returns output]"
+    assert contract_groups(["custom_finish"])["result"] == ["custom_finish"]
+
+
+def test_schema_builder_prefers_live_parameters_over_static_catalog(monkeypatch):
+    import tool_schemas
+
+    registry = ToolRegistry()
+    monkeypatch.setattr(registry_mod, "_GLOBAL", registry)
+    schema = {
+        "type": "object",
+        "properties": {"keywords": {"type": "string"}},
+        "required": ["keywords"],
+    }
+    tool = _Tool(get_parameters=lambda: schema)
+    registry.register_tool(tool, name="web_search", plugin="custom")
+    published = tool_schemas.build_openai_tools({"web_search": tool})[0]["function"]
+    assert published["parameters"] == registry.get("web_search").schema()
+    assert published["parameters"]["required"] == ["keywords"]
+    assert "query" not in published["parameters"]["properties"]
+    assert "query" in tool_schemas.TOOL_PARAMETERS["web_search"]["properties"]

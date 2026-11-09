@@ -184,7 +184,7 @@ def notice_text(bot, user_id) -> str | None:
         return None
     return (
         "Maxwell sends your request and necessary context to the selected AI provider. "
-        "Saved messages are on until you turn them off in `/config → Privacy`. "
+        "Message history is saved only when you enable it in `/config → Privacy`. "
         "Turning storage off does not stop provider processing. "
         f"[Terms]({urls['terms']}) · [Privacy]({urls['privacy']})"
     )

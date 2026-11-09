@@ -925,6 +925,9 @@ async def _normalize_audio_to_wav(data: bytes) -> bytes | None:
         "-hide_banner",
         "-loglevel",
         "error",
+        # Downloaded media may be a playlist; never let its demuxer open URLs/files.
+        "-protocol_whitelist",
+        "pipe",
         "-i",
         "pipe:0",
         "-t",
@@ -942,10 +945,13 @@ async def _normalize_audio_to_wav(data: bytes) -> bytes | None:
     )
     try:
         stdout, _stderr = await asyncio.wait_for(proc.communicate(data), timeout=25)
-    except asyncio.TimeoutError:
-        proc.kill()
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
         with contextlib.suppress(Exception):
             await proc.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         return None
     if proc.returncode != 0 or not stdout:
         return None

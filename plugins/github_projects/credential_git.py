@@ -112,7 +112,7 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
                             continue
                         output = captured[key.data]
                         output.extend(chunk)
-            code = process.wait()
+            code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
         except BaseException:
             process.kill()
             process.wait()
@@ -431,7 +431,8 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
         commands = request["commands"]
         validate_git_commands(commands)
         repo = request["repo"]
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repo):
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repo)
+                or any(part in {".", ".."} for part in repo.split("/"))):
             raise ValueError("invalid repository")
         remote = "https://github.com/" + repo + ".git"
         env = {
@@ -550,9 +551,12 @@ GIT_SCRIPT = inspect.getsource(validate_git_commands) + "\n" + dedent(
             # Private disk caches contain sanitized objects only. Authentication
             # stays on ephemeral /tmp, including when a container is killed.
             storage = sys.argv[2] if len(sys.argv) > 2 else None
+            worktree = Path(sys.argv[1])
+            if request.get("checkout"):
+                worktree.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="maxwell-git-auth-") as credentials:
-                code, output, error = cached_execute(request, Path(sys.argv[1]), storage, Path(credentials))
-        except (OSError, ValueError, TimeoutError) as exc:
+                code, output, error = cached_execute(request, worktree, storage, Path(credentials))
+        except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
             code, output, error = 2, "", str(exc) + "\n"
         if token:
             encoded = base64.b64encode(("x-access-token:" + token).encode()).decode("ascii")

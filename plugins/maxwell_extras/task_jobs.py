@@ -150,6 +150,8 @@ class TaskJobs:
                 return "refused: a current authorized request is required"
         except Exception:
             return "refused: Premium or privacy state is unavailable"
+        if self.closed:
+            return "refused: worker manager is stopping"
         uid, source = str(message.author.id), str(message.id)
         for job in self.jobs.values():
             if job.row["user_id"] == uid and job.row["source_id"] == source:
@@ -193,9 +195,10 @@ class TaskJobs:
             # A cancelled chat cannot leave an accepted-but-unstarted job live.
             try:
                 saved = await creation
-                await asyncio.to_thread(
-                    self.store.update, saved["id"], state="interrupted"
-                )
+                if saved["id"] == row["id"]:
+                    await asyncio.to_thread(
+                        self.store.update, saved["id"], state="interrupted"
+                    )
             finally:
                 self._users.discard(uid)
                 self._active -= len(tasks)
@@ -209,6 +212,15 @@ class TaskJobs:
                     "note": "Existing job; never replay interrupted work automatically",
                 }
             )
+        if self.closed:
+            try:
+                await asyncio.to_thread(
+                    self.store.update, row["id"], state="interrupted"
+                )
+            finally:
+                self._users.discard(uid)
+                self._active -= len(tasks)
+            return "refused: worker manager is stopping"
         job = Job(
             row, WorkerMessage(message), engine, arguments={"tasks": tasks},
             header=str(header or "")[:300], direct=bool(direct),
@@ -340,12 +352,11 @@ class TaskJobs:
 
     async def _run(self, job, tasks, timeout_minutes=None):
         from bot import _current_inbound, _current_byok_tool_budget
-        from premium_access import current_plan
+        from premium_access import current_plan, load_plan
 
         active_job.set((self, job))
         _current_inbound.set(job.message)
         _current_byok_tool_budget.set({"calls": 0})
-        current_plan.set((job.row["user_id"], "premium"))
         watcher = None
         shell = (getattr(self.bot, "tools", None) or {}).get("shell")
         pin = None
@@ -358,6 +369,9 @@ class TaskJobs:
             except Exception:
                 logger.debug("could not pin worker sandbox", exc_info=True)
         try:
+            current_plan.set(
+                (job.row["user_id"], await load_plan(self.bot, job.row["user_id"]))
+            )
             if not await self.allowed(job):
                 raise asyncio.CancelledError
             job.row["state"] = "running"
@@ -487,18 +501,27 @@ class TaskJobs:
         if not workspace or not callable(persist) or job.message is None:
             job.kept = [p for p in paths if p.startswith("/storage/")]
             return
+        names = [p.rsplit("/", 1)[-1] for p in workspace]
+        unique = [p for p, name in zip(workspace, names) if names.count(name) == 1]
+        groups = [(unique, f"jobs/{job.row['id']}")] if unique else []
+        groups.extend(
+            ([path], f"jobs/{job.row['id']}/{index}")
+            for index, (path, name) in enumerate(zip(workspace, names), 1)
+            if names.count(name) > 1
+        )
+        stored = {}
         try:
-            kept = await asyncio.wait_for(
-                persist(job.message, workspace, f"jobs/{job.row['id']}"), 300
-            )
+            async with asyncio.timeout(300):
+                for sources, folder in groups:
+                    kept = await persist(job.message, sources, folder)
+                    by_name = {p.rsplit("/", 1)[-1]: p for p in kept}
+                    for source in sources:
+                        destination = by_name.get(source.rsplit("/", 1)[-1])
+                        if destination:
+                            stored[source] = destination
         except Exception:
             logger.warning("Could not keep subagent files in /storage", exc_info=True)
-            kept = []
-        by_name = {p.rsplit("/", 1)[-1]: p for p in kept}
-        job.artifacts = [
-            by_name.get(p.rsplit("/", 1)[-1], p) if p.startswith("/workspace/") else p
-            for p in paths
-        ]
+        job.artifacts = [stored.get(path, path) for path in paths]
         job.kept = [p for p in job.artifacts if p.startswith("/storage/")]
 
     async def _send_reported_files(self, job) -> None:
@@ -510,16 +533,21 @@ class TaskJobs:
         if not job.artifacts or tool is None or job.message is None:
             return
         gate = getattr(self.bot, "_authorize_tool_execution", None)
+        if not callable(gate):
+            logger.warning("Subagent file attachment refused: authorization unavailable")
+            job.unsent.extend(str(path) for path in job.artifacts)
+            return
         for path in job.artifacts:
-            if callable(gate):
-                try:
-                    refusal = gate(job.message, "send_file", tool, {"path": path})
-                except Exception:
-                    logger.exception("Subagent attachment authorization failed")
-                    continue
-                if refusal:
-                    logger.info("Subagent file attachment refused")
-                    continue
+            try:
+                refusal = gate(job.message, "send_file", tool, {"path": path})
+            except Exception:
+                logger.exception("Subagent attachment authorization failed")
+                job.unsent.append(path)
+                continue
+            if refusal:
+                logger.info("Subagent file attachment refused")
+                job.unsent.append(path)
+                continue
             try:
                 result = await tool.execute(job.message, path=path)
             except Exception:
@@ -618,8 +646,9 @@ class TaskJobs:
                 if job.task.done():
                     self.jobs.pop(row["id"], None)
                     job = None
+            shared = str(row.get("user_id") or "") != uid
             view = (
-                job.view()
+                job.view(report=not shared)
                 if job
                 else {
                     k: row.get(k)
@@ -634,9 +663,10 @@ class TaskJobs:
                     )
                 }
             )
-            shared = str(row.get("user_id") or "") != uid
             if shared:
                 view.pop("reports", None)
+                view.pop("kept", None)
+                view.pop("unsent", None)
                 view["requester"] = str(row.get("user_id") or "")
             if not job or not job.reports or shared:
                 view["note"] = (
@@ -659,6 +689,7 @@ class TaskJobs:
                 and not job.task.done()
                 and (
                     job.row["state"] in LIVE_STATES
+                    or job.row.get("delivery") == "pending"
                     or reason in {"stopped", "interrupted"}
                 )
             ):
@@ -708,6 +739,8 @@ class TaskJobs:
                 continue
             view = job.view(report=False)
             if shared:
+                view.pop("kept", None)
+                view.pop("unsent", None)
                 # The model must not assume another person's running job died
                 # and launch a duplicate. It gets status only, not the report.
                 view["requester"] = str(job.row["user_id"])
@@ -822,7 +855,6 @@ def format_job(row, *, limit=1850):
     if str(row.get("state") or "") == "completed":
         reports = row.get("reports") or []
         results = []
-        has_site = False
         for report in reports:
             urls = list(dict.fromkeys(
                 item["site_url"]
@@ -833,14 +865,11 @@ def format_job(row, *, limit=1850):
                 and item.get("site_url")
             ))
             if urls:
-                has_site = True
                 results.extend(f"here you go: {url}" for url in urls)
             else:
                 results.append(_public_report(report.get("report", "")))
-        if has_site:
-            return strip_internal_context("\n".join(results) + _files_note(row))[:limit]
-        latest = reports[-1].get("report", "") if reports else ""
-        return strip_internal_context((_public_report(latest) or "The subagent finished.") + _files_note(row))[:limit]
+        body = "\n".join(results) or "The subagent finished."
+        return strip_internal_context(body + _files_note(row))[:limit]
     text = f"Subagent `{row['id']}` · {state}\n"
     if row.get("last_tool"):
         text += f"Last tool: {row['last_tool']} · calls: {row.get('tool_calls', 0)}\n"

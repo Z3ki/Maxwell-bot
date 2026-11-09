@@ -25,7 +25,7 @@ for _name in dir(_helpers):
     globals().setdefault(_name, getattr(_helpers, _name))
 del _name
 
-from plugins.media.impl import SeeImageTool, SeeVideoTool  # noqa: E402
+from plugins.media.impl import SeeImageTool, SeeVideoTool, _authorize_nested_media  # noqa: E402
 
 # Hard cap on a fetched body. fetch_url hands the bytes to the media tools and
 # to the text decoder, so an unbounded read let a model-invoked fetch on a URL
@@ -34,21 +34,6 @@ from plugins.media.impl import SeeImageTool, SeeVideoTool  # noqa: E402
 MAX_FETCH_BYTES = 25 * 1024 * 1024
 
 
-def _authorize_nested_media(bot: Any, message: Any, tool_name: str, url: str):
-    """Apply the normal dispatcher policy before an internal tool delegation."""
-    tool = (getattr(bot, "tools", None) or {}).get(tool_name)
-    if tool is None:
-        return None, f"Error: {tool_name} is not enabled."
-    authorize = getattr(bot, "_authorize_tool_execution", None)
-    if not callable(authorize):
-        return None, "refused: tool authorization is unavailable"
-    try:
-        denied = authorize(message, tool_name, tool, {"url": url})
-    except Exception:
-        return None, "refused: tool authorization could not be verified"
-    if denied:
-        return None, str(denied)
-    return tool, None
 
 class WebSearchTool(Tool):
     """Model-requested search with optional HTTP providers and ddgs fallback."""

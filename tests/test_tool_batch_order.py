@@ -4,6 +4,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from bot import MaxwellBot
 
 
@@ -231,3 +233,72 @@ def test_later_round_send_posts_to_the_channel(monkeypatch, tmp_path):
 
     asyncio.run(run())
 
+
+@pytest.mark.parametrize("side_effects", [False, True])
+@pytest.mark.parametrize("succeeds", [False, True])
+def test_registered_terminal_stops_later_tools_only_after_success(
+    monkeypatch, side_effects, succeeds
+):
+    from maxwell_core.tools import registry as registry_mod
+    from maxwell_core.tools.registry import ToolRegistry
+    from maxwell_core.tools.spec import ToolSpec
+
+    terminal = SimpleNamespace(side_effects=side_effects)
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="custom_finish", plugin="example", tool=terminal, ends_turn=True
+    ))
+    monkeypatch.setattr(registry_mod, "_GLOBAL", registry)
+    executed = []
+
+    async def execute(self, message, name, *_args, **_kwargs):
+        executed.append(name)
+        await asyncio.sleep(0)
+        outcome = "done" if succeeds or name != "custom_finish" else "Error - failed"
+        return f"Tool {name}: {outcome}"
+
+    monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+    monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+    owner = SimpleNamespace(_control={}, tools={
+        "custom_finish": terminal, "typing": SimpleNamespace(side_effects=False)
+    })
+    message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+
+    _, results = asyncio.run(MaxwellBot._process_native_tool_calls(
+        owner, message, "", [_call("custom_finish"), _call("typing")]
+    ))
+
+    assert executed == (["custom_finish"] if succeeds else ["custom_finish", "typing"])
+    if succeeds:
+        assert "Skipped" in results[1]
+    else:
+        assert "Error - failed" in results[0]
+
+
+def test_registered_terminal_waits_for_batched_result_inspection(monkeypatch):
+    from maxwell_core.tools import registry as registry_mod
+    from maxwell_core.tools.registry import ToolRegistry
+    from maxwell_core.tools.spec import ToolSpec
+
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="custom_finish", plugin="example", tool=SimpleNamespace(), ends_turn=True
+    ))
+    monkeypatch.setattr(registry_mod, "_GLOBAL", registry)
+    executed = []
+
+    async def execute(self, message, name, *_args, **_kwargs):
+        executed.append(name)
+        return f"Tool {name}: done"
+
+    monkeypatch.setattr(MaxwellBot, "_execute_tool_by_name", execute)
+    monkeypatch.setattr(MaxwellBot, "_remember_tool_call", AsyncMock())
+    owner = SimpleNamespace(_control={}, tools={})
+    message = SimpleNamespace(id=7, channel=SimpleNamespace(id=99), guild=None)
+
+    _, results = asyncio.run(MaxwellBot._process_native_tool_calls(
+        owner, message, "", [_call("shell"), _call("custom_finish")]
+    ))
+
+    assert executed == ["shell"]
+    assert "Deferred" in results[1]

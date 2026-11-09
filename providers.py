@@ -4,6 +4,7 @@ import asyncio
 import copy
 from functools import wraps
 import ipaddress
+import json
 import logging
 import os
 import time
@@ -299,6 +300,7 @@ class OpenAICompatibleProvider(ChatProvider):
             )
         ]
         if fallback_base_url and fallback_model:
+            self._validate_endpoint(fallback_base_url)
             self._endpoints.append(
                 ProviderEndpoint(
                     "fallback",
@@ -312,6 +314,7 @@ class OpenAICompatibleProvider(ChatProvider):
         # Appended last so text routing can keep treating index 1 as fallback.
         vision_model = (vision_model or "").strip()
         if vision_model:
+            self._validate_endpoint(vision_base_url or self.base_url)
             self._endpoints.append(
                 ProviderEndpoint(
                     "vision",
@@ -385,7 +388,9 @@ class OpenAICompatibleProvider(ChatProvider):
             address = ipaddress.ip_address(parsed.hostname)
         except ValueError:
             return
-        if not address.is_global:
+        # aiohttp bypasses the resolver for IP literals, so enforce the same
+        # public-unicast rule here as for addresses returned by DNS.
+        if not _ip_is_public(address):
             raise ValueError("Provider address must be public")
 
     async def _auth_headers(self, endpoint: ProviderEndpoint) -> dict[str, str]:
@@ -438,6 +443,20 @@ class OpenAICompatibleProvider(ChatProvider):
             for secret in secrets or (self.api_key,):
                 if secret:
                     value = value.replace(secret, "[redacted]")
+            # Tool arguments and reply envelopes may themselves be JSON
+            # strings. Scrub their decoded values before downstream consumers
+            # unescape them, otherwise an echoed key can bypass redaction via
+            # e.g. "\u0070rivate-token".
+            if value.lstrip().startswith(("{", "[", '"')):
+                try:
+                    decoded = json.loads(value)
+                except (ValueError, TypeError):
+                    pass
+                else:
+                    if isinstance(decoded, (dict, list, str)):
+                        redacted = self._redact_provider_payload(decoded, secrets)
+                        if redacted != decoded:
+                            return json.dumps(redacted, ensure_ascii=False)
             return value
         if isinstance(value, list):
             return [self._redact_provider_payload(item, secrets) for item in value]
@@ -999,6 +1018,8 @@ class OpenAICompatibleProvider(ChatProvider):
         first time a tool_call delta with a function name arrives in the SSE
         stream. This lets callers update a live progress message mid-generation.
         """
+        # Policy clamping below is not a caller-specified output budget.
+        allow_context_output_clamp = max_tokens is None
         retry_budget = (
             self.retry_attempts
             if retry_attempts is None
@@ -1362,10 +1383,12 @@ class OpenAICompatibleProvider(ChatProvider):
                             len(error_text),
                             "[provider body omitted]",
                         )
+                        # Classify the original body; the display-safe BYOK
+                        # message deliberately contains no compatibility clues.
                         if (
                             has_media
                             and not allow_media_degrade
-                            and _is_media_unsupported_error(resp.status, error_text)
+                            and _is_media_unsupported_error(resp.status, raw_error_text)
                         ):
                             raise ProviderMediaUnsupportedError(
                                 "Provider cannot accept this media"
@@ -1374,7 +1397,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         # fallbacks 404 on input audio. Mark broken and retry a
                         # media-capable endpoint (typically vision / primary).
                         if has_media and _is_media_unsupported_error(
-                            resp.status, error_text
+                            resp.status, raw_error_text
                         ):
                             media_broken.add(endpoint.name)
                             # Model capability, not a transient fault — remember
@@ -1418,7 +1441,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         # Provider-side function degradation (e.g. "DEGRADED function
                         # cannot be invoked"). This is NOT transient — don't waste
                         # retries on the same endpoint; cool it and fall back now.
-                        if resp.status == 400 and "degraded" in error_text.lower():
+                        if resp.status == 400 and "degraded" in raw_error_text.lower():
                             self._cool_endpoint(endpoint.name)
                             logger.warning(
                                 "Provider endpoint %s marked degraded; skipping to fallback",
@@ -1441,7 +1464,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         # Region / geo blocks (DeepSeek V4 Flash China opt-in)
                         # are not transient. Don't burn a 2s retry on the same
                         # endpoint — cool it and fail over immediately.
-                        if resp.status == 403 or "regionerror" in error_text.lower():
+                        if resp.status == 403 or "regionerror" in raw_error_text.lower():
                             self._cool_endpoint(endpoint.name)
                             logger.warning(
                                 "Provider endpoint %s returned 403/region block; skipping to fallback",
@@ -1466,7 +1489,7 @@ class OpenAICompatibleProvider(ChatProvider):
                         # time, so cool the endpoint and hand the turn to the
                         # fallback model rather than burning retries or surfacing
                         # a raw Google error into the channel.
-                        if _is_content_policy_block(resp.status, error_text):
+                        if _is_content_policy_block(resp.status, raw_error_text):
                             self._cool_endpoint(
                                 endpoint.name, "blocked the prompt on content policy"
                             )
@@ -1494,9 +1517,9 @@ class OpenAICompatibleProvider(ChatProvider):
                         current_output = int(data.get("max_tokens", self.max_tokens))
                         safe_context_output = (
                             context_output_limit(
-                                resp.status, error_text, current_output
+                                resp.status, raw_error_text, current_output
                             )
-                            if max_tokens is None
+                            if allow_context_output_clamp
                             else None
                         )
                         if safe_context_output is not None:
@@ -1514,7 +1537,7 @@ class OpenAICompatibleProvider(ChatProvider):
                             recovery_endpoint = endpoint
                             continue
                         safe_output = maximum_output_limit(
-                            resp.status, error_text, current_output
+                            resp.status, raw_error_text, current_output
                         )
                         if safe_output is not None:
                             logger.warning(
@@ -1522,7 +1545,7 @@ class OpenAICompatibleProvider(ChatProvider):
                                 current_output,
                                 safe_output,
                                 endpoint.name,
-                                data["model"],
+                                "byok" if byok_request else data["model"],
                             )
                             self._endpoint_output_caps[
                                 (endpoint.name, data["model"])
@@ -1532,7 +1555,7 @@ class OpenAICompatibleProvider(ChatProvider):
                             recovery_endpoint = endpoint
                             continue
                         if _is_stream_options_rejected(
-                            resp.status, error_text
+                            resp.status, raw_error_text
                         ) and data.get("stream_options"):
                             self._endpoints_without_stream_usage.add(endpoint.name)
                             logger.warning(

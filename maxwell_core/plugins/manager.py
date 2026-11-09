@@ -131,6 +131,7 @@ class PluginManager:
         self._maxwell_dynamic_items: Dict[str, set[Any]] = {}
         self._pending_async_setup: list[PendingSetup] = []
         self._pending_teardown: list[tuple[str, Any, PluginContext | None]] = []
+        self._pending_task_cleanup: list[asyncio.Task] = []
         self._event_tasks: Dict[str, set[asyncio.Task]] = {}
         self._tool_wraps: Dict[str, list[ToolWrapper]] = {}
         self._lifecycle_lock = asyncio.Lock()
@@ -703,6 +704,9 @@ class PluginManager:
             logger.exception("Plugin %r teardown failed", plugin)
 
     async def _drain_teardowns(self) -> None:
+        if self._pending_task_cleanup:
+            tasks, self._pending_task_cleanup = self._pending_task_cleanup, []
+            await asyncio.gather(*tasks, return_exceptions=True)
         while self._pending_teardown:
             plugin, module, ctx = self._pending_teardown.pop(0)
             await self._invoke_teardown(plugin, module, ctx)
@@ -758,17 +762,21 @@ class PluginManager:
                 discard_awaitable(pending.awaitable)
         self._pending_async_setup = kept
 
-    def _clear_plugin_registrations(self, plugin_name: str) -> None:
+    def _cancel_plugin_tasks(self, plugin_name: str) -> list[asyncio.Task]:
+        tasks = self._cancel_managed(plugin_name)
+        tasks.extend(self._job_tasks.pop(plugin_name, []))
+        tasks.extend(self._event_tasks.pop(plugin_name, set()))
+        for task in tasks:
+            task.cancel()
+        return tasks
+
+    def _clear_plugin_registrations(self, plugin_name: str) -> list[asyncio.Task]:
         data = self.loaded_plugins.get(plugin_name) or {}
         ctx = data.get("context")
         if ctx is not None:
             ctx._retire()
         self._discard_pending_setups(plugin_name)
-        self._cancel_managed(plugin_name)
-        for task in self._job_tasks.pop(plugin_name, []):
-            task.cancel()
-        for task in self._event_tasks.pop(plugin_name, set()):
-            task.cancel()
+        tasks = self._cancel_plugin_tasks(plugin_name)
         self._cleanup_ui(plugin_name)
         self._unwrap_tools(plugin_name)
         self._drop_registrations(plugin_name)
@@ -777,6 +785,7 @@ class PluginManager:
         self.services.unregister_owner(plugin_name)
         self.tool_registry.unregister_plugin(plugin_name, force=True)
         self._extensions.pop(plugin_name, None)
+        return tasks
 
     def _forget_plugin_modules(self, plugin_name: str) -> None:
         module_name = f"plugins.{plugin_name}"
@@ -790,7 +799,7 @@ class PluginManager:
         module = data.get("module")
         if callable(getattr(module, "teardown", None)):
             self._pending_teardown.append((plugin_name, module, data.get("context")))
-        self._clear_plugin_registrations(plugin_name)
+        self._pending_task_cleanup.extend(self._clear_plugin_registrations(plugin_name))
         self.loaded_plugins.pop(plugin_name, None)
         self._forget_plugin_modules(plugin_name)
         self.load_errors[plugin_name] = str(error) or type(error).__name__
@@ -897,7 +906,7 @@ class PluginManager:
 
         self._publish_result_tools()
         self.sync_bot_tools()
-        if self._pending_teardown:
+        if self._pending_teardown or self._pending_task_cleanup:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
@@ -1251,7 +1260,13 @@ class PluginManager:
     def _load_typed_manifest(self, plugin_dir: Path, plugin_name: str) -> PluginManifest:
         manifest_file = plugin_dir / "plugin.json"
         if manifest_file.exists():
-            return load_manifest_file(manifest_file, directory_name=plugin_name)
+            manifest = load_manifest_file(manifest_file, directory_name=plugin_name)
+            if manifest.id != plugin_name:
+                raise ManifestError(
+                    f"plugin id {manifest.id!r} must match directory {plugin_name!r}",
+                    path=manifest_file,
+                )
+            return manifest
         return validate_manifest(
             {
                 "name": plugin_name,
@@ -1471,13 +1486,14 @@ class PluginManager:
             return "user_id is required when not disabling globally."
 
         uid = str(user_id)
-        if uid in cfg.setdefault("allowed_users", []):
+        if uid not in cfg["denied_users"] and len(cfg["denied_users"]) >= 500:
+            return "Error: plugin has reached its per-user denial limit."
+        if uid in cfg["allowed_users"]:
             cfg["allowed_users"].remove(uid)
-        if cfg.get("enabled_globally", False):
-            if uid not in cfg.setdefault("denied_users", []):
-                if len(cfg["denied_users"]) >= 500:
-                    return "Error: plugin has reached its per-user denial limit."
-                cfg["denied_users"].append(uid)
+        # User opt-outs also override server-level enablement, even when the
+        # plugin is not globally enabled.
+        if uid not in cfg["denied_users"]:
+            cfg["denied_users"].append(uid)
 
         self._save_state()
         self.sync_bot_tools()
@@ -1647,47 +1663,83 @@ class PluginManager:
             if extract_root is not None:
                 shutil.rmtree(extract_root, ignore_errors=True)
 
-    def uninstall_plugin(self, plugin_name: str) -> str:
-        """Remove an independently installed plugin's code. Data is kept."""
-        dest = self.installed_plugins_dir() / plugin_name
-        if (
-            plugin_name not in self.loaded_plugins
-            and plugin_name not in self.load_errors
-            and not dest.exists()
-        ):
-            return f"Plugin '{plugin_name}' is not installed."
-        if self.is_protected(plugin_name):
-            return f"Plugin '{plugin_name}' is protected and cannot be uninstalled."
-        data = self.loaded_plugins.get(plugin_name) or {}
-        manifest = data.get("typed_manifest")
-        if manifest is not None and manifest.bundled:
-            return (
-                f"Plugin '{plugin_name}' is bundled. Disable it instead of uninstalling."
+    async def uninstall_plugin(self, plugin_name: str) -> str:
+        """Stop and remove an installed plugin, preserving its stored data."""
+        async with self._lifecycle_lock:
+            if not isinstance(plugin_name, str) or not plugin_name.isidentifier():
+                return "Error: plugin name must be a valid Python identifier."
+            dest = self.installed_plugins_dir() / plugin_name
+            if (
+                plugin_name not in self.loaded_plugins
+                and plugin_name not in self.load_errors
+                and not dest.exists()
+            ):
+                return f"Plugin '{plugin_name}' is not installed."
+            if self.is_protected(plugin_name):
+                return f"Plugin '{plugin_name}' is protected and cannot be uninstalled."
+            data = self.loaded_plugins.get(plugin_name) or {}
+            manifest = data.get("typed_manifest")
+            if manifest is not None and manifest.bundled:
+                return (
+                    f"Plugin '{plugin_name}' is bundled. Disable it instead of uninstalling."
+                )
+            if manifest is not None and not manifest.uninstallable:
+                return f"Plugin '{plugin_name}' does not allow uninstallation."
+            dependents = {
+                name
+                for name, info in self.loaded_plugins.items()
+                if name != plugin_name
+                and info.get("typed_manifest") is not None
+                and plugin_name in info["typed_manifest"].dependencies
+            }
+            dependents.update(
+                pending.plugin for pending in self._pending_async_setup
+                if pending.plugin != plugin_name
+                and plugin_name in pending.manifest.dependencies
             )
-        path = Path(str(data.get("path") or dest))
-        installed_root = self.installed_plugins_dir().resolve()
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        if installed_root not in resolved.parents and resolved != installed_root / plugin_name:
+            if dependents:
+                return (
+                    f"Error: plugin '{plugin_name}' is required by: "
+                    f"{', '.join(sorted(dependents))}. Uninstall dependents first."
+                )
+            path = Path(str(data.get("path") or dest))
+            installed_root = self.installed_plugins_dir().resolve()
+            try:
+                resolved = path.resolve()
+            except OSError as exc:
+                return f"Error: cannot resolve plugin code: {exc}"
+            if resolved != installed_root / plugin_name:
+                return (
+                    f"Plugin '{plugin_name}' is not independently installed "
+                    f"(code lives at {path})."
+                )
+            trash = self.data_dir / "plugin_trash" / f"{plugin_name}-{int(time.time())}"
+            trash.parent.mkdir(parents=True, exist_ok=True)
+            if plugin_name in self.loaded_plugins:
+                self.disable_plugin(plugin_name, is_global=True)
+            ctx = data.get("context")
+            if ctx is not None:
+                ctx._retire()
+            self._discard_pending_setups(plugin_name)
+            tasks = self._cancel_plugin_tasks(plugin_name)
+            try:
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                self._cleanup_ui(plugin_name)
+                await self._drain_teardowns()
+                await self._invoke_teardown(plugin_name, data.get("module"), ctx)
+            finally:
+                self._clear_plugin_registrations(plugin_name)
+                self.loaded_plugins.pop(plugin_name, None)
+                self._forget_plugin_modules(plugin_name)
+                self._publish_result_tools()
+                self.sync_bot_tools()
+            try:
+                shutil.move(str(resolved), str(trash))
+            except OSError as exc:
+                return f"Error moving stopped plugin code aside: {exc}"
+            self.load_errors.pop(plugin_name, None)
             return (
-                f"Plugin '{plugin_name}' is not independently installed "
-                f"(code lives at {path})."
+                f"Uninstalled plugin '{plugin_name}'. Code moved to {trash}. "
+                f"Stored data in {self.data_dir / 'plugins' / plugin_name} was kept."
             )
-        if plugin_name in self.loaded_plugins:
-            self.disable_plugin(plugin_name, is_global=True)
-        trash = self.data_dir / "plugin_trash" / f"{plugin_name}-{int(time.time())}"
-        trash.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.move(str(resolved), str(trash))
-        except OSError as exc:
-            return f"Error moving plugin code aside: {exc}"
-        self._clear_plugin_registrations(plugin_name)
-        self.loaded_plugins.pop(plugin_name, None)
-        self._publish_result_tools()
-        self.sync_bot_tools()
-        return (
-            f"Uninstalled plugin '{plugin_name}'. Code moved to {trash}. "
-            f"Stored data in {self.data_dir / 'plugins' / plugin_name} was kept."
-        )

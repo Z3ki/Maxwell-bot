@@ -107,6 +107,11 @@ class _GatedFile(web.FileResponse):
         super().__init__(path, **kwargs)
         self._gate = gate
 
+    def _get_file_path_stat_encoding(self, accept_encoding):
+        # A signed link authorizes this exact stored file, not a .gz/.br
+        # sibling that may contain unrelated private data.
+        return super()._get_file_path_stat_encoding("")
+
     async def prepare(self, request):
         async with self._gate:
             return await super().prepare(request)

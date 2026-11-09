@@ -12,7 +12,7 @@ class _Manager:
         self.loaded_plugins = {name: {}}
         self.reloads = 0
 
-    def reload_plugins(self):
+    async def reload_plugins_async(self):
         self.reloads += 1
         self.loaded_plugins[self.name] = {}
         return "Reloaded"

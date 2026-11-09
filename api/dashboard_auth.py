@@ -207,14 +207,25 @@ class DashboardSessions:
         except Exception:
             return None
 
-    def mint_link(self, user: dict, guilds: list[dict], *, ttl: int = LINK_TTL) -> str:
+    def _check_write(self, user_id, started_at):
+        from privacy import owned_write_allowed
+
+        root = self.path.parent.parent if self.path.parent.name == "dashboard" else self.path.parent
+        if not owned_write_allowed(root, user_id, started_at):
+            raise ValueError("Personal data was deleted. Make a new dashboard sign-in link.")
+
+    def mint_link(self, user: dict, guilds: list[dict], *, ttl: int = LINK_TTL, started_at=None) -> str:
         """One-time sign-in link token, written by the bot, redeemed by the API."""
+        from privacy import request_started_at
+
+        started_at = request_started_at() if started_at is None else started_at
         token = secrets.token_urlsafe(32)
         identity = _digest("link:" + token)
         uid = str(user["id"])
-        payload = self._seal(identity, {"user": user, "guilds": guilds})
+        payload = self._seal(identity, {"user": user, "guilds": guilds, "issued_at": started_at})
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_write(uid, started_at)
             self.prune(db)
             if db.execute("SELECT COUNT(*) FROM links WHERE uid=?", (uid,)).fetchone()[0] >= 5:
                 # Older unused links die first; nobody needs six open tabs of it.
@@ -263,7 +274,10 @@ class DashboardSessions:
             )
             return cursor.rowcount == 1
 
-    def create(self, user: dict, token: str, lifetime: int, **extra):
+    def create(self, user: dict, token: str, lifetime: int, *, started_at=None, **extra):
+        from privacy import request_started_at
+
+        started_at = request_started_at() if started_at is None else started_at
         cookie = secrets.token_urlsafe(32)
         session = {"user": user, "token": token, "csrf": secrets.token_urlsafe(32), **extra}
         nonce = secrets.token_bytes(12)
@@ -273,6 +287,8 @@ class DashboardSessions:
         )
         expires = time.time() + min(max(lifetime, 1), 8 * 3600)
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._check_write(str(user["id"]), started_at)
             self.prune(db)
             db.execute(
                 "INSERT INTO sessions VALUES (?, ?, ?)", (identity, encrypted, expires)

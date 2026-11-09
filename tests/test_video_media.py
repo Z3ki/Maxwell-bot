@@ -3,6 +3,11 @@
 import asyncio
 import base64
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from bot import MaxwellBot
 
 from bot_tools import FetchUrlTool, SeeVideoTool
 from tool_schemas import RESULT_TOOL_NAMES, TOOL_PARAMETERS
@@ -113,3 +118,42 @@ def test_video_tool_returns_frames_and_audio_for_followup_input():
     assert "audio track was extracted" in result
     assert cached and cached[0][0] == "8"
     assert len(cached[0][1]) == 1
+
+
+@pytest.mark.parametrize("audio_enabled", [False, True])
+def test_embed_thumbnail_does_not_replace_enabled_video_audio(audio_enabled):
+    owner = object.__new__(MaxwellBot)
+    owner._control = {"process_images": True, "process_audio": audio_enabled}
+    owner.config = SimpleNamespace(ENABLE_AUDIO_INPUT=True, ENABLE_VIDEO_INPUT=True)
+    thumbnail = {
+        "b64": "anBlZw==", "mime_type": "image/jpeg",
+        "filename": "thumbnail.jpg", "is_image": True,
+    }
+    video = {
+        "b64": "dmlkZW8=", "mime_type": "video/mp4",
+        "filename": "clip.mp4", "is_image": False, "message_id": 7,
+        "url": "https://example.invalid/clip.mp4",
+    }
+    audio = {
+        "b64": "d2F2", "mime_type": "audio/wav",
+        "filename": "audio.wav", "is_image": False,
+    }
+    owner._download_embed_media = AsyncMock(side_effect=[thumbnail, video])
+    owner._extract_video_derivatives = AsyncMock(return_value=[audio])
+    embed = SimpleNamespace(
+        thumbnail=SimpleNamespace(url="https://example.invalid/thumbnail.jpg"),
+        video=SimpleNamespace(url=video["url"]),
+    )
+
+    result = asyncio.run(owner._extract_embeds(SimpleNamespace(id=7, embeds=[embed])))
+
+    binary = [item for item in result if item.get("b64")]
+    assert binary == [thumbnail, audio] if audio_enabled else binary == [thumbnail]
+    assert not any(item.get("mime_type", "").startswith("video/") for item in result)
+    if audio_enabled:
+        owner._extract_video_derivatives.assert_awaited_once_with(
+            b"video", "clip.mp4", 7, owner._max_media_bytes(),
+            source_url=video["url"], include_frames=False, source_prefix="embed_video",
+        )
+    else:
+        owner._extract_video_derivatives.assert_not_awaited()

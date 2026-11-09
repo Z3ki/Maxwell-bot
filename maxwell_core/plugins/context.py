@@ -60,11 +60,13 @@ class PluginContext:
         self._active = True
         self._retired_services: dict[str, Any] = {}
         self._retired_tools: dict[str, Any] = {}
+        self._retired_permissions: list[str] = []
 
     def _retire(self) -> None:
         if self._active:
             self._retired_services = self._manager.services.snapshot()
             self._retired_tools = self._manager.tool_registry.snapshot_as_dict()
+            self._retired_permissions = self.granted_permissions()
             self._active = False
 
     def _require_active(self) -> None:
@@ -88,6 +90,8 @@ class PluginContext:
         return self._manager.plugin_config(self.name)
 
     def granted_permissions(self) -> list[str]:
+        if not self._active:
+            return list(self._retired_permissions)
         return list(self._manager.granted_permissions(self.name))
 
     def has_permission(self, capability: str) -> bool:

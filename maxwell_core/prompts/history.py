@@ -159,7 +159,7 @@ def canonical_history(
         if id(row) in redundant:
             continue
         if row.get("is_tool") and row.get("tool_name") == "send_message":
-            output = str(row.get("tool_result") or row["content"])
+            output = strip_media_payloads(str(row.get("tool_result") or row["content"]))
             marker = "__MESSAGE_SENT__\n"
             if marker in output:
                 destination = str(

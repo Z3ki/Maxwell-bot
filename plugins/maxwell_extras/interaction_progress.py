@@ -481,6 +481,7 @@ def _patch_session() -> None:
         return await next_send["fn"](self, content=content, file=file, **kwargs)
 
     session_init._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
+    session_init._maxwell_original = original_init  # type: ignore[attr-defined]
     session_send._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
     UserInstallSession.__init__ = session_init
 
@@ -534,7 +535,9 @@ def _patch_tool_progress() -> None:
         self._posted = None
 
     post_reply._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
+    post_reply._maxwell_original = original_post  # type: ignore[attr-defined]
     stop._maxwell_interaction_progress_wrapped = True  # type: ignore[attr-defined]
+    stop._maxwell_original = original_stop  # type: ignore[attr-defined]
     ToolProgress._post_reply = post_reply
     ToolProgress.stop = stop
     _TOOL_PROGRESS_PATCHED = True
@@ -599,15 +602,33 @@ def install_interaction_progress(bot: Any, ctx: Any = None) -> None:
     bot._maxwell_interaction_progress_installed = True
 
 
-def uninstall_interaction_progress(bot: Any) -> None:
-    """Allow a plugin reload to install the handlers again.
-
-    teardown unregisters the interaction handler and unwraps the session
-    sender, but the bot attribute and module guards would otherwise survive
-    and make the next setup return early.
-    """
+async def uninstall_interaction_progress(bot: Any) -> None:
+    """Retire timers and class wrappers before the next plugin module loads."""
     global _SESSION_PATCHED, _TOOL_PROGRESS_PATCHED
 
+    tasks = {
+        task
+        for state in _STATES.values()
+        for task in (state.timer, state.cleanup, state.tool_status_task)
+        if task is not None and task is not asyncio.current_task()
+    }
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _STATES.clear()
+
+    from tool_progress import ToolProgress
+
+    for cls, name in (
+        (UserInstallSession, "__init__"),
+        (ToolProgress, "_post_reply"),
+        (ToolProgress, "stop"),
+    ):
+        wrapped = getattr(cls, name)
+        original = getattr(wrapped, "_maxwell_original", None)
+        if original is not None and getattr(wrapped, "_maxwell_interaction_progress_wrapped", False):
+            setattr(cls, name, original)
     bot._maxwell_interaction_progress_installed = False
     _SESSION_PATCHED = False
     _TOOL_PROGRESS_PATCHED = False

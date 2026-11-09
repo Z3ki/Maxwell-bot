@@ -615,9 +615,6 @@ class VoiceModTool(Tool):
         }.get(act)
         if not cap:
             return "Error: action must be mute, unmute, deafen, undeafen, move, or disconnect"
-        missing = _missing_cap(guild, cap, message)
-        if missing:
-            return missing
         member, error = await _resolve_member(guild, user_id)
         if error:
             return error
@@ -627,6 +624,12 @@ class VoiceModTool(Tool):
         )
         if blocked:
             return blocked
+        voice_channel = getattr(getattr(member, "voice", None), "channel", None)
+        if voice_channel is None:
+            return "Error: member is not connected to a voice channel"
+        missing = _missing_cap(guild, cap, message, channel=voice_channel)
+        if missing:
+            return missing
         why = _mod_reason(message)
         try:
             if act == "mute":
@@ -651,6 +654,9 @@ class VoiceModTool(Tool):
                 return error
             if not isinstance(dest, discord.VoiceChannel):
                 return "Error: move requires a voice channel_id in this server"
+            missing = _missing_cap(guild, cap, message, channel=dest)
+            if missing:
+                return missing
             await member.edit(voice_channel=dest, reason=why)
             return f"Moved {member} to {_channel_label(dest)}"
         except discord.Forbidden:
@@ -706,6 +712,12 @@ class LockChannelTool(Tool):
         ok = 0
         errors = []
         for ch in targets:
+            missing = _missing_cap(
+                guild, "manage_channels", message, alt_caps=("manage_roles",), channel=ch
+            )
+            if missing:
+                errors.append(f"{_channel_label(ch)}: {missing}")
+                continue
             err = await _lock_target(ch, locked, why)
             if err:
                 errors.append(err)
@@ -779,6 +791,12 @@ class LockdownTool(Tool):
         ok = []
         failed = []
         for ch in channels:
+            missing = _missing_cap(
+                guild, "manage_channels", message, alt_caps=("manage_roles",), channel=ch
+            )
+            if missing:
+                failed.append(f"{_channel_label(ch)}: {missing}")
+                continue
             err = await _lock_target(ch, locked, why)
             if err:
                 failed.append(err)
@@ -862,7 +880,12 @@ class SetChannelPermissionsTool(Tool):
                             "Error: you cannot grant channel permissions you do not have: "
                             + ", ".join(denied)
                         )
-            await channel.set_permissions(subject, reason=why, **pairs)
+            unknown = sorted(set(pairs) - set(discord.Permissions.VALID_FLAGS))
+            if unknown:
+                return "Error: unknown channel permissions: " + ", ".join(unknown)
+            overwrite = channel.overwrites_for(subject)
+            overwrite.update(**pairs)
+            await channel.set_permissions(subject, overwrite=overwrite, reason=why)
             return (
                 f"Updated overwrites for {target} on {_channel_label(channel)}: {pairs}"
             )

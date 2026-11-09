@@ -47,6 +47,9 @@ class _PublicationState:
         result_names: set[str] = set()
         for contribution in self.owners.values():
             schemas.update(contribution.schemas)
+            # Result contracts follow the same latest-owner precedence as
+            # schemas; an older result declaration cannot override silence.
+            result_names.difference_update(contribution.schemas)
             result_names.update(contribution.result_names)
         # If unrelated code replaced a managed entry, that value becomes an
         # external catalog entry. Do not delete or overwrite it on unload.

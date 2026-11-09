@@ -149,3 +149,21 @@ def test_messages_attributed_by_id_count_too():
         {"author_id": "1", "content": c} for c in ("jaja a", "jaja b", "jaja c")
     ]
     assert MaxwellBot._self_repetition_note(_bot(self_id=1), rows)
+
+
+def test_other_bots_are_not_attributed_to_maxwell():
+    rows = [
+        {"author_id": "9", "author_is_bot": True, "content": "jaja scheduled reminder"}
+        for _ in range(6)
+    ]
+    assert MaxwellBot._self_repetition_note(_bot(), rows) == ""
+
+
+def test_all_current_self_identities_count_as_maxwell():
+    bot = _bot()
+    bot._self_ids = lambda: {1, 2}
+    rows = [
+        {"author_id": str(uid), "author_is_bot": True, "content": "jaja hello"}
+        for uid in (1, 2, 1)
+    ]
+    assert MaxwellBot._self_repetition_note(bot, rows)

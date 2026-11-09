@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from maxwell_core.tools.spec import ToolSpec
 from message_pipeline import ReplyQueue
 from runtime_lifecycle import drain_timeout_seconds, shard_launch_kwargs
@@ -24,6 +26,12 @@ def test_drain_timeout_defaults_and_clamps(monkeypatch):
     assert drain_timeout_seconds() == 0.0
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_drain_timeout_nonfinite_uses_bounded_default(monkeypatch, value):
+    monkeypatch.setenv("DRAIN_TIMEOUT_SECONDS", value)
+    assert drain_timeout_seconds() == 30.0
+
+
 def test_shard_kwargs_stay_empty_when_unset(monkeypatch):
     monkeypatch.delenv("SHARD_COUNT", raising=False)
     monkeypatch.delenv("SHARD_IDS", raising=False)
@@ -39,6 +47,15 @@ def test_shard_count_and_ids(monkeypatch):
     monkeypatch.delenv("SHARD_COUNT", raising=False)
     monkeypatch.setenv("SHARD_IDS", "0,2")
     assert shard_launch_kwargs() == {"shard_count": 3, "shard_ids": [0, 2]}
+
+
+@pytest.mark.parametrize("count", ["4", ""])
+@pytest.mark.parametrize("ids", ["-1", "invalid", ",,", "-1,invalid"])
+def test_invalid_shard_subset_never_launches_all_shards(monkeypatch, count, ids):
+    monkeypatch.setenv("SHARD_COUNT", count)
+    monkeypatch.setenv("SHARD_IDS", ids)
+    with pytest.raises(ValueError, match="SHARD_IDS"):
+        shard_launch_kwargs()
 
 
 def test_user_install_can_use_discord_tools():

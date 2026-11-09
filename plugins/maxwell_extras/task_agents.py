@@ -163,8 +163,8 @@ class ManageTaskAgentTool(Tool):
             "save (Premium) stores name, shell/website/research/custom scope, instructions and optional tool permissions only "
             "when asked to save/edit an agent; Maxwell can choose and update tool permissions within the caller’s available tools. delete removes a named profile. "
             "Profiles are optional saved settings, expire 90 days after editing by default, "
-            "and are included in Delete my data. Never store credentials. Run a profile "
-            "through delegate_task with profile=<name> and the concrete task. Profiles "
+            "and are included in Delete my data. Never store credentials. delegate_task "
+            "accepts concrete task text only; include any saved instructions explicitly. Profiles "
             "cannot grant extra tools, permissions, background jobs or separate credentials."
         )
 

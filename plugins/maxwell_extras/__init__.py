@@ -100,5 +100,5 @@ async def teardown(bot):
     ui.unregister_interaction_handler("message_requests")
     from .interaction_progress import uninstall_interaction_progress
 
-    uninstall_interaction_progress(bot)
+    await uninstall_interaction_progress(bot)
     del bot

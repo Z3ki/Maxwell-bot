@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timezone
 from typing import ClassVar
 
@@ -11,10 +10,10 @@ import discord
 
 from tools import Tool
 
-from .cron import CronError, describe, next_after, parse, zone
+from .cron import CronError, describe, parse, zone
 from .planning import NAME_LIMIT as _NAME_LIMIT
 from .planning import PROMPT_LIMIT as _PROMPT_LIMIT
-from .planning import plan_at, plan_cron
+from .planning import next_run, plan_at, plan_cron
 from .store import ScheduleLimitError, ScheduleStore, daily_run_limit, max_per_user, min_interval_minutes
 
 
@@ -172,7 +171,7 @@ class ScheduleTool(Tool):
             await asyncio.to_thread(self.store.update, uid, sid, enabled=False, last_status="paused by user")
             return f"Paused `{sid}`."
         if action == "resume":
-            first = self._next(row, now)
+            first = next_run(row, now)
             if first is None:
                 return "Error: that one-time run is in the past; edit it with a new at"
             await asyncio.to_thread(
@@ -204,6 +203,8 @@ class ScheduleTool(Tool):
             if "next_run" in changes:
                 changes["enabled"] = True
             updated = await asyncio.to_thread(self.store.update, uid, sid, **changes)
+            if updated is None:
+                return "Error: no schedule with that id"
             return "Updated. " + self._line(updated)
         return "Error: unknown action"
 
@@ -212,14 +213,6 @@ class ScheduleTool(Tool):
         if row["kind"] == "cron":
             return f"cron {describe(parse(row['spec']))} {row['tz']}"
         return f"once at {_when(datetime.fromisoformat(row['spec']).timestamp())}"
-
-    @staticmethod
-    def _next(row: dict, now: datetime) -> float | None:
-        if row["kind"] == "cron":
-            found = next_after(parse(row["spec"]), now, zone(row["tz"]))
-            return found.timestamp() if found else None
-        when = datetime.fromisoformat(row["spec"]).timestamp()
-        return when if when > time.time() else None
 
     def _line(self, row: dict) -> str:
         state = "on" if row["enabled"] else "off"

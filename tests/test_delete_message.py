@@ -19,7 +19,8 @@ def _setup(author_id=999, *, requester_permission=False, bot_permission=False):
     target = SimpleNamespace(author=SimpleNamespace(id=author_id), delete=AsyncMock())
     channel = SimpleNamespace(id=600, guild=guild, fetch_message=AsyncMock(return_value=target))
     channel.permissions_for = lambda member: SimpleNamespace(
-        administrator=False, manage_messages=permissions.get(member.id, False)
+        administrator=False, manage_messages=permissions.get(member.id, False),
+        view_channel=True, read_message_history=True,
     )
     message = SimpleNamespace(author=requester, guild=guild, channel=channel)
     journal = SimpleNamespace(find_response=object(), submit=AsyncMock())

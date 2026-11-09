@@ -534,3 +534,50 @@ def test_web_dashboard_plugin_registers_and_removes_the_command(tmp_path, monkey
         sys.modules.update(saved)
     assert bot._dashboard_links is None
     assert "dashboard" not in {cmd["name"] for cmd in ui.USER_INSTALL_COMMANDS}
+
+
+def test_redeem_cannot_recreate_session_after_concurrent_deletion(tmp_path, monkeypatch):
+    import api.dashboard_auth as auth
+
+    async def run():
+        async with link_app(tmp_path, monkeypatch) as (dashboard, client):
+            monkeypatch.setattr(auth.time, "time", lambda: 100.0)
+            token = dashboard.sessions.mint_link({"id": UID, "name": "User"}, [])
+            create = dashboard.sessions.create
+
+            def delete_then_create(*args, **kwargs):
+                # The token has been consumed, but its session is not saved yet.
+                path = tmp_path / "plugins/maxwell_extras/user_preferences.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"users": {UID: {"deleted_at": 200.0}}}))
+                dashboard.sessions.delete_user(UID)
+                return create(*args, **kwargs)
+
+            monkeypatch.setattr(dashboard.sessions, "create", delete_then_create)
+            monkeypatch.setattr(auth.time, "time", lambda: 300.0)
+            response = await client.post(
+                "/api/dashboard/redeem", json={"token": token}, headers={"Origin": LINK.origin}
+            )
+            assert response.status == 400
+            assert "deleted" in (await response.json())["error"]
+            with dashboard.sessions.db() as db:
+                assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+            monkeypatch.setattr(dashboard.sessions, "create", create)
+            # A genuinely new user action is allowed after deletion.
+            assert (await sign_in(dashboard, client))["Authorization"].startswith("Bearer ")
+
+    asyncio.run(run())
+
+
+def test_stale_dashboard_link_writer_cannot_undo_deletion(tmp_path):
+    from api.dashboard_auth import DashboardSessions
+
+    path = tmp_path / "plugins/maxwell_extras/user_preferences.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"users": {UID: {"deleted_at": 200.0}}}))
+    sessions = DashboardSessions(tmp_path / "dashboard/sessions.sqlite3", LINK.key)
+    with pytest.raises(ValueError, match="deleted"):
+        sessions.mint_link({"id": UID}, [], started_at=100.0)
+    with pytest.raises(ValueError, match="deleted"):
+        sessions.create({"id": UID}, "", 3600, started_at=100.0)
+    assert sessions.mint_link({"id": UID}, [], started_at=201.0)

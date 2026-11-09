@@ -148,6 +148,32 @@ def test_can_test_a_site_you_did_not_create(bot, monkeypatch):
     assert "belongs to someone else" not in out
     assert "mine" in out.lower()
 
+@pytest.mark.parametrize(
+    ("requester", "admin", "can_read_logs"),
+    [(1, False, True), (2, False, False), (2, True, True)],
+)
+def test_backend_logs_are_only_visible_to_owner_or_admin(
+    bot, monkeypatch, requester, admin, can_read_logs,
+):
+    from unittest.mock import AsyncMock
+    import site_server
+
+    run(CreateSiteTool(bot).execute(_msg(uid=1), name="mine", title="Mine", body=PAGE))
+    bot._sites["mine"]["server"] = True
+    bot._is_admin = lambda _uid: admin
+    logs = AsyncMock(return_value="PRIVATE_BACKEND_SECRET")
+    monkeypatch.setattr(site_server, "logs", logs)
+    monkeypatch.setattr(site_test, "http_get", AsyncMock(return_value=(200, PAGE.encode(), "")))
+    monkeypatch.setattr(
+        site_test, "probe_browser",
+        AsyncMock(return_value={"browser": "none", "http_status": 200, "console_errors": []}),
+    )
+    out = run(SiteTestTool(bot).execute(_msg(uid=requester), name="mine"))
+    assert "Python API" in out
+    assert ("PRIVATE_BACKEND_SECRET" in out) is can_read_logs
+    assert logs.await_count == int(can_read_logs)
+
+
 
 def test_site_test_refuses_a_third_identical_probe(bot, monkeypatch):
     from bot_tools import SITE_READ_LOOP_MARKER
@@ -266,3 +292,25 @@ def test_real_browser_sees_console_error_and_404():
     assert "missing-asset.png" in failed or "404" in failed
     assert isinstance(result.get("screenshot_png"), (bytes, bytearray))
     assert result["screenshot_png"][:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_dev_public_prefix_maps_to_the_requested_page(tmp_path):
+    page = tmp_path / "about.html"
+    page.write_text("<p>about</p>", encoding="utf-8")
+    url = "https://bot.example/dev/bot/demo/about.html"
+    assert site_test.html_path_for_url(tmp_path, "demo", url) == page
+    assert site_test._asset_relpath("/dev/bot/demo/style.css", "demo") == "style.css"
+    assert site_test.html_path_for_url(tmp_path, "demo", "https://bot.example/bot/demo/") == (
+        tmp_path / "index.html"
+    )
+
+
+def test_probe_blocks_other_origins_including_loopback():
+    target = "https://bot.example/dev/bot/demo/about.html"
+    assert site_test._probe_request_allowed(target, target)
+    assert site_test._probe_request_allowed("https://bot.example/dev/bot/demo/app.js", target)
+    assert not site_test._probe_request_allowed("http://127.0.0.1:8801/notes", target)
+    assert not site_test._probe_request_allowed("http://169.254.169.254/", target)
+    local = "http://127.0.0.1:8765/bot/demo/"
+    assert site_test._probe_request_allowed(local, local)
+    assert not site_test._probe_request_allowed("http://127.0.0.1:8801/notes", local)

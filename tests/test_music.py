@@ -79,6 +79,7 @@ def fixture(tmp_path, gid=10, uid=100):
 @pytest.mark.parametrize('url', ['http://youtube.com/watch?v=abcdefghijk', 'https://127.0.0.1/a.mp3',
     'file:///etc/passwd', 'https://youtube.com.evil.org/watch?v=abcdefghijk', 'ytsearch:secret',
     'https://user:pw@youtube.com/watch?v=abcdefghijk', 'https://youtube.com:8888/watch?v=abcdefghijk',
+    'https://youtube.com:0/watch?v=abcdefghijk',
     'https://youtube.com/redirect?q=http://localhost', 'https://example.org/a.mp3', ''])
 def test_music_rejects_arbitrary_urls(url):
     with pytest.raises((MusicError, ValueError)):

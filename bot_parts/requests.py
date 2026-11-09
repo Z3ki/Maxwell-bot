@@ -164,6 +164,15 @@ class RequestPipelineMixin:
         to raise ``TypeError: got multiple values for argument 'name'`` because
         the identifier was also called ``name``.
         """
+        # Refused calls have not performed an effect and must leave fallback
+        # delivery and retry eligibility intact.
+        tool_args.pop("message", None)
+        tool_args.pop("self", None)
+        denied = MaxwellBot._authorize_tool_execution(
+            self, inbound_message, tool_identifier, handler, tool_args
+        )
+        if denied:
+            raise PermissionError(denied)
         if tool_identifier not in {"no_response", "more_tools", "reasoning"}:
             await MaxwellBot._mark_request_effect(self, inbound_message)
         state = _current_inbound_effects.get()
@@ -185,9 +194,8 @@ class RequestPipelineMixin:
             }:
                 state["send_attempted"] = True
         try:
-            # Model-supplied kwargs must never shadow the Discord message object.
-            tool_args.pop("message", None)
-            tool_args.pop("self", None)
+            # The durable checkpoint awaits I/O, so policy may have changed
+            # since preflight. Recheck immediately before execution.
             denied = MaxwellBot._authorize_tool_execution(
                 self, inbound_message, tool_identifier, handler, tool_args
             )
@@ -867,18 +875,20 @@ class RequestPipelineMixin:
     def _note_same_user_latest(self, message) -> bool:
         """True when this message is the newest same-user replacement in the room."""
         cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+        uid = str(getattr(getattr(message, "author", None), "id", "") or "")
         try:
             mid = int(getattr(message, "id", 0) or 0)
         except (TypeError, ValueError):
             mid = 0
-        if not cid or mid <= 0:
+        if not cid or not uid or mid <= 0:
             return True
         latest = getattr(self, "_same_user_latest", None)
         if latest is None:
             latest = self._same_user_latest = {}
-        if mid < int(latest.get(cid, 0) or 0):
+        key = (cid, uid)
+        if mid < int(latest.get(key, 0) or 0):
             return False
-        latest[cid] = mid
+        latest[key] = mid
         return True
 
     def _mark_same_user_interrupt(self, message) -> None:

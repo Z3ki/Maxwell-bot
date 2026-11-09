@@ -61,7 +61,12 @@ async def show_tasks(manager, interaction, uid, job_id=None):
     view = discord.ui.View(timeout=300)
     view.add_item(JobButton(manager, uid, "status"))
     for row in rows[:4]:
-        if row["state"] in {"queued", "running", "cancelling"}:
+        job = manager.jobs.get(row["id"])
+        awaiting_delivery = (
+            job is not None and job.task is not None and not job.task.done()
+            and row.get("delivery") == "pending"
+        )
+        if row["state"] in {"queued", "running", "cancelling"} or awaiting_delivery:
             view.add_item(JobButton(manager, uid, "cancel", row["id"]))
     await interaction.followup.send(
         content=text[:1900],

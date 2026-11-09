@@ -40,11 +40,12 @@ class GatewayEventsMixin:
         if isinstance(current, asyncio.Task) and not current.done():
             return
         try:
-            task = asyncio.create_task(
-                self._recover_missed_messages(), name="missed-recovery"
-            )
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        task = loop.create_task(
+            self._recover_missed_messages(), name="missed-recovery"
+        )
         self._recovery_task = task
         if getattr(self, "_tasks", None) is not None:
             self._track_task(task)
@@ -58,12 +59,13 @@ class GatewayEventsMixin:
         if isinstance(current, asyncio.Task) and not current.done():
             return
         try:
-            task = asyncio.create_task(
-                self._resync_shard_state(int(shard_id)),
-                name=f"shard-resync-{int(shard_id)}",
-            )
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        task = loop.create_task(
+            self._resync_shard_state(int(shard_id)),
+            name=f"shard-resync-{int(shard_id)}",
+        )
         tasks[int(shard_id)] = task
         if getattr(self, "_tasks", None) is not None:
             self._track_task(task)

@@ -165,6 +165,97 @@ def test_import_keeps_host_edits_made_meanwhile(storage):
     assert storage.read(PREMIUM, "from-dashboard.txt") == b"host"
     assert storage.read(PREMIUM, "from-shell.txt") == b"guest"
 
+@pytest.mark.parametrize("initial", [{}, {"old.txt": b"old"}])
+@pytest.mark.parametrize("write_after_wipe", [False, True])
+def test_import_cannot_resurrect_a_wiped_snapshot(storage, initial, write_after_wipe):
+    for path, data in initial.items():
+        storage.write(PREMIUM, path, data)
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    storage.wipe(PREMIUM)
+    if write_after_wipe:
+        storage.write(PREMIUM, "new.txt", b"new")
+    before = storage.manifest(PREMIUM)
+    result = storage.import_tar(
+        PREMIUM, io.BytesIO(tar_bytes({"resurrected.txt": b"old guest"})),
+        base, base_generation=generation,
+    )
+    assert "deleted while the job was running" in result.error
+    assert storage.manifest(PREMIUM) == before
+
+    # A new snapshot after deletion is authorized, including after reopening.
+    reopened = UserStorage(storage.root, plan_lookup=lambda _uid: "premium")
+    spool, base, generation = reopened.export_tar(PREMIUM)
+    spool.close()
+    result = reopened.import_tar(
+        PREMIUM, io.BytesIO(tar_bytes({"fresh.txt": b"fresh"})),
+        base, base_generation=generation,
+    )
+    assert not result.error
+    assert reopened.read(PREMIUM, "fresh.txt") == b"fresh"
+
+
+@pytest.mark.parametrize(
+    ("initial", "incoming"),
+    [
+        ({"node": b"old"}, {"node/child.txt": b"new"}),
+        ({"node/child.txt": b"old"}, {"node": b"new"}),
+    ],
+)
+def test_import_replaces_files_and_directories(storage, initial, incoming):
+    for path, data in initial.items():
+        storage.write(PREMIUM, path, data)
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    result = storage.import_tar(
+        PREMIUM, io.BytesIO(tar_bytes(incoming)), base, base_generation=generation,
+    )
+    assert result.clean and not result.error and not result.skipped
+    assert storage.usage(PREMIUM) == (3, 1)
+    for path, data in incoming.items():
+        assert storage.read(PREMIUM, path) == data
+    assert result.manifest == storage.manifest(PREMIUM)
+
+
+def test_import_type_conflict_preserves_all_host_children(storage):
+    storage.write(PREMIUM, "node/original.txt", b"old")
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    storage.write(PREMIUM, "node/added.txt", b"host")
+    before = storage.manifest(PREMIUM)
+    result = storage.import_tar(
+        PREMIUM, io.BytesIO(tar_bytes({"node": b"replacement"})),
+        base, base_generation=generation,
+    )
+    assert "changed on the host" in result.error
+    assert storage.manifest(PREMIUM) == before
+
+
+def test_import_type_conflict_keeps_a_host_deleted_sibling(storage):
+    storage.write(PREMIUM, "dir/keep.txt", b"keep")
+    storage.write(PREMIUM, "dir/gone.txt", b"gone")
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    storage.delete(PREMIUM, "dir/gone.txt")
+    before = storage.manifest(PREMIUM)
+    result = storage.import_tar(
+        PREMIUM, io.BytesIO(tar_bytes({"dir": b"file"})),
+        base, base_generation=generation,
+    )
+    assert "changed on the host" in result.error
+    assert storage.manifest(PREMIUM) == before
+
+
+def test_directory_only_tar_counts_toward_the_file_cap(storage, monkeypatch):
+    monkeypatch.setenv("MAXWELL_STORAGE_MAX_FILES", "2")
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    archive = _tar([("a", "dir", b""), ("b", "dir", b""), ("c", "dir", b"")])
+    result = storage.import_tar(PREMIUM, archive, base, base_generation=generation)
+    assert result.error and "file limit" in result.error
+    assert storage.usage(PREMIUM) == (0, 0)
+
+
 
 def test_import_refuses_over_quota(storage, monkeypatch):
     monkeypatch.setenv("MAXWELL_STORAGE_PREMIUM_MB", "1")
@@ -174,6 +265,38 @@ def test_import_refuses_over_quota(storage, monkeypatch):
     result = storage.import_tar(PREMIUM, archive, base, base_generation=generation)
     assert "quota" in result.error
     assert storage.usage(PREMIUM) == (0, 0)
+
+
+def test_import_enforces_file_count_after_concurrent_host_additions(storage, monkeypatch):
+    monkeypatch.setenv("MAXWELL_STORAGE_MAX_FILES", "10")
+    storage.write(PREMIUM, "original", b"old")
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    for index in range(8):
+        storage.write(PREMIUM, f"host-{index}", b"")
+    before = storage.manifest(PREMIUM)
+    archive = io.BytesIO(tar_bytes({
+        "original": b"old", "guest-1": b"", "guest-2": b"",
+    }))
+
+    result = storage.import_tar(PREMIUM, archive, base, base_generation=generation)
+
+    assert "file limit" in result.error
+    assert storage.manifest(PREMIUM) == before
+    assert storage.usage(PREMIUM)[1] == 9
+
+
+def test_import_empty_directories_advances_generation(storage):
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    archive = _tar([("empty/nested", "dir", b"")])
+
+    result = storage.import_tar(PREMIUM, archive, base, base_generation=generation)
+
+    assert not result.error
+    assert result.generation > generation
+    assert storage.generation(PREMIUM) == result.generation
+    assert storage.manifest(PREMIUM) == {"empty": "", "empty/nested": ""}
 
 
 def test_handles_and_signed_links(storage):
@@ -193,10 +316,29 @@ def test_handles_and_signed_links(storage):
 def test_wipe_removes_files_and_handle(storage):
     storage.write(PREMIUM, "public/index.html", b"x")
     storage.set_handle(PREMIUM, "gone")
+    generation = storage.generation(PREMIUM)
     storage.wipe(PREMIUM)
     assert storage.usage(PREMIUM) == (0, 0)
     assert storage.uid_for_handle("gone") is None
-    assert storage.generation(PREMIUM) == 0
+    assert storage.generation(PREMIUM) > generation
+
+
+def test_wipe_reports_filesystem_failure_without_claiming_deletion(storage, monkeypatch):
+    import plugins.user_storage.store as store_module
+
+    storage.write(PREMIUM, "private.txt", b"not deleted")
+    storage.set_handle(PREMIUM, "still-present")
+    generation = storage.generation(PREMIUM)
+
+    def fail_delete(*_args, **_kwargs):
+        raise PermissionError("cannot remove storage")
+
+    monkeypatch.setattr(store_module.shutil, "rmtree", fail_delete)
+    with pytest.raises(PermissionError, match="cannot remove storage"):
+        storage.wipe(PREMIUM)
+    assert storage.read(PREMIUM, "private.txt") == b"not deleted"
+    assert storage.uid_for_handle("still-present") == PREMIUM
+    assert storage.generation(PREMIUM) == generation
 
 
 def test_public_urls(monkeypatch):
@@ -313,6 +455,48 @@ def test_privacy_deletion_wipes_storage_and_schedules(tmp_path):
     assert storage.usage(PREMIUM) == (0, 0)
     assert storage.uid_for_handle("mine") is None
     assert schedules.list_user(PREMIUM) == []
+
+
+def test_stale_request_cannot_recreate_storage_after_deletion(tmp_path):
+    import json
+
+    storage = UserStorage(
+        tmp_path / "plugins/user_storage", plan_lookup=lambda uid: "premium"
+    )
+    deleted_at = 1_000.0
+    prefs = tmp_path / "plugins/maxwell_extras/user_preferences.json"
+    prefs.parent.mkdir(parents=True)
+    prefs.write_text(
+        json.dumps({"users": {PREMIUM: {"deleted_at": deleted_at}}}),
+        encoding="utf-8",
+    )
+    stale = deleted_at - 1
+    with pytest.raises(StorageError, match="privacy deletion"):
+        storage.write(PREMIUM, "notes.txt", b"back", started_at=stale)
+    with pytest.raises(StorageError, match="privacy deletion"):
+        storage.mkdir(PREMIUM, "folder", started_at=stale)
+    with pytest.raises(StorageError, match="privacy deletion"):
+        storage.set_handle(PREMIUM, "revived", started_at=stale)
+    spool, base, generation = storage.export_tar(PREMIUM)
+    spool.close()
+    result = storage.import_tar(
+        PREMIUM,
+        io.BytesIO(tar_bytes({"resurrected.txt": b"x"})),
+        base,
+        base_generation=generation,
+        started_at=stale,
+    )
+    assert result.error and "privacy deletion" in result.error
+    assert storage.usage(PREMIUM) == (0, 0)
+    assert storage.uid_for_handle("revived") is None
+    assert storage.file_path(PREMIUM, "notes.txt") is None
+    storage.write(PREMIUM, "notes.txt", b"new", started_at=deleted_at + 1)
+    assert storage.read(PREMIUM, "notes.txt") == b"new"
+    with pytest.raises(StorageError, match="privacy deletion"):
+        storage.delete(PREMIUM, "notes.txt", started_at=stale)
+    with pytest.raises(StorageError, match="privacy deletion"):
+        storage.move(PREMIUM, "notes.txt", "moved.txt", started_at=stale)
+    assert storage.read(PREMIUM, "notes.txt") == b"new"
 
 
 def test_zero_byte_key_file_is_repaired(tmp_path):

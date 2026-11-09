@@ -119,6 +119,9 @@ provision a host without the script.
    mounted read-only into Maxwell. The systemd unit removes it when Docker stops
    so the application fails closed during a daemon restart. Do not copy or set
    the marker manually.
+   A refresh must successfully list and remove existing managed shell guests
+   before changing firewall rules. A Docker listing failure aborts the refresh
+   with readiness disabled, leaving the existing firewall rules untouched.
 
 4. Configure the shown `MAXWELL_SHELL_*` values in `.env` and restart Maxwell.
    On platforms without runsc and the host policy, shell reports that isolation

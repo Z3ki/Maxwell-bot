@@ -241,7 +241,7 @@ def test_install_from_path_validates_then_copies(tmp_path):
     keep = tmp_path / "data" / "plugins" / "echo"
     keep.mkdir(parents=True)
     (keep / "state.json").write_text("{}", encoding="utf-8")
-    gone = pm.uninstall_plugin("echo")
+    gone = asyncio.run(pm.uninstall_plugin("echo"))
     assert "Uninstalled" in gone
     assert not dest.exists()
     assert (keep / "state.json").exists()

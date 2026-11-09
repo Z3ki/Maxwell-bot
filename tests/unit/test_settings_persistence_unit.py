@@ -178,6 +178,31 @@ def test_save_failure_is_logged_not_raised(tmp_path, caplog):
     assert any("Failed to save blacklist" in r.getMessage() for r in caplog.records)
 
 
+def test_save_str_set_does_not_clobber_while_file_lock_is_held(tmp_path, monkeypatch):
+    from utils import FileLock
+    import bot_parts.settings as settings
+
+    class ShortLock(FileLock):
+        def __init__(self, target, timeout=5):
+            assert timeout == 5
+            super().__init__(target, timeout=0.05)
+
+    monkeypatch.setattr(settings, "FileLock", ShortLock)
+    bot = _bot(tmp_path)
+    path = tmp_path / "blacklist.json"
+    path.write_text('["kept"]', encoding="utf-8")
+    bot._blacklist = {"clobber"}
+    held = FileLock(path, timeout=1)
+    held.__enter__()
+    try:
+        bot._save_blacklist()
+        assert json.loads(path.read_text(encoding="utf-8")) == ["kept"]
+    finally:
+        held.__exit__(None, None, None)
+    bot._save_blacklist()
+    assert json.loads(path.read_text(encoding="utf-8")) == ["clobber"]
+
+
 # -- sites --------------------------------------------------------------------
 
 

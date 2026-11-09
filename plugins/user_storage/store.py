@@ -132,6 +132,10 @@ class StorageError(Exception):
     """A user-facing refusal. The message is safe to show the requester."""
 
 
+class StorageDenied(StorageError):
+    """A write that would undo a privacy deletion."""
+
+
 def clean_path(raw: str, *, allow_root: bool = False) -> str:
     """Normalise a user path to 'a/b/c'. Raise on anything clever."""
     text = str(raw or "").strip().replace("\\", "/")
@@ -228,6 +232,9 @@ class UserStorage:
                 "uid TEXT PRIMARY KEY, handle TEXT UNIQUE, gen INTEGER NOT NULL DEFAULT 0, "
                 "updated REAL NOT NULL DEFAULT 0)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS deletions (uid TEXT PRIMARY KEY, gen INTEGER NOT NULL)"
+            )
         self._key = self._load_key()
 
     # ---- plumbing -------------------------------------------------------
@@ -267,11 +274,12 @@ class UserStorage:
 
     def _bump(self, uid: str) -> int:
         now = time.time()
+        generation = self.generation(uid) + 1
         with self._db() as db:
             db.execute(
-                "INSERT INTO users(uid, gen, updated) VALUES(?, 1, ?) "
-                "ON CONFLICT(uid) DO UPDATE SET gen=gen+1, updated=excluded.updated",
-                (uid, now),
+                "INSERT INTO users(uid, gen, updated) VALUES(?, ?, ?) "
+                "ON CONFLICT(uid) DO UPDATE SET gen=excluded.gen, updated=excluded.updated",
+                (uid, generation, now),
             )
             row = db.execute("SELECT gen FROM users WHERE uid=?", (uid,)).fetchone()
         return int(row[0])
@@ -279,8 +287,11 @@ class UserStorage:
     def generation(self, uid: str) -> int:
         uid = self._uid(uid)
         with self._db() as db:
-            row = db.execute("SELECT gen FROM users WHERE uid=?", (uid,)).fetchone()
-        return int(row[0]) if row else 0
+            row = db.execute(
+                "SELECT MAX(gen) FROM (SELECT gen FROM users WHERE uid=? "
+                "UNION ALL SELECT gen FROM deletions WHERE uid=?)", (uid, uid)
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
     # ---- plan / quota ---------------------------------------------------
 
@@ -392,6 +403,19 @@ class UserStorage:
 
     # ---- writes ---------------------------------------------------------
 
+    def _request_current(self, uid: str, started_at: float | None) -> bool:
+        """True when this request may create data. Read the marker in the lock."""
+        from privacy import owned_write_allowed, request_started_at
+
+        when = request_started_at() if started_at is None else started_at
+        return owned_write_allowed(self.root.parent.parent, uid, when)
+
+    def _require_current_request(self, uid: str, started_at: float | None) -> None:
+        if not self._request_current(uid, started_at):
+            raise StorageDenied(
+                "Request predates a privacy deletion; submit a new request"
+            )
+
     def _check_capacity(self, uid: str, extra_bytes: int, extra_files: int) -> None:
         quota = self.quota(uid)
         if quota <= 0:
@@ -418,12 +442,13 @@ class UserStorage:
                 raise StorageError(f"'{part}' is a file, not a folder")
         return current
 
-    def write(self, uid: str, path: str, data: bytes) -> int:
+    def write(self, uid: str, path: str, data: bytes, *, started_at: float | None = None) -> int:
         uid = self._uid(uid)
         rel = clean_path(path)
         if rel == PUBLIC_DIR:
             raise StorageError("public is a folder")
         with self.locked(uid):
+            self._require_current_request(uid, started_at)
             base = self.user_dir(uid)
             existing = self._resolve(base, rel) if base.exists() else None
             old = 0
@@ -447,10 +472,11 @@ class UserStorage:
                 raise
             return self._bump(uid)
 
-    def mkdir(self, uid: str, path: str) -> int:
+    def mkdir(self, uid: str, path: str, *, started_at: float | None = None) -> int:
         uid = self._uid(uid)
         rel = clean_path(path)
         with self.locked(uid):
+            self._require_current_request(uid, started_at)
             if self.quota(uid) <= 0:
                 raise StorageError("persistent storage is a Premium feature on this bot")
             # make_parents builds every component of rel; the "/x" is the
@@ -458,10 +484,11 @@ class UserStorage:
             self._make_parents(self.user_dir(uid), rel + "/x")
             return self._bump(uid)
 
-    def delete(self, uid: str, path: str) -> int:
+    def delete(self, uid: str, path: str, *, started_at: float | None = None) -> int:
         uid = self._uid(uid)
         rel = clean_path(path)
         with self.locked(uid):
+            self._require_current_request(uid, started_at)
             target = self._resolve(self.user_dir(uid), rel)
             if target is None:
                 raise StorageError("nothing at that path")
@@ -472,12 +499,13 @@ class UserStorage:
                 os.unlink(target)
             return self._bump(uid)
 
-    def move(self, uid: str, src: str, dst: str) -> int:
+    def move(self, uid: str, src: str, dst: str, *, started_at: float | None = None) -> int:
         uid = self._uid(uid)
         a, b = clean_path(src), clean_path(dst)
         if b == a or b.startswith(a + "/"):
             raise StorageError("cannot move a folder into itself")
         with self.locked(uid):
+            self._require_current_request(uid, started_at)
             base = self.user_dir(uid)
             source = self._resolve(base, a)
             if source is None:
@@ -489,11 +517,19 @@ class UserStorage:
             return self._bump(uid)
 
     def wipe(self, uid: str) -> bool:
-        """Privacy deletion: the tree, the handle, the generation row."""
+        """Privacy deletion: remove files and handles; retain a merge cutoff."""
         uid = self._uid(uid)
         with self.locked(uid):
-            shutil.rmtree(self.users / uid, ignore_errors=True)
+            generation = self.generation(uid) + 1
+            try:
+                shutil.rmtree(self.users / uid)
+            except FileNotFoundError:
+                pass
             with self._db() as db:
+                db.execute(
+                    "INSERT INTO deletions(uid, gen) VALUES(?, ?) "
+                    "ON CONFLICT(uid) DO UPDATE SET gen=excluded.gen", (uid, generation)
+                )
                 db.execute("DELETE FROM users WHERE uid=?", (uid,))
         # Keep locks/<uid>.lock. Unlinking it splits any waiter already blocked
         # on the old inode from the next opener, so two mutations could run at
@@ -516,24 +552,26 @@ class UserStorage:
             row = db.execute("SELECT uid FROM users WHERE handle=?", (value,)).fetchone()
         return row[0] if row else None
 
-    def set_handle(self, uid: str, handle: str) -> str:
+    def set_handle(self, uid: str, handle: str, *, started_at: float | None = None) -> str:
         uid = self._uid(uid)
         value = valid_handle(handle)
-        with self._db() as db:
-            owner = db.execute("SELECT uid FROM users WHERE handle=?", (value,)).fetchone()
-            if owner and owner[0] != uid:
-                raise StorageError("that handle is taken")
-            try:
-                db.execute(
-                    "INSERT INTO users(uid, handle, gen, updated) VALUES(?, ?, 0, ?) "
-                    "ON CONFLICT(uid) DO UPDATE SET handle=excluded.handle, updated=excluded.updated",
-                    (uid, value, time.time()),
-                )
-            except sqlite3.IntegrityError as exc:
-                # The SELECT above is not atomic with the write; another user
-                # can claim the same suggested handle in between. Report it as
-                # a normal collision so ensure_handle tries the next suffix.
-                raise StorageError("that handle is taken") from exc
+        with self.locked(uid):
+            self._require_current_request(uid, started_at)
+            with self._db() as db:
+                owner = db.execute("SELECT uid FROM users WHERE handle=?", (value,)).fetchone()
+                if owner and owner[0] != uid:
+                    raise StorageError("that handle is taken")
+                try:
+                    db.execute(
+                        "INSERT INTO users(uid, handle, gen, updated) VALUES(?, ?, 0, ?) "
+                        "ON CONFLICT(uid) DO UPDATE SET handle=excluded.handle, updated=excluded.updated",
+                        (uid, value, time.time()),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # The SELECT above is not atomic with the write; another user
+                    # can claim the same suggested handle in between. Report it as
+                    # a normal collision so ensure_handle tries the next suffix.
+                    raise StorageError("that handle is taken") from exc
         return value
 
     def ensure_handle(self, uid: str, name: str = "") -> str:
@@ -545,6 +583,8 @@ class UserStorage:
             candidate = base if attempt == 0 else f"{base[:26]}-{attempt + 1}"
             try:
                 return self.set_handle(uid, candidate)
+            except StorageDenied:
+                raise
             except StorageError:
                 continue
         return self.set_handle(uid, "u" + str(uid)[-10:])
@@ -654,10 +694,15 @@ class UserStorage:
                 result.skipped.append(name[:80])
                 continue
             if member.isdir():
+                file_count += 1
+                if file_count > limit_files:
+                    result.error = f"/storage has more than {limit_files} files; nothing was saved"
+                    return None
                 try:
                     self._make_parents(stage, rel + "/x")
                 except StorageError:
                     result.skipped.append(rel)
+                    file_count -= 1
                     continue
                 incoming[rel] = ""
                 continue
@@ -707,6 +752,7 @@ class UserStorage:
         base: dict[str, str],
         *,
         base_generation: int,
+        started_at: float | None = None,
     ) -> MergeResult:
         """Merge a sandbox's /storage tar back into the host tree.
 
@@ -734,6 +780,11 @@ class UserStorage:
                 return result
 
             with self.locked(uid):
+                if not self._request_current(uid, started_at):
+                    result.error = (
+                        "Request predates a privacy deletion; submit a new request"
+                    )
+                    return result
                 # The quota/plan or the whole tree may have changed while this
                 # merge waited for the lock. Re-read it now: a revoked plan or
                 # a privacy wipe must not be undone by a stale import.
@@ -741,7 +792,11 @@ class UserStorage:
                 if quota <= 0:
                     result.error = "persistent storage is not enabled for this user"
                     return result
-                if base_generation and self.generation(uid) == 0:
+                with self._db() as db:
+                    deletion = db.execute(
+                        "SELECT gen FROM deletions WHERE uid=?", (uid,)
+                    ).fetchone()
+                if deletion is not None and base_generation < deletion[0]:
                     result.error = (
                         "storage was deleted while the job was running; "
                         "changes were not saved"
@@ -752,17 +807,55 @@ class UserStorage:
                 result.clean = self.generation(uid) == base_generation and live == base
                 changed = {p: h for p, h in incoming.items() if base.get(p) != h}
                 removed = [p for p in base if p not in incoming]
+                # Replacing a file with a folder (or vice versa) also removes
+                # the old node. Refuse conflicts before deleting any children,
+                # so a host edit cannot turn a type change into a partial wipe.
+                replaced = [
+                    p for p, h in changed.items()
+                    if p in live and (h == "") != (live[p] == "")
+                ]
+                for path in replaced:
+                    affected = [
+                        p for p in live if p == path or p.startswith(path + "/")
+                    ]
+                    base_sub = [
+                        p for p in base if p == path or p.startswith(path + "/")
+                    ]
+                    host_changed = any(
+                        p not in live or live.get(p) != base.get(p) for p in base_sub
+                    ) or any(p not in base for p in affected)
+                    if host_changed:
+                        result.error = (
+                            f"/storage/{path} changed on the host; "
+                            "type replacement was not saved"
+                        )
+                        result.clean = False
+                        return result
+                removed.extend(replaced)
                 # Project the post-merge size before touching anything.
                 sizes = {p: os.lstat(live_base / p).st_size for p, h in live.items() if h}
                 for path, digest in changed.items():
                     if digest:
                         sizes[path] = os.lstat(stage / path).st_size
+                    else:
+                        sizes.pop(path, None)
                 for path in removed:
-                    if live.get(path) == base.get(path):
+                    if path not in incoming and live.get(path) == base.get(path):
                         sizes.pop(path, None)
                 if sum(sizes.values()) > quota:
                     result.error = (
                         f"saving would exceed the {quota // MB} MB quota; /storage changes were not saved"
+                    )
+                    return result
+                merged = set(live)
+                for path in removed:
+                    if path not in incoming and live.get(path) == base.get(path):
+                        merged.discard(path)
+                merged.update(changed)
+                if len(merged) > max_files():
+                    result.error = (
+                        f"saving would exceed the {max_files()} file limit; "
+                        "/storage changes were not saved"
                     )
                     return result
                 # Deletions deepest-first so folders empty out before removal.
@@ -781,13 +874,17 @@ class UserStorage:
                     except OSError:
                         # Non-empty dir: the host added something inside it.
                         result.clean = False
+                made_directory = False
                 for path in sorted(changed, key=lambda p: p.count("/")):
                     digest = changed[path]
                     if digest == "":
                         try:
+                            existed = self._resolve(live_base, path) is not None
                             self._make_parents(live_base, path + "/x")
+                            made_directory = made_directory or not existed
                         except StorageError:
                             result.skipped.append(path)
+                            result.clean = False
                         continue
                     try:
                         parent = self._make_parents(live_base, path)
@@ -802,7 +899,7 @@ class UserStorage:
                         continue
                     os.replace(stage / path, destination)
                     result.written += 1
-                result.generation = self._bump(uid) if (result.written or result.deleted) else self.generation(uid)
+                result.generation = self._bump(uid) if (result.written or result.deleted or made_directory) else self.generation(uid)
                 result.manifest = self.manifest(uid)
         finally:
             shutil.rmtree(stage, ignore_errors=True)

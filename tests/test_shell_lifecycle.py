@@ -225,6 +225,9 @@ def test_command_timeout_destroys_the_tenant_container(monkeypatch):
             self.killed = True
             self.returncode = -9
 
+        async def communicate(self):
+            return b"", b""
+
     process = Process()
 
     async def create_process(*_args, **_kwargs):
@@ -294,3 +297,47 @@ def test_destroy_container_releases_the_cache_slot(monkeypatch):
 
     assert tenant.container_name not in ShellTool._tenants
     assert tenant.container_name not in ShellTool._last_used_by_tenant
+
+
+def test_replacing_sandbox_remains_tracked_for_shutdown(monkeypatch):
+    tenant = ShellTenant("7", "guild:9", "mwsh-" + "d" * 24)
+    tool = ShellTool(None)
+    calls = []
+    present = True
+
+    async def run_docker(cls, *args, timeout=30):
+        nonlocal present
+        calls.append(args)
+        if args[0] == "inspect":
+            return ((b"true runsc v1 <no value>" if present else b"", b""), 0 if present else 1)
+        if args[0] == "rm":
+            present = False
+        elif args[0] == "run":
+            present = True
+        return (b"", b""), 0
+
+    async def ready():
+        return None
+
+    async def image(_image):
+        return None
+
+    monkeypatch.delenv("MAXWELL_CONTROLLER_ID", raising=False)
+    monkeypatch.setattr(ShellTool, "_run_docker", classmethod(run_docker))
+    monkeypatch.setattr(tool, "_runtime_ready", ready)
+    monkeypatch.setattr("plugins.shell.impl._ensure_sandbox_image", image)
+    for name in ("_tenants", "_last_used_by_tenant", "_storage_state", "_idle_savers", "_tenant_locks"):
+        monkeypatch.setattr(ShellTool, name, {})
+    for name in ("_active_tenants", "_active_owners", "_prepared_tenants"):
+        monkeypatch.setattr(ShellTool, name, set())
+    monkeypatch.setattr(ShellTool, "_state_lock", asyncio.Lock())
+    monkeypatch.setattr(ShellTool, "_idle_reaper_task", None)
+
+    async def scenario():
+        await tool._ensure_container(tenant)
+        assert ShellTool._tenants.get(tenant.container_name) == tenant
+        await ShellTool.shutdown_sandbox()
+
+    asyncio.run(scenario())
+    assert sum(call[0] == "rm" for call in calls) == 2
+    assert tenant.container_name not in ShellTool._prepared_tenants

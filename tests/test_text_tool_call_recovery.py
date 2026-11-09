@@ -362,3 +362,47 @@ def test_unknown_namespaced_call_is_scrubbed_not_posted():
     assert "atem:" not in cleaned
     assert "invoke" not in cleaned
     assert "parameter" not in cleaned
+
+
+def test_recovery_uses_live_parameters_when_catalog_is_stale(monkeypatch):
+    """A plugin param shown to the model must survive text recovery.
+
+    Native publication reads the live tool schema. The static catalog can lag
+    behind, and treating that lag as the recovery allowlist drops the call so
+    the parameter dump is posted as the reply.
+    """
+    import tool_schemas
+    from maxwell_core.tools import registry as registry_mod
+    from maxwell_core.tools.registry import ToolRegistry
+    from maxwell_core.tools.spec import spec_from_tool
+
+    class LiveTool:
+        def get_parameters(self):
+            return {
+                "type": "object",
+                "properties": {
+                    "site_name": {"type": "string"},
+                    "public": {"type": "boolean"},
+                },
+            }
+
+    catalog = {
+        "live_recovery_probe": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+        }
+    }
+    monkeypatch.setattr(tool_schemas, "TOOL_PARAMETERS", catalog)
+    registry = ToolRegistry()
+    registry.register(spec_from_tool(LiveTool(), name="live_recovery_probe", plugin="test"))
+    monkeypatch.setattr(registry_mod, "_GLOBAL", registry)
+    calls, leftover = recover_text_tool_calls(
+        "live_recovery_probe(site_name=hello world, public=true)",
+        known_names={"live_recovery_probe"},
+    )
+    assert leftover == ""
+    assert calls
+    assert json.loads(calls[0]["function"]["arguments"]) == {
+        "site_name": "hello world",
+        "public": True,
+    }

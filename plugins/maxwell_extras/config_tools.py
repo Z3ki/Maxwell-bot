@@ -148,6 +148,10 @@ async def change_setting(bot, context, scope, setting, value, *, reset=False):
                 await asyncio.to_thread(store.set_personality, uid, "")
             else:
                 await asyncio.to_thread(store.reset_default, uid, setting)
+            if setting == "tracking":
+                from conversation_memory import forget_author
+
+                await forget_author(getattr(bot, "memory", None), uid)
             return
         if setting == "style":
             if not isinstance(value, str):

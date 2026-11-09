@@ -14,50 +14,14 @@ from __future__ import annotations
 from types import MethodType
 from typing import Any
 
-_VISIBLE_MARKERS = (
-    "__REACTION_SENT__",
-    "__GIF_SENT__",
-    "__MESSAGE_SENT__",
-    "__FILE_SENT__",
-    "__MEDIA_SENT__",
-    "__MEME_SENT__",
-    "__POLL_SENT__",
-    "__TTS_SENT__",
-)
-_VISIBLE_TOOLS = frozenset(
-    {
-        "send_message",
-        "send_file",
-        "send_media",
-        "send_meme",
-        "create_poll",
-        "send_rich_message",
-        "tts",
-    }
-)
-
-
-def _tool_result_parts(result: Any) -> tuple[str, str]:
-    text = str(result or "").strip()
-    if not text.startswith("Tool ") or ":" not in text:
-        return "", text
-    head, payload = text[5:].split(":", 1)
-    name = head.strip()
-    if not name or not name.replace("_", "a").isalnum():
-        return "", text
-    return name, payload.strip()
 
 
 def tool_result_is_visible(result: Any) -> bool:
     """Whether a tool result means the user already received a visible effect."""
 
-    name, payload = _tool_result_parts(result)
-    lowered = payload.lower()
-    if lowered.startswith(("error", "__tool_error__")):
-        return False
-    if any(marker in payload for marker in _VISIBLE_MARKERS):
-        return True
-    return bool(name in _VISIBLE_TOOLS and payload)
+    from maxwell_core.tools.results import _turn_sent_message
+
+    return _turn_sent_message([str(result or "")])
 
 
 def tool_batch_has_visible_output(results: list[str] | None) -> bool:

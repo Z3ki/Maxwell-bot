@@ -631,6 +631,11 @@ async def snapshot_channel_history(
                         history = getattr(channel, "history", None)
             if not callable(history):
                 return []
+            from context_hydration import requester_can_read_history
+
+            # Bot-token history must not expose messages the requester cannot read.
+            if not requester_can_read_history(interaction, channel):
+                return []
             result = history(limit=limit)
             if hasattr(result, "__aiter__"):
                 async for msg in result:
@@ -777,9 +782,28 @@ class UserInstallChannelAdapter:
     async def send(self, content: str | None = None, file=None, **kwargs):
         return await self._session.send(content=content, file=file, **kwargs)
 
+    def _history_allowed(self) -> bool:
+        from context_hydration import requester_can_read_history
+
+        return requester_can_read_history(
+            self._session.interaction, self._real or self
+        )
+
+    def history(self, *args, **kwargs):
+        # __getattr__ would otherwise proxy bot-token history without a check.
+        real = getattr(self._real, "history", None)
+        if self._history_allowed() and callable(real):
+            return real(*args, **kwargs)
+
+        async def empty():
+            if False:
+                yield None
+
+        return empty()
+
     async def fetch_message(self, message_id):
         fetch = getattr(self._real, "fetch_message", None)
-        if callable(fetch):
+        if self._history_allowed() and callable(fetch):
             return await fetch(message_id)
         raise LookupError("user-install has no channel history")
 

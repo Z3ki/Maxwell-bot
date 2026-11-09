@@ -44,6 +44,10 @@ def _bot(memory):
         bot_name="Maxwell",
         memory=memory,
         user=SimpleNamespace(display_name="Maxwell", id=1),
+        _user_preferences=SimpleNamespace(
+            get=lambda _uid: {"defaults": {"tracking": "on"}},
+            content_allowed=lambda _uid, _started_at=None: True,
+        ),
     )
     bot._reply_parent = MaxwellBot._reply_parent.__get__(bot)
     bot._replying_to_own_message = MaxwellBot._replying_to_own_message.__get__(bot)
@@ -62,7 +66,12 @@ def _bot(memory):
 def _message():
     return SimpleNamespace(
         author=SimpleNamespace(bot=False, display_name="alice", id=456),
-        channel=SimpleNamespace(id=123),
+        channel=SimpleNamespace(
+            id=123,
+            permissions_for=lambda _requester: SimpleNamespace(
+                view_channel=True, read_message_history=True
+            ),
+        ),
         guild=None,
         id=789,
         mentions=[],
@@ -396,7 +405,7 @@ def test_short_turn_and_guild_asset_changes_preserve_system_and_history():
 def test_reaction_updates_only_change_tail_and_edits_and_deletions_remain_visible():
     memory = FakeMemory([
         {"message_id": "10", "author": "alice", "author_id": "456", "content": "original text",
-         "reactions": [{"emoji": "👍", "user_name": "bob"}]},
+         "reactions": [{"emoji": "👍", "user_id": "457", "user_name": "bob"}]},
         {"message_id": "11", "author": "alice", "author_id": "456", "content": "keep me"},
     ])
     bot = _bot(memory)
@@ -405,7 +414,7 @@ def test_reaction_updates_only_change_tail_and_edits_and_deletions_remain_visibl
 
     async def run():
         first = await MaxwellBot._build_messages(bot, _message(), "hi")
-        bot._message_reactions["10"] = [{"emoji": "😂", "user_name": "carol"}]
+        bot._message_reactions["10"] = [{"emoji": "😂", "user_id": "458", "user_name": "carol"}]
         changed = await MaxwellBot._build_messages(bot, _message(), "hi")
         bot._message_reactions["10"] = []
         removed = await MaxwellBot._build_messages(bot, _message(), "hi")
@@ -433,7 +442,7 @@ def test_character_budget_trims_message_chunks_and_omits_evicted_reactions():
          "content": f"ROW{i:04} " + "detail " * 30}
         for i in range(160)
     ])
-    memory.messages[0]["reactions"] = [{"emoji": "👍", "user_name": "bob"}]
+    memory.messages[0]["reactions"] = [{"emoji": "👍", "user_id": "457", "user_name": "bob"}]
     bot = _bot(memory)
     bot._control.update(memory_history_messages=160, memory_context_budget=5000)
     bot._reactions_annotation_for = MaxwellBot._reactions_annotation_for.__get__(bot)
@@ -461,8 +470,8 @@ def test_reactions_do_not_attach_to_retained_duplicate_text_from_an_evicted_mess
          "content": "identical repeated message " * 10}
         for i in range(80)
     ])
-    memory.messages[0]["reactions"] = [{"emoji": "👍", "user_name": "old reaction"}]
-    memory.messages[-1]["reactions"] = [{"emoji": "😂", "user_name": "recent reaction"}]
+    memory.messages[0]["reactions"] = [{"emoji": "👍", "user_id": "457", "user_name": "old reaction"}]
+    memory.messages[-1]["reactions"] = [{"emoji": "😂", "user_id": "458", "user_name": "recent reaction"}]
     bot = _bot(memory)
     bot._control.update(memory_history_messages=80, memory_context_budget=5000)
     bot._reactions_annotation_for = MaxwellBot._reactions_annotation_for.__get__(bot)
@@ -716,3 +725,57 @@ def test_empty_history_keeps_turn_block_out_of_leading_system_messages():
     assert first[0]["role"] == "system" and first[1]["role"] == "user"
     assert first[:2] == second[:2]
     assert "Memory scope:" not in first[0]["content"]
+
+
+def test_pinned_reply_and_hydration_targets_keep_original_transcript_order():
+    for pin in ("reference", "hydrated_target_id"):
+        rows = [
+            {"message_id": str(index), "author": "alice", "author_id": "456",
+             "content": f"ORDER_ROW_{index}"}
+            for index in range(1, 7)
+        ]
+        bot = _bot(FakeMemory(rows))
+        bot._control["memory_history_messages"] = 2
+        message = _message()
+        if pin == "reference":
+            message.reference = SimpleNamespace(message_id=1, resolved=None)
+        else:
+            message.hydrated_target_id = "1"
+        result = asyncio.run(MaxwellBot._build_messages(bot, message, "Explain that."))
+        transcript = next(
+            row["content"] for row in result
+            if str(row["content"]).startswith("<previous_conversation>")
+        )
+        assert transcript.index("ORDER_ROW_1") < transcript.index("ORDER_ROW_5")
+        assert transcript.index("ORDER_ROW_5") < transcript.index("ORDER_ROW_6")
+        assert "ORDER_ROW_2" not in transcript
+        assert "ORDER_ROW_3" not in transcript
+        assert "ORDER_ROW_4" not in transcript
+        assert rows[0]["content"] == "ORDER_ROW_1"
+
+
+def test_guild_history_permissions_gate_cached_snapshot_reply_and_hydrated_context():
+    for view, read in ((False, True), (True, False), (False, False)):
+        reads = []
+
+        class Memory(FakeMemory):
+            async def get_channel_memory(self, *args, **kwargs):
+                reads.append("cached")
+                return await super().get_channel_memory(*args, **kwargs)
+
+        bot = _bot(Memory([{"message_id": "1", "content": "CACHED_SECRET"}]))
+        bot._reply_parent_context_lines = lambda _message: ["REPLY_SECRET"]
+        message = _message()
+        message.guild = SimpleNamespace(id=99)
+        message.channel.permissions_for = lambda requester: (
+            SimpleNamespace(view_channel=view, read_message_history=read)
+            if requester is message.author else None
+        )
+        message.user_install = True
+        message.user_install_history_limit = 10
+        message.user_install_history = [{"message_id": "2", "content": "SNAPSHOT_SECRET"}]
+        message.hydrated_context = "HYDRATED_SECRET"
+        result = asyncio.run(MaxwellBot._build_messages(bot, message, "Visible live text."))
+        assert reads == []
+        assert "_SECRET" not in str(result)
+        assert "Visible live text." in result[-1]["content"]

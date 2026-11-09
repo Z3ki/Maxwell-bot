@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import discord
+import pytest
 
 import plugin_manager
 from plugin_manager import PluginContext, PluginManager
@@ -127,7 +128,8 @@ def test_plugin_context_allows_interactions_after_ui_upgrade(tmp_path):
     assert manager._listeners["on_interaction"][-1] == ("demo", handler)
 
 
-def test_callback_buttons_and_context_survive_plain_text_fallback(tmp_path):
+@pytest.mark.parametrize("positional", [False, True])
+def test_callback_buttons_and_context_survive_plain_text_fallback(tmp_path, positional):
     _bot, _manager, tool, store, _seen = _runtime(tmp_path)
     calls = []
 
@@ -143,8 +145,10 @@ def test_callback_buttons_and_context_survive_plain_text_fallback(tmp_path):
             ),
         ),
     )
+    args = (message, "embed", "Choose", "Pick an action") if positional else (message,)
+    text = {} if positional else {"title": "Choose", "description": "Pick an action"}
     result = asyncio.run(tool.execute(
-        message, title="Choose", description="Pick an action",
+        *args, **text,
         buttons=json.dumps([
             {"label": "Explain", "style": "primary", "prompt": "Explain this"}
         ]),
@@ -212,3 +216,68 @@ def test_rich_message_schema_accepts_json_string_fields_and_buttons():
         },
         params,
     )
+
+
+def test_unauthorized_click_does_not_consume_owner_one_shot_action(tmp_path):
+    _bot, manager, _tool, store, seen = _runtime(tmp_path)
+    token = store.add({
+        "label": "Continue", "prompt": "Continue the task",
+        "owner_id": "42", "one_shot": True,
+    })
+    callback = manager._listeners["on_interaction"][0][1]
+
+    class Response:
+        def __init__(self):
+            self.sent = []
+            self.deferred = False
+
+        def is_done(self):
+            return self.deferred or bool(self.sent)
+
+        async def send_message(self, text, **_kwargs):
+            self.sent.append(text)
+
+        async def defer(self, **_kwargs):
+            self.deferred = True
+
+    def interaction(uid):
+        return SimpleNamespace(
+            id=uid,
+            data={"custom_id": f"maxwell:rich:{token}", "component_type": 2},
+            response=Response(),
+            followup=SimpleNamespace(send=None),
+            user=SimpleNamespace(id=uid, name="tester", display_name="tester", bot=False),
+            channel_id=55,
+            channel=SimpleNamespace(id=55, name="general", guild=None),
+            guild=None,
+            message=SimpleNamespace(content="Continue", embeds=[]),
+        )
+
+    async def scenario():
+        other = interaction(99)
+        await callback(other)
+        assert other.response.sent == ["This button belongs to another user."]
+        assert seen == []
+        assert store.get(token)["prompt"] == "Continue the task"
+        owner = interaction(42)
+        await callback(owner)
+        assert owner.response.deferred
+        assert len(seen) == 1
+        repeated = interaction(42)
+        await callback(repeated)
+        assert repeated.response.sent == [
+            "That Maxwell action has expired. Please ask for a new one."
+        ]
+        assert len(seen) == 1
+
+    asyncio.run(scenario())
+
+
+def test_one_shot_claim_is_atomic_for_concurrent_owner_clicks(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = RichInteractionStore(tmp_path / "actions.json")
+    token = store.add({"owner_id": "42", "prompt": "Continue", "one_shot": True})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rows = list(pool.map(lambda _: store.get(token, user_id="42"), range(2)))
+    assert sum(row is not None for row in rows) == 1
