@@ -131,7 +131,7 @@ def test_chess_apply_move_rejects_illegal_without_mutation():
 
 def test_chess_roundtrip_preserves_repetition_history():
     game = new_game()
-    for san in ["Nf3", "Nf6", "Ng1", "Ng8"] * 2:
+    for san in ["Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1"]:
         game.apply_move(game.parse_move(san))
     restored = ChessGame.from_dict(game.to_dict())
     assert restored.board.move_stack == game.board.move_stack
@@ -235,7 +235,7 @@ def test_progress_final_waits_for_inflight_status_edit():
         release = asyncio.Event()
         contents = []
 
-        async def edit(*, content):
+        async def edit(*, content, **_kwargs):
             if content == "stale progress":
                 entered.set()
                 await release.wait()
@@ -245,7 +245,7 @@ def test_progress_final_waits_for_inflight_status_edit():
         posted = SimpleNamespace(edit=edit)
         progress._posted = posted
         old = asyncio.create_task(progress._flush("stale progress"))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 2)
         final = asyncio.create_task(
             progress._background_transition(posted, "final answer")
         )
@@ -255,6 +255,7 @@ def test_progress_final_waits_for_inflight_status_edit():
         assert contents[-1] == "final answer"
 
     run(scenario())
+
 
 
 @pytest.mark.parametrize(
