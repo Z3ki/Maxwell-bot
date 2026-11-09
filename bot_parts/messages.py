@@ -33,6 +33,20 @@ def _live_test_webhook(message):
 
 class MessagesMixin:
 
+    def _author_is_ignored(self, message) -> bool:
+        """True when a non-admin author is blacklisted or on ignore_users."""
+        author = getattr(message, "author", None)
+        if author is None:
+            return False
+        if self._is_admin(author.id):
+            return False
+        uid = str(author.id)
+        control = getattr(self, "_control", None) or {}
+        return uid in (getattr(self, "_blacklist", None) or set()) or uid in set(
+            control.get("ignore_users") or []
+        )
+
+
     async def on_message(self, message):
         """Error boundary + dedup around the real handler.
 
@@ -76,6 +90,12 @@ class MessagesMixin:
                     return
                 if self._reply_queue.contains(channel_id, message_id):
                     return
+                if self._author_is_ignored(message):
+                    await MaxwellBot._record_request_outcome(
+                        self, message, "suppressed", "ignored_author"
+                    )
+                    return
+
                 if is_user_install_message(message):
                     requests = getattr(self, "_interaction_requests", None)
                     if requests is None:
@@ -110,6 +130,9 @@ class MessagesMixin:
                     return
             elif not self._inbound_dedup.check_and_add(message_id):
                 return
+            if journal is None and self._author_is_ignored(message):
+                return
+
             # Journal first. Keep an outage cursor frozen while newer live
             # receipts arrive; they are independently durable in the journal.
             if not is_user_install_message(message) and channel_id not in (getattr(self, "_recovery_cursors", None) or {}):
@@ -225,16 +248,10 @@ class MessagesMixin:
                 author.id,
             )
 
-        # BUG FIX: blacklist/ignore must be checked BEFORE command handling.
-        # Previously, blacklisted users could still run text-prefix commands
-        # because the blacklist check was after the command check.
         # Admins bypass so they can manage the blacklist.
-        if (
-            str(message.author.id) in self._blacklist
-            or str(message.author.id)
-            in set(self._control.get("ignore_users", []) or [])
-        ) and not self._is_admin(message.author.id):
+        if self._author_is_ignored(message):
             return "ignored_author"
+
 
         # DMs are off unless reply_dms is on. When on, anyone can DM; the
         # turn still hides Discord mod/server tools (see DM_BLOCKED_TOOLS).

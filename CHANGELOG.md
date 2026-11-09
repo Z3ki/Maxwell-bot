@@ -9,6 +9,8 @@
 
 - Bound schedule minimum-gap checks to nearby fires and the next spring-forward instead of walking an 8-year horizon.
 - Recheck blacklist, ignore list, and channel restrictions before firing a stored schedule or delivering a reminder.
+- Drop blacklisted and ignored authors before capacity replies, queue deferral, and plugin dispatch.
+- Exec GitHub workspace commands by captured container ID so a timeout cannot kill a stale ID while the command runs in a replacement.
 - Stage GitHub OAuth until the authorizing Discord user confirms a private code. The browser callback no longer publishes the token.
 - Do not reuse a site slug's backend store, server, or secrets unless the same owner is replacing that site.
 - Keep reply and mention names out of memory when the quoted account opted out or the quoting turn predates their deletion, including after they opt back in.

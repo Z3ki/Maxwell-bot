@@ -229,4 +229,33 @@ def test_workspace_timeout_kills_the_captured_container(tmp_path, monkeypatch):
 
     asyncio.run(scenario())
     assert killed == ["container-id-abc"]
-    assert calls[1][-4:] == ("synthetic-workspace", "bash", "-lc", "sleep 300")
+    assert calls[1][-4:] == ("container-id-abc", "bash", "-lc", "sleep 300")
+
+
+def test_workspace_exec_does_not_fall_back_to_container_name(tmp_path, monkeypatch):
+    service = GitHubProjectService(
+        SimpleNamespace(), SimpleNamespace(data_dir=tmp_path)
+    )
+    service.repo_root("1", "acme/app").mkdir()
+    calls = []
+
+    async def container(_uid):
+        return "synthetic-workspace"
+
+    async def process(*args, **kwargs):
+        calls.append(args)
+        if args[:3] == ("docker", "inspect", "-f"):
+            return ExecResult(1, "", "no such container")
+        return ExecResult(0, "", "")
+
+    monkeypatch.setattr(service, "ensure_container", container)
+    monkeypatch.setattr(service, "_proc", process)
+
+    async def scenario():
+        await service.policy.set("1", "acme/app", {"allow_security_testing": True})
+        await service.run("1", "acme/app", "sleep 300")
+
+    with pytest.raises(RuntimeError, match="could not identify user workspace"):
+        asyncio.run(scenario())
+    assert all(args[:2] != ("docker", "exec") for args in calls)
+

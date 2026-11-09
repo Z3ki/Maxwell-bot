@@ -587,8 +587,11 @@ class GitHubProjectService:
         container=await self.ensure_container(uid); owner,name=repo.split("/",1); argv=["docker","exec","--workdir",f"/workspace/repos/{owner}/{name}"]
         for k,v in (env or {}).items(): argv += ["-e",f"{k}={v}"]
         ident = await self._proc("docker", "inspect", "-f", "{{.Id}}", container, timeout=20)
-        container_id = ident.stdout.strip() if ident.code == 0 and ident.stdout.strip() else container
-        argv += [container, "bash", "-lc", command]
+        container_id = ident.stdout.strip() if ident.code == 0 else ""
+        if not container_id:
+            raise RuntimeError("could not identify user workspace")
+        argv += [container_id, "bash", "-lc", command]
+
         return await self._proc(
             *argv,
             timeout=max(1, min(int(timeout), 3600)),

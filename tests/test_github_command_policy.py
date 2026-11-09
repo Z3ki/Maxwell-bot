@@ -21,6 +21,8 @@ def workspace(tmp_path, monkeypatch):
 
     async def process(*args, **kwargs):
         calls.append((args, kwargs))
+        if args[:3] == ("docker", "inspect", "-f"):
+            return ExecResult(0, "container-id-abc\n", "")
         return ExecResult(0, "simulated output\n", "")
 
     async def container(_uid):
@@ -129,7 +131,7 @@ def test_opt_in_preserves_custom_command_text_and_execution(workspace, action):
         assert not result.startswith("Error:")
         executed = [args for args, _ in calls if args[:2] == ("docker", "exec")]
         assert len(executed) == 1
-        assert executed[0][-4:] == ("simulated-container", "bash", "-lc", command)
+        assert executed[0][-4:] == ("container-id-abc", "bash", "-lc", command)
         assert executed[0][-1] == command
 
     asyncio.run(scenario())

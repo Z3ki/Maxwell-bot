@@ -194,6 +194,40 @@ def test_gate_returns_have_terminal_reason(tmp_path, control, reason):
     assert (row["status"], row["reason"]) == ("suppressed", reason)
 
 
+
+def test_ignored_author_skips_capacity_reply_and_plugins(tmp_path):
+    bot = _bot(tmp_path, capacity=1)
+    bot._control["error_replies"] = True
+    bot._blacklist.add("11")
+    occupant = _message(bot, mid=100)
+    occupant.user_install = True
+    bot._request_journal.accept("100", 22, 22, directed=True)
+    bot._interaction_requests = {"100": occupant}
+    message = _message(bot, mid=101)
+    message.user_install = True
+    failures = []
+    plugins = []
+    impl = []
+
+    async def fail(*args, **kwargs):
+        failures.append((args, kwargs))
+
+    async def impl_hook(_message):
+        impl.append(1)
+        return "should_not_run"
+
+    bot._request_failure = fail
+    bot._dispatch_plugin_event = lambda *a, **k: plugins.append(a)
+    bot._on_message_impl = impl_hook
+    asyncio.run(bot.on_message(message))
+    assert failures == []
+    assert plugins == []
+    assert impl == []
+    row = bot._request_journal.get(message.id)
+    assert (row["status"], row["reason"]) == ("suppressed", "ignored_author")
+    assert message.channel.sent == []
+
+
 @pytest.mark.parametrize(
     ("control", "reason"),
     [
