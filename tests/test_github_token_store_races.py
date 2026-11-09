@@ -363,7 +363,7 @@ def test_stale_logout_cannot_delete_a_token_saved_after_privacy_deletion(tmp_pat
     path = tmp_path / "plugins" / "github_projects" / "user_tokens.json"
     store = github.TokenStore(path)
     fence = tmp_path / "plugins" / "maxwell_extras" / "user_preferences.json"
-    fence.parent.mkdir()
+    fence.parent.mkdir(parents=True)
     fence.write_text(json.dumps({"users": {"1": {"deleted_at": 200.0}}}))
     store.write("1", "synthetic-new-token", started_at=201.0)
     with pytest.raises(ValueError, match="predates a privacy deletion"):

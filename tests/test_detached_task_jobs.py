@@ -948,6 +948,7 @@ def test_reported_files_with_duplicate_basenames_keep_and_attach_distinct_bytes(
             return "__FILE_SENT__"
 
         shell.persist_to_storage = persist
+        bot._authorize_tool_execution = lambda *_args, **_kwargs: None
         bot.tools["send_file"] = SimpleNamespace(execute=send)
         job = Job(
             row={"id": "abcdefabcdef"},

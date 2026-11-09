@@ -41,6 +41,8 @@ def _message(message_id, content, *, embeds=None):
 
 def _bot():
     bot = object.__new__(MaxwellBot)
+    bot._connection = SimpleNamespace(user=None)
+    bot.get_channel = lambda *_args, **_kwargs: None
     bot._control = {
         "store_memory": True,
         "process_images": True,

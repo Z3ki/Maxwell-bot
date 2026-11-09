@@ -86,6 +86,9 @@ def _message(bot, mid=101, cid=22, *, directed=True, content="question"):
     channel = bot._channels_for_test.get(cid)
     if channel is None:
         channel = SimpleNamespace(id=cid, name="chat", sent=[], messages={})
+        channel.permissions_for = lambda _user: SimpleNamespace(
+            view_channel=True, read_message_history=True
+        )
 
         async def send(content=None, **_kwargs):
             sent = SimpleNamespace(id=10000 + len(channel.sent), content=content)

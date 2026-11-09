@@ -12,6 +12,8 @@ from maxwell_core.prompts.conversation import (
     ConversationPromptHooks,
 )
 
+_HISTORY_OK = SimpleNamespace(view_channel=True, read_message_history=True)
+
 
 class Memory:
     def __init__(self, *, failed=False, cold=False):
@@ -131,7 +133,11 @@ def service(*, failed=False, cold=False, short=False, private=False, **controls)
     message = SimpleNamespace(
         id=9,
         author=SimpleNamespace(id=42, display_name="Alice", bot=False),
-        channel=SimpleNamespace(id=20, name="chat"),
+        channel=SimpleNamespace(
+            id=20,
+            name="chat",
+            permissions_for=lambda _user: _HISTORY_OK,
+        ),
         guild=SimpleNamespace(id=30, name="Guild"),
         mentions=[],
         response_visibility="private" if private else "public",

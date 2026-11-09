@@ -289,8 +289,10 @@ def test_later_silent_publication_clears_older_result_contract(monkeypatch):
     previous = set(tool_schemas._PLUGIN_RESULT_TOOL_NAMES)
     tool_schemas._PLUGIN_RESULT_TOOL_NAMES.clear()
     schema = {"type": "object", "properties": {}}
-    first = SimpleNamespace()
-    second = SimpleNamespace()
+    class _Owner:
+        pass
+    first = _Owner()
+    second = _Owner()
     try:
         publish_plugin_tools(first, [ToolSpec(
             name="dynamic", plugin="old", tool=object(),

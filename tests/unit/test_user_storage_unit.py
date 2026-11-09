@@ -259,12 +259,12 @@ def test_import_type_conflict_keeps_a_host_deleted_sibling(storage):
 
 
 def test_directory_only_tar_counts_toward_the_file_cap(storage, monkeypatch):
-    monkeypatch.setenv("MAXWELL_STORAGE_MAX_FILES", "2")
+    monkeypatch.setenv("MAXWELL_STORAGE_MAX_FILES", "10")
     spool, base, generation = storage.export_tar(PREMIUM)
     spool.close()
-    archive = _tar([("a", "dir", b""), ("b", "dir", b""), ("c", "dir", b"")])
+    archive = _tar([(name, "dir", b"") for name in "abcdefghijk"])
     result = storage.import_tar(PREMIUM, archive, base, base_generation=generation)
-    assert result.error and "file limit" in result.error
+    assert result.error and "more than" in result.error and "files" in result.error
     assert storage.usage(PREMIUM) == (0, 0)
 
 

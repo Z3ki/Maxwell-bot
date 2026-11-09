@@ -129,7 +129,7 @@ def test_opt_in_preserves_custom_command_text_and_execution(workspace, action):
         assert not result.startswith("Error:")
         executed = [args for args, _ in calls if args[:2] == ("docker", "exec")]
         assert len(executed) == 1
-        assert executed[0][-3:-1] == ("simulated-container", "bash")
+        assert executed[0][-4:] == ("simulated-container", "bash", "-lc", command)
         assert executed[0][-1] == command
 
     asyncio.run(scenario())

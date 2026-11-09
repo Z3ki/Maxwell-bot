@@ -41,7 +41,8 @@ def test_work_draft_claims_delegation_only_after_acceptance(monkeypatch, receipt
     assert ("Handed that to a subagent" in reply) is accepted
     assert DRAFT not in reply
     checkpoint.assert_awaited_once_with(owner, message)
-    authorize.assert_called_once_with(
+    assert authorize.call_count == 2
+    authorize.assert_called_with(
         owner, message, "delegate_task", tool,
         {"tasks": [{"task": message.content}]},
     )

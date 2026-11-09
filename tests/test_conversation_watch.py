@@ -105,7 +105,12 @@ def _plain_followup(
     reference=None,
 ):
     return SimpleNamespace(
-        channel=SimpleNamespace(id=1506001126426808511),
+        channel=SimpleNamespace(
+            id=1506001126426808511,
+            permissions_for=lambda _user: SimpleNamespace(
+                view_channel=True, read_message_history=True
+            ),
+        ),
         author=SimpleNamespace(id=author_id, bot=False, display_name=display_name),
         mentions=[],
         mention_everyone=False,
