@@ -36,6 +36,40 @@ class Unavailable(Exception):
         self.permanent = permanent
 
 
+def delayed_job_policy_reason(bot, message) -> str:
+    """Policy can change between creating a schedule and firing it.
+
+    Same delayed-turn gates as queued chat: a later blacklist, ignore list,
+    blocked/allowed channel, or solo restriction must stop the job. Mention
+    and DM reply flags stay out of this — a schedule is not a mention reply.
+    """
+    control = getattr(bot, "_control", None) or {}
+    author = getattr(message, "author", None)
+    uid = str(getattr(author, "id", "") or "")
+    is_admin = getattr(bot, "_is_admin", None)
+    admin = bool(
+        uid and callable(is_admin) and is_admin(getattr(author, "id", uid))
+    )
+    if uid and not admin:
+        if uid in set(getattr(bot, "_blacklist", None) or ()):
+            return "ignored_author"
+        ignored = {str(item) for item in (control.get("ignore_users") or [])}
+        if uid in ignored:
+            return "ignored_author"
+    cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
+    blocked = {str(item) for item in (control.get("blocked_channels") or [])}
+    if cid in blocked:
+        return "blocked_channel"
+    if getattr(message, "guild", None) is not None:
+        allowed = {str(item) for item in (control.get("allowed_channels") or [])}
+        if allowed and cid and cid not in allowed:
+            return "channel_not_allowed"
+        solo = getattr(bot, "_solo_blocks", None)
+        if callable(solo) and solo(message):
+            return "solo_restriction"
+    return ""
+
+
 class ScheduledMessage:
     """Who and where for a scheduled job. Not a Discord message; never replied to."""
 
@@ -178,6 +212,11 @@ class ScheduleRunner:
                     f"retrying: {exc.reason}", failed=True,
                 )
             return
+        reason = delayed_job_policy_reason(self.bot, message)
+        if reason:
+            await self._finish(row, now, f"paused: {reason}", pause=True)
+            return
+
         scope = getattr(self.bot, "_dev_scope_allows", None)
         if callable(scope) and not scope(message):
             await self._finish(row, now, "paused: this bot only runs in its test servers", pause=True)

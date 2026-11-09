@@ -262,6 +262,21 @@ async def _drop_reminder(store: ReminderStore, rid: str, channel_id: str, why: s
     _REMINDER_FAILURES.pop(rid, None)
 
 
+def _reminder_owner_blocked(bot: Any, owner_id: str) -> bool:
+    """True when a later blacklist or ignore list should stop this ping."""
+    if not owner_id:
+        return False
+    is_admin = getattr(bot, "_is_admin", None)
+    if callable(is_admin) and is_admin(owner_id):
+        return False
+    if owner_id in set(getattr(bot, "_blacklist", None) or ()):
+        return True
+    control = getattr(bot, "_control", None) or {}
+    ignored = {str(item) for item in (control.get("ignore_users") or [])}
+    return owner_id in ignored
+
+
+
 async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
     now = time.time()
     for item in await store.due():
@@ -270,6 +285,10 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
         owner_id = str(item.get("owner_id") or "")
         if not rid or not channel_id:
             continue
+        if _reminder_owner_blocked(bot, owner_id):
+            await _drop_reminder(store, rid, channel_id, "owner is blocked")
+            continue
+
         if now < _UNAVAILABLE_CHANNEL_UNTIL.get(channel_id, 0.0):
             continue
         channel = None

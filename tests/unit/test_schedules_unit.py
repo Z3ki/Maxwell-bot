@@ -19,7 +19,12 @@ from plugins.schedules.cron import (
     zone,
 )
 from plugins.schedules.planning import plan_at, plan_cron
-from plugins.schedules.runner import GRACE_SECONDS, ScheduleRunner, Unavailable
+from plugins.schedules.runner import (
+    GRACE_SECONDS,
+    ScheduleRunner,
+    Unavailable,
+    delayed_job_policy_reason,
+)
 from plugins.schedules.store import ScheduleLimitError, ScheduleStore
 from plugins.schedules.tool import ScheduleTool
 
@@ -273,6 +278,47 @@ def test_runner_starts_a_job_and_advances(tmp_path):
     saved = store.get(UID, row["id"])
     assert saved["runs"] == 1 and saved["last_job"] == "abcdef123456"
     assert saved["enabled"] and saved["next_run"] > time.time()
+
+
+def test_delayed_job_policy_reason_matches_queued_chat_gates():
+    author = SimpleNamespace(id=int(UID))
+    channel = SimpleNamespace(id=99)
+    guild_message = SimpleNamespace(
+        author=author, channel=channel, guild=SimpleNamespace(id=1)
+    )
+    dm = SimpleNamespace(author=author, channel=channel, guild=None)
+    deny = SimpleNamespace(_control={}, _blacklist={UID}, _is_admin=lambda _uid: False)
+    assert delayed_job_policy_reason(deny, guild_message) == "ignored_author"
+    deny._blacklist = set()
+    deny._control = {"ignore_users": [UID]}
+    assert delayed_job_policy_reason(deny, guild_message) == "ignored_author"
+    deny._control = {"blocked_channels": ["99"]}
+    assert delayed_job_policy_reason(deny, guild_message) == "blocked_channel"
+    deny._control = {"allowed_channels": ["1"]}
+    assert delayed_job_policy_reason(deny, guild_message) == "channel_not_allowed"
+    deny._control = {}
+    deny._solo_blocks = lambda _msg: True
+    assert delayed_job_policy_reason(deny, guild_message) == "solo_restriction"
+    assert delayed_job_policy_reason(deny, dm) == ""
+    admin = SimpleNamespace(
+        _control={"ignore_users": [UID]},
+        _blacklist={UID},
+        _is_admin=lambda _uid: True,
+    )
+    assert delayed_job_policy_reason(admin, guild_message) == ""
+
+
+def test_runner_pauses_when_owner_is_later_blacklisted(tmp_path):
+    store = _store(tmp_path)
+    row = _add(store)
+    bot = _bot()
+    bot._blacklist = {UID}
+    asyncio.run(ScheduleRunner(bot, store).tick())
+    assert bot._task_jobs.calls == []
+    saved = store.get(UID, row["id"])
+    assert not saved["enabled"]
+    assert saved["last_status"] == "paused: ignored_author"
+    assert saved["runs"] == 0
 
 
 def test_runner_one_shot_disables_itself(tmp_path):
