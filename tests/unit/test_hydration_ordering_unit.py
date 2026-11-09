@@ -129,23 +129,23 @@ def test_rehydrating_an_edited_message_clears_object_and_slotted_cache_targets()
 def test_guild_pointer_hydration_requires_requester_view_and_history_permissions():
     for view, read in ((False, True), (True, False), (False, False)):
         accesses = []
+        live = _msg(9, "^", author_id=4)
+        live.guild = SimpleNamespace(id=99)
 
         class Channel(_Channel):
-            def permissions_for(self, requester):
-                assert requester is live.author
+            def permissions_for(self, requester, author=live.author, view=view, read=read):
+                assert requester is author
                 return SimpleNamespace(view_channel=view, read_message_history=read)
 
-            def history(self, *args, **kwargs):
-                accesses.append("discord")
+            def history(self, *args, seen=accesses, **kwargs):
+                seen.append("discord")
                 return super().history(*args, **kwargs)
 
         class Memory:
-            async def get_channel_memory(self, *args, **kwargs):
-                accesses.append("memory")
+            async def get_channel_memory(self, *args, seen=accesses, **kwargs):
+                seen.append("memory")
                 return [{"message_id": "8", "content": "OLD_PRIVATE_MESSAGE"}]
 
-        live = _msg(9, "^", author_id=4)
-        live.guild = SimpleNamespace(id=99)
         live.channel = Channel([_msg(8, "OLD_PRIVATE_MESSAGE")])
         bot = _bot()
         bot.memory = Memory()

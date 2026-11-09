@@ -16,17 +16,17 @@ from plugins.discord_presence import impl as presence_tools
 
 
 def _permissions(**overrides):
-    flags = dict(
-        view_channel=True,
-        read_message_history=True,
-        send_messages=True,
-        send_messages_in_threads=True,
-        manage_channels=True,
-        manage_roles=True,
-        mute_members=True,
-        deafen_members=True,
-        move_members=True,
-    )
+    flags = {
+        "view_channel": True,
+        "read_message_history": True,
+        "send_messages": True,
+        "send_messages_in_threads": True,
+        "manage_channels": True,
+        "manage_roles": True,
+        "mute_members": True,
+        "deafen_members": True,
+        "move_members": True,
+    }
     flags.update(overrides)
     return discord.Permissions(**flags)
 

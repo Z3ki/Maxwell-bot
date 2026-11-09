@@ -1,7 +1,6 @@
 """Deterministic sandbox/site regressions without Docker or network access."""
 
 import asyncio
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 

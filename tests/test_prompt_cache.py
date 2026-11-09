@@ -759,17 +759,17 @@ def test_guild_history_permissions_gate_cached_snapshot_reply_and_hydrated_conte
         reads = []
 
         class Memory(FakeMemory):
-            async def get_channel_memory(self, *args, **kwargs):
-                reads.append("cached")
+            async def get_channel_memory(self, *args, bucket=reads, **kwargs):
+                bucket.append("cached")
                 return await super().get_channel_memory(*args, **kwargs)
 
         bot = _bot(Memory([{"message_id": "1", "content": "CACHED_SECRET"}]))
         bot._reply_parent_context_lines = lambda _message: ["REPLY_SECRET"]
         message = _message()
         message.guild = SimpleNamespace(id=99)
-        message.channel.permissions_for = lambda requester: (
+        message.channel.permissions_for = lambda requester, view=view, read=read, author=message.author: (
             SimpleNamespace(view_channel=view, read_message_history=read)
-            if requester is message.author else None
+            if requester is author else None
         )
         message.user_install = True
         message.user_install_history_limit = 10
