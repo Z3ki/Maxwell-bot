@@ -229,5 +229,4 @@ def test_workspace_timeout_kills_the_captured_container(tmp_path, monkeypatch):
 
     asyncio.run(scenario())
     assert killed == ["container-id-abc"]
-    assert calls[1][-3:] == ("synthetic-workspace", "bash", "-lc")
-    assert calls[1][-1] == "sleep 300"
+    assert calls[1][-4:] == ("synthetic-workspace", "bash", "-lc", "sleep 300")

@@ -14,6 +14,7 @@ from plugins.schedules.cron import (
     next_after,
     parse,
     parse_at,
+    shortest_gap,
     upcoming,
     zone,
 )
@@ -70,6 +71,15 @@ def test_spring_forward_compression_is_below_the_interval_floor():
     now = datetime(2026, 1, 15, 12, tzinfo=UTC)
     with pytest.raises(CronError, match="once every"):
         plan_cron("0,50 1,3 * * *", "America/New_York", now)
+
+
+def test_shortest_gap_finds_spring_forward_without_walking_years():
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    started = time.perf_counter()
+    gap = shortest_gap(parse("0,50 1,3 * * *"), now, zone("America/New_York"))
+    assert time.perf_counter() - started < 1
+    assert gap is not None
+    assert gap < timedelta(minutes=15)
 
 
 def test_fall_back_second_pass_stays_in_the_future():

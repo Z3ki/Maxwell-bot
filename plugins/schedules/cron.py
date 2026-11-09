@@ -197,27 +197,63 @@ def upcoming(cron: Cron, after: datetime, tz: ZoneInfo, count: int) -> list[date
     return out
 
 
-def shortest_gap(cron: Cron, after: datetime, tz: ZoneInfo, samples: int = 60) -> timedelta | None:
-    """Smallest spacing through the scheduling horizon.
+def _spring_forward_utc(tz: ZoneInfo, year: int) -> datetime | None:
+    """First UTC noon in ``year`` whose local offset is larger than the previous day.
 
-    A short sample misses a spring-forward day, where two local times that
-    look far apart can land less than the interval floor apart in UTC.
-    ``samples`` is unused; the walk stops at the first one-minute gap.
+    Spring-forward is the only DST move that can compress two cron fires
+    below the interval floor. Sampling noon avoids the missing local hour.
     """
-    del samples
+    noon = datetime(year, 1, 1, 12, tzinfo=timezone.utc)
+    previous = noon.astimezone(tz).utcoffset()
+    for day in range(1, 366):
+        moment = noon + timedelta(days=day)
+        offset = moment.astimezone(tz).utcoffset()
+        if previous is not None and offset is not None and offset > previous:
+            return moment
+        previous = offset
+    return None
+
+
+def shortest_gap(cron: Cron, after: datetime, tz: ZoneInfo, samples: int = 60) -> timedelta | None:
+    """Smallest spacing among nearby fires, including the next spring-forward.
+
+    Consecutive sampling alone can sit entirely before DST. Walking until a
+    one-minute gap (or the 8-year horizon) hangs CI for any cron that never
+    fires every minute. Probe spring-forward days directly instead.
+    """
     prev = next_after(cron, after, tz)
     if prev is None:
         return None
     gap: timedelta | None = None
-    while True:
-        found = next_after(cron, prev, tz)
+    moment = prev
+    for _ in range(max(1, samples)):
+        found = next_after(cron, moment, tz)
         if found is None:
-            return gap
-        delta = found - prev
+            break
+        delta = found - moment
         gap = delta if gap is None else min(gap, delta)
         if gap <= timedelta(minutes=1):
             return gap
-        prev = found
+        moment = found
+
+    utc_after = after.astimezone(timezone.utc)
+    for year in range(utc_after.year, utc_after.year + 3):
+        skip = _spring_forward_utc(tz, year)
+        if skip is None or skip <= utc_after:
+            continue
+        moment = next_after(cron, skip - timedelta(hours=24), tz)
+        for _ in range(12):
+            if moment is None:
+                break
+            nxt = next_after(cron, moment, tz)
+            if nxt is None:
+                break
+            gap = nxt - moment if gap is None else min(gap, nxt - moment)
+            if gap <= timedelta(minutes=1):
+                return gap
+            moment = nxt
+    return gap
+
 
 
 _RELATIVE = re.compile(r"^\+?\s*(?:in\s+)?(\d{1,6})\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)$")
