@@ -709,3 +709,19 @@ def _instant_sleep(real):
         return await real(0)
 
     return sleep
+
+
+def test_systemd_credential_mode_0440_only_inside_credentials_directory(tmp_path, monkeypatch):
+    creds = tmp_path / "creds"
+    creds.mkdir()
+    for directory in (creds, tmp_path):
+        (directory / "c").write_text("v")
+        (directory / "c").chmod(0o440)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+    assert policy.read_credential(creds / "c") == "v"
+    with pytest.raises(policy.PolicyDenied):
+        policy.read_credential(tmp_path / "c")
+    for mode in (0o460, 0o444, 0o442):
+        (creds / "c").chmod(mode)
+        with pytest.raises(policy.PolicyDenied):
+            policy.read_credential(creds / "c")

@@ -139,10 +139,21 @@ def response_text(data: dict[str, Any]) -> str:
     return text[:1800] or "I couldn't produce a text answer. Please try again."
 
 
+def _credential_forbidden_bits(path: Path) -> int:
+    """Private files only. systemd LoadCredential delivers read-only 0440 files
+    (owner root, group root, ACL for the service user) inside
+    $CREDENTIALS_DIRECTORY; accept group-READ there only, never write/other."""
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    if directory and os.path.dirname(os.path.abspath(path)) == os.path.abspath(directory):
+        return 0o037
+    return 0o077
+
+
 def read_credential(path: Path) -> str:
     """Read only operator-provisioned credentials, never user-selected paths."""
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+    forbidden = _credential_forbidden_bits(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_mode & forbidden:
         raise PolicyDenied("Credential must be a non-symlink private regular file")
     if info.st_uid not in {0, os.geteuid()}:
         raise PolicyDenied("Unexpected credential owner")
@@ -153,7 +164,7 @@ def read_credential(path: Path) -> str:
         current = os.fstat(fd)
         if (
             not stat.S_ISREG(current.st_mode)
-            or current.st_mode & 0o077
+            or current.st_mode & forbidden
             or current.st_uid not in {0, os.geteuid()}
             or current.st_size > MAX_AUTHORITATIVE_JSON
         ):
