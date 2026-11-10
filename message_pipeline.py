@@ -49,6 +49,13 @@ from functools import partial
 from typing import Any
 
 from concurrency_safety import cancel_once
+from request_phase import (
+    PENDING_STATUSES,
+    TERMINAL_STATUSES,
+    can_begin,
+    recover_target,
+    transition,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -555,8 +562,8 @@ class RequestJournal:
     ``accept()`` and ``begin()`` never silently reopen terminal requests.
     """
 
-    _PENDING = ("received", "queued", "deferred", "running")
-    _TERMINAL = ("delivered", "suppressed", "failed", "superseded")
+    _PENDING = PENDING_STATUSES
+    _TERMINAL = tuple(TERMINAL_STATUSES)
     _TERMINAL_RETENTION = 10_000
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
@@ -830,6 +837,7 @@ class RequestJournal:
             raise ValueError(f"Unknown request status: {status}")
         with self._transaction(write=True) as connection:
             row = self._require(connection, message_id)
+            status = transition(row["status"], status, reason=reason).value
             record = self._change(
                 connection,
                 row,
@@ -881,7 +889,7 @@ class RequestJournal:
         """Atomically count an attempt and start an unfinished, effect-free turn."""
         with self._transaction(write=True) as connection:
             row = self._require(connection, message_id)
-            if row["status"] not in self._PENDING or row["effects_started"]:
+            if not can_begin(row["status"], bool(row["effects_started"])):
                 raise ValueError("Cannot begin a terminal or effects-started request")
             record = self._change(
                 connection, row, "running", attempts=row["attempts"] + 1
@@ -931,10 +939,13 @@ class RequestJournal:
             ).fetchall()
             for row in rows:
                 interrupted = bool(row["effects_started"])
+                nxt = recover_target(row["status"], interrupted)
+                if nxt is None:
+                    continue
                 record = self._change(
                     connection,
                     row,
-                    "failed" if interrupted else "deferred",
+                    nxt,
                     reason="interrupted_after_effect" if interrupted else "recovered",
                 )
                 transitions.append((row["status"], record))
