@@ -1,0 +1,40 @@
+[Unit]
+Description=Maxwell standby failover watchdog (non-root; requests only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxwell-failover
+Group=maxwell-failover
+WorkingDirectory=/opt/maxwell-standby/app
+ExecStart=/opt/maxwell-standby/venv/bin/python -m standby.failover watch
+LoadCredential=failover-key:/etc/maxwell-failover/key
+LoadCredential=tls-cert:/etc/grokagent/server.crt
+LoadCredential=tls-key:/etc/grokagent/server.key
+StateDirectory=maxwell-failover
+StateDirectoryMode=0700
+Restart=always
+RestartSec=5
+UMask=0022
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/maxwell-failover-watchdog
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=128M
+TasksMax=64
+StandardOutput=journal
+LogRateLimitIntervalSec=60s
+LogRateLimitBurst=40
+
+[Install]
+WantedBy=multi-user.target

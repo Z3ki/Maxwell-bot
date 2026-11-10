@@ -202,7 +202,8 @@ def main():
             "Manual only: review/deploy guarded revision; approve audience and config snapshot; "
             "provision token; explicitly approve primary stop; verify durable fence+stopped PID; "
             "only then start standby. Failback stops/verifies standby before unfencing primary. "
-            "No health-timeout takeover and no automatic failover."
+            "This manual tool never takes over on a health timeout; guarded automatic "
+            "failover is the separate standby.failover watchdog (docs/STANDBY.md)."
         )
         return
     operator = Operator(args.main_wrapper, args.backup_wrapper)

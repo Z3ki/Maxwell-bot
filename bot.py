@@ -92,7 +92,13 @@ class MaxwellBot(
 
 async def main():
     from standby.policy import assert_primary_unfenced
+    from standby.primary_gate import startup_gate
+
     assert_primary_unfenced(Config.DATA_DIR)
+    # Guarded automatic failover: ask an active backup to hand back and wait
+    # (bounded) for it to stop its gateway BEFORE this primary logs in. No-op
+    # unless data/standby-failover/client.json exists; never raises.
+    logger.info("Standby failover gate: %s", await asyncio.to_thread(startup_gate, Config.DATA_DIR))
     if find_spec("nacl") is None or find_spec("davey") is None:
         logger.info(
             "Optional native Discord voice dependencies are missing; "

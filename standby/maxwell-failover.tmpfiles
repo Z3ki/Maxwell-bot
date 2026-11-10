@@ -1,0 +1,3 @@
+d /run/maxwell-failover 2750 root maxwell-failover -
+d /run/maxwell-failover-watchdog 0755 maxwell-failover maxwell-failover -
+d /run/maxwell-standby 0700 root root -

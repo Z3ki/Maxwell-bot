@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import re
+import secrets
+import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -25,9 +27,13 @@ from standby.policy import (
     response_text,
     text_payload,
     validate_provider,
+    with_nonce,
 )
 
 from standby.sync import chat_allowed, snowflake, validate_snapshot
+
+# Exit status reported to the failover watchdog when the primary is seen live.
+CONFLICT_EXIT = 3
 
 LIMITATION = (
     "I'm on the limited standby: text chat only; no tools, files or attachments."
@@ -74,11 +80,15 @@ async def read_bounded(content, limit: int = 1024 * 1024) -> bytes:
             raise PolicyDenied("Provider output too large")
 
 
-async def run() -> None:
+async def run() -> int:
     if deployment_mode() != "standby":
         raise PolicyDenied("Use the explicit standby deployment mode")
     credentials = Path(os.environ["CREDENTIALS_DIRECTORY"])
-    activation_record(credentials / "activation")
+    record = activation_record(credentials / "activation")
+    # observe_only: a bounded gateway session that can NEVER send or respond.
+    observe_only = record.get("mode") == "observe_only"
+    probation = int(record.get("probation_seconds", 0)) if not observe_only else 0
+    observe_seconds = int(record.get("observe_seconds", 0)) if observe_only else 0
     snapshot = validate_snapshot(
         parse_json(read_credential(credentials / "chat-config"))
     )
@@ -110,13 +120,55 @@ async def run() -> None:
     admission = Admission()
     consented: set[int] = set()
     inflight: dict[int, set[asyncio.Task]] = {}
+    # Split-brain detector: messages authored by this bot account that this
+    # process did not send can only come from a live primary (same token).
+    sent_ids: OrderedDict[int, None] = OrderedDict()
+    sent_nonces: OrderedDict[str, None] = OrderedDict()
+    checks: set[asyncio.Future] = set()
+    watch = {"ready": False, "ready_at": None, "messages_seen": 0,
+             "primary_messages_seen": 0, "conflict": False, "guilds": 0}
 
     class TextOnlyClient(discord.Client):
         async def setup_hook(self):
             # No extensions, command tree sync, API server, caches, or workers.
-            pass
+            if observe_only:
+                asyncio.get_running_loop().call_later(
+                    observe_seconds, lambda: asyncio.ensure_future(self.close())
+                )
+
+        async def on_ready(self):
+            watch["ready"] = True
+            watch["guilds"] = len(getattr(self, "guilds", ()) or ())
+            if watch["ready_at"] is None:
+                watch["ready_at"] = time.monotonic()
+
+        def quiet(self) -> bool:
+            """Observe-only always; automatic leases during initial probation."""
+            if observe_only:
+                return True
+            if not probation:
+                return False
+            ready_at = watch["ready_at"]
+            return ready_at is None or time.monotonic() < ready_at + probation
+
+        async def primary_seen(self, message) -> None:
+            if getattr(message, "id", None) in sent_ids:
+                return
+            if observe_only:
+                watch["primary_messages_seen"] += 1
+                return
+            # The REST reply may land after the gateway echo; recheck briefly.
+            await asyncio.sleep(5)
+            if getattr(message, "id", None) in sent_ids:
+                return
+            watch["primary_messages_seen"] += 1
+            watch["conflict"] = True
+            print(json.dumps({"event": "primary_detected", "action": "standby_exit"}), flush=True)
+            await self.close()
 
         async def on_interaction(self, interaction):
+            if self.quiet() or watch["conflict"]:
+                return
             if interaction.guild_id is None:
                 return
             # Do not dispatch existing registered slash commands from the primary.
@@ -142,6 +194,19 @@ async def run() -> None:
                     admission.leave()
 
         async def on_message(self, message):
+            watch["messages_seen"] += 1
+            own = getattr(self.user, "id", None)
+            if own is not None and getattr(message.author, "id", None) == own:
+                if (
+                    str(getattr(message, "nonce", "")) not in sent_nonces
+                    and len(checks) < 64
+                ):
+                    task = asyncio.ensure_future(self.primary_seen(message))
+                    checks.add(task)
+                    task.add_done_callback(checks.discard)
+                return
+            if self.quiet() or watch["conflict"]:
+                return
             if (
                 message.author.bot
                 or message.guild is None
@@ -242,11 +307,21 @@ async def run() -> None:
 
         async def send_text(self, channel_id: int, text: str, **extras):
             # No files, embeds, stickers, components, webhook or arbitrary routes.
-            payload = text_payload(text, **extras)
+            if observe_only or watch["conflict"]:
+                raise PolicyDenied("Observe-only standby never sends")
+            nonce = str(secrets.randbelow(10**18))
+            sent_nonces[nonce] = None
+            while len(sent_nonces) > 4096:
+                sent_nonces.popitem(last=False)
+            payload = with_nonce(text_payload(text, **extras), nonce)
             route = discord.http.Route(
                 "POST", "/channels/{channel_id}/messages", channel_id=channel_id
             )
-            await self.http.request(route, json=payload)
+            data = await self.http.request(route, json=payload)
+            if isinstance(data, dict) and str(data.get("id", "")).isdigit():
+                sent_ids[int(data["id"])] = None
+                while len(sent_ids) > 4096:
+                    sent_ids.popitem(last=False)
 
     intents = discord.Intents.none()
     intents.guilds = True
@@ -259,6 +334,12 @@ async def run() -> None:
     ) as session:
         async with TextOnlyClient(intents=intents, max_messages=None) as client:
             await client.start(token, reconnect=True)
+    if observe_only:
+        print(json.dumps({"observe_only": True, "sent": 0, **{
+            k: watch[k] for k in ("ready", "guilds", "messages_seen", "primary_messages_seen")
+        }}), flush=True)
+        return 0
+    return CONFLICT_EXIT if watch["conflict"] else 0
 
 
 def main() -> None:
@@ -279,14 +360,15 @@ def main() -> None:
                     "plugins": False,
                     "files": False,
                     "api": False,
-                    "automatic_failover": False,
-                    "requires_manual_fence": True,
+                    "automatic_failover": "guarded lease via standby.failover",
+                    "requires_manual_fence": False,
+                    "requires_fence_or_auto_lease": True,
                     "audience": "explicit emergency channel allowlist",
                 }
             )
         )
         return
-    asyncio.run(run())
+    sys.exit(asyncio.run(run()))
 
 
 if __name__ == "__main__":

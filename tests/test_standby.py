@@ -392,7 +392,9 @@ def test_transport_bypass_paths_with_no_network(
                 "/channels/{channel_id}/messages",
                 {"channel_id": 10},
             )
-            assert set(kwargs["json"]) == {"content", "allowed_mentions"}
+            # Only bounded text plus a numeric self-recognition nonce.
+            assert set(kwargs["json"]) == {"content", "allowed_mentions", "nonce"}
+            assert kwargs["json"]["nonce"].isdigit()
             sends.append(kwargs["json"]["content"])
 
         async def start(self, token, **kwargs):
