@@ -1,5 +1,5 @@
 [Unit]
-Description=Maxwell manually fenced text-only standby
+Description=Maxwell limited text-only standby (manual fence or automatic lease)
 After=network.target
 ConditionPathExists=/run/maxwell-standby/activation.json
 ConditionPathExists=/etc/maxwell-standby/discord-token

@@ -1,4 +1,4 @@
-# Limited emergency chat standby (manual activation only)
+# Limited emergency chat standby (manual or guarded automatic activation)
 
 This is a **separate, minimal runtime**, not a second fully capable Maxwell.
 `MAXWELL_DEPLOYMENT_MODE=standby python bot.py` selects it **before** importing
@@ -7,7 +7,9 @@ primary plugins, media handlers, APIs or background workers. The default mode is
 
 ## Status and limits
 
-- Staging the code is not an active backup. No automatic takeover exists.
+- Staging the code is not an active backup. Automatic takeover exists only when
+  the guarded failover watchdog below is installed **and** armed (`/etc/maxwell-failover/mode`
+  contains exactly `auto`). Otherwise activation is manual and fenced.
 - Standby answers **explicit mentions in operator-approved guild channels only**.
   No DMs, ordinary channel chatter, primary conversation history, message cache,
   persistent conversation memory, user-install shortcuts or private BYOK settings.
@@ -182,9 +184,11 @@ it checks the offline credential/config/dependency/audience preflight and that n
    before recovery, never remove fences blindly.
 4. Installs a private **boot-local** `/run/maxwell-standby/activation.json`
    receipt and starts standby manually. Systemd copies it into protected service
-   credentials, then a privileged pre-start consumes it exactly once, retaining
-   separate `/run/maxwell-standby/owner.json` evidence for failback. Reusing the
-   source receipt is impossible; reboot removes all activation sources. The unit
+   credentials, then a privileged pre-start exclusively creates
+   `/run/maxwell-standby/owner.json` (single use: a second start fails until the
+   ordered failback/stepdown removes it). The source receipt stays in place while
+   the unit runs because systemd re-reads credential sources for every Exec
+   command; reboot removes all activation sources. The unit
    is **static** (no Install/WantedBy) and does not auto-restart. A second start
    without a newly verified fenced activation cannot log in.
 
@@ -204,16 +208,124 @@ fence, restoring its former restart policy, then starting primary. If primary
 restoration fails, standby cannot silently restart from a stale receipt. Separate owner evidence is retained through failures and cleared only after primary is positively running, permitting ordered retry. Reboot loss of /run evidence requires manual reconciliation, not a guessed takeover. If either host
 is unreachable or any evidence fails, the tool does not guess or start a competitor.
 
-## Hard-outage automatic failover is NOT solved by this PR
+## Guarded automatic failover (`standby/failover.py`, `standby/primary_gate.py`)
 
-If main cannot be reached, the manual stop cannot be positively verified. Remain
-disconnected. To cover that case without two responders requires a separate
-approved architecture: independently verifiable provider power/egress fencing;
-or an independent strongly consistent owner with **stale-writer enforcement at
-every outbound path**; or a single independently owned Discord gateway. A lease on
-the backup alone introduces a new primary availability dependency and cannot
-safely be silently installed. A health-check polling loop is not fencing. No paid
-coordinator or additional subscription is required/created by this change.
+A health timeout alone is still **not** proof that the primary stopped. The
+automatic path therefore combines several independent signals, keeps the primary
+as the single authority, and closes any overlap as fast as it can be observed.
+It cannot provide the guarantee of real power/egress fencing; the residual risk
+is listed below.
+
+### Components
+
+| Where | Unit | Privilege | Role |
+|---|---|---|---|
+| backup | `maxwell-failover.service` | user `maxwell-failover`, no capabilities | probes, decision logic, authenticated HTTPS listener on TCP 8443 (`/failover`: `status`, `heartbeat`, `handback`) |
+| backup | `maxwell-failover-actuator.path` + `.service` | root oneshot | re-validates each watchdog request; writes the boot-local `auto_lease` receipt; starts/stops `maxwell-standby.service` |
+| primary host | `maxwell-primary-guard.service` | root (needs `docker inspect`) | every 15 s: heartbeat (is the `maxwell` container running/healthy); if the backup holds an automatic lease while the primary bot runs, requests handback immediately |
+| primary bot | `bot.py` startup gate | in-process | before Discord login, asks the backup to hand back and waits (max 150 s) for confirmation that its gateway stopped. If the backup is unreachable twice, the primary proceeds. Configured only if `data/standby-failover/client.json` exists (dev has none) |
+
+The failover key is dedicated (not the admin or config-sync key). The client pins
+the backup's exact TLS leaf certificate plus IP SAN. No redirects or proxies.
+The listener drops every peer except the primary's IP before TLS or any slot is
+used. The standby gateway is single-shot: it never re-IDENTIFYs or RESUMEs (it
+overrides discord.py's reconnect loop, which would otherwise re-identify on
+op 7/op 9 even with `reconnect=False`). Any session end, including Discord's
+routine reconnect requests, ends the process; the outage must re-qualify
+(about 3 minutes) before a new session. Two sessions on the token therefore
+cannot fight in a reconnect loop. Listener work slots are taken only after TLS
+and the key check; the primary gate treats a TCP-level failure as "unreachable"
+but a refusal after TCP connects (TLS EOF/reset/busy) as "alive, not confirmed"
+and keeps waiting up to its 150 s deadline.
+
+### Takeover (all must hold continuously)
+
+1. No primary heartbeat for `heartbeat_stale_seconds` (60 s; guard pushes every 15 s).
+2. Primary unreachable **directly** (TCP 443 and 22 on its IP).
+3. The backup's own internet is healthy on every tick: Discord API `GET /gateway`
+   returns 200 **and** at least 2 of 4 public anchors (1.1.1.1, 8.8.8.8, 9.9.9.9,
+   208.67.222.222 on 443) answer. Any unhealthy tick resets the outage window, so a
+   backup-side blip (e.g. a provider switch failure) never triggers takeover.
+4. Conditions 1–3 hold for `takeover_after_seconds` (180 s) without interruption.
+5. **External confirmation**: independent check-host.net observers in DE/NL/FR/US
+   are asked to TCP-probe the primary. Any observer reaching it vetoes takeover
+   for 5 minutes (backup↔primary partition, not an outage). `down` requires every
+   observer the service assigned to answer with a failure on both ports (nothing
+   pending, at least 2 nodes). Anything inconclusive, or the observer service being
+   unavailable, is `unknown` and **never** allows takeover (an optional
+   `external_fallback_after_seconds` exists but is disabled by default).
+6. The watchdog process itself has been up at least one heartbeat grace window.
+   Outage/observer evidence is never persisted across restarts; only blockers
+   (cooldowns, claim hold, takeover history) are, rebased onto the monotonic clock
+   and clamped. All timers use the monotonic clock, so wall-clock jumps cannot
+   shorten a window.
+7. Not blocked by: manual mode, a cooldown (10 min after a takeover ends, 2 min
+   after the standby drops its gateway, 1 h after split-brain detection), a primary
+   handback claim within 10 minutes, 1 hour after a split-brain detection, or the
+   daily limit (3 automatic takeovers per 24 h, enforced again root-side).
+
+Expected takeover time after a hard primary outage: about 4–5 minutes.
+
+The actuator re-checks arming, that no lease/manual fence exists, that the standby
+is stopped, the root-side daily limit and the offline preflight (without the
+15-minute snapshot freshness limit: an outage keeps the last-good snapshot). It
+then writes an `auto_lease` receipt and starts the unchanged, text-only,
+non-root, 512 MiB `maxwell-standby.service`. The standby stays quiet for a 30 s
+probation after gateway READY, watching for the primary.
+
+### Handback (any one is enough)
+
+- The primary startup gate or guard sends `handback`: the watchdog requests a
+  stop, the actuator stops the unit, verifies inactive with PID 0, removes the
+  receipt and lease, and only then confirms. The gate lets the primary log in
+  after that confirmation (zero overlap on primary restarts/boots).
+- The guard heartbeat reports the primary bot running: immediate stepdown.
+- The primary stays directly reachable for `stepdown_after_seconds` (60 s) and
+  no heartbeat says its bot is stopped.
+- **Discord-side split-brain detector**: the standby sees a message authored by
+  its own bot account that it did not send (nonce/ID tracking). It goes quiet
+  immediately, confirms for 5 s against REST reply IDs, then exits (status 3) and
+  the watchdog applies a 1-hour cooldown. Verified live: a 180 s observe-only
+  session saw 3 of the live primary's replies and sent nothing.
+
+If the primary host is up but its bot is not running (guard heartbeat says
+stopped), the standby keeps serving until the primary's startup gate claims.
+
+### Residual risk (why this is not a fencing guarantee)
+
+- A primary that can reach Discord but is unreachable from the backup **and**
+  from all external observers **and** cannot reach the backup for 4+ minutes can
+  overlap with the standby. The overlap ends when the primary answers someone in
+  a channel the standby sees (detector), or when connectivity returns.
+- If the backup is unreachable when the primary starts while a lease is active,
+  the primary proceeds after about 10 s; overlap lasts until the backup's next
+  tick sees the primary (≤ 60–75 s) or the detector fires.
+- During any overlap both bots may answer the same mention. The standby is
+  text-only, so it cannot run tools, files or commands twice.
+- check-host.net is a third party; it can only *veto* or delay takeover. If it
+  is down during a real outage there is no automatic takeover (manual remains).
+- The failover key also lives in the primary's data directory for the startup
+  gate. Anyone with it can only send heartbeats (suppressing takeover) or
+  handback (stopping the standby), and only from the primary's IP.
+- Observe-only test sessions are bounded (≤ 300 s), never send, and end on the
+  first primary message or on any handback.
+
+### Operations
+
+- Status: `cat /run/maxwell-failover-watchdog/status.json` (backup),
+  `cat /run/maxwell-primary-guard/status.json` (primary).
+- **Disarm** (no new automatic takeovers; stepdowns still work):
+  `echo manual > /etc/maxwell-failover/mode`. Re-arm: `echo auto > /etc/maxwell-failover/mode`.
+- Stop everything automatic: `systemctl disable --now maxwell-failover.service maxwell-failover-actuator.path`.
+  The primary gate stays harmless (backup unreachable => proceeds after ~10 s);
+  remove `data/standby-failover/` on the primary to disable it entirely.
+- Force handback now (from the primary): `python3 /opt/maxwell-failover/primary_gate.py gate-test --data-dir /root/maxwell/data`.
+- Live simulation without actuation (backup): `python -m standby.failover simulate --main-ip 192.0.2.1 --armed`.
+- Bounded observe-only gateway test that can never send (backup, root):
+  `python -m standby.failover observe-test --seconds 60`.
+- Manual fenced takeover/failback (`standby.takeover`) is unchanged and is never
+  touched by the automatic path: the actuator refuses to stop a manually fenced
+  standby, and the watchdog does not manage it.
 
 ## Verification / rollback
 

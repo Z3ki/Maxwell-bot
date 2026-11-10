@@ -10,14 +10,22 @@ from standby.policy import PolicyDenied, parse_json, read_credential, validate_p
 from standby.sync import snowflake, validate_snapshot
 
 
-def validate(root: Path, *, now: float | None = None) -> None:
+def validate(
+    root: Path, *, now: float | None = None, max_age: float | None = 900
+) -> None:
+    """Offline checks. ``max_age=None`` (automatic outage takeover only) keeps the
+    last-good snapshot usable during a long primary outage; manual activation
+    keeps the 15-minute refresh requirement."""
     validate_provider(parse_json(read_credential(root / "provider.json")))
     if not read_credential(root / "discord-token").strip():
         raise PolicyDenied("Missing Discord credential")
     snapshot = validate_snapshot(
         parse_json(read_credential(root / "chat-config.json")), now=now
     )
-    if (time.time() if now is None else now) - snapshot["exported_at"] > 900:
+    if (
+        max_age is not None
+        and (time.time() if now is None else now) - snapshot["exported_at"] > max_age
+    ):
         raise PolicyDenied(
             "Refresh scoped config snapshot before activation (15 minute limit)"
         )

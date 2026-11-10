@@ -392,7 +392,9 @@ def test_transport_bypass_paths_with_no_network(
                 "/channels/{channel_id}/messages",
                 {"channel_id": 10},
             )
-            assert set(kwargs["json"]) == {"content", "allowed_mentions"}
+            # Only bounded text plus a numeric self-recognition nonce.
+            assert set(kwargs["json"]) == {"content", "allowed_mentions", "nonce"}
+            assert kwargs["json"]["nonce"].isdigit()
             sends.append(kwargs["json"]["content"])
 
         async def start(self, token, **kwargs):
@@ -502,12 +504,13 @@ def test_boot_local_activation_consumed_once(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(consume.os, "geteuid", lambda: 0)
     consume.consume(tmp_path)
-    assert not (tmp_path / "activation.json").exists()
+    # Source stays for systemd's per-Exec credential load; owner marker is exclusive.
+    assert (tmp_path / "activation.json").exists()
     assert json.loads((tmp_path / "owner.json").read_text()) == record
-    with pytest.raises(FileNotFoundError):
-        consume.consume(tmp_path)
-    private(tmp_path / "activation.json", record)
     with pytest.raises(FileExistsError):
+        consume.consume(tmp_path)
+    (tmp_path / "activation.json").unlink()
+    with pytest.raises(FileNotFoundError):
         consume.consume(tmp_path)
 
 

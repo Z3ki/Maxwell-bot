@@ -1,0 +1,9 @@
+[Unit]
+Description=Trigger the root failover actuator on watchdog requests
+
+[Path]
+PathChanged=/run/maxwell-failover-watchdog/request.json
+Unit=maxwell-failover-actuator.service
+
+[Install]
+WantedBy=multi-user.target

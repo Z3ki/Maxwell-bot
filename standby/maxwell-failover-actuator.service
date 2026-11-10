@@ -1,0 +1,16 @@
+[Unit]
+Description=Maxwell failover actuator (root; re-validates every request)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/maxwell-standby/app
+ExecStart=/opt/maxwell-standby/venv/bin/python -m standby.failover actuate
+StateDirectory=maxwell-failover-actuator
+StateDirectoryMode=0700
+TimeoutStartSec=180
+UMask=0027
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+StandardOutput=journal

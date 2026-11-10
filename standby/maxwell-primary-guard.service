@@ -1,0 +1,22 @@
+[Unit]
+Description=Maxwell primary failover guard (heartbeat + immediate handback)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /opt/maxwell-failover/primary_gate.py guard
+RuntimeDirectory=maxwell-primary-guard
+Environment=DOCKER_CONFIG=/run/maxwell-primary-guard/docker
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=64M
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
