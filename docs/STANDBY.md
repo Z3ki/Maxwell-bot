@@ -184,9 +184,11 @@ it checks the offline credential/config/dependency/audience preflight and that n
    before recovery, never remove fences blindly.
 4. Installs a private **boot-local** `/run/maxwell-standby/activation.json`
    receipt and starts standby manually. Systemd copies it into protected service
-   credentials, then a privileged pre-start consumes it exactly once, retaining
-   separate `/run/maxwell-standby/owner.json` evidence for failback. Reusing the
-   source receipt is impossible; reboot removes all activation sources. The unit
+   credentials, then a privileged pre-start exclusively creates
+   `/run/maxwell-standby/owner.json` (single use: a second start fails until the
+   ordered failback/stepdown removes it). The source receipt stays in place while
+   the unit runs because systemd re-reads credential sources for every Exec
+   command; reboot removes all activation sources. The unit
    is **static** (no Install/WantedBy) and does not auto-restart. A second start
    without a newly verified fenced activation cannot log in.
 

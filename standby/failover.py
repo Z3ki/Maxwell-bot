@@ -499,6 +499,7 @@ def stepdown(paths: ActuatorPaths, runner=subprocess.run) -> str:
 def takeover(
     paths: ActuatorPaths, request: dict[str, Any], runner=subprocess.run,
     validate: Callable[[Path], None] | None = None, now: float | None = None,
+    settle: Callable[[float], None] = time.sleep,
 ) -> str:
     now = time.time() if now is None else now
     observe = request.get("observe_only") is True
@@ -545,8 +546,13 @@ def takeover(
         paths.state.mkdir(mode=0o700, exist_ok=True)
         atomic_write(history_path, history, 0o600)  # type: ignore[arg-type]
     started = runner(["systemctl", "start", UNIT], check=False, timeout=90, capture_output=True)
+    settle(3)  # a process that dies during credential/setup must not count as started
     shown = systemctl_show(UNIT, runner)
-    if started.returncode != 0 or shown.get("ActiveState") not in {"active", "activating"}:
+    if (
+        started.returncode != 0
+        or shown.get("ActiveState") != "active"
+        or shown.get("MainPID") in {None, "", "0"}
+    ):
         runner(["systemctl", "stop", UNIT], check=False, timeout=60, capture_output=True)
         _clear_auto(paths)
         raise PolicyDenied("Standby failed to start; lease cleared")

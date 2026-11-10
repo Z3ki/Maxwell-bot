@@ -268,7 +268,7 @@ def test_actuator_takeover_writes_valid_lease_and_starts(tmp_path):
     result = failover.handle_request(p, request(), systemd, __import__("time").time())
     # Inject a passing offline validation for the real takeover call.
     assert result["ok"] is False  # default preflight fails without credentials
-    result = failover.takeover(p, request(), systemd, validate=lambda root: None)
+    result = failover.takeover(p, request(), systemd, validate=lambda root: None, settle=lambda s: None)
     assert "automatic" in result and systemd.active
     record = json.loads((p.standby_run / "activation.json").read_text())
     assert policy.auto_lease_record(record)["mode"] == "automatic"
@@ -279,13 +279,13 @@ def test_actuator_takeover_writes_valid_lease_and_starts(tmp_path):
 def test_actuator_refuses_when_disarmed_running_or_leased(tmp_path):
     p = paths(tmp_path, armed=False)
     with pytest.raises(policy.PolicyDenied, match="off"):
-        failover.takeover(p, request(), FakeSystemd(), validate=lambda root: None)
+        failover.takeover(p, request(), FakeSystemd(), validate=lambda root: None, settle=lambda s: None)
     p.mode.write_text("auto")
     with pytest.raises(policy.PolicyDenied, match="running"):
-        failover.takeover(p, request(), FakeSystemd(active=True), validate=lambda root: None)
+        failover.takeover(p, request(), FakeSystemd(active=True), validate=lambda root: None, settle=lambda s: None)
     (p.root_run / "lease.json").write_text("{}")
     with pytest.raises(policy.PolicyDenied, match="lease"):
-        failover.takeover(p, request(), FakeSystemd(), validate=lambda root: None)
+        failover.takeover(p, request(), FakeSystemd(), validate=lambda root: None, settle=lambda s: None)
 
 
 def test_actuator_daily_limit_is_enforced_root_side(tmp_path):
@@ -295,17 +295,17 @@ def test_actuator_daily_limit_is_enforced_root_side(tmp_path):
     p.state.mkdir()
     (p.state / "history.json").write_text(json.dumps([time.time() - 5] * 3))
     with pytest.raises(policy.PolicyDenied, match="limit"):
-        failover.takeover(p, request(), FakeSystemd(), validate=lambda root: None)
+        failover.takeover(p, request(), FakeSystemd(), validate=lambda root: None, settle=lambda s: None)
     # Observe-only tests never send, so they are not limited and need no arming.
     p.mode.write_text("manual")
     assert "observe_only" in failover.takeover(p, request(observe_only=True), FakeSystemd(),
-                                               validate=lambda root: None)
+                                               validate=lambda root: None, settle=lambda s: None)
 
 
 def test_failed_start_clears_lease(tmp_path):
     p = paths(tmp_path)
     with pytest.raises(policy.PolicyDenied, match="failed to start"):
-        failover.takeover(p, request(), FakeSystemd(start_ok=False), validate=lambda root: None)
+        failover.takeover(p, request(), FakeSystemd(start_ok=False), validate=lambda root: None, settle=lambda s: None)
     assert not (p.root_run / "lease.json").exists()
     assert not (p.standby_run / "activation.json").exists()
 
@@ -313,7 +313,7 @@ def test_failed_start_clears_lease(tmp_path):
 def test_stepdown_stops_first_and_never_touches_manual_fence(tmp_path):
     p = paths(tmp_path)
     systemd = FakeSystemd()
-    failover.takeover(p, request(), systemd, validate=lambda root: None)
+    failover.takeover(p, request(), systemd, validate=lambda root: None, settle=lambda s: None)
     assert failover.stepdown(p, systemd).startswith("standby stopped")
     assert systemd.calls.index("stop") > systemd.calls.index("start")
     assert not (p.root_run / "lease.json").exists()
