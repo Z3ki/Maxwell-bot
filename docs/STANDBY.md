@@ -227,6 +227,10 @@ is listed below.
 
 The failover key is dedicated (not the admin or config-sync key). The client pins
 the backup's exact TLS leaf certificate plus IP SAN. No redirects or proxies.
+The listener drops every peer except the primary's IP before TLS or any slot is
+used. The standby gateway runs with `reconnect=False`: a dropped session ends the
+process and the outage must re-qualify, so two sessions cannot fight in a
+reconnect loop.
 
 ### Takeover (all must hold continuously)
 
@@ -239,10 +243,18 @@ the backup's exact TLS leaf certificate plus IP SAN. No redirects or proxies.
 4. Conditions 1–3 hold for `takeover_after_seconds` (180 s) without interruption.
 5. **External confirmation**: independent check-host.net observers in DE/NL/FR/US
    are asked to TCP-probe the primary. Any observer reaching it vetoes takeover
-   for 5 minutes (backup↔primary partition, not an outage). An unavailable observer
-   service is never treated as evidence; takeover then waits for the extended
-   `external_fallback_after_seconds` (15 min) of continuous outage.
-6. Not blocked by: manual mode, 10-minute cooldown after a lease ends, a primary
+   for 5 minutes (backup↔primary partition, not an outage). `down` requires every
+   observer the service assigned to answer with a failure on both ports (nothing
+   pending, at least 2 nodes). Anything inconclusive, or the observer service being
+   unavailable, is `unknown` and **never** allows takeover (an optional
+   `external_fallback_after_seconds` exists but is disabled by default).
+6. The watchdog process itself has been up at least one heartbeat grace window.
+   Outage/observer evidence is never persisted across restarts; only blockers
+   (cooldowns, claim hold, takeover history) are, rebased onto the monotonic clock
+   and clamped. All timers use the monotonic clock, so wall-clock jumps cannot
+   shorten a window.
+7. Not blocked by: manual mode, a cooldown (10 min after a takeover ends, 2 min
+   after the standby drops its gateway, 1 h after split-brain detection), a primary
    handback claim within 10 minutes, 1 hour after a split-brain detection, or the
    daily limit (3 automatic takeovers per 24 h, enforced again root-side).
 
@@ -265,9 +277,10 @@ probation after gateway READY, watching for the primary.
 - The primary stays directly reachable for `stepdown_after_seconds` (60 s) and
   no heartbeat says its bot is stopped.
 - **Discord-side split-brain detector**: the standby sees a message authored by
-  its own bot account that it did not send (nonce/ID tracking). That can only be
-  the live primary, so it exits (status 3) and the watchdog applies a 1-hour
-  cooldown.
+  its own bot account that it did not send (nonce/ID tracking). It goes quiet
+  immediately, confirms for 5 s against REST reply IDs, then exits (status 3) and
+  the watchdog applies a 1-hour cooldown. Verified live: a 180 s observe-only
+  session saw 3 of the live primary's replies and sent nothing.
 
 If the primary host is up but its bot is not running (guard heartbeat says
 stopped), the standby keeps serving until the primary's startup gate claims.
@@ -283,7 +296,13 @@ stopped), the standby keeps serving until the primary's startup gate claims.
   tick sees the primary (≤ 60–75 s) or the detector fires.
 - During any overlap both bots may answer the same mention. The standby is
   text-only, so it cannot run tools, files or commands twice.
-- check-host.net is a third party; it can only *veto* or delay takeover.
+- check-host.net is a third party; it can only *veto* or delay takeover. If it
+  is down during a real outage there is no automatic takeover (manual remains).
+- The failover key also lives in the primary's data directory for the startup
+  gate. Anyone with it can only send heartbeats (suppressing takeover) or
+  handback (stopping the standby), and only from the primary's IP.
+- Observe-only test sessions are bounded (≤ 300 s), never send, and end on the
+  first primary message or on any handback.
 
 ### Operations
 

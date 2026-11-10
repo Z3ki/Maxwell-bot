@@ -69,13 +69,15 @@ class Config:
     heartbeat_stale_seconds: float = 60.0
     takeover_after_seconds: float = 180.0
     external_lead_seconds: float = 45.0
-    external_fallback_after_seconds: float = 900.0
+    # 0 = disabled (default): an unavailable/inconclusive observer never allows takeover.
+    external_fallback_after_seconds: float = 0.0
     external_veto_seconds: float = 300.0
     stepdown_after_seconds: float = 60.0
     cooldown_seconds: float = 600.0
     conflict_cooldown_seconds: float = 3600.0
     claim_hold_seconds: float = 600.0
     max_takeovers_per_day: int = 3
+    exit_cooldown_seconds: float = 120.0
     probation_seconds: int = 30
     anchors: tuple[str, ...] = (
         "1.1.1.1:443",
@@ -92,6 +94,8 @@ class Config:
         "us1.node.check-host.net",
     )
     external_min_answers: int = 2
+    # Only the primary may talk to the listener; everyone else is dropped pre-TLS.
+    allowed_clients: tuple[str, ...] = ("89.117.57.145",)
 
     @classmethod
     def load(cls, path: Path = ETC / "config.json") -> "Config":
@@ -148,6 +152,7 @@ class Observation:
     standby_active: bool
     lease_mode: str | None  # "automatic" | "observe_only" | None
     exit_status: int | None = None
+    uptime: float | None = None  # watchdog process uptime (monotonic)
 
 
 @dataclass
@@ -195,7 +200,7 @@ def decide(obs: Observation, st: State, cfg: Config, is_armed: bool) -> Decision
             st.cooldown_until = max(st.cooldown_until, now + cfg.conflict_cooldown_seconds)
             return Decision("cleanup", "standby saw primary's own messages; split brain avoided")
         if obs.lease_mode == "automatic":
-            st.cooldown_until = max(st.cooldown_until, now + cfg.cooldown_seconds)
+            st.cooldown_until = max(st.cooldown_until, now + cfg.exit_cooldown_seconds)
         return Decision("cleanup", "standby process is no longer running")
 
     if obs.standby_active:
@@ -219,6 +224,10 @@ def decide(obs: Observation, st: State, cfg: Config, is_armed: bool) -> Decision
         return Decision("none", "serving as standby; primary still down")
 
     st.up_since = None
+    if obs.uptime is not None and obs.uptime < cfg.heartbeat_stale_seconds:
+        # Fresh process: heartbeats live in memory, so wait one full grace window.
+        st.down_since = None
+        return Decision("none", "watchdog warming up (heartbeat grace window)")
     if not obs.self_ok:
         st.down_since = None
         return Decision("none", "backup's own internet unhealthy; observations untrusted")
@@ -261,7 +270,7 @@ def decide(obs: Observation, st: State, cfg: Config, is_armed: bool) -> Decision
         return Decision("none", "daily automatic takeover limit reached; manual only")
     if external_fresh and st.external_result == "down":
         return Decision("takeover", "primary silent, unreachable directly and externally")
-    if elapsed >= cfg.external_fallback_after_seconds:
+    if cfg.external_fallback_after_seconds and elapsed >= cfg.external_fallback_after_seconds:
         return Decision("takeover", "extended outage; external observers unavailable")
     if want_external:
         return Decision("external_check", "confirming outage with external observers")
@@ -319,37 +328,45 @@ class Prober:
         return any(f.result() for f in futures)
 
 
-def classify_external(results: list[Any], min_answers: int = 2) -> str:
+def classify_external(
+    results: list[Any], min_answers: int = 2, nodes: list[set[str]] | None = None
+) -> str:
     """check-host.net TCP result maps -> ``up`` | ``down`` | ``unknown``.
 
-    ``up`` if any observer reached any main port. ``down`` only when at least
-    ``min_answers`` distinct observers answered and every answer was a failure.
-    Pending (null) or malformed rows never count as evidence.
+    ``up`` if any observer reached any port. ``down`` only if, for every check,
+    every node the observer service assigned answered (none pending/malformed)
+    and every answer was an error, with at least ``min_answers`` distinct nodes.
+    Anything else is ``unknown``, which never counts as outage evidence.
     """
-    answered: set[str] = set()
-    for result in results:
-        if not isinstance(result, dict):
+    failed: set[str] = set()
+    complete = True
+    for index, result in enumerate(results):
+        if not isinstance(result, dict) or not result:
+            complete = False
             continue
-        for node, rows in result.items():
-            if not isinstance(rows, list):
+        expected = nodes[index] if nodes is not None else set(result)
+        if not expected or not expected <= set(result):
+            complete = False
+        for node in expected | set(result):
+            rows = result.get(node)
+            if not isinstance(rows, list) or not rows:
+                complete = False
                 continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                if "error" not in row and ("time" in row or "address" in row):
-                    return "up"
-                if "error" in row:
-                    answered.add(str(node))
-    return "down" if len(answered) >= max(min_answers, 1) else "unknown"
+            dicts = [row for row in rows if isinstance(row, dict)]
+            if any("error" not in row and ("time" in row or "address" in row) for row in dicts):
+                return "up"
+            if dicts and len(dicts) == len(rows) and all("error" in row for row in dicts):
+                failed.add(str(node))
+            else:
+                complete = False
+    if complete and len(failed) >= max(min_answers, 1):
+        return "down"
+    return "unknown"
 
 
 def external_check(cfg: Config, *, fetch: Callable[[str], Any] | None = None,
-                   wait: float = 16.0, poll: float = 4.0) -> str:
-    """Ask independent public observers (check-host.net) to TCP-probe main.
-
-    Any failure of the observer service itself yields ``unknown``, which never
-    counts as outage evidence.
-    """
+                   wait: float = 20.0, poll: float = 4.0) -> str:
+    """Ask independent public observers (check-host.net) to TCP-probe main."""
 
     def default_fetch(url: str) -> Any:
         parsed = urllib.parse.urlsplit(url)
@@ -371,7 +388,7 @@ def external_check(cfg: Config, *, fetch: Callable[[str], Any] | None = None,
 
     fetch = fetch or default_fetch
     try:
-        ids = []
+        ids, nodes = [], []
         for port in cfg.main_ports:
             query = urllib.parse.urlencode(
                 [("host", f"{cfg.main_ip}:{port}")] + [("node", n) for n in cfg.external_nodes]
@@ -379,9 +396,10 @@ def external_check(cfg: Config, *, fetch: Callable[[str], Any] | None = None,
             created = fetch("https://check-host.net/check-tcp?" + query)
             if not isinstance(created, dict) or not isinstance(created.get("request_id"), str):
                 return "unknown"
+            assigned = created.get("nodes")
+            nodes.append(set(assigned) if isinstance(assigned, dict) and assigned else set(cfg.external_nodes))
             ids.append(created["request_id"])
         deadline = time.monotonic() + wait
-        verdict = "unknown"
         while True:
             if poll:
                 time.sleep(poll)
@@ -389,11 +407,8 @@ def external_check(cfg: Config, *, fetch: Callable[[str], Any] | None = None,
                 fetch("https://check-host.net/check-result/" + urllib.parse.quote(i, safe=""))
                 for i in ids
             ]
-            verdict = classify_external(results, cfg.external_min_answers)
-            complete = all(
-                isinstance(r, dict) and r and all(v is not None for v in r.values()) for r in results
-            )
-            if verdict == "up" or complete or time.monotonic() >= deadline:
+            verdict = classify_external(results, cfg.external_min_answers, nodes)
+            if verdict != "unknown" or time.monotonic() >= deadline:
                 return verdict
     except Exception:
         return "unknown"
@@ -634,10 +649,8 @@ class Watchdog:
         self.request_lock = threading.Lock()
         self.heartbeat_at: float | None = None
         self.heartbeat_bot_running: bool | None = None
-        try:
-            self.state = State.from_dict(read_small_json(state_path))
-        except Exception:
-            self.state = State()
+        self.started = time.monotonic()
+        self.state = load_state(state_path)
         self.status: dict[str, Any] = {}
 
     # -- inputs from main --
@@ -646,7 +659,7 @@ class Watchdog:
             self.heartbeat_at = time.monotonic()
             self.heartbeat_bot_running = bot_running
             if claim:
-                self.state.last_claim_at = time.time()
+                self.state.last_claim_at = time.monotonic()
 
     def lease(self) -> dict[str, Any] | None:
         try:
@@ -697,7 +710,8 @@ class Watchdog:
             exit_status = None
         direct = self.prober.direct_ok()
         return Observation(
-            now=time.time(),
+            now=time.monotonic(),
+            uptime=time.monotonic() - self.started,
             self_ok=self.prober.self_ok(),
             direct_ok=direct,
             heartbeat_age=hb_age,
@@ -712,9 +726,9 @@ class Watchdog:
         with self.lock:
             decision = decide(obs, self.state, self.cfg, armed(self.mode_path))
         if decision.action == "external_check":
-            self.state.external_started_at = time.time()
+            self.state.external_started_at = time.monotonic()
             self.state.external_result = external_check(self.cfg)
-            self.state.external_result_at = time.time()
+            self.state.external_result_at = time.monotonic()
             with self.lock:
                 decision = decide(self.observe(), self.state, self.cfg, armed(self.mode_path))
             if decision.action == "external_check":
@@ -723,7 +737,7 @@ class Watchdog:
         if decision.action in {"takeover", "stepdown", "cleanup"} and self.actuate_requests:
             result = self.request(decision.action, decision.reason)
             if decision.action == "takeover" and result.get("ok"):
-                self.state.takeovers.append(time.time())
+                self.state.takeovers.append(time.monotonic())
                 self.state.down_since = None
             if decision.action in {"stepdown", "cleanup"} and result.get("ok"):
                 self.state.up_since = None
@@ -739,7 +753,7 @@ class Watchdog:
         with contextlib.suppress(OSError):
             atomic_write(self.watch_run / "status.json", self.status, 0o644)
         with contextlib.suppress(OSError):
-            atomic_write(self.state_path, asdict(self.state), 0o600)
+            save_state(self.state_path, self.state)
         return decision
 
     def run_forever(self) -> None:
@@ -753,14 +767,65 @@ class Watchdog:
             time.sleep(max(1.0, self.cfg.tick_seconds - (time.monotonic() - started)))
 
 
+PERSISTED = ("takeovers", "cooldown_until", "external_veto_until", "last_claim_at")
+
+
+def load_state(path: Path, *, mono: float | None = None, wall: float | None = None) -> State:
+    """Only blockers survive a restart (rebased from wall to monotonic time and
+    clamped). Outage/observer evidence never does: a new process must observe a
+    full window itself."""
+    mono = time.monotonic() if mono is None else mono
+    wall = time.time() if wall is None else wall
+    state = State()
+    try:
+        data = read_small_json(path)
+    except Exception:
+        return state
+    if not isinstance(data, dict):
+        return state
+
+    def rebase(value: Any, lo: float, hi: float) -> float:
+        offset = min(max(float(value) - wall, lo), hi)
+        return mono + offset
+
+    with contextlib.suppress(Exception):
+        state.takeovers = [rebase(t, -86400, 0) for t in data.get("takeovers", [])
+                           if isinstance(t, (int, float)) and wall - 86400 < t <= wall + 60][:50]
+    for key, hi in (("cooldown_until", 3600.0), ("external_veto_until", 300.0)):
+        with contextlib.suppress(Exception):
+            if isinstance(data.get(key), (int, float)) and data[key] > wall:
+                setattr(state, key, rebase(data[key], 0, hi))
+    with contextlib.suppress(Exception):
+        claim = data.get("last_claim_at")
+        if isinstance(claim, (int, float)) and wall - 3600 < claim:
+            state.last_claim_at = rebase(claim, -3600, 0)
+    return state
+
+
+def save_state(path: Path, state: State, *, mono: float | None = None, wall: float | None = None) -> None:
+    mono = time.monotonic() if mono is None else mono
+    wall = time.time() if wall is None else wall
+    data: dict[str, Any] = {"takeovers": [wall + (t - mono) for t in state.takeovers]}
+    for key in PERSISTED[1:]:
+        value = getattr(state, key)
+        data[key] = wall + (value - mono) if value else 0.0
+    atomic_write(path, data, 0o600)
+
+
 class BoundedServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
 
-    def __init__(self, address, handler, context: ssl.SSLContext, slots: int = 8):
+    def __init__(self, address, handler, context: ssl.SSLContext, slots: int = 8,
+                 allowed: tuple[str, ...] = ()):
         super().__init__(address, handler)
         self.context = context
         self.slots = threading.BoundedSemaphore(slots)
+        self.allowed = frozenset(allowed)
+
+    def verify_request(self, request, client_address):
+        # Drop non-primary peers before any slot, thread or TLS work.
+        return client_address[0] in self.allowed
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -840,12 +905,16 @@ def make_handler(watchdog: Watchdog):
     return Handler
 
 
-def serve(watchdog: Watchdog, cert: Path, key: Path, port: int) -> BoundedServer:
+def serve(watchdog: Watchdog, cert: Path, key: Path, port: int,
+          allowed: tuple[str, ...] | None = None) -> BoundedServer:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(cert), str(key))
     # Public by design: the primary connects over the internet (key + pinned TLS).
-    server = BoundedServer(("0.0.0.0", port), make_handler(watchdog), context)  # nosec B104
+    server = BoundedServer(
+        ("0.0.0.0", port), make_handler(watchdog), context,  # nosec B104
+        allowed=watchdog.cfg.allowed_clients if allowed is None else allowed,
+    )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -891,21 +960,21 @@ def main() -> None:
                      heartbeat_stale_seconds=3 * args.tick_seconds,
                      takeover_after_seconds=args.tick_seconds * (args.ticks - 2),
                      external_lead_seconds=args.tick_seconds,
-                     external_fallback_after_seconds=10**6)
+                     external_fallback_after_seconds=0)
         if args.anchor:
             cfg.anchors = tuple(args.anchor)
         prober = Prober(cfg)
         st = State()
         hb = {"none": (None, None), "running": (0.0, True), "stopped": (0.0, False)}[args.heartbeat]
         for i in range(args.ticks):
-            o = Observation(now=time.time(), self_ok=prober.self_ok(), direct_ok=prober.direct_ok(),
+            o = Observation(now=time.monotonic(), self_ok=prober.self_ok(), direct_ok=prober.direct_ok(),
                             heartbeat_age=hb[0], heartbeat_bot_running=hb[1],
                             standby_active=False, lease_mode=None)
             d = decide(o, st, cfg, args.armed)
             if d.action == "external_check":
-                st.external_started_at = time.time()
+                st.external_started_at = time.monotonic()
                 st.external_result = external_check(cfg) if args.external == "live" else args.external
-                st.external_result_at = time.time()
+                st.external_result_at = time.monotonic()
                 d = decide(o, st, cfg, args.armed)
             print(json.dumps({"tick": i, "self_ok": o.self_ok, "direct_ok": o.direct_ok,
                               "external": st.external_result, "decision": d.action, "reason": d.reason}), flush=True)

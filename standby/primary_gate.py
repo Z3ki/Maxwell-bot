@@ -42,10 +42,18 @@ class GateError(RuntimeError):
 
 
 def _private(path: Path) -> str:
+    """Private regular file only: no symlink, FIFO or device can block the gate."""
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_size > 65536:
         raise GateError("failover client file must be a private regular file")
-    return path.read_text()
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode) or current.st_mode & 0o077:
+            raise GateError("failover client file must be a private regular file")
+        return os.read(fd, 65537).decode()
+    finally:
+        os.close(fd)
 
 
 class FailoverClient:
@@ -56,13 +64,13 @@ class FailoverClient:
             raise GateError("invalid failover client config")
         self.host, self.port = host, port
         self.key = _private(directory / "key").strip()
-        self.cert_file = directory / "server.crt"
-        self.expected = ssl.PEM_cert_to_DER_cert(self.cert_file.read_text())
+        self.cert_pem = _private(directory / "server.crt")
+        self.expected = ssl.PEM_cert_to_DER_cert(self.cert_pem)
         if not self.key:
             raise GateError("missing failover key")
 
     def call(self, op: str, bot_running: bool, timeout: float = 45.0) -> dict[str, Any]:
-        context = ssl.create_default_context(cafile=str(self.cert_file))
+        context = ssl.create_default_context(cadata=self.cert_pem)
         # Short connect/TLS timeout so an unreachable backup is detected fast;
         # the longer timeout only applies to waiting for a confirmed stop.
         connection = http.client.HTTPSConnection(
@@ -100,6 +108,7 @@ def startup_gate(
 ) -> str:
     """Return a short outcome. NEVER raises: a broken gate must not stop main."""
     directory = Path(data_dir) / "standby-failover"
+    started = clock()
     try:
         if not (directory / "client.json").exists():
             return "not configured"
@@ -107,14 +116,17 @@ def startup_gate(
     except Exception as error:
         logger.error("Standby failover gate misconfigured (%s); starting", type(error).__name__)
         return "misconfigured"
-    started = clock()
     failures = 0
     answered = False
     while True:
+        remaining = deadline - (clock() - started)
+        if remaining <= 0:
+            logger.error("Standby failover gate deadline reached; primary proceeds")
+            return "deadline; primary proceeds"
         try:
-            answer = client.call("handback", True)
+            answer = client.call("handback", True, timeout=max(1.0, min(45.0, remaining)))
             answered = True
-            if not answer.get("standby_active") and answer.get("stepped_down", True):
+            if answer.get("standby_active") is False and answer.get("stepped_down") is True:
                 logger.info("Standby failover gate: backup confirmed inactive")
                 return "backup inactive"
             logger.warning("Standby failover gate: backup still active; waiting")
@@ -126,9 +138,6 @@ def startup_gate(
         except Exception as error:  # pragma: no cover - defensive
             logger.error("Standby failover gate error (%s); starting", type(error).__name__)
             return "error"
-        if clock() - started >= deadline:
-            logger.error("Standby failover gate deadline reached; primary proceeds")
-            return "deadline; primary proceeds"
         sleep(3)
 
 

@@ -126,7 +126,7 @@ async def run() -> int:
     sent_nonces: OrderedDict[str, None] = OrderedDict()
     checks: set[asyncio.Future] = set()
     watch = {"ready": False, "ready_at": None, "messages_seen": 0,
-             "primary_messages_seen": 0, "conflict": False, "guilds": 0}
+             "primary_messages_seen": 0, "conflict": False, "guilds": 0, "suspect": 0}
 
     class TextOnlyClient(discord.Client):
         async def setup_hook(self):
@@ -144,7 +144,7 @@ async def run() -> int:
 
         def quiet(self) -> bool:
             """Observe-only always; automatic leases during initial probation."""
-            if observe_only:
+            if observe_only or watch["suspect"] or watch["conflict"]:
                 return True
             if not probation:
                 return False
@@ -154,17 +154,20 @@ async def run() -> int:
         async def primary_seen(self, message) -> None:
             if getattr(message, "id", None) in sent_ids:
                 return
-            if observe_only:
+            # Go quiet IMMEDIATELY; the REST reply may land after the gateway
+            # echo, so confirm briefly before treating it as the live primary.
+            watch["suspect"] += 1
+            try:
+                if not observe_only:
+                    await asyncio.sleep(5)
+                    if getattr(message, "id", None) in sent_ids:
+                        return
                 watch["primary_messages_seen"] += 1
-                return
-            # The REST reply may land after the gateway echo; recheck briefly.
-            await asyncio.sleep(5)
-            if getattr(message, "id", None) in sent_ids:
-                return
-            watch["primary_messages_seen"] += 1
-            watch["conflict"] = True
-            print(json.dumps({"event": "primary_detected", "action": "standby_exit"}), flush=True)
-            await self.close()
+                watch["conflict"] = True
+                print(json.dumps({"event": "primary_detected", "action": "standby_exit"}), flush=True)
+                await self.close()
+            finally:
+                watch["suspect"] -= 1
 
         async def on_interaction(self, interaction):
             if self.quiet() or watch["conflict"]:
@@ -307,8 +310,8 @@ async def run() -> int:
 
         async def send_text(self, channel_id: int, text: str, **extras):
             # No files, embeds, stickers, components, webhook or arbitrary routes.
-            if observe_only or watch["conflict"]:
-                raise PolicyDenied("Observe-only standby never sends")
+            if observe_only or watch["conflict"] or watch["suspect"]:
+                raise PolicyDenied("Observe-only/suspect standby never sends")
             nonce = str(secrets.randbelow(10**18))
             sent_nonces[nonce] = None
             while len(sent_nonces) > 4096:
@@ -333,8 +336,12 @@ async def run() -> int:
         trust_env=False,
     ) as session:
         async with TextOnlyClient(intents=intents, max_messages=None) as client:
-            await client.start(token, reconnect=True)
+            # No automatic reconnect: a dropped session ends the process and the
+            # watchdog re-qualifies the outage before any new takeover. This also
+            # prevents a reconnect war if Discord invalidates one of two sessions.
+            await client.start(token, reconnect=False)
     if observe_only:
+        watch.pop("suspect", None)
         print(json.dumps({"observe_only": True, "sent": 0, **{
             k: watch[k] for k in ("ready", "guilds", "messages_seen", "primary_messages_seen")
         }}), flush=True)

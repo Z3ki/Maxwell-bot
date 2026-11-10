@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import ssl
 import subprocess
 from pathlib import Path
@@ -110,13 +111,40 @@ def test_external_observers_reaching_main_veto_takeover_partition():
     assert st.external_veto_until > 0
 
 
-def test_external_unknown_waits_for_extended_fallback():
+def test_external_unknown_never_takes_over_by_default():
     st = State()
-    decisions = run_outage(st, seconds=CFG.external_fallback_after_seconds + 60, external="unknown")
+    decisions = run_outage(st, seconds=7200, external="unknown")
+    assert first(decisions, "takeover") is None
+
+
+def test_optional_extended_fallback_only_when_configured(monkeypatch):
+    monkeypatch.setattr(CFG, "external_fallback_after_seconds", 900.0)
+    st = State()
+    decisions = run_outage(st, seconds=960, external="unknown")
     taken = first(decisions, "takeover")
-    start = decisions[0][0]
-    assert taken is not None and taken - start >= CFG.external_fallback_after_seconds
-    assert "extended" in decisions[-1][1].reason
+    assert taken is not None and taken - decisions[0][0] >= 900
+
+
+def test_fresh_watchdog_process_waits_full_grace_window():
+    st = State(down_since=1.0, external_result="down", external_result_at=2.0)
+    d = decide(obs(500, uptime=5.0), st, CFG, True)
+    assert d.action == "none" and st.down_since is None and "warming" in d.reason
+
+
+def test_restart_keeps_only_clamped_blockers_never_outage_evidence(tmp_path):
+    path = tmp_path / "state.json"
+    st = State(down_since=50.0, external_result="down", external_result_at=60.0,
+               cooldown_until=1100.0, last_claim_at=990.0, takeovers=[900.0])
+    failover.save_state(path, st, mono=1000.0, wall=10_000.0)
+    loaded = failover.load_state(path, mono=5.0, wall=10_000.0)
+    assert loaded.down_since is None and loaded.external_result is None
+    assert loaded.cooldown_until == pytest.approx(105.0)
+    assert loaded.last_claim_at == pytest.approx(-5.0)
+    assert loaded.takeovers == [pytest.approx(-95.0)]
+    # A wall clock jump forward neither erases recent takeovers early beyond 24 h
+    # semantics nor stretches cooldowns past their bound.
+    far = failover.load_state(path, mono=5.0, wall=10_000.0 - 10**6)
+    assert far.cooldown_until <= 5.0 + 3600
 
 
 def test_cooldown_claim_hold_and_daily_limit_block_takeover():
@@ -199,6 +227,8 @@ def test_config_rejects_unknown_or_unsafe_values(tmp_path):
         ([{"a": [{"address": "1", "time": 0.1}], "b": [{"error": "timeout"}]}], "up"),
         ([{"a": [{"error": "timeout"}], "b": [{"error": "No route"}]}], "down"),
         ([{"a": [{"error": "timeout"}], "b": None}], "unknown"),
+        ([{"a": [{"error": "t"}], "b": [{"error": "t"}], "c": None}], "unknown"),
+        ([{"a": [{"error": "t"}]}], "unknown"),
         ([{"a": None, "b": None}], "unknown"),
         (["garbage", {"a": "x"}], "unknown"),
     ],
@@ -428,6 +458,21 @@ def test_gate_bounded_when_backup_refuses(tmp_path):
     assert "deadline" in gate(tmp_path, client)
 
 
+def test_gate_requires_explicit_stepdown_confirmation(tmp_path):
+    client = FakeClient([{"ok": True, "standby_active": False}] * 200)
+    assert "deadline" in gate(tmp_path, client)
+
+
+def test_gate_fifo_certificate_cannot_block(tmp_path):
+    d = tmp_path / "standby-failover"
+    d.mkdir()
+    for name, value in (("client.json", '{"host": "127.0.0.1", "port": 9}'), ("key", "k")):
+        (d / name).write_text(value)
+        (d / name).chmod(0o600)
+    os.mkfifo(d / "server.crt", 0o600)
+    assert primary_gate.startup_gate(tmp_path, deadline=1.0) == "misconfigured"
+
+
 def test_gate_misconfigured_never_raises(tmp_path):
     d = tmp_path / "standby-failover"
     d.mkdir()
@@ -479,6 +524,22 @@ def _make_cert(tmp_path):
     return cert, key
 
 
+def test_listener_drops_non_primary_peers(tmp_path):
+    cert, key = _make_cert(tmp_path)
+    watchdog = failover.Watchdog(CFG, key="k", prober=SimpleNamespace(), watch_run=tmp_path,
+                                 root_run=tmp_path, state_path=tmp_path / "s.json",
+                                 mode_path=tmp_path / "mode", runner=FakeSystemd())
+    server = failover.serve(watchdog, cert, key, 0, allowed=("192.0.2.9",))
+    try:
+        import socket
+
+        with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=3) as sock:
+            sock.settimeout(3)
+            assert sock.recv(1) == b""  # closed before TLS
+    finally:
+        server.shutdown()
+
+
 def test_listener_auth_heartbeat_and_handback_roundtrip(tmp_path):
     cert, key = _make_cert(tmp_path)
     (tmp_path / "root").mkdir()
@@ -488,14 +549,14 @@ def test_listener_auth_heartbeat_and_handback_roundtrip(tmp_path):
         root_run=tmp_path / "root", state_path=tmp_path / "state.json", mode_path=tmp_path / "mode",
         runner=FakeSystemd(),
     )
-    server = failover.serve(watchdog, cert, key, 0)
+    server = failover.serve(watchdog, cert, key, 0, allowed=("127.0.0.1",))
     port = server.server_address[1]
     client_dir = tmp_path / "client"
     client_dir.mkdir()
     (client_dir / "client.json").write_text(json.dumps({"host": "127.0.0.1", "port": port}))
     (client_dir / "key").write_text("secret-key")
     (client_dir / "server.crt").write_text(cert.read_text())
-    for name in ("client.json", "key"):
+    for name in ("client.json", "key", "server.crt"):
         (client_dir / name).chmod(0o600)
     try:
         client = primary_gate.FailoverClient(client_dir)
@@ -512,6 +573,7 @@ def test_listener_auth_heartbeat_and_handback_roundtrip(tmp_path):
         other, _ = _make_cert(tmp_path / "o")
         (client_dir / "key").write_text("secret-key")
         (client_dir / "server.crt").write_text(other.read_text())
+        (client_dir / "server.crt").chmod(0o600)
         with pytest.raises((primary_gate.GateError, ssl.SSLError)):
             primary_gate.FailoverClient(client_dir).call("status", True, timeout=5)
     finally:
@@ -593,6 +655,7 @@ def _run_fake(script, monkeypatch):
             self.closed = True
 
         async def start(self, token, **kw):
+            assert kw == {"reconnect": False}
             await self.setup_hook()
             await script(self)
 
@@ -725,3 +788,21 @@ def test_systemd_credential_mode_0440_only_inside_credentials_directory(tmp_path
         (creds / "c").chmod(mode)
         with pytest.raises(policy.PolicyDenied):
             policy.read_credential(creds / "c")
+
+
+def test_suspected_primary_message_silences_standby_immediately(tmp_path, monkeypatch):
+    import asyncio
+
+    _runtime_env(tmp_path, monkeypatch, LEASE)
+    seen = {}
+
+    async def script(client):
+        await client.on_ready()
+        await client.on_message(_msg(555, bot=True, nonce="1", mid=99))
+        await asyncio.sleep(0)  # detector task starts; confirmation still pending
+        seen["quiet"] = client.quiet()
+        with pytest.raises(policy.PolicyDenied):
+            await client.send_text(10, "x")
+
+    code, sends, _, _ = _run_fake(script, monkeypatch)
+    assert seen["quiet"] is True and not sends
