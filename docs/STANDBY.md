@@ -228,9 +228,15 @@ is listed below.
 The failover key is dedicated (not the admin or config-sync key). The client pins
 the backup's exact TLS leaf certificate plus IP SAN. No redirects or proxies.
 The listener drops every peer except the primary's IP before TLS or any slot is
-used. The standby gateway runs with `reconnect=False`: a dropped session ends the
-process and the outage must re-qualify, so two sessions cannot fight in a
-reconnect loop.
+used. The standby gateway is single-shot: it never re-IDENTIFYs or RESUMEs (it
+overrides discord.py's reconnect loop, which would otherwise re-identify on
+op 7/op 9 even with `reconnect=False`). Any session end, including Discord's
+routine reconnect requests, ends the process; the outage must re-qualify
+(about 3 minutes) before a new session. Two sessions on the token therefore
+cannot fight in a reconnect loop. Listener work slots are taken only after TLS
+and the key check; the primary gate treats a TCP-level failure as "unreachable"
+but a refusal after TCP connects (TLS EOF/reset/busy) as "alive, not confirmed"
+and keeps waiting up to its 150 s deadline.
 
 ### Takeover (all must hold continuously)
 

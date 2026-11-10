@@ -136,6 +136,33 @@ async def run() -> int:
                     observe_seconds, lambda: asyncio.ensure_future(self.close())
                 )
 
+        async def connect(self, *, reconnect: bool = False) -> None:
+            """ONE gateway session, never re-IDENTIFY or RESUME.
+
+            discord.py's own loop re-identifies on ReconnectWebSocket (e.g. op 9
+            after another session on this token) regardless of ``reconnect``.
+            Any session end closes the client; the watchdog must re-qualify the
+            outage before a new process may connect.
+            """
+            from discord.gateway import DiscordWebSocket
+
+            try:
+                self.ws = await asyncio.wait_for(
+                    DiscordWebSocket.from_client(self, initial=True, shard_id=self.shard_id),
+                    timeout=60.0,
+                )
+                while not self.is_closed():
+                    await self.ws.poll_event()
+            except BaseException as error:  # includes ReconnectWebSocket
+                if not self.is_closed():
+                    print(json.dumps({"event": "gateway_session_ended",
+                                      "reason": type(error).__name__}), flush=True)
+                if isinstance(error, asyncio.CancelledError) or not isinstance(error, Exception):
+                    raise
+            finally:
+                if not self.is_closed():
+                    await self.close()
+
         async def on_ready(self):
             watch["ready"] = True
             watch["guilds"] = len(getattr(self, "guilds", ()) or ())

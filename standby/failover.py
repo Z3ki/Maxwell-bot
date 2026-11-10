@@ -397,7 +397,12 @@ def external_check(cfg: Config, *, fetch: Callable[[str], Any] | None = None,
             if not isinstance(created, dict) or not isinstance(created.get("request_id"), str):
                 return "unknown"
             assigned = created.get("nodes")
-            nodes.append(set(assigned) if isinstance(assigned, dict) and assigned else set(cfg.external_nodes))
+            requested = set(cfg.external_nodes)
+            # Every requested observer must be assigned; a partial assignment is
+            # never enough evidence for an outage.
+            if isinstance(assigned, dict) and not requested <= set(assigned):
+                return "unknown"
+            nodes.append(requested)
             ids.append(created["request_id"])
         deadline = time.monotonic() + wait
         while True:
@@ -817,10 +822,13 @@ class BoundedServer(ThreadingHTTPServer):
     request_queue_size = 16
 
     def __init__(self, address, handler, context: ssl.SSLContext, slots: int = 8,
-                 allowed: tuple[str, ...] = ()):
+                 allowed: tuple[str, ...] = (), pre_auth: int = 64):
         super().__init__(address, handler)
         self.context = context
+        # Authenticated work slots are taken only AFTER TLS + key check (in the
+        # handler); pre-auth connections have a separate, larger, time-bounded cap.
         self.slots = threading.BoundedSemaphore(slots)
+        self.pre_auth = threading.BoundedSemaphore(pre_auth)
         self.allowed = frozenset(allowed)
 
     def verify_request(self, request, client_address):
@@ -828,7 +836,7 @@ class BoundedServer(ThreadingHTTPServer):
         return client_address[0] in self.allowed
 
     def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):
+        if not self.pre_auth.acquire(blocking=False):
             self.shutdown_request(request)
             return
         super().process_request(request, client_address)
@@ -843,7 +851,7 @@ class BoundedServer(ThreadingHTTPServer):
         except Exception:
             self.shutdown_request(request)
         finally:
-            self.slots.release()
+            self.pre_auth.release()
 
 
 def make_handler(watchdog: Watchdog):
@@ -873,6 +881,14 @@ def make_handler(watchdog: Watchdog):
                 supplied.encode(), watchdog.key.encode()
             ):
                 return self.reply(401, {"error": "unauthorized"})
+            if not self.server.slots.acquire(timeout=10):
+                return self.reply(503, {"error": "busy"})
+            try:
+                return self.authenticated()
+            finally:
+                self.server.slots.release()
+
+        def authenticated(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 2048:

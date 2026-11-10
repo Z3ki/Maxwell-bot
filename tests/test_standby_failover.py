@@ -250,6 +250,20 @@ def test_external_check_failures_are_unknown_never_down():
 
     assert failover.external_check(CFG, fetch=fake, poll=0) == "down"
 
+    def partial(url):
+        if "check-tcp" in url:
+            return {"request_id": "r1", "nodes": {n: [] for n in CFG.external_nodes[:2]}}
+        return {n: [{"error": "Connection timed out"}] for n in CFG.external_nodes[:2]}
+
+    assert failover.external_check(CFG, fetch=partial, poll=0) == "unknown"
+
+    def missing(url):
+        if "check-tcp" in url:
+            return {"request_id": "r1", "nodes": {n: [] for n in CFG.external_nodes}}
+        return {n: [{"error": "Connection timed out"}] for n in CFG.external_nodes[:2]}
+
+    assert failover.external_check(CFG, fetch=missing, poll=0, wait=0) == "unknown"
+
 
 # ---------------------------------------------------------------- actuator
 
@@ -448,13 +462,21 @@ def test_gate_waits_for_backup_to_confirm_stepdown(tmp_path):
 
 
 def test_gate_unreachable_backup_never_blocks_primary_long(tmp_path):
-    client = FakeClient([OSError("down"), TimeoutError("slow"), OSError("x")])
+    down = primary_gate.BackupUnreachable
+    client = FakeClient([down("refused"), down("timeout"), down("x")])
     assert "unreachable" in gate(tmp_path, client)
     assert len(client.calls) == primary_gate.UNREACHABLE_ATTEMPTS
 
 
 def test_gate_bounded_when_backup_refuses(tmp_path):
     client = FakeClient([{"ok": True, "standby_active": True, "stepped_down": False}] * 200)
+    assert "deadline" in gate(tmp_path, client)
+
+
+def test_gate_reachable_but_refusing_backup_never_counts_as_unreachable(tmp_path):
+    # e.g. TLS EOF/reset after TCP connect, or a busy listener: keep waiting.
+    client = FakeClient([primary_gate.GateError("tls eof"), ssl.SSLError("reset"),
+                         ConnectionResetError("rst")] * 100)
     assert "deadline" in gate(tmp_path, client)
 
 
@@ -806,3 +828,45 @@ def test_suspected_primary_message_silences_standby_immediately(tmp_path, monkey
 
     code, sends, _, _ = _run_fake(script, monkeypatch)
     assert seen["quiet"] is True and not sends
+
+
+def test_gateway_session_is_single_shot_never_reidentifies(tmp_path, monkeypatch):
+    """op 9 / Reconnect must end the process, not IDENTIFY again (reconnect war)."""
+    import asyncio
+    import sys
+    import types
+    from unittest.mock import patch
+
+    _runtime_env(tmp_path, monkeypatch, LEASE)
+    calls = {"identify": 0, "closed": 0}
+
+    class ReconnectWebSocket(Exception):
+        pass
+
+    class WS:
+        async def poll_event(self):
+            raise ReconnectWebSocket()
+
+    class DiscordWebSocket:
+        @staticmethod
+        async def from_client(client, **kw):
+            calls["identify"] += 1
+            return WS()
+
+    gateway = types.ModuleType("discord.gateway")
+    gateway.DiscordWebSocket = DiscordWebSocket
+
+    async def script(client):
+        client.shard_id = None
+        client.is_closed = lambda: calls["closed"] > 0
+
+        async def close():
+            calls["closed"] += 1
+
+        client.close = close
+        await client.connect(reconnect=False)
+
+    with patch.dict(sys.modules, {"discord.gateway": gateway}):
+        code, sends, _, _ = _run_fake(script, monkeypatch)
+    assert calls == {"identify": 1, "closed": 1} and code == 0 and not sends
+    assert asyncio  # noqa

@@ -41,6 +41,25 @@ class GateError(RuntimeError):
     pass
 
 
+class BackupUnreachable(OSError):
+    """TCP connect failed: the backup host/port is not reachable at all."""
+
+
+class _PinnedConnection(http.client.HTTPSConnection):
+    def connect(self):
+        try:
+            raw = socket.create_connection((self.host, self.port), self.timeout)
+        except OSError as error:
+            raise BackupUnreachable(str(type(error).__name__)) from None
+        # TCP works: anything failing from here on (TLS EOF/reset, busy) means the
+        # backup is ALIVE and has not confirmed handback; never "unreachable".
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)  # type: ignore[attr-defined]
+        except Exception:
+            raw.close()
+            raise GateError("backup reachable but TLS not completed") from None
+
+
 def _private(path: Path) -> str:
     """Private regular file only: no symlink, FIFO or device can block the gate."""
     info = path.lstat()
@@ -73,7 +92,7 @@ class FailoverClient:
         context = ssl.create_default_context(cadata=self.cert_pem)
         # Short connect/TLS timeout so an unreachable backup is detected fast;
         # the longer timeout only applies to waiting for a confirmed stop.
-        connection = http.client.HTTPSConnection(
+        connection = _PinnedConnection(
             self.host, self.port, context=context, timeout=min(CONNECT_TIMEOUT, timeout)
         )
         try:
@@ -130,11 +149,15 @@ def startup_gate(
                 logger.info("Standby failover gate: backup confirmed inactive")
                 return "backup inactive"
             logger.warning("Standby failover gate: backup still active; waiting")
-        except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException, GateError, ValueError) as error:
+        except BackupUnreachable as error:
             failures += 1
             logger.warning("Standby failover gate: backup unreachable (%s)", type(error).__name__)
             if not answered and failures >= UNREACHABLE_ATTEMPTS:
                 return "backup unreachable; primary proceeds (backup self-demotes)"
+        except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException, GateError, ValueError) as error:
+            # Reachable but no confirmation: keep waiting (bounded by the deadline).
+            answered = True
+            logger.warning("Standby failover gate: backup did not confirm (%s); waiting", type(error).__name__)
         except Exception as error:  # pragma: no cover - defensive
             logger.error("Standby failover gate error (%s); starting", type(error).__name__)
             return "error"
