@@ -37,6 +37,7 @@ import discord
 from discord.ext import commands
 from discord.utils import MISSING
 from process_utils import communicate_process
+from request_phase import TERMINAL_STATUSES
 from media_payloads import (
     merge_followup_media,
     sanitize_media_memory,
@@ -410,7 +411,7 @@ BYOK_BUDGET_EXEMPT_TOOLS = frozenset(
 _current_inbound_effects: ContextVar[Any] = ContextVar(
     "current_inbound_effects", default=None
 )
-_REQUEST_TERMINAL = frozenset({"delivered", "suppressed", "failed", "superseded"})
+_REQUEST_TERMINAL = TERMINAL_STATUSES
 
 # Retained briefly so stale pre-migration confirmation state can expire.
 _CONFIRM_TTL_SECONDS = 120.0

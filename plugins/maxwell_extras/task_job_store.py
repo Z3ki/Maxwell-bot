@@ -8,8 +8,9 @@ import time
 
 from privacy import owned_write_allowed, retention_days
 
+from .job_phase import LIVE_STATES, delivery_transition, job_transition
+
 active_job = ContextVar("maxwell_active_worker_job", default=None)
-LIVE_STATES = ("queued", "running", "cancelling")
 
 
 class TaskJobStore:
@@ -110,6 +111,17 @@ class TaskJobStore:
         }:
             raise ValueError("Unsupported job metadata")
         with self.db() as db:
+            current = db.execute(
+                "SELECT state, delivery FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if current is None:
+                return False
+            if "state" in values:
+                values["state"] = job_transition(current["state"], values["state"])
+            if "delivery" in values:
+                values["delivery"] = delivery_transition(
+                    current["delivery"], values["delivery"]
+                )
             return (
                 db.execute(
                     "UPDATE jobs SET "
