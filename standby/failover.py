@@ -562,7 +562,8 @@ def actuate(
     watchdog_uid = pwd.getpwnam(WATCHDOG_USER).pw_uid
     paths.root_run.mkdir(mode=0o750, exist_ok=True)
     os.chown(paths.root_run, 0, pwd.getpwnam(WATCHDOG_USER).pw_gid)
-    os.chmod(paths.root_run, 0o2750)  # setgid: state files inherit the watchdog group
+    # setgid group dir: state files inherit the watchdog group (read-only for it).
+    os.chmod(paths.root_run, 0o2750)  # nosec B103 - root-owned, no world access
     results = []
     with open(paths.root_run / ".lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -837,7 +838,8 @@ def serve(watchdog: Watchdog, cert: Path, key: Path, port: int) -> BoundedServer
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(cert), str(key))
-    server = BoundedServer(("0.0.0.0", port), make_handler(watchdog), context)
+    # Public by design: the primary connects over the internet (key + pinned TLS).
+    server = BoundedServer(("0.0.0.0", port), make_handler(watchdog), context)  # nosec B104
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
