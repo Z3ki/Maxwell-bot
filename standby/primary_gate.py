@@ -33,6 +33,7 @@ from typing import Any, Callable
 logger = logging.getLogger("maxwell.standby.gate")
 
 GATE_DEADLINE = 150.0
+CONNECT_TIMEOUT = 6.0
 UNREACHABLE_ATTEMPTS = 2
 
 
@@ -62,10 +63,16 @@ class FailoverClient:
 
     def call(self, op: str, bot_running: bool, timeout: float = 45.0) -> dict[str, Any]:
         context = ssl.create_default_context(cafile=str(self.cert_file))
-        connection = http.client.HTTPSConnection(self.host, self.port, context=context, timeout=timeout)
+        # Short connect/TLS timeout so an unreachable backup is detected fast;
+        # the longer timeout only applies to waiting for a confirmed stop.
+        connection = http.client.HTTPSConnection(
+            self.host, self.port, context=context, timeout=min(CONNECT_TIMEOUT, timeout)
+        )
         try:
             connection.connect()
             sock = connection.sock
+            if sock is not None:
+                sock.settimeout(timeout)
             if sock is None or not hmac.compare_digest(sock.getpeercert(binary_form=True) or b"", self.expected):
                 raise GateError("backup TLS pin mismatch")
             body = json.dumps({"op": op, "bot_running": bot_running}).encode()
