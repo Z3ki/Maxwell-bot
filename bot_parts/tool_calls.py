@@ -154,6 +154,9 @@ class ToolCallsMixin:
         metrics_started = _metrics_time.monotonic()
         metrics_invoked = False
         metrics_exception = False
+        # Policy refusals (per-turn search cap, hooks, access denials) are
+        # expected outcomes, not tool faults; keep them out of failure counts.
+        metrics_refused = False
         plugin_allowed = False
         result_text = ""
         try:
@@ -270,6 +273,7 @@ class ToolCallsMixin:
                         logger.exception("before_tool hook failed")
                         hook_result = None
                     if hook_result is not None and hook_result.get("stop"):
+                        metrics_refused = True
                         result_text = str(
                             hook_result.get("error")
                             or "refused: a before_tool hook blocked this call"
@@ -277,6 +281,7 @@ class ToolCallsMixin:
                 if not result_text and name == "web_search" and web_search_budget is not None:
                     limit, used = web_search_budget
                     if limit and used >= limit:
+                        metrics_refused = True
                         result_text = (
                             "Search limit reached for this turn. Use the results already "
                             "available to answer, or ask the user for a follow-up."
@@ -347,7 +352,7 @@ class ToolCallsMixin:
                     )
             raise
         except (discord.Forbidden, PermissionError) as e:
-            metrics_exception = True
+            metrics_refused = True
             # Expected access denials are scoped to this request/channel. They
             # must not disable a tool globally or generate owner crash alerts.
             logger.warning("Tool %s denied access (%s)", name, type(e).__name__)
@@ -384,8 +389,10 @@ class ToolCallsMixin:
                         name=f"owner-report-{name}",
                     )
                 )
-        metrics_failed = metrics_exception or not metrics_invoked
-        metrics_outcome = "failed" if metrics_failed else "returned"
+        metrics_failed = not metrics_refused and (metrics_exception or not metrics_invoked)
+        metrics_outcome = (
+            "refused" if metrics_refused else "failed" if metrics_failed else "returned"
+        )
         metrics_duration = (_metrics_time.monotonic() - metrics_started) * 1000
         metrics_name = name if name in self.tools or plugin_allowed else "unknown"
         logger.info(

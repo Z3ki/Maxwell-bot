@@ -267,6 +267,11 @@ class Config:
         "AI_MAX_OUTPUT_TOKENS", 16384, min_value=1, max_value=131072
     )
     AI_REQUEST_TIMEOUT_SECONDS = _int_env("AI_REQUEST_TIMEOUT_SECONDS", 3600, min_value=10, max_value=14400)
+    # Fail over to AI_FALLBACK_* when the primary has not started streaming
+    # within this many seconds (0 disables). Only used when a fallback exists.
+    AI_PRIMARY_FIRST_BYTE_TIMEOUT_SECONDS = _int_env(
+        "AI_PRIMARY_FIRST_BYTE_TIMEOUT_SECONDS", 45, min_value=0, max_value=600
+    )
     AI_TURN_TIMEOUT_SECONDS = _int_env("AI_TURN_TIMEOUT_SECONDS", 0, min_value=0, max_value=14400)
     AI_CONTEXT_WINDOW = _int_env("AI_CONTEXT_WINDOW", 0, min_value=0, max_value=2000000)
     AI_DISABLE_REASONING = _bool_env("AI_DISABLE_REASONING", True)

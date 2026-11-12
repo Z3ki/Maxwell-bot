@@ -17,6 +17,7 @@ from .base import ChatProvider
 from .errors import (
     ProviderEmptyResponseError,
     ProviderError,
+    ProviderFirstByteTimeoutError,
     ProviderMediaUnsupportedError,
     ProviderUnavailableError,
 )
@@ -52,6 +53,7 @@ class ProviderRouter(ChatProvider):
         retry_attempts: int = 3,
         empty_response_retries: int = 2,
         cooldown_seconds: float = 60,
+        first_byte_timeout: float = 0,
     ):
         self.primary = primary
         self.fallback = fallback
@@ -77,6 +79,15 @@ class ProviderRouter(ChatProvider):
         self.retry_attempts = max(1, min(retry_attempts, 10))
         self.empty_response_retries = max(0, min(empty_response_retries, 5))
         self.cooldown_seconds = max(0, cooldown_seconds)
+        # Seconds the primary may take to start a streamed answer while an
+        # untried alternative route exists. 0 disables the bound.
+        try:
+            first_byte_timeout = float(first_byte_timeout or 0)
+        except (TypeError, ValueError):
+            first_byte_timeout = 0.0
+        self.first_byte_timeout = (
+            first_byte_timeout if 0 < first_byte_timeout < float("inf") else 0.0
+        )
         self._cooldowns: dict[str, float] = {}
         self._media_incapable: set[str] = set()
         self._timing_history = deque(maxlen=100)
@@ -158,6 +169,10 @@ class ProviderRouter(ChatProvider):
         attempt = 0
         recovery_provider = None
         last_error: ProviderError | None = None
+        tried: set[str] = set()
+        # Routes that missed the first-byte bound stay out for this request:
+        # retrying them without the bound would wait the full request timeout.
+        stalled: set[str] = set()
         while attempt < min(max_attempts, ceiling):
             attempt += 1
             split = 1 if fast_fallback else 2
@@ -185,6 +200,15 @@ class ProviderRouter(ChatProvider):
             )
             if empty_recoveries:
                 options["stream"] = False
+            options.pop("first_byte_timeout", None)
+            if (
+                self.first_byte_timeout
+                and selected is self.primary
+                and getattr(selected, "supports_first_byte_timeout", False)
+                and any(p is not selected and p.name not in tried for p in healthy)
+            ):
+                options["first_byte_timeout"] = self.first_byte_timeout
+            tried.add(selected.name)
             # Keep model identity at the end of the prompt, leaving the
             # stable cached prefix untouched. Each retry gets its own snapshot.
             effective_model = (
@@ -263,8 +287,13 @@ class ProviderRouter(ChatProvider):
                         })
                         has_media = False
                         dead.clear()
+                        dead.update(stalled)
                         order = self._order(False, prefer_fallback)
                     max_attempts = max(max_attempts, attempt + len(order))
+                elif isinstance(error, ProviderFirstByteTimeoutError):
+                    stalled.add(selected.name)
+                    dead.add(selected.name)
+                    max_attempts = max(max_attempts, attempt + len(order) - len(dead))
                 elif not error.retryable:
                     dead.add(selected.name)
                     max_attempts = max(max_attempts, attempt + len(order) - len(dead))

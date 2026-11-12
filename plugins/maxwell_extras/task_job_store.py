@@ -8,7 +8,7 @@ import time
 
 from privacy import owned_write_allowed, retention_days
 
-from .job_phase import LIVE_STATES, delivery_transition, job_transition
+from .job_phase import LIVE_STATES, delivery_transition, job_transition  # noqa: F401 (re-exported to task_jobs)
 
 active_job = ContextVar("maxwell_active_worker_job", default=None)
 

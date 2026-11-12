@@ -407,6 +407,9 @@ class CoreMixin:
             vision_model=self.config.AI_VISION_MODEL,
             vision_api_key=self.config.AI_VISION_API_KEY,
             vision_disable_reasoning=self.config.AI_VISION_DISABLE_REASONING,
+            first_byte_timeout=getattr(
+                self.config, "AI_PRIMARY_FIRST_BYTE_TIMEOUT_SECONDS", 0
+            ),
         )
 
     def _wants_premium_model(self, quota_user_id: str, message) -> bool:
