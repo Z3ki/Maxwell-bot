@@ -17,6 +17,7 @@ from .base import ChatProvider
 from .errors import (
     ProviderEmptyResponseError,
     ProviderError,
+    ProviderFirstByteTimeoutError,
     ProviderMediaUnsupportedError,
     ProviderUnavailableError,
 )
@@ -169,6 +170,9 @@ class ProviderRouter(ChatProvider):
         recovery_provider = None
         last_error: ProviderError | None = None
         tried: set[str] = set()
+        # Routes that missed the first-byte bound stay out for this request:
+        # retrying them without the bound would wait the full request timeout.
+        stalled: set[str] = set()
         while attempt < min(max_attempts, ceiling):
             attempt += 1
             split = 1 if fast_fallback else 2
@@ -283,8 +287,13 @@ class ProviderRouter(ChatProvider):
                         })
                         has_media = False
                         dead.clear()
+                        dead.update(stalled)
                         order = self._order(False, prefer_fallback)
                     max_attempts = max(max_attempts, attempt + len(order))
+                elif isinstance(error, ProviderFirstByteTimeoutError):
+                    stalled.add(selected.name)
+                    dead.add(selected.name)
+                    max_attempts = max(max_attempts, attempt + len(order) - len(dead))
                 elif not error.retryable:
                     dead.add(selected.name)
                     max_attempts = max(max_attempts, attempt + len(order) - len(dead))
