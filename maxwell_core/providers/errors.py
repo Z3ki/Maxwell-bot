@@ -41,5 +41,12 @@ class ProviderUnavailableError(ProviderError):
         self.cooldown = cooldown
 
 
+class ProviderFirstByteTimeoutError(ProviderUnavailableError):
+    """A streamed request sent no response headers in time; try another route."""
+
+    def __init__(self, message: str):
+        super().__init__(message, cooldown=True)
+
+
 class ProviderEmptyResponseError(ProviderUnavailableError):
     user_message = "The model returned an empty response after retries. Please try again in a moment."
