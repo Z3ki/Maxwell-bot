@@ -184,3 +184,40 @@ def test_search_cap_refusals_are_not_recorded_as_tool_failures(monkeypatch):
         (fields["outcome"], fields["success"]) for kind, fields in events if kind == "tool"
     )
     assert outcomes == [("refused", None), ("returned", None), ("returned", None)]
+
+
+def test_stalled_primary_is_not_retried_unbounded_in_the_same_request(monkeypatch):
+    async def no_wait(_seconds):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    from maxwell_core.providers.errors import (
+        ProviderInvalidRequestError,
+        ProviderMediaUnsupportedError,
+    )
+
+    stall = ProviderFirstByteTimeoutError("Provider primary sent no response within 45s")
+    image = [{"role": "user", "content": [
+        {"type": "text", "text": "hi"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]}]
+    # Media fallback refuses the image: degrade to text on the fallback,
+    # never re-wait on the stalled primary without its bound.
+    primary = _Recorder("primary", [stall])
+    fallback = _Recorder("fallback", [ProviderMediaUnsupportedError("no image"), "ok"])
+    router = ProviderRouter(primary, fallback, retry_attempts=3, first_byte_timeout=45)
+    assert asyncio.run(router.generate_response(image)) == "ok"
+    assert primary.calls == [45]
+    assert len(fallback.calls) == 2
+
+    # A deterministic fallback rejection ends the request instead of
+    # starting an unbounded primary call.
+    primary = _Recorder("primary", [stall])
+    fallback = _Recorder("fallback", [ProviderInvalidRequestError("bad request")])
+    router = ProviderRouter(primary, fallback, retry_attempts=3, first_byte_timeout=45)
+    import pytest
+
+    with pytest.raises(ProviderInvalidRequestError):
+        asyncio.run(router.generate_response([{"role": "user", "content": "hi"}]))
+    assert primary.calls == [45]
+    assert len(fallback.calls) == 1
