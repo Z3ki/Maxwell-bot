@@ -109,6 +109,6 @@ def test_content_permission_preserves_deletion_barrier_and_fails_closed(tmp_path
     store.set_default("1", "tracking", "on")
     assert store.content_allowed("1", started_at=deleted_at) is False
     assert store.content_allowed("1", started_at=deleted_at + 1) is True
-    assert store.content_allowed("2") is False
+    assert store.content_allowed("2") is True
     store.path.write_text('{"users":')
     assert store.content_allowed("1") is False

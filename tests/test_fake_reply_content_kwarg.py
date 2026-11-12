@@ -150,7 +150,7 @@ def test_reply_parent_includes_reactions():
     assert "[reactions: 👍 z3ki]" in rendered
 
 
-@pytest.mark.parametrize("policy", ["missing", "off", "unknown", "unreadable", "disabled"])
+@pytest.mark.parametrize("policy", ["missing", "off", "unreadable", "disabled"])
 def test_reaction_identity_never_enters_memory_without_consent(tmp_path, policy):
     from plugins.maxwell_extras.user_preferences import UserPreferenceStore
 
@@ -174,6 +174,20 @@ def test_reaction_identity_never_enters_memory_without_consent(tmp_path, policy)
     assert bot._message_reactions == {}
     merge.assert_not_awaited()
     assert MaxwellBot._reactions_annotation_for(bot, message) == ""
+
+
+def test_reaction_identity_is_kept_for_a_user_with_no_saved_choice(tmp_path):
+    from plugins.maxwell_extras.user_preferences import UserPreferenceStore
+
+    bot = _reaction_bot()
+    bot._user_preferences = UserPreferenceStore(tmp_path / "preferences.json")
+    message = SimpleNamespace(id=777, author=bot.user)
+    reaction = SimpleNamespace(message=message, emoji="😂")
+    user = SimpleNamespace(id=99, display_name="private-name", bot=False)
+
+    asyncio.run(MaxwellBot.on_reaction_add(bot, reaction, user))
+
+    assert "private-name" in MaxwellBot._reactions_annotation_for(bot, message)
 
 
 def test_reaction_overlay_and_snapshot_recheck_consent_and_deletion_fence(tmp_path, monkeypatch):

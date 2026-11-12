@@ -22,7 +22,8 @@ _DEFAULTS: dict[str, Any] = {
     "language": "",
     "visibility": "public",
     # on: store this person's message content. off: do not store it.
-    "tracking": "off",
+    # Missing preference is on. A saved off stays off.
+    "tracking": "on",
 }
 _ALLOWED_DEFAULTS = frozenset(_DEFAULTS)
 _PERSONALITY_LIMIT = 800
@@ -256,6 +257,7 @@ class UserPreferenceStore:
             return isinstance(defaults, dict) and defaults.get("tracking") == "off"
 
     def content_allowed(self, user_id, started_at=None):
+        """True unless this account saved Off, the store is unreadable, or a deletion fence blocks the turn."""
         uid = str(user_id)
         with _LOCK:
             root = self._read()
@@ -263,9 +265,9 @@ class UserPreferenceStore:
                 return False
             row = root["users"].get(uid)
             if not isinstance(row, dict):
-                return False
+                return True
             defaults = row.get("defaults")
-            if not isinstance(defaults, dict) or defaults.get("tracking") != "on":
+            if isinstance(defaults, dict) and defaults.get("tracking") == "off":
                 return False
             return not (
                 started_at and float(started_at) <= float(row.get("deleted_at") or 0)
@@ -275,7 +277,7 @@ class UserPreferenceStore:
 def tracks_message_content(store: Any, user_id: Any) -> bool:
     """False when this person opted out, or their choice cannot be read.
 
-    A missing or unreadable store fails closed for personal content.
+    A missing preference is On. A missing or unreadable store fails closed.
     System and bot ids are not personal opt-outs.
     """
     uid = str(user_id or "").strip()
@@ -290,7 +292,7 @@ def tracks_message_content(store: Any, user_id: Any) -> bool:
     defaults = row.get("defaults") if isinstance(row, dict) else None
     if not isinstance(defaults, dict):
         return False
-    return str(defaults.get("tracking", "off")) == "on"
+    return str(defaults.get("tracking", "on")) == "on"
 
 
 def bind_message_tracking(bot: Any, store: Any) -> None:

@@ -125,7 +125,7 @@ def test_periodic_cleanup_removes_reactor_without_authored_messages(tmp_path):
     asyncio.run(scenario())
 
 
-def test_processing_notice_matches_opt_in_history_default(tmp_path, monkeypatch):
+def test_processing_notice_matches_history_default(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from plugins.maxwell_extras.user_preferences import UserPreferenceStore
     from privacy import notice_text
@@ -135,5 +135,6 @@ def test_processing_notice_matches_opt_in_history_default(tmp_path, monkeypatch)
     bot = SimpleNamespace(_user_preferences=preferences)
     text = notice_text(bot, "100")
     assert text is not None
-    assert "saved only when you enable" in text
-    assert preferences.get("100")["defaults"]["tracking"] == "off"
+    assert "saved by default" in text
+    assert preferences.get("100")["defaults"]["tracking"] == "on"
+    assert "100" not in preferences._read().get("users", {})
