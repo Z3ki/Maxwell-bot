@@ -96,7 +96,7 @@ _SETTING_HELP = {
     "language": "For example, enter Spanish or English. Reset lets Maxwell choose the language again.",
     "style": "For example: Keep replies short and skip emojis. Applies to your messages, mentions and commands everywhere. Changes only your replies.",
     "byok": "Paste a public HTTPS OpenAI-compatible endpoint, the model ID, and the modalities that model accepts. The key is encrypted. Private hosts are rejected.",
-    "tracking": "On opts into optional saved history. Off stops saving and deletes your history. External AI processing still occurs for requests.",
+    "tracking": "On is the default and saves channel history. Off stops saving and deletes your history. External AI processing still occurs for requests.",
     "channels": "Choose a response channel, or use Allow all channels. The channel picker includes every text channel in this server.",
     "plugins": "Select the optional tools to allow in this server. Reset inherits the existing global and personal choices.",
     "capabilities": "Selected groups are allowed. Unselect a group to disable its tools. Discord permissions still apply.",
@@ -993,7 +993,7 @@ class _ConfigPanel(discord.ui.View):
         )
         return (
             "## Privacy\n"
-            "Saved messages are off unless you turn them on.\n\n"
+            "Saved messages are on unless you turn them off.\n\n"
             f"**Message storage:** {current}\n"
             "**Persistent learned memory:** unavailable; automatic facts/embeddings are retired.\n"
             "**AI processing:** current requests and necessary context still go to the selected provider, including fallbacks/BYOK. Provider retention is separate.\n\n"

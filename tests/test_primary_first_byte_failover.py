@@ -148,7 +148,7 @@ def test_first_byte_timeout_error_cools_the_route():
         assert word not in str(error).lower()
 
 
-def test_search_cap_refusals_are_not_recorded_as_tool_failures(monkeypatch):
+def test_repeated_searches_are_recorded_as_returned_not_refused(monkeypatch):
     import bot_parts.tool_calls as tool_calls
     from bot import MaxwellBot
 
@@ -175,15 +175,15 @@ def test_search_cap_refusals_are_not_recorded_as_tool_failures(monkeypatch):
     monkeypatch.setattr(tool_calls, "record_reasoning", AsyncMock())
     calls = [
         {"id": str(i), "type": "function", "function": {"name": "web_search", "arguments": "{}"}}
-        for i in range(3)
+        for i in range(7)
     ]
     asyncio.run(MaxwellBot._dispatch_tool_calls(
-        bot, message, "", native_tool_calls=calls, web_search_budget=[2, 0],
+        bot, message, "", native_tool_calls=calls,
     ))
     outcomes = sorted(
         (fields["outcome"], fields["success"]) for kind, fields in events if kind == "tool"
     )
-    assert outcomes == [("refused", None), ("returned", None), ("returned", None)]
+    assert outcomes == [("returned", None)] * 7
 
 
 def test_stalled_primary_is_not_retried_unbounded_in_the_same_request(monkeypatch):

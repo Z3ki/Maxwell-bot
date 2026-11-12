@@ -8,4 +8,4 @@ def test_notice_version_example_matches_current_default():
     )
     match = re.search(r"^MAXWELL_NOTICE_VERSION=(\S+)", text, re.M)
     assert match, "MAXWELL_NOTICE_VERSION missing from .env.example"
-    assert match.group(1) == "processing-notice-3"
+    assert match.group(1) == "processing-notice-4"
