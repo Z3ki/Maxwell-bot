@@ -87,6 +87,7 @@ def openai_compat_provider(
     vision_model = kwargs.pop("vision_model", "")
     vision_key = kwargs.pop("vision_api_key", "")
     vision_reasoning = kwargs.pop("vision_disable_reasoning", True)
+    first_byte_timeout = kwargs.pop("first_byte_timeout", 0)
     defaults = GenerationDefaults(
         max_output_tokens=kwargs.pop("max_tokens", 16384),
         temperature=kwargs.pop("temperature", 0.7),
@@ -159,5 +160,6 @@ def openai_compat_provider(
             retry_attempts=defaults.retry_attempts,
             empty_response_retries=primary.empty_response_retries,
             cooldown_seconds=primary._cooldown_seconds,
+            first_byte_timeout=first_byte_timeout,
         )
     return primary

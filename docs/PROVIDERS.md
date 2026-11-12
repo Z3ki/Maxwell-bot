@@ -176,7 +176,11 @@ service controls (`OLLAMA_ORIGINS` and the old embedding URL alias).
 Set `AI_REQUEST_TIMEOUT_SECONDS` (default 3600, range 10–14400) for each
 operator-provider call and `AI_TURN_TIMEOUT_SECONDS` (0–14400) for the whole
 request, including tools. Zero preserves `live_turn_timeout_seconds` (900 by default).
-For example, use 600 and 1800 for a slow website-building model. A shorter
+For example, use 600 and 1800 for a slow website-building model. When a fallback
+route is configured, `AI_PRIMARY_FIRST_BYTE_TIMEOUT_SECONDS` (default 45, 0
+disables) bounds how long a streamed primary call may wait for its first response
+bytes before the turn moves to the fallback; an answer that has started streaming
+is never cut, and the primary is cooled down like any other unavailable route. A shorter
 whole-task deadline still cancels the call. `AI_CONTEXT_WINDOW` sets the model's
 context size in tokens (0 retains the normal prompt budget); output tokens and
 context size are separate. Prompt budgeting is a conservative character estimate,

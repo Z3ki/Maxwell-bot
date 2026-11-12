@@ -33,6 +33,7 @@ from maxwell_core.providers.errors import (
     ProviderRateLimitError,
     ProviderRequestError,
     ProviderUnavailableError,
+    ProviderFirstByteTimeoutError,
     ProviderMediaUnsupportedError,
     ProviderUsageExhaustedError,
 )
@@ -219,6 +220,9 @@ class OpenAICompatibleProvider(ChatProvider):
     Multi-endpoint constructor arguments and _last_* attributes are deprecated
     compatibility paths for integrations predating ProviderRouter.
     """
+
+    # ProviderRouter may bound the wait for response headers on this client.
+    supports_first_byte_timeout = True
     completion_path = "/chat/completions"
     extra_retryable_statuses = frozenset()
 
@@ -992,6 +996,7 @@ class OpenAICompatibleProvider(ChatProvider):
         empty_response_retries: int | None = None,
         stream: bool | None = None,
         allow_media_degrade: bool = True,
+        first_byte_timeout: float | None = None,
     ) -> dict:
         """Generate an OpenAI-compatible assistant message, optionally with tools.
 
@@ -1273,13 +1278,32 @@ class OpenAICompatibleProvider(ChatProvider):
             try:
                 headers = await self._auth_headers(endpoint)
                 credential_secrets = self._credential_secrets(headers)
-                async with session.post(
+                request = session.post(
                     f"{endpoint.base_url}{self.completion_path}",
                     json=data,
                     timeout=aiohttp.ClientTimeout(total=timeout, connect=10),
                     headers=headers,
                     allow_redirects=self.policy.allow_redirects,
-                ) as resp:
+                )
+                if first_byte_timeout and data.get("stream"):
+                    # A stalled upstream (e.g. capacity retries inside a
+                    # gateway) must not hold the turn when the router has
+                    # another route ready. Only the wait for headers is
+                    # bounded; an answer that has started streams normally.
+                    try:
+                        request = await asyncio.wait_for(request, first_byte_timeout)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Provider timing first_byte_timeout request_id=%s endpoint=%s elapsed_ms=%.1f limit_s=%s",
+                            request_id,
+                            self._timing_endpoint_label(endpoint),
+                            (time.perf_counter() - request_start) * 1000,
+                            first_byte_timeout,
+                        )
+                        raise ProviderFirstByteTimeoutError(
+                            f"Provider {endpoint.name} sent no response within {first_byte_timeout:g}s"
+                        ) from None
+                async with request as resp:
                     headers_ms = (time.perf_counter() - request_start) * 1000
                     if resp.status == 503 or resp.status in self.extra_retryable_statuses:
                         raw_error_text = await _read_response_text_limited(resp)
