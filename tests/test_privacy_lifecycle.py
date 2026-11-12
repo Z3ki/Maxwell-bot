@@ -44,7 +44,10 @@ def test_new_and_legacy_users_do_not_create_fake_storage_consent(tmp_path):
     store = UserPreferenceStore(path)
     assert store.get("1")["defaults"]["tracking"] == "on"
     assert store.get("2")["defaults"]["tracking"] == "off"
-    assert store.get("3")["defaults"]["tracking"] == "off"
+    assert store.get("3")["defaults"]["tracking"] == "on"
+    assert store.content_allowed("3") is True
+    assert store.content_allowed("2") is False
+    assert tracks_message_content(store, "3") is True
     assert store.consents.review("1") == []
     assert tracks_message_content(None, "1") is False
     store.reset_default("2", "tracking")
@@ -85,8 +88,8 @@ def test_consent_is_scoped_versioned_idempotent_and_durable(tmp_path):
     assert restored.review("1") == []
 
 
-@pytest.mark.parametrize(("choice", "stored"), [(None, False), ("on", True), ("off", False)])
-def test_history_requires_saved_on_choice(tmp_path, choice, stored):
+@pytest.mark.parametrize(("choice", "stored"), [(None, True), ("on", True), ("off", False)])
+def test_history_defaults_on_unless_saved_off(tmp_path, choice, stored):
     async def scenario():
         memory = ConversationMemoryManager(str(tmp_path))
         if choice is not None:
@@ -191,6 +194,7 @@ def test_failed_write_does_not_activate_history(tmp_path, monkeypatch):
     import plugins.maxwell_extras.user_preferences as module
 
     store = preferences(tmp_path)
+    store.set_default("1", "tracking", "off")
     monkeypatch.setattr(
         module,
         "_atomic_json_write_sync",
@@ -198,7 +202,12 @@ def test_failed_write_does_not_activate_history(tmp_path, monkeypatch):
     )
     with pytest.raises(OSError):
         store.set_default("1", "tracking", "on")
+    assert store.get("1")["defaults"]["tracking"] == "off"
     assert not tracks_message_content(store, "1")
+    with pytest.raises(OSError):
+        store.set_default("2", "tracking", "on")
+    assert "2" not in store._read()["users"]
+    assert tracks_message_content(store, "2") is True
 
 
 def test_dashboard_sync_keeps_opt_out_on_unrelated_update(tmp_path):

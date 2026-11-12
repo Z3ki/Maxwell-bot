@@ -6,6 +6,11 @@
 
 ## Unreleased
 
+## 0.1.16 — 2026-11-12
+
+- Remove the per-turn web search limit. `WEB_SEARCH_MAX_PER_TURN` is no longer read and searches are never refused for count; search stays SearXNG-first with the ddgs scraper off by default.
+- Fail over to the configured fallback when the primary route sends no first byte within `AI_PRIMARY_FIRST_BYTE_TIMEOUT_SECONDS` (default 45; 0 disables). A streaming answer is never cut, and the stalled route stays out for the rest of the request.
+- Save channel history by default when a person has no storage preference. Explicit Off, reset, deletion, and an unreadable preference file still block storage and are not turned back on. Disclosure version is `processing-notice-4`; bump a pinned `MAXWELL_NOTICE_VERSION` so the corrected notice is shown once.
 - Reduce chat prompt overhead with a stable fixed prefix, compact guidance and a
   permission-filtered native tool catalog. Load additional schemas per turn with
   `load_tools`; workers and the custom tool protocol retain their tool access.

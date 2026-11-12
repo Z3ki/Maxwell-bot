@@ -1739,10 +1739,6 @@ class MessagesMixin:
             promise_followups = 0
             site_loop_strikes = 0
             tool_results: list[str] = []
-            web_search_budget = [
-                max(0, _safe_int(getattr(self.config, "WEB_SEARCH_MAX_PER_TURN", 5), 5)),
-                0,
-            ]
             for _iteration in range(max_iters):
                 if time.monotonic() > tool_deadline:
                     logger.info("Tool iteration time budget exceeded, breaking")
@@ -1753,7 +1749,6 @@ class MessagesMixin:
                     native_tool_calls=pending_native or None,
                     include_images=True,
                     existing_progress=first_dispatch_progress,
-                    web_search_budget=web_search_budget,
                 )
                 first_dispatch_progress = None
                 pending_native = None
