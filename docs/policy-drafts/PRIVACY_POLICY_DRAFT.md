@@ -18,9 +18,8 @@ checklist. It has been retired so there is only one version of the truth: the
 published page above. If the published policy and any old copy of this draft
 disagree, the published page wins.
 
-Current implementation defaults missing message-history preferences to off;
-saved on choices permit storage, including legacy choices without separate
-consent evidence. Changing the default does not itself delete old history.
+Current implementation defaults missing message-history preferences to on;
+explicit off choices stop storage and delete that account's history. Changing the default does not itself delete old history.
 Existing retention and explicit deletion controls still apply. Provider
 processing of live requests is separate from optional local history.
 

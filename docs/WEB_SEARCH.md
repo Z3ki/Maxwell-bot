@@ -92,10 +92,9 @@ automatic parameter upgrades. No paid provider is used without its key.
 ## Tuning and verification
 
 Defaults: `WEB_SEARCH_TIMEOUT=12`, `SEARXNG_TIMEOUT=6`,
-`WEB_SEARCH_MAX_PER_TURN=5`, `WEB_SEARCH_CONCURRENCY=4`,
-`WEB_SEARCH_MAX_PENDING=32`, `WEB_SEARCH_CACHE_SIZE=256`,
-`WEB_FETCH_TIMEOUT=12`. The per-turn limit caps web searches; set
-`WEB_SEARCH_MAX_PER_TURN=0` for unlimited searches per turn. The source-page
+`WEB_SEARCH_CONCURRENCY=4`, `WEB_SEARCH_MAX_PENDING=32`,
+`WEB_SEARCH_CACHE_SIZE=256`, `WEB_FETCH_TIMEOUT=12`. There is no per-turn
+search limit; `WEB_SEARCH_MAX_PER_TURN` is no longer read. The source-page
 deadline covers redirects and Jina
 fallback. Oversized pages and HTTP 403/429 can use the existing Jina Reader
 fallback; private/internal URLs remain refused. Authorization headers are

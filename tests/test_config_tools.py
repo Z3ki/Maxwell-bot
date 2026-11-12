@@ -130,7 +130,8 @@ def test_tracking_off_deletes_that_account_and_rejects_unknown_values(tmp_path):
     assert result["saved"]
     assert deleted == ["100"]
     assert bot._user_preferences.get("100")["defaults"]["tracking"] == "off"
-    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "off"
+    # Another account keeps its own (default On) choice.
+    assert bot._user_preferences.get("200")["defaults"]["tracking"] == "on"
     assert "error" in run(
         ConfigureTool(bot), message(), setting="tracking", value="maybe"
     )

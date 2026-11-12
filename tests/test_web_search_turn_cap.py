@@ -1,4 +1,4 @@
-"""The search budget belongs to a request, not a batch or the bot."""
+"""Web searches have no per-turn limit."""
 
 import asyncio
 from types import SimpleNamespace
@@ -16,7 +16,7 @@ def _fixture(monkeypatch):
     tools = {name: SimpleNamespace(side_effects=False, is_destructive=False)
              for name in ("web_search", "fetch_url")}
     bot = SimpleNamespace(
-        _control={}, tools=tools, config=SimpleNamespace(),
+        _control={}, tools=tools, config=SimpleNamespace(WEB_SEARCH_MAX_PER_TURN=1),
         _tool_breaker=SimpleNamespace(is_open=lambda name: False,
                                       record_failure=lambda name: None,
                                       record_success=lambda name: None),
@@ -36,58 +36,33 @@ def _fixture(monkeypatch):
     return bot, message, invoked
 
 
-def test_cap_spans_batches_and_preserves_other_tools_and_call_pairing(monkeypatch):
+def test_many_searches_across_batches_all_run(monkeypatch):
     bot, message, invoked = _fixture(monkeypatch)
 
     async def run():
-        budget = [5, 0]
-        _, first = await MaxwellBot._dispatch_tool_calls(
-            bot, message, "", native_tool_calls=[_call("web_search", i) for i in range(4)],
-            web_search_budget=budget,
-        )
-        _, second = await MaxwellBot._dispatch_tool_calls(
-            bot, message, "", native_tool_calls=[_call("web_search", 4), _call("search", 5), _call("fetch_url", 6)],
-            web_search_budget=budget,
-        )
-        assert len(first) == 4
-        assert sum("Search limit reached" in line for line in second) == 1
-        assert len(bot._last_native_followup_messages) == 4
-        assert invoked.count("web_search") == 5
-        assert invoked.count("fetch_url") == 1
-        # A new request gets an independent budget.
-        _, third = await MaxwellBot._dispatch_tool_calls(
-            bot, message, "", native_tool_calls=[_call("web_search", 7)],
-            web_search_budget=[5, 0],
-        )
-        assert "Search limit reached" not in third[0]
-        assert invoked.count("web_search") == 6
+        for batch in range(3):
+            calls = [_call("web_search", batch * 10 + i) for i in range(8)]
+            calls.append(_call("fetch_url", batch * 10 + 9))
+            _, results = await MaxwellBot._dispatch_tool_calls(
+                bot, message, "", native_tool_calls=calls,
+            )
+            assert len(results) == 9
+            assert not any("Search limit reached" in line for line in results)
+        # A stale WEB_SEARCH_MAX_PER_TURN setting is ignored.
+        assert invoked.count("web_search") == 24
+        assert invoked.count("fetch_url") == 3
 
     asyncio.run(run())
 
 
-def test_zero_limit_is_unlimited_and_disabled_calls_do_not_consume_budget(monkeypatch):
-    bot, message, invoked = _fixture(monkeypatch)
+def test_dispatch_no_longer_accepts_a_search_budget():
+    import inspect
 
-    async def run():
-        budget = [0, 0]
-        _, results = await MaxwellBot._dispatch_tool_calls(
-            bot, message, "", native_tool_calls=[_call("web_search", i) for i in range(8)],
-            web_search_budget=budget,
-        )
-        assert len(results) == len(invoked) == 8
-        limited = [1, 0]
-        message.user_install_web_mode = "off"
-        await MaxwellBot._dispatch_tool_calls(
-            bot, message, "", native_tool_calls=[_call("web_search", 8)],
-            web_search_budget=limited,
-        )
-        assert limited == [1, 0]
-        message.user_install_web_mode = "auto"
-        _, results = await MaxwellBot._dispatch_tool_calls(
-            bot, message, "", native_tool_calls=[_call("web_search", 9)],
-            web_search_budget=limited,
-        )
-        assert "Search limit reached" not in results[0]
-        assert limited == [1, 1]
+    for fn in (MaxwellBot._dispatch_tool_calls,):
+        assert "web_search_budget" not in inspect.signature(fn).parameters
 
-    asyncio.run(run())
+
+def test_config_has_no_per_turn_search_limit():
+    from config import Config
+
+    assert not hasattr(Config, "WEB_SEARCH_MAX_PER_TURN")

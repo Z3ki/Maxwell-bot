@@ -5,10 +5,10 @@ modularization PR #82 head `8f42b79`. This is engineering evidence, not a legal
 opinion or regulatory certification. Production credentials, provider accounts,
 server disks/backups and the Discord Developer Portal were not available here.
 
-> **Current behavior:** Missing history preferences default to off. Saved
+> **Current behavior:** Missing history preferences default to on. Saved
 > `tracking=on` choices still permit storage, including legacy rows without
 > consent evidence; `content_allowed` does not independently require a consent
-> record. An unreadable preferences file fails closed. This change does not
+> record. An explicit off stays off. An unreadable preferences file fails closed. This change does not
 > delete historical content merely because a preference is missing.
 
 ## Discord requirements and design decisions
@@ -66,8 +66,8 @@ The receipt is not an agreement record. No AI request is used for privacy UX.
 
 `/config → Privacy` and the dashboard explain history, current provider
 processing and retired persistent facts/embeddings. Missing-user preferences
-default to off; an existing saved On choice remains effective. Model-driven
-configuration cannot enable it for a user. Off stops new transcript
+default to on; an explicit Off stays off. Model-driven
+configuration cannot enable it for a user who saved Off. Off stops new transcript
 writes and removes stored conversation content. Reset stays off. Independent
 choices can be reviewed/withdrawn; voice authorization is bound to a hash of the
 exact reference and a distinct policy version. It is a user's permission
@@ -98,7 +98,7 @@ before release; no fabricated address was added.
 
 | Category / location | Default lifecycle and deletion |
 | --- | --- |
-| `maxwell_rag.db` conversation/linked tool transcript | Missing choices default off; saved on permits storage. 30-day default absolute age, existing per-channel count bound, 12-hour inactive-channel cleanup. Explicit off removes owner rows/replies/quotes; full deletion also invokes it. |
+| `maxwell_rag.db` conversation/linked tool transcript | Missing choices default on; explicit off removes owner rows/replies/quotes. 30-day default absolute age, existing per-channel count bound, 12-hour inactive-channel cleanup. Full deletion also invokes that removal. |
 | Legacy facts/vectors/user directory | No current live embeddings/fact creation. Cleanup removes retired facts/vectors and the old user directory. Archived modules remain offline compatibility fixtures, not live providers. |
 | Personal settings JSON | Until changed/deleted. Full deletion replaces the row with storage-off plus a suppression timestamp. This minimal privacy record intentionally remains. |
 | `privacy.sqlite3` | Active optional choices until withdrawal/deletion. Withdrawn choices: 365 days by default. Notice ID/version/time remains to avoid repeated unchanged notices, unless the user deletes it. |

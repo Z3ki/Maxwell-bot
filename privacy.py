@@ -179,12 +179,12 @@ def notice_text(bot, user_id) -> str | None:
     uid = str(user_id or "")
     if store is None or not uid.isdigit() or not {"terms", "privacy"} <= urls.keys():
         return None
-    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-3").strip()
+    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-4").strip()
     if not store.consents.claim_notice(uid, version):
         return None
     return (
         "Maxwell sends your request and necessary context to the selected AI provider. "
-        "Message history is saved only when you enable it in `/config → Privacy`. "
+        "Message history is saved by default. Turn it off in `/config → Privacy`. "
         "Turning storage off does not stop provider processing. "
         f"[Terms]({urls['terms']}) · [Privacy]({urls['privacy']})"
     )
@@ -195,7 +195,7 @@ def release_notice(bot, user_id) -> None:
     uid = str(user_id or "")
     if store is None or not uid.isdigit():
         return
-    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-3").strip()
+    version = os.getenv("MAXWELL_NOTICE_VERSION", "processing-notice-4").strip()
     store.consents.retry_notice(uid, version)
 
 
