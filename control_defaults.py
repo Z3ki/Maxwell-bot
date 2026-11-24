@@ -132,20 +132,6 @@ DEFAULT_CONTROL = {
     # Unused for answering: startup skips the offline backlog instead of
     # replaying history. Kept so old control.json keys still sanitize.
     "gap_recovery_max_messages": 0,
-    # When enabled, after a mention/reply (or after Maxwell posts in a room),
-    # watch the channel for directed follow-ups without another @. Unrelated
-    # chatter should stay silent. Seconds=0 also disables (legacy).
-    "conversation_watch_enabled": False,
-    "conversation_watch_seconds": 60,
-    # Watch follow-ups wait this long for more lines, then one reply.
-    # Hard @ / reply-to-Maxwell still go out immediately.
-    "conversation_watch_debounce_seconds": 1,
-    # How much a line nobody pinged him with has to look like it wants an
-    # answer before it is worth an LLM turn (0..1, see
-    # watch_policy.reply_pressure). After a ping, unrelated chatter used
-    # to clear this bar on presence alone. Higher is stricter; 1.0 means
-    # only hard pings.
-    "conversation_watch_pressure": 0.55,
     "reply_to_bots": False,
     # Unused for starting turns. Reactions are stored on the message and
     # shown in context; they never kick off a live reply.
@@ -253,6 +239,12 @@ DEAD_CONTROL_KEYS = frozenset(
         "auto_recent_window_minutes",
         "auto_inactivity_minutes",
         "auto_decider_prompt",
+        # Conversation watch (unmentioned follow-ups after a ping) was
+        # removed. Persisted values must not re-enable the old 60s window.
+        "conversation_watch_enabled",
+        "conversation_watch_seconds",
+        "conversation_watch_debounce_seconds",
+        "conversation_watch_pressure",
         # Intel engine was removed in d455e4b. These keys can linger in
         # persisted bot_control.json from older installs; strip them so
         # the dashboard's stale-key warning list stays clean.

@@ -443,24 +443,6 @@ def test_chess_data_dir_honors_data_dir_env(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------
-# watch_policy: the prompt states the operator's configured bar
-# --------------------------------------------------------------------------
-def test_describe_signal_uses_the_configured_threshold():
-    from watch_policy import AddressSignal, WatchState, describe_signal
-
-    text = describe_signal(
-        AddressSignal(text_length=40), WatchState(), 0.12, 1000.0, threshold=0.5
-    )
-    assert "0.50" in text
-    assert "no_response" in text
-    # Comfortably above the configured bar: no marginal note.
-    high = describe_signal(
-        AddressSignal(text_length=40), WatchState(), 0.95, 1000.0, threshold=0.5
-    )
-    assert "no_response" not in high
-
-
-# --------------------------------------------------------------------------
 # tts/music URL parsing: a malformed port must not raise
 # --------------------------------------------------------------------------
 def test_cdn_url_rejects_a_malformed_port_without_raising():

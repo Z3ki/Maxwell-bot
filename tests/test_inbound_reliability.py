@@ -49,7 +49,6 @@ def _bot(path, *, capacity=2):
     bot._active_request_user = {}
     bot._replying_channels = set()
     bot._inflight_context = {}
-    bot._watch_debounce = {}
     bot._blacklist = set()
     bot._stop_until = {}
     bot._cooldowns = {}

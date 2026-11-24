@@ -174,4 +174,3 @@ def test_default_limits_are_inside_their_own_sanitizer_bounds():
     assert 1 <= DEFAULT_CONTROL["message_quota_limit"] <= 100_000
     assert 60 <= DEFAULT_CONTROL["message_quota_window_seconds"] <= 7 * 24 * 3600
     assert 0 <= DEFAULT_CONTROL["tool_history_messages"] <= 20
-    assert 0.0 <= DEFAULT_CONTROL["conversation_watch_pressure"] <= 1.0

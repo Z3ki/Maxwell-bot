@@ -335,10 +335,6 @@ class MessagesMixin:
                     self._update_recent_users(channel_id, self.user)
                 except Exception as e:
                     logger.warning(f"Self-message memory write failed: {type(e).__name__}")
-            try:
-                await self._arm_watch_from_own_message(message)
-            except Exception as e:
-                logger.debug("Conversation watch arm from own message failed: %s", e)
             # 2026-07-21: even with reply_to_bots on, never generate a
             # reply to a self-message. Once the bot starts replying to
             # its own posts the channel turns into a self-monologue
@@ -474,7 +470,7 @@ class MessagesMixin:
         )
         if (
             MaxwellBot._image_input_enabled(self)
-            and not (reply_path_enabled and self._should_live_reply(message))
+            and not (reply_path_enabled and self._directly_addressed(message))
             and self._message_carries_media(message)
         ):
             try:
@@ -497,20 +493,13 @@ class MessagesMixin:
             if not self._control.get("reply_to_bots", True) and not _live_test_webhook(message):
                 return "bot_author"
 
-        # Every human line updates the room's pace and engagement, even
-        # the ones that never become a turn — deliberately above the
-        # cooldown return, so a room's rhythm is already measured by the
-        # time he first speaks there and arms the watch.
-        with contextlib.suppress(Exception):
-            self._note_watch_message(message)
-
         # 2026-07-31: per-user cooldown was previously an early-return at
         # bot.py:2823 that ate ~2/3 of channel traffic before it could
         # reach memory. Now it's applied here, AFTER storage but BEFORE
         # an LLM turn — so RAG keeps every message but the bot doesn't
         # burn provider calls replying to every rapid-fire text.
         if cooldown_for_reply and not message.author.bot:
-            if not self._should_live_reply(message) and not self._is_same_user_interrupt(message):
+            if not self._directly_addressed(message) and not self._is_same_user_interrupt(message):
                 logger.info(
                     f"Cooldown skip reply for user {message.author.id} in {channel_id} (still stored to memory)"
                 )
@@ -532,7 +521,6 @@ class MessagesMixin:
 
         if isinstance(message.channel, discord.GroupChannel):
             if not self._control.get("reply_groups", True):
-                self._touch_watch_debounce(message)
                 return "group_replies_disabled"
             await self._maybe_live_reply(
                 message, self._content_without_self_mention(message.content, message)
@@ -541,13 +529,22 @@ class MessagesMixin:
 
         if message.guild:
             if not self._control.get("reply_mentions", True):
-                self._touch_watch_debounce(message)
                 return "mention_replies_disabled"
             clean = self._content_without_self_mention(message.content, message)
             # Bare @Maxwell with no extra text: still a turn. Do not
             # invent "look at this" — he should read the room (and any
             # reply-parent) and answer from that.
             await self._maybe_live_reply(message, clean)
+
+    async def _maybe_live_reply(self, message, content: str) -> None:
+        """Reply immediately to hard pings; leave undirected lines suppressed."""
+        same_user_check = getattr(self, "_is_same_user_interrupt", None)
+        same_user_interrupt = bool(same_user_check(message)) if callable(same_user_check) else False
+        if same_user_interrupt or self._directly_addressed(message):
+            if same_user_interrupt and not self._note_same_user_latest(message):
+                await self._record_request_outcome(message, "superseded", "same_user_interrupt")
+                return
+            await self._dispatch_reply(message, content, directed=True)
 
     async def on_typing(self, channel, user, when):
         """Discord TYPING_START — someone is composing in a room we can see."""
@@ -1222,14 +1219,6 @@ class MessagesMixin:
         turn_context = self._begin_inflight_context(message, content)
         live_typing = await self._enter_live_typing(message)
         turn_context["live_typing"] = live_typing
-        author = getattr(message, "author", None)
-        if (
-            author is not None
-            and not getattr(author, "bot", False)
-            and self._directly_addressed(message)
-            and str(getattr(message, "response_visibility", "public") or "public") != "private"
-        ):
-            self._arm_conversation_watch(channel_id)
         normal_reply_sent = False
         # Mark this channel as in-flight (bot is generating a reply) so autonomy
         # can skip posting into it and avoid racing the real reply.
@@ -1952,10 +1941,6 @@ class MessagesMixin:
                 for tr in all_tool_results
             ):
                 await MaxwellBot._record_request_outcome(self, message, "suppressed", "no_response")
-                # Feedback for the watch: repeated silence in a room shortens
-                # how long that room stays on watch at all.
-                with contextlib.suppress(Exception):
-                    self._note_watch_silence(message)
                 await self._ensure_reasoning_trace(
                     message, all_tool_results, response, "no_response"
                 )
@@ -2177,8 +2162,6 @@ class MessagesMixin:
             self._tick_media_context(channel_id)
             if normal_reply_sent:
                 self._last_bot_reply[channel_id] = time.time()
-                if author is not None and not getattr(author, "bot", False):
-                    self._arm_conversation_watch(channel_id)
             # Keep the reply map bounded.
             if len(self._last_bot_reply) > 64:
                 cutoff = time.time() - 3600

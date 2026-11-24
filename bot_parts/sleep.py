@@ -66,9 +66,6 @@ class SleepMixin:
         # Drop every conversation watch and every follow-up already waiting
         # out its debounce. Otherwise going to sleep mid-conversation leaves
         # a queued turn that fires a second later, from someone asleep.
-        dropper = getattr(self, "_drop_watches_for_sleep", None)
-        if callable(dropper):
-            dropper()
         arm = getattr(self, "_arm_sleep_wake", None)
         if callable(arm):
             arm()
@@ -78,16 +75,6 @@ class SleepMixin:
             if asyncio.iscoroutine(result):
                 await result
         return f"sleeping for {duration_minutes}m"
-
-    def _drop_watches_for_sleep(self) -> None:
-        """Forget every armed watch and cancel every pending follow-up."""
-        with contextlib.suppress(Exception):
-            (getattr(self, "_conversation_watch", None) or {}).clear()
-        for cid in list((getattr(self, "_watch_debounce", None) or {})):
-            with contextlib.suppress(Exception):
-                self._cancel_watch_debounce(cid)
-        with contextlib.suppress(Exception):
-            (getattr(self, "_watch_debounce", None) or {}).clear()
 
     async def clear_sleep(self) -> str:
         """Cancel any active sleep window. Idempotent."""
