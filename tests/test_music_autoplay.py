@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from plugins.music.service import MusicError, Track
+from plugins.music.service import MusicError, Track, parse_flag
 from test_music import Backend, fixture
 
 
@@ -130,8 +130,6 @@ def test_autoplay_permissions_boolean_and_guild_isolation(tmp_path):
     async def journey():
         await service.execute(message, 'play', query='seed')
         await service.execute(other, 'join')
-        with pytest.raises(MusicError, match='true or false'):
-            await service.execute(message, 'autoplay', value=1)
         message.author.voice.channel = None
         with pytest.raises(MusicError, match='active voice'):
             await service.execute(message, 'autoplay', value=True)
@@ -276,3 +274,58 @@ def test_prefetch_is_bounded_and_deferred_guild_recovers_capacity(tmp_path):
         await service.close()
 
     asyncio.run(journey())
+
+
+@pytest.mark.parametrize('value, expected', [
+    (True, True), (False, False), (1, True), (0, False),
+    ('true', True), ('FALSE', False), ('on', True), ('OFF', False),
+    ('yes', True), ('no', False), ('1', True), ('0', False), ('  Yes  ', True),
+])
+def test_parse_flag_accepts_common_values(value, expected):
+    assert parse_flag(value) is expected
+
+
+@pytest.mark.parametrize('value', [2, -1, 1.0, 'track', 'maybe', '', None, [], {}])
+def test_parse_flag_rejects_invalid_values(value):
+    assert parse_flag(value) is None
+
+
+def test_autoplay_accepts_integer_and_boolean(tmp_path):
+    service, _, message, _ = radio_fixture(tmp_path)
+
+    async def journey():
+        await service.execute(message, 'play', query='seed')
+        assert (await service.execute(message, 'autoplay', value=1))['autoplay'] is True
+        assert (await service.execute(message, 'status'))['autoplay'] is True
+        assert (await service.execute(message, 'autoplay', value=True))['autoplay'] is True
+        assert (await service.execute(message, 'autoplay', value=0))['autoplay'] is False
+        assert (await service.execute(message, 'autoplay', value='off'))['autoplay'] is False
+        with pytest.raises(MusicError, match='true or false'):
+            await service.execute(message, 'autoplay', value=2)
+        await service.close()
+
+    asyncio.run(journey())
+
+
+def test_listener_controls_accepts_integer_flag(tmp_path):
+    from test_music import fixture
+    service, _, msg, _ = fixture(tmp_path)
+
+    async def journey():
+        msg.author.guild_permissions.manage_guild = True
+        result = await service.execute(msg, 'configure', settings={'listener_controls': 0})
+        assert result['saved']
+        assert service.config(msg.guild.id)['listener_controls'] is False
+        result = await service.execute(msg, 'configure', settings={'listener_controls': 'yes'})
+        assert service.config(msg.guild.id)['listener_controls'] is True
+        with pytest.raises(MusicError, match='true or false'):
+            await service.execute(msg, 'configure', settings={'listener_controls': 2})
+        await service.close()
+
+    asyncio.run(journey())
+
+
+def test_music_control_value_schema_allows_boolean():
+    from plugins.music.tools import PARAMETERS
+    types = {branch.get('type') for branch in PARAMETERS['properties']['value']['oneOf']}
+    assert types == {'integer', 'boolean', 'string'}
