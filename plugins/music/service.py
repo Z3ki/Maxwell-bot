@@ -25,6 +25,21 @@ class MusicError(ValueError):
     """Safe, user-facing error (never include transport exceptions)."""
 
 
+def parse_flag(value):
+    """Parse an on/off tool argument; return None when the value is not a flag."""
+    if type(value) is bool:
+        return value
+    if type(value) is int and value in (0, 1):
+        return value == 1
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {'true', 'yes', 'on', '1'}:
+            return True
+        if text in {'false', 'no', 'off', '0'}:
+            return False
+    return None
+
+
 def identifier(query: str) -> str:
     """Only YouTube identifiers reach the audio node, never arbitrary URLs."""
     if not isinstance(query, str) or not query.strip() or len(query) > 400:
@@ -439,10 +454,11 @@ class MusicService:
                         session.repeat = value
                         result = {'repeat': value}
                     elif action == 'autoplay':
-                        if type(value) is not bool:
+                        flag = parse_flag(value)
+                        if flag is None:
                             raise MusicError('Autoplay must be true or false.')
-                        session.autoplay = value
-                        result = {'autoplay': value}
+                        session.autoplay = flag
+                        result = {'autoplay': flag}
                     session.last_active = time.monotonic()
                     if action != 'skip':
                         session.error = None
@@ -653,8 +669,11 @@ class MusicService:
                 bounds = {'queue_limit': (1, 100), 'user_queue_limit': (1, 100), 'idle_seconds': (30, 3600)}[key]
                 if type(value) is not int or not bounds[0] <= value <= bounds[1]:
                     raise MusicError(f'{key} must be between {bounds[0]} and {bounds[1]}.')
-            elif key == 'listener_controls' and type(value) is not bool:
-                raise MusicError('listener_controls must be true or false.')
+            elif key == 'listener_controls':
+                flag = parse_flag(value)
+                if flag is None:
+                    raise MusicError('listener_controls must be true or false.')
+                changes[key] = flag
             elif key == 'default_channel' and value is not None:
                 if not str(value).isdigit() or not isinstance(guild.get_channel(int(value)), discord.VoiceChannel):
                     raise MusicError('Default channel must be a voice channel in this server.')
