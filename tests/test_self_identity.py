@@ -43,7 +43,6 @@ def _bot(memory=None):
         _drugged_until={},
         _guild_emojis={},
         _recent_users={},
-        _conversation_watch={},
         _tool_system_prompt=lambda *args, **kwargs: "",
         bot_name="Maxwell",
         _base_knowledge=fill_identity("You are {bot_name}", {"bot_name": "Maxwell"}),
@@ -59,7 +58,6 @@ def _bot(memory=None):
         bot
     )
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
-    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
     bot._get_personality = lambda: "test"
     return bot

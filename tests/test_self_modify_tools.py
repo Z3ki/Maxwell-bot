@@ -32,7 +32,6 @@ def test_loading_a_legacy_control_file_uses_the_locked_personality(tmp_path):
         _ai_concurrency=2,
         _notify_ai_waiters=lambda: None,
         _sync_audio_input_flags=lambda: None,
-        _conversation_watch_enabled=lambda: True,
     )
     MaxwellBot._load_control(bot, force=True)
     assert bot._control["base_personality"] == DEFAULT_CONTROL["base_personality"]

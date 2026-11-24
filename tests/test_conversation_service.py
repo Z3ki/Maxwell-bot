@@ -108,7 +108,6 @@ def service(*, failed=False, cold=False, short=False, private=False, **controls)
         _shared_fact_relevant=lambda *_args: True,
         _tool_system_prompt=lambda **_kwargs: "",
         _reply_parent_context_lines=lambda _message: ["trusted reply-parent context"],
-        _conversation_watch_prompt=lambda *_args: ["watch-only context"],
         memory=memory,
         user=SimpleNamespace(id=1, display_name="Maxwell"),
         bot_name="Maxwell",
@@ -212,12 +211,13 @@ def test_short_ambient_turn_skips_optional_lookups_but_keeps_this_chat():
 
 
 @pytest.mark.parametrize("private", [False, True])
-def test_private_response_does_not_inherit_ambient_watch_instructions(private):
+def test_prompt_does_not_inject_conversation_watch_instructions(private):
     builder, message, _ = service(private=private)
     messages = build(builder, message)
-    assert (
-        any("watch-only context" in row["content"] for row in messages) is not private
-    )
+    all_text = "\n".join(row["content"] for row in messages)
+    assert "watch-only context" not in all_text
+    assert "Soft follow-up:" not in all_text
+    assert "Watch signals:" not in all_text
 
 
 def test_cancelling_scoped_history_read_stops_prompt_construction():

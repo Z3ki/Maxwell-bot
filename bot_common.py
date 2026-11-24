@@ -62,7 +62,6 @@ from message_quota import (
 from usage_commands import install_usage_commands
 from diagnostics_safety import SafeLogFormatter
 
-import watch_policy  # noqa: E402
 import channel_watch  # noqa: E402
 from concurrency_safety import (  # noqa: E402
     ChannelWorkQueues,
@@ -416,9 +415,6 @@ _REQUEST_TERMINAL = TERMINAL_STATUSES
 # Retained briefly so stale pre-migration confirmation state can expire.
 _CONFIRM_TTL_SECONDS = 120.0
 
-# Ceiling on remembered per-room watch state. Eviction costs a room one
-# default-length watch window and nothing else.
-_MAX_WATCH_STATES = 300
 # Message ids remembered as "read untrusted content this turn". One turn's
 # worth is all that is ever consulted; the cap only stops the dict growing
 # for the life of the process.

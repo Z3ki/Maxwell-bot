@@ -23,8 +23,6 @@ def _load(tmp_path, payload):
     bot.config = SimpleNamespace(DATA_DIR=str(tmp_path))
     bot._control = {}
     bot._control_mtime = None
-    bot._conversation_watch = {}
-    bot._watch_debounce = {}
     bot.ai_provider = _Provider()
     bot._load_control(force=True)
     return bot._control

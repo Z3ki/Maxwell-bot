@@ -148,10 +148,6 @@ class AddressingMixin:
         me = any(getattr(u, "id", None) in me_ids for u in mentions)
         return bool(others) and not me
 
-    def _watch_followup_is_directed(self, message) -> bool:
-        """Any human line he would see. No word list — he decides whether to speak."""
-        return self._should_live_reply(message)
-
     def _reply_parent(self, message):
         if message_reference_is_forward(message):
             return None

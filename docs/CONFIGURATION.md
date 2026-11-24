@@ -338,14 +338,8 @@ Frequently used controls include:
 | `message_quota_enabled` | Enforce message quota when enabled (default off) |
 | `store_memory` | Conversation-memory storage switch |
 | `enable_night_fallback` | Night-window fallback routing when configured |
-| `conversation_watch_enabled` | Allow eligible unmentioned follow-ups after a directed exchange or Maxwell's post (default false) |
-| `conversation_watch_seconds` | Base watch window in seconds (default 60; zero disables watch) |
-| `conversation_watch_debounce_seconds` | Baseline quiet interval for soft follow-ups (default 1 second) |
-| `conversation_watch_pressure` | Threshold for considering soft follow-ups (default 0.55; higher is stricter) |
 
-Watch windows and debounce intervals adapt to room activity; the model may still
-choose silence. Direct mentions and replies are not delayed by the soft-follow-up
-debounce. Directed requests cannot use `wait` before a visible response. The
+Directed requests cannot use `wait` before a visible response. The
 `wait` tool pauses a batch for up to 10 seconds (default 2), does not schedule
 another model turn, and cannot reopen a completed turn. Ambient waits remain
 available; a send ends the batch except for consecutive reply-burst sends.

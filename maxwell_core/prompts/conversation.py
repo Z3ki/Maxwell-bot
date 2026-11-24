@@ -348,22 +348,6 @@ class ConversationPromptBuilder:
             f"Memory scope: transcript is {scope_channel_label} ({channel_id}) only. "
             "Retrieved memory is limited to authorized scope; do not assume it is shared elsewhere."
         )
-        watch_prompt = getattr(host, "_conversation_watch_prompt", None)
-        if (
-            str(getattr(message, "response_visibility", "public") or "public")
-            == "private"
-        ):
-            watch_prompt = None
-        if callable(watch_prompt):
-            dynamic_parts.extend(watch_prompt(message, channel_id))
-        elif getattr(message, "_watch_followup", False):
-            dynamic_parts.append(
-                "Soft follow-up: they did not @ you or Discord-reply this time. "
-                "Default is no_response. Speak only if this line is for you or "
-                "needs you. To Discord-reply to an earlier line, send_message "
-                "with reply_to as a short quote or name, like nah or alice — "
-                "not an id."
-            )
         # Static prefix ONLY in the leading system message — see the
         # `dynamic_parts` comment above. The volatile block is appended as its
         # own system message AFTER the transcript (below), because prefix

@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+- Remove conversation watch. After a ping, Maxwell no longer keeps the room live for about a minute so unmentioned follow-ups can become a turn. Hard @ mentions, replies to Maxwell, and DMs still work; undirected messages stay suppressed.
+
 ## 0.1.16 — 2026-11-12
 
 - Remove the per-turn web search limit. `WEB_SEARCH_MAX_PER_TURN` is no longer read and searches are never refused for count; search stays SearXNG-first with the ddgs scraper off by default.
