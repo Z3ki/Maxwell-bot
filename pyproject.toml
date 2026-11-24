@@ -95,7 +95,6 @@ files = [
     "config.py",
     "tool_registry.py",
     "response_guard.py",
-    "watch_policy.py",
     "message_quota.py",
     "context_budget.py",
     "provider_limits.py",

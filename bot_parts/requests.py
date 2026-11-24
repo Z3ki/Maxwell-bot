@@ -938,9 +938,6 @@ class RequestPipelineMixin:
         active = (getattr(self, "_active_requests", None) or {}).get(cid)
         if active_user == uid and active is not None and not active.done():
             cancel_once(active)
-        cancel_watch = getattr(self, "_cancel_watch_debounce", None)
-        if callable(cancel_watch):
-            cancel_watch(cid)
         logger.info(
             "Same-user interrupt cid=%s user=%s latest=%s",
             cid,

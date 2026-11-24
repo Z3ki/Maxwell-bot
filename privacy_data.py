@@ -174,33 +174,6 @@ def _without_author(items, uid: str) -> list:
     return [item for item in list(items or []) if _message_author_id(item) != uid]
 
 
-def _scrub_watch_debounce(bot, uid: str) -> list:
-    """Cancel bursts that would flush this account's text after deletion."""
-    debounce = getattr(bot, "_watch_debounce", None)
-    tasks = []
-    if not isinstance(debounce, dict):
-        return tasks
-    for cid, bucket in list(debounce.items()):
-        if not isinstance(bucket, dict):
-            continue
-        burst = list(bucket.get("burst") or [])
-        owns_bucket = (
-            _message_author_id(bucket.get("latest")) == uid
-            or _message_author_id(bucket.get("latest_directed")) == uid
-        )
-        if owns_bucket:
-            task = bucket.get("task")
-            debounce.pop(cid, None)
-            if task is not None and not getattr(task, "done", lambda: True)():
-                task.cancel()
-                if asyncio.isfuture(task) or asyncio.iscoroutine(task):
-                    tasks.append(task)
-            continue
-        if any(_message_author_id(item) == uid for item in burst):
-            bucket["burst"] = _without_author(burst, uid)
-    return tasks
-
-
 def _scrub_reply_queue(bot, uid: str) -> None:
     """Drop this account's queued turns and quotes carried on other turns."""
     queue = getattr(bot, "_reply_queue", None)
@@ -273,9 +246,6 @@ async def delete_live_data(bot, user_id):
         for jid, job in list(manager.jobs.items()):
             if job.row["user_id"] == uid:
                 manager.jobs.pop(jid, None)
-    watch_tasks = _scrub_watch_debounce(bot, uid)
-    if watch_tasks:
-        await asyncio.gather(*watch_tasks, return_exceptions=True)
     _scrub_reply_queue(bot, uid)
     owners = getattr(bot, "_active_request_user", {}) or {}
     tasks = getattr(bot, "_active_requests", {}) or {}

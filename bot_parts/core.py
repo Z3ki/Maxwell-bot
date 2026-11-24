@@ -136,17 +136,6 @@ class CoreMixin:
         self._sleep_wake_task: asyncio.Task | None = None
         self._sleep_presence_overlay = False
         self._cooldowns: dict[str, float] = {}
-        # channel_id -> monotonic expiry. After a real exchange, the whole
-        # room stays on watch so a follow-up does not need another @.
-        self._conversation_watch: dict[str, float] = {}
-        # channel_id -> watch_policy.WatchState. How each room is actually
-        # going: its pace, when he last spoke, whether anyone is answering
-        # him. The watch window and the debounce are derived from this rather
-        # than being the same two constants for every room.
-        self._watch_states: dict[str, Any] = {}
-        # channel_id -> pending watch follow-up. Wait a beat so a burst of
-        # lines becomes one reply instead of one LLM turn per message.
-        self._watch_debounce: dict[str, dict] = {}
         # channel_id -> user_id -> {name, expires_at}. Discord TYPING_START
         # lasts ~10s and refreshes while they keep composing. Live replies
         # and autonomy read this so Maxwell can wait instead of talking over

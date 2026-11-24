@@ -39,7 +39,6 @@ def _bot(memory):
         _drugged_until={},
         _guild_emojis={},
         _recent_users={},
-        _conversation_watch={},
         _tool_system_prompt=lambda *args, **kwargs: "",
         bot_name="Maxwell",
         memory=memory,
@@ -58,7 +57,6 @@ def _bot(memory):
         bot
     )
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
-    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
     return bot
 

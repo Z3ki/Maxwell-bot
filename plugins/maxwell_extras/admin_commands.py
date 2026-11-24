@@ -286,7 +286,6 @@ def _embed(bot: Any, section: str) -> discord.Embed:
                     "error_replies",
                     "error_details",
                     "require_direct_response",
-                    "conversation_watch_enabled",
                     "reply_to_bots",
                 ),
             ),

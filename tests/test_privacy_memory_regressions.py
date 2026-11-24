@@ -339,7 +339,7 @@ def test_author_deletion_removes_detached_chat_labels(tmp_path):
         db.close()
 
 
-def test_live_deletion_drops_author_from_watch_queue_and_journal(tmp_path):
+def test_live_deletion_drops_author_from_reply_queue_and_journal(tmp_path):
     from message_pipeline import ReplyQueue, RequestJournal, _ChannelState, _Pending
 
     async def scenario():
@@ -356,7 +356,6 @@ def test_live_deletion_drops_author_from_watch_queue_and_journal(tmp_path):
             kept = SimpleNamespace(id="12", author=SimpleNamespace(id="200"))
             other = SimpleNamespace(
                 id="11", author=SimpleNamespace(id="200"), content="keep",
-                _watch_burst=[deleted, kept],
             )
             queue = ReplyQueue()
             state = _ChannelState()
@@ -366,34 +365,15 @@ def test_live_deletion_drops_author_from_watch_queue_and_journal(tmp_path):
             ]
             queue._channels["22"] = state
             queue._outstanding = 2
-            unrelated = SimpleNamespace(id="30", author=SimpleNamespace(id="300"))
-
-            async def linger():
-                await asyncio.sleep(30)
-
-            task = asyncio.create_task(linger())
             bot = SimpleNamespace(
                 _user_preferences=memory.preferences,
                 config=SimpleNamespace(DATA_DIR=tmp_path),
                 _request_journal=journal,
                 _reply_queue=queue,
-                _watch_debounce={
-                    "22": {
-                        "latest": deleted,
-                        "burst": [deleted],
-                        "task": task,
-                        "content": "PRIVATE_TURN",
-                    },
-                    "33": {"latest": unrelated, "burst": [unrelated], "task": None},
-                },
             )
             await delete_live_data(bot, "100")
-            assert task.done()
-            assert "22" not in bot._watch_debounce
-            assert "33" in bot._watch_debounce
             assert [entry.message_id for entry in queue._channels["22"].queue] == ["11"]
             assert queue._channels["22"].queue[0].burst == [kept]
-            assert [item.id for item in other._watch_burst] == ["12"]
             assert journal.get("10")["status"] == "suppressed"
             assert journal.get("10")["reason"] == "privacy_deletion"
             assert journal.get("11")["status"] == "queued"

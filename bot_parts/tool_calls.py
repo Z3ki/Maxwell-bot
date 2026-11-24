@@ -1419,12 +1419,6 @@ class ToolCallsMixin:
         text = str(
             content if content is not None else getattr(message, "content", "") or ""
         )
-        if getattr(message, "_watch_followup", False):
-            return True
-        if self._conversation_watch_active(
-            getattr(getattr(message, "channel", None), "id", "")
-        ) and not self._directly_addressed(message):
-            return True
         return len(text.strip()) < 80 and not self._directly_addressed(message)
 
     def _build_openai_tools(

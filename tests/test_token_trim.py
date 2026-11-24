@@ -51,14 +51,12 @@ def _live_bot(extra_tools=None):
             "native_tool_calls": True,
             "emoji_context_enabled": True,
         },
-        _conversation_watch={},
         _emoji_grid_shown={},
         _tool_breaker=ToolCircuitBreaker(failure_threshold=999, recovery_seconds=0),
     )
     bot._compatible_tool_names = MaxwellBot._compatible_tool_names.__get__(bot)
     bot._native_tools_enabled = MaxwellBot._native_tools_enabled.__get__(bot)
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
-    bot._conversation_watch_active = MaxwellBot._conversation_watch_active.__get__(bot)
     bot._is_short_live_turn = MaxwellBot._is_short_live_turn.__get__(bot)
     bot._lean_chat_turn = MaxwellBot._lean_chat_turn.__get__(bot)
     bot._turn_tool_names = MaxwellBot._turn_tool_names.__get__(bot)
@@ -68,7 +66,7 @@ def _live_bot(extra_tools=None):
     return bot
 
 
-def _msg(content, *, mentions=None, watch_followup=False, dm=False):
+def _msg(content, *, mentions=None, dm=False):
     guild = None
     author = SimpleNamespace(id=2)
     if not dm:
@@ -92,8 +90,6 @@ def _msg(content, *, mentions=None, watch_followup=False, dm=False):
         author=author,
         reference=None,
     )
-    if watch_followup:
-        msg._watch_followup = True
     return msg
 
 
@@ -264,11 +260,11 @@ def test_loaded_schema_prefix_is_stable_and_workers_keep_full_catalog():
         _loaded_native_tools.reset(token)
 
 
-def test_short_live_turn_for_watch_followup_not_hard_ping():
+def test_short_live_turn_skips_hard_pings():
     bot = _live_bot()
-    watch = _msg("dont be like him max", watch_followup=True)
+    ambient = _msg("dont be like him max")
     ping = _msg("wyd", mentions=[bot.user])
-    assert MaxwellBot._is_short_live_turn(bot, watch, "dont be like him max") is True
+    assert MaxwellBot._is_short_live_turn(bot, ambient, "dont be like him max") is True
     assert MaxwellBot._is_short_live_turn(bot, ping, "wyd") is False
 
 

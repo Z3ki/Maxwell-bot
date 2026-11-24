@@ -300,8 +300,6 @@ class SettingsMixin:
             # read sites now (they call _progress_enabled(server_id)).
             self._control_mtime = mtime
             logger.info("Loaded dashboard control settings")
-            if not self._conversation_watch_enabled():
-                self._drop_watches_for_sleep()
         except Exception as e:
             logger.error(f"Failed to load control settings: {e}")
 

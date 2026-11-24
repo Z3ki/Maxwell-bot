@@ -70,7 +70,6 @@ def test_guild_plugin_overrides_keep_only_numeric_guilds_and_boolean_plugin_valu
     "key",
     [
         # control_defaults documents 0 as meaningful for each of these.
-        "conversation_watch_seconds",  # 0 disables the follow-up watch
         "site_ttl_hours",  # 0 = never expire
         "max_tool_iterations",
         "tool_history_messages",

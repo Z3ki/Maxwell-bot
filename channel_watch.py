@@ -5,8 +5,7 @@ Maxwell watches for channels being created. Two things matter:
 * A brand-new **text** channel is a fresh room he has never seen. To be useful
   there he has to notice it — which is what posting a self-authored opening
   line into a support/ticket channel does (the bot's own messages go through
-  the normal memory path, so the room lands in his context and his
-  conversation-watch gets armed).
+  the normal memory path, so the room lands in his context).
 
 * A channel whose name looks like a **support / ticket / modmail / report**
   channel is high-signal: someone is about to ask for help. Those get a
