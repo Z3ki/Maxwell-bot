@@ -76,7 +76,7 @@ def make_bot(MaxwellBot, ToolCircuitBreaker, temp):
                   "memory_context_budget": 30000, "memory_history_messages": 20,
                   "music_context_enabled": False, "tools_enabled": True,
                   "native_tool_calls": True, "subagents_require_premium": False},
-        _drugged_until={}, _guild_emojis={}, _recent_users={}, _conversation_watch={},
+        _drugged_until={}, _guild_emojis={}, _recent_users={},
         bot_name="Maxwell", memory=Memory(),
         user=SimpleNamespace(display_name="Maxwell", name="Maxwell", id=1, bot=True),
         _is_admin=lambda uid: uid == 456,
@@ -84,7 +84,7 @@ def make_bot(MaxwellBot, ToolCircuitBreaker, temp):
     for name in (
         "_reply_parent", "_replying_to_own_message", "_render_reply_parent",
         "_author_is_self", "_iter_resolved_reply_chain", "_reply_parent_context_lines",
-        "_directly_addressed", "_conversation_watch_active", "_is_short_live_turn",
+        "_directly_addressed", "_is_short_live_turn",
         "_tool_system_prompt", "_native_tools_enabled",
     ):
         setattr(bot, name, getattr(MaxwellBot, name).__get__(bot))

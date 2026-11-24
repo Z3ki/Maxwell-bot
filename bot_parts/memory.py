@@ -294,15 +294,6 @@ class MemoryMixin:
             for cid in [k for k, room in typing.items() if not room]:
                 typing.pop(cid, None)
                 removed += 1
-        # Watch debounce buckets are popped by their own flush. One that was
-        # cancelled mid-flight would otherwise sit here forever.
-        debounce = getattr(self, "_watch_debounce", None)
-        if isinstance(debounce, dict):
-            for cid, bucket in list(debounce.items()):
-                task = (bucket or {}).get("task")
-                if task is None or task.done():
-                    debounce.pop(cid, None)
-                    removed += 1
         # Finished reply tasks that never made it through their finally.
         active = getattr(self, "_active_requests", None)
         if isinstance(active, dict):

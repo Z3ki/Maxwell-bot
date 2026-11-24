@@ -265,13 +265,9 @@ def _gate_bot():
         _control={"enable_sleep": True},
         _sleep_until=0.0,
         _sleep_notified_at={},
-        _conversation_watch={},
-        _watch_debounce={},
         user=_BOT_USER,
     )
     bot._directly_addressed = MaxwellBot._directly_addressed.__get__(bot)
-    bot._cancel_watch_debounce = MaxwellBot._cancel_watch_debounce.__get__(bot)
-    bot._drop_watches_for_sleep = MaxwellBot._drop_watches_for_sleep.__get__(bot)
     bot._is_sleeping = MaxwellBot._is_sleeping.__get__(bot)
     bot.set_sleep = MaxwellBot.set_sleep.__get__(bot)
     bot._format_sleep_remaining = MaxwellBot._format_sleep_remaining.__get__(bot)
@@ -301,9 +297,8 @@ def test_sleep_gate_posts_in_channel_not_dm():
 def test_sleep_gate_is_silent_for_lines_nobody_sent_him():
     """Typing in a room he was in is not a ping — he stays asleep, and quiet.
 
-    The watch keeps a whole room live after he speaks, so an ordinary line in
-    that room used to reach the gate and get answered with "max is sleeping":
-    a bot talking in his sleep to someone who never asked him anything.
+    An ordinary line in a room he was in is not a ping, so it must not
+    reach the gate and get answered with "max is sleeping".
     """
 
     async def scenario():
@@ -317,20 +312,6 @@ def test_sleep_gate_is_silent_for_lines_nobody_sent_him():
         ping = FakeMessage()
         assert await bot._check_sleep_gate(ping) is False
         assert len(ping.channel.sent) == 1
-
-    asyncio.run(scenario())
-
-
-def test_sleep_drops_armed_watches():
-    """Going to sleep forgets every room it was watching."""
-
-    async def scenario():
-        bot = _gate_bot()
-        bot._conversation_watch["222"] = 1e9
-        bot._watch_debounce["222"] = {"task": None}
-        await bot.set_sleep(10)
-        assert bot._conversation_watch == {}
-        assert bot._watch_debounce == {}
 
     asyncio.run(scenario())
 

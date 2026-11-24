@@ -22,8 +22,6 @@ def _bot(tmp_path, **config):
     bot.config = SimpleNamespace(DATA_DIR=str(tmp_path), **config)
     bot._control = {}
     bot._control_mtime = None
-    bot._conversation_watch = {}
-    bot._watch_debounce = {}
     bot.ai_provider = _Provider()
     return bot
 
@@ -224,14 +222,6 @@ def test_load_syncs_provider_audio_flag(tmp_path):
     assert bot.ai_provider.enable_audio_input is True
 
 
-def test_disabling_conversation_watch_drops_armed_watches(tmp_path):
-    _write(tmp_path, {"conversation_watch_enabled": False})
-    bot = _bot(tmp_path)
-    bot._conversation_watch = {"123": object()}
-    bot._load_control()
-    assert bot._conversation_watch == {}
-
-
 # --------------------------------------------------------------------------
 # dashboard API: api.state._sanitize_control
 # --------------------------------------------------------------------------
@@ -279,9 +269,6 @@ def test_api_sanitize_bad_int_falls_back_to_default():
         ("max_response_chars", 10**6, 8000),
         ("per_user_cooldown_seconds", -5, 0),
         ("per_user_cooldown_seconds", 10**6, 3600),
-        ("conversation_watch_pressure", 7, 1.0),
-        ("conversation_watch_pressure", -1, 0.0),
-        ("conversation_watch_seconds", 10**6, 3600),
         ("site_ttl_hours", 10**6, 8760),
         ("max_image_size_mb", 0, 1),
         ("ai_timeout_seconds", 1, 10),

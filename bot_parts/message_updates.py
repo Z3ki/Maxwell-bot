@@ -598,19 +598,6 @@ class MessageUpdatesMixin:
             # binary media needed downloading.
             return True
 
-        # A watch debounce may already have queued this message without
-        # acquiring the channel lock yet. Replace that pending target so the
-        # eventual single reply uses the edited text/object instead of the
-        # stale MESSAGE_CREATE snapshot.
-        for bucket in (getattr(self, "_watch_debounce", None) or {}).values():
-            for key in ("latest", "latest_directed"):
-                queued = bucket.get(key)
-                if str(getattr(queued, "id", "") or "") == mid:
-                    message = preserve_message_delivery(message, queued)
-                    bucket[key] = message
-                    if key == "latest_directed":
-                        bucket["content"] = str(getattr(message, "content", "") or "")
-
         for state in self._inflight_for_message(mid):
             state_media = list(state.get("media") or [])
             is_root = mid == str(state.get("root_message_id") or "")

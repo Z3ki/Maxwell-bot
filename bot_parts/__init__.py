@@ -11,7 +11,6 @@ from bot_parts.memory import MemoryMixin
 from bot_parts.requests import RequestPipelineMixin
 from bot_parts.addressing import AddressingMixin
 from bot_parts.reactions import ReactionsMixin
-from bot_parts.watch import WatchMixin
 from bot_parts.gateway import GatewayEventsMixin
 from bot_parts.recovery import RecoveryMixin
 from bot_parts.guild_events import GuildEventsMixin
@@ -34,7 +33,6 @@ __all__ = [
     "RequestPipelineMixin",
     "AddressingMixin",
     "ReactionsMixin",
-    "WatchMixin",
     "GatewayEventsMixin",
     "RecoveryMixin",
     "GuildEventsMixin",

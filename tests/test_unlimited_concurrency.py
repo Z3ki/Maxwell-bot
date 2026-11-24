@@ -120,7 +120,6 @@ def test_saved_controls_cannot_restore_the_legacy_inference_pool(tmp_path):
     bot.config = SimpleNamespace(DATA_DIR=str(tmp_path))
     bot._control_mtime = 0
     bot._ai_call_kind = {}
-    bot._conversation_watch_enabled = lambda: True
     bot._load_control(force=True)
     assert "ai_concurrency" not in bot._control
     assert bot._control["message_quota_enabled"] is True

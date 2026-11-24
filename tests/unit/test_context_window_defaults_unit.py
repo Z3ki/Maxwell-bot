@@ -120,7 +120,6 @@ def _bot(rows, control=None):
         _drugged_until={},
         _guild_emojis={},
         _recent_users={},
-        _conversation_watch={},
         _tool_system_prompt=lambda *args, **kwargs: "s" * SYSTEM_PROMPT_CHARS,
         bot_name="Maxwell",
         memory=_Memory(rows),
@@ -135,7 +134,6 @@ def _bot(rows, control=None):
         "_iter_resolved_reply_chain",
         "_reply_parent_context_lines",
         "_directly_addressed",
-        "_conversation_watch_active",
         "_is_short_live_turn",
     ):
         setattr(bot, name, getattr(MaxwellBot, name).__get__(bot))
