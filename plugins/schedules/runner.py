@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 import discord
 
+from maxwell_core.transport.channel_policy import channel_policy_reason
+
 from .cron import CronError, next_after, parse, zone
 from .store import ScheduleStore, daily_run_limit
 
@@ -57,13 +59,11 @@ def delayed_job_policy_reason(bot, message) -> str:
         if uid in ignored:
             return "ignored_author"
     cid = str(getattr(getattr(message, "channel", None), "id", "") or "")
-    blocked = {str(item) for item in (control.get("blocked_channels") or [])}
-    if cid in blocked:
-        return "blocked_channel"
-    if getattr(message, "guild", None) is not None:
-        allowed = {str(item) for item in (control.get("allowed_channels") or [])}
-        if allowed and cid and cid not in allowed:
-            return "channel_not_allowed"
+    is_guild = getattr(message, "guild", None) is not None
+    reason = channel_policy_reason(control, cid, is_guild=is_guild)
+    if reason:
+        return reason
+    if is_guild:
         solo = getattr(bot, "_solo_blocks", None)
         if callable(solo) and solo(message):
             return "solo_restriction"
