@@ -29,6 +29,7 @@ import discord
 from response_guard import strip_internal_context
 from tools import Tool
 from maxwell_core.memory.scope import MemoryRequester
+from maxwell_core.transport.channel_policy import channel_policy_reason
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,21 @@ async def _drop_reminder(store: ReminderStore, rid: str, channel_id: str, why: s
     _REMINDER_FAILURES.pop(rid, None)
 
 
+def _reminder_owner_blocked(bot: Any, owner_id: str) -> bool:
+    """True when a later blacklist or ignore list should stop this ping."""
+    if not owner_id:
+        return False
+    is_admin = getattr(bot, "_is_admin", None)
+    if callable(is_admin) and is_admin(owner_id):
+        return False
+    if owner_id in set(getattr(bot, "_blacklist", None) or ()):
+        return True
+    control = getattr(bot, "_control", None) or {}
+    ignored = {str(item) for item in (control.get("ignore_users") or [])}
+    return owner_id in ignored
+
+
+
 async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
     now = time.time()
     for item in await store.due():
@@ -270,6 +286,10 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
         owner_id = str(item.get("owner_id") or "")
         if not rid or not channel_id:
             continue
+        if _reminder_owner_blocked(bot, owner_id):
+            await _drop_reminder(store, rid, channel_id, "owner is blocked")
+            continue
+
         if now < _UNAVAILABLE_CHANNEL_UNTIL.get(channel_id, 0.0):
             continue
         channel = None
@@ -300,6 +320,14 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
             logger.warning("Reminder %s channel %s is unavailable", rid, channel_id)
             continue
         _UNAVAILABLE_CHANNEL_UNTIL.pop(channel_id, None)
+        reason = channel_policy_reason(
+            getattr(bot, "_control", None) or {},
+            channel_id,
+            is_guild=getattr(channel, "guild", None) is not None,
+        )
+        if reason:
+            await _drop_reminder(store, rid, channel_id, reason)
+            continue
         text = strip_internal_context(str(item.get("text") or ""))
         if not text.strip():
             await store.remove(rid)

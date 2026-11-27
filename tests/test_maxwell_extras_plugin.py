@@ -2,11 +2,15 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 from plugins.maxwell_extras.tools import (
     RecallCrossServerMemoryTool,
     ReminderStore,
+    deliver_due_reminders,
 )
 
 
@@ -33,6 +37,117 @@ def test_reminder_store_persists_and_scopes(tmp_path):
         assert [row["id"] for row in await fresh.due(now=150.0)] == [a["id"]]
         assert await fresh.remove(a["id"], owner_id="2") is False
         assert await fresh.remove(a["id"], owner_id="1") is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("blacklist", "control"),
+    [
+        ({"1"}, {}),
+        (set(), {"ignore_users": ["1"]}),
+        (set(), {"ignore_users": [1]}),
+    ],
+)
+def test_due_reminder_drops_blocked_non_admin_owner(tmp_path, caplog, blacklist, control):
+    async def run():
+        store = ReminderStore(tmp_path / "reminders.json")
+        channel = SimpleNamespace(send=AsyncMock())
+        bot = SimpleNamespace(
+            _blacklist=set(),
+            _control={},
+            _is_admin=lambda uid: str(uid) == "9",
+            get_channel=lambda _cid: channel,
+        )
+        row = await store.add(
+            owner_id="1", channel_id="10", text="ping me", due_at=1.0
+        )
+        bot._blacklist = blacklist
+        bot._control = control
+        await deliver_due_reminders(bot, store)
+        channel.send.assert_not_called()
+        assert await store.list_for("1") == []
+        assert f"Dropping reminder {row['id']} for channel 10: owner is blocked" in caplog.text
+        await deliver_due_reminders(bot, store)
+        channel.send.assert_not_called()
+        assert caplog.text.count(f"Dropping reminder {row['id']}") == 1
+
+        bot._blacklist = {"9"}
+        bot._control = {"ignore_users": ["9"]}
+        await store.add(owner_id="9", channel_id="10", text="admin ping", due_at=1.0)
+        await deliver_due_reminders(bot, store)
+        channel.send.assert_awaited_once()
+        assert channel.send.await_args.args == ("<@9> reminder: admin ping",)
+        assert await store.list_for("9") == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("control", "is_guild", "reason"),
+    [
+        ({"blocked_channels": ["10"]}, True, "blocked_channel"),
+        ({"blocked_channels": [10]}, False, "blocked_channel"),
+        ({"allowed_channels": [20]}, True, "channel_not_allowed"),
+        (
+            {"blocked_channels": ["10"], "allowed_channels": ["10"]},
+            True,
+            "blocked_channel",
+        ),
+    ],
+)
+def test_due_reminder_drops_disallowed_channel(
+    tmp_path, caplog, control, is_guild, reason
+):
+    async def run():
+        store = ReminderStore(tmp_path / "reminders.json")
+        channel = SimpleNamespace(
+            guild=SimpleNamespace(id=100) if is_guild else None,
+            send=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            _control={},
+            get_channel=lambda _cid: channel,
+        )
+        row = await store.add(
+            owner_id="1", channel_id="10", text="ping me", due_at=1.0
+        )
+        bot._control = control
+        await deliver_due_reminders(bot, store)
+        channel.send.assert_not_called()
+        assert await store.list_for("1") == []
+        assert f"Dropping reminder {row['id']} for channel 10: {reason}" in caplog.text
+        await deliver_due_reminders(bot, store)
+        channel.send.assert_not_called()
+        assert caplog.text.count(f"Dropping reminder {row['id']}") == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("control", "is_guild"),
+    [
+        ({"allowed_channels": [10]}, True),
+        ({"allowed_channels": ["20"]}, False),
+        ({}, True),
+    ],
+)
+def test_due_reminder_sends_in_allowed_channel(tmp_path, control, is_guild):
+    async def run():
+        store = ReminderStore(tmp_path / "reminders.json")
+        channel = SimpleNamespace(
+            guild=SimpleNamespace(id=100) if is_guild else None,
+            send=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            _control=control,
+            get_channel=lambda _cid: channel,
+        )
+        await store.add(owner_id="1", channel_id="10", text="ping me", due_at=1.0)
+        await deliver_due_reminders(bot, store)
+        channel.send.assert_awaited_once()
+        assert channel.send.await_args.args == ("<@1> reminder: ping me",)
+        assert await store.list_for("1") == []
 
     asyncio.run(run())
 
