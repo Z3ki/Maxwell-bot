@@ -29,6 +29,7 @@ import discord
 from response_guard import strip_internal_context
 from tools import Tool
 from maxwell_core.memory.scope import MemoryRequester
+from maxwell_core.transport.channel_policy import channel_policy_reason
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +320,14 @@ async def deliver_due_reminders(bot: Any, store: ReminderStore) -> None:
             logger.warning("Reminder %s channel %s is unavailable", rid, channel_id)
             continue
         _UNAVAILABLE_CHANNEL_UNTIL.pop(channel_id, None)
+        reason = channel_policy_reason(
+            getattr(bot, "_control", None) or {},
+            channel_id,
+            is_guild=getattr(channel, "guild", None) is not None,
+        )
+        if reason:
+            await _drop_reminder(store, rid, channel_id, reason)
+            continue
         text = strip_internal_context(str(item.get("text") or ""))
         if not text.strip():
             await store.remove(rid)

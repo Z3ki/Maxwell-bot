@@ -8,6 +8,7 @@
 ## Unreleased
 
 - Remove conversation watch. After a ping, Maxwell no longer keeps the room live for about a minute so unmentioned follow-ups can become a turn. Hard @ mentions, replies to Maxwell, and DMs still work; undirected messages stay suppressed.
+- Drop due reminders with a warning when their channel is now blocked or excluded by the guild channel allowlist. Share channel policy with schedules; DMs remain exempt from the allowlist, and existing owner checks are unchanged.
 
 ## 0.1.16 — 2026-11-12
 
